@@ -336,6 +336,7 @@ export function MessageList({
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
+  activeRunId,
   canEdit = false,
   editLockedByGoal = false,
   canBranch = false,
@@ -373,6 +374,7 @@ export function MessageList({
     messageIds: string[],
   ) => void | Promise<void>;
   canRegenerate?: boolean;
+  activeRunId?: string;
   canEdit?: boolean;
   /** Edit would be allowed but for an active goal: show the pencil locked. */
   editLockedByGoal?: boolean;
@@ -418,6 +420,15 @@ export function MessageList({
     return byMessage;
   }, [messages, readMessageKnowledgeSources]);
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const isSteeredRun = useCallback(
+    (message: Message) => {
+      const runId =
+        getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+      const progress = thread.values.applied_run_inputs;
+      return !!progress?.ids.length && runId === progress.run_id;
+    },
+    [thread.values.applied_run_inputs],
+  );
   // Schedule event lines sit at the end of the turn they followed.
   const placedTaskEvents = useMemo(
     () =>
@@ -595,12 +606,23 @@ export function MessageList({
     () =>
       collectRenderedSubtasks(
         groupedMessages,
-        (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
+        (groupIndex) =>
+          thread.isLoading &&
+          (groupIndex === lastGroupIndex ||
+            (!!activeRunId &&
+              Boolean(
+                groupedMessages[groupIndex]?.messages.some(
+                  (m) =>
+                    (getMessageRunId(m) ?? m.additional_kwargs?.run_id) ===
+                    activeRunId,
+                ),
+              ))),
         t.subtasks.failed,
         t.subtasks.subtask,
       ),
     [
       groupedMessages,
+      activeRunId,
       lastGroupIndex,
       t.subtasks.failed,
       t.subtasks.subtask,
@@ -1046,7 +1068,13 @@ export function MessageList({
           {enableRegenerateForTurn &&
             actionTarget?.id &&
             onRegenerateMessage && (
-              <Tooltip content={t.common.regenerate}>
+              <Tooltip
+                content={
+                  isSteeredRun(actionTarget)
+                    ? t.inputBox.runInputReplayUnavailable
+                    : t.common.regenerate
+                }
+              >
                 <Button
                   aria-label={t.common.regenerate}
                   size="icon-sm"
@@ -1054,6 +1082,7 @@ export function MessageList({
                   variant="ghost"
                   disabled={
                     !canRegenerate ||
+                    isSteeredRun(actionTarget) ||
                     replayActionBusy ||
                     regeneratingMessageId === actionTarget.id
                   }
@@ -1087,12 +1116,14 @@ export function MessageList({
       branchingMessageId,
       canBranch,
       canRegenerate,
+      isSteeredRun,
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
       replayActionBusy,
       t.common.branch,
       t.common.regenerate,
+      t.inputBox.runInputReplayUnavailable,
     ],
   );
 
@@ -1308,6 +1339,8 @@ export function MessageList({
                       const isLatestEditableHumanMessage =
                         group.type === "human" &&
                         !group.scheduledOrigin &&
+                        !msg.additional_kwargs?.run_input_id &&
+                        !isSteeredRun(msg) &&
                         Boolean(msg.id) &&
                         msg.id === latestEditableHumanMessageId &&
                         !replayActionBusy &&

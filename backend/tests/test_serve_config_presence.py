@@ -39,7 +39,7 @@ def test_serve_config_presence_reaches_dependency_sync(tmp_path: Path, mode: str
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
     (checkout / "backend").mkdir()
-    for name in ("serve.sh", "detect_uv_extras.py"):
+    for name in ("serve.sh", "dotenv_exports.py", "detect_uv_extras.py"):
         shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
     (scripts / "nginx-local-conf.sh").write_text("printf 'test-nginx.conf\\n'\n", encoding="utf-8")
     (scripts / "cleanup-containers.sh").write_text("exit 0\n", encoding="utf-8")

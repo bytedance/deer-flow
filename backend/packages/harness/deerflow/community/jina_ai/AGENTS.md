@@ -17,3 +17,9 @@ leases cover response stream cleanup, never retry backoff, idle client-pool clos
 stream-close ordering; re-verify on upgrades. Drain stream/client close on cancellation, with cancellation taking precedence over cleanup errors. Null bypasses only before first enablement; afterward all callers reuse the frozen policy until restart.
 Config: `backend/docs/CONFIGURATION.md`. Tests:
 `tests/test_jina_{client,retries,retry_after,response_limit,request_admission}.py`.
+
+DEBUG completion summaries keep counters local, count HTTPX API attempts, and
+measure monotonic elapsed/backoff time (including cancelled waits). Classify
+branches, never error text; emit only enums/numbers in the message for existing
+formatters/trace filters. Logging failure must preserve results/cancellation.
+Offline coverage: `tests/test_jina_diagnostics.py`.

@@ -25,6 +25,7 @@ from deerflow.config.managed_model_providers import get_managed_model_provider, 
 from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.secret_file import read_or_create_secret_file
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -224,7 +225,9 @@ class ManagedModelStore:
             os.replace(temporary, path)
         finally:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                # Discarding the temporary must not replace the outcome of the
+                # write (or of a failed ``os.replace``) with a cleanup error.
+                cleanup_failed_atomic_write(temporary)
 
 
 def merge_managed_models(config: AppConfig) -> AppConfig:

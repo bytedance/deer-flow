@@ -45,3 +45,7 @@ Capability options must reflect the fetched base: omit graph controls without
 graph support and chunk overrides for missing/parent-child chunking config.
 Local credential validation raises ManagementCredentialUnavailable before HTTP;
 map it to 503 without uncertain-write reconciliation guidance.
+
+`routes_enabled: false` preserves the enabled plugin namespace for downstream
+authorization while mounting no direct routes or Provider. Keep the default true
+for compatibility; disabling the entire install also removes the namespace.

@@ -7,6 +7,10 @@ export type ExtensionSettings = Readonly<
   Record<string, boolean | number | string>
 >;
 export type SurfaceSlot = "page";
+export type ExtensionRequestOptions = Pick<
+  RequestInit,
+  "method" | "headers" | "body" | "signal"
+>;
 export type SurfaceContext = {
   namespace: string;
   locale: string;
@@ -14,6 +18,11 @@ export type SurfaceContext = {
   threadId?: string;
   signal: AbortSignal;
   callBackend: FrontendServices["callBackend"];
+  /** Authenticated HTTP to contributed /api/extensions/ routes. Routes own authorization. */
+  requestBackend?: (
+    path: string,
+    options?: ExtensionRequestOptions,
+  ) => Promise<Response>;
   /** Host resolves current thread ownership before navigating; unavailable on older hosts. */
   openConversation?: (threadId: string) => Promise<void>;
 };

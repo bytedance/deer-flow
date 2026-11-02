@@ -25,19 +25,24 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency and Label Checks
 
-`check_extension.py` uses Gateway's wheel asset validator; CI checks examples
-in `extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
+`check_extension.py`: Gateway wheel asset validator; example CI:
+`extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
 
-`check.py`: decode UTF-8 with replacement; pnpm uses
-`PYTHONIOENCODING=utf-8:backslashreplace`. Keep Unicode/exit status in
-`make check` in any locale. Tests: `backend/tests/test_check_script.py`.
+`check.py`: UTF-8 replacement decoding; pnpm uses
+`PYTHONIOENCODING=utf-8:backslashreplace`. Preserve `make check` Unicode/exit
+status in any locale. Tests: `backend/tests/test_check_script.py`.
 
-`doctor.py`/`setup_wizard.py`: at `main` start, keep stdout's encoding
-with `errors="replace"` for legacy terminals/pipes. Guard `reconfigure` on
-embedded/captured streams. Offline tests: `backend/tests/test_setup_script_encoding.py`.
+`doctor.py`/`setup_wizard.py`: at `main` start, retain stdout encoding with
+`errors="replace"`; guard `reconfigure` for embedded/captured streams.
+Legacy-terminal/pipe tests: `backend/tests/test_setup_script_encoding.py`.
 
-`check_label_declarations.py`: stdlib-only guard; reject unsupported
-expressions. Tests: `backend/tests/test_label_declarations.py`.
+`sync_labels.py`: guard stdout/stderr `reconfigure` at `main` start. Retain
+TTY encodings; intentionally force UTF-8 on redirects for CI logs. Both use
+`errors="backslashreplace"`; decode `gh` output as UTF-8 with replacement.
+Tests (stub `gh`/`yaml`, ASCII stdio): `backend/tests/test_sync_labels_script.py`.
+
+`check_label_declarations.py`: stdlib-only; reject unsupported expressions.
+Tests: `backend/tests/test_label_declarations.py`.
 
 ## Manual Claude OAuth Export
 
@@ -495,14 +500,11 @@ The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
 
-Support-bundle and doctor tool captures explicitly decode UTF-8 with replacement
-for invalid bytes. Set `PYTHONIOENCODING=utf-8:backslashreplace` only in the copied
-support-bundle child environment so Python helpers can print Unicode and escape
-surrogates without aborting diagnostics or changing the parent.
-Keep exit codes, timeouts and redaction intact; do not rely on the host locale.
-Regressions use real local children, including ASCII/GBK capture defaults,
-nonzero exits, surrogate characters and malformed output, without invoking
-provider diagnostics. Doctor covers both `_run` streams and pnpm runner capture.
+Support-bundle/doctor captures use UTF-8 with replacement, preserving exit codes,
+timeouts and redaction. Only copied support-bundle child env sets
+`PYTHONIOENCODING=utf-8:backslashreplace` for Unicode/surrogates; parent unchanged.
+Offline real-child tests: ASCII/GBK defaults, nonzero exits, surrogates,
+invalid bytes; no provider calls. Doctor covers both `_run` streams/pnpm capture.
 
 ## Production dotenv selection
 

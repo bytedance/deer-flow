@@ -65,6 +65,7 @@ def lifespan_shutdown_seconds() -> float:
 
     Unbounded steps (OIDC close, MCP task-service stop, backend close) are
     expected to be quick and are not modeled; deployments keep slack on top of
-    this figure for them.
+    this figure for them. Sandbox provider shutdown is unbounded too and is not
+    quick: it runs one backend destroy per tracked sandbox after the run drain.
     """
     return bounded_hooks_seconds() + retrieval_warm_wait_seconds() + run_drain_seconds() + memory_flush_seconds()

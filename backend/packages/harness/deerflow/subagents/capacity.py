@@ -58,14 +58,14 @@ class SubagentExecutionCapacity:
             admission_policy=self._config.admission_policy,
         )
 
-    async def _acquire(self) -> None:
+    async def _acquire(self, *, wait=True) -> None:
         waiter: asyncio.Future[None] | None = None
         async with self._lock:
             if self._running < self._config.max_running:
                 self._running += 1
                 return
             queued = sum(not candidate.done() for candidate in self._waiters)
-            if self._config.admission_policy == "reject" or queued >= self._config.max_queued:
+            if not wait or self._config.admission_policy == "reject" or queued >= self._config.max_queued:
                 raise SubagentCapacityRejected(f"Subagent execution capacity is full ({self._config.max_running} running, {queued} queued)")
             waiter = asyncio.get_running_loop().create_future()
             self._waiters.append(waiter)
@@ -125,8 +125,8 @@ class SubagentExecutionCapacity:
         release_task.result()
 
     @asynccontextmanager
-    async def slot(self) -> AsyncIterator[None]:
-        await self._acquire()
+    async def slot(self, *, wait=True) -> AsyncIterator[None]:
+        await self._acquire(wait=wait)
         try:
             yield
         finally:

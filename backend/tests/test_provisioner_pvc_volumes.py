@@ -159,17 +159,14 @@ class TestBuildVolumes:
     def test_hostpath_skills_legacy_volume(self, provisioner_module):
         """Legacy projection is per-user and stable regardless of visibility."""
         provisioner_module.SKILLS_PVC_NAME = ""
-        volumes = provisioner_module._build_volumes(
-            "thread-1",
-            include_legacy_skills=True,
-        )
+        volumes = provisioner_module._build_volumes("thread-1")
         legacy = volumes[2]
         assert legacy.name == "skills-legacy"
         assert legacy.host_path is not None
         assert "users/default/skills_view/legacy" in posix_path(legacy.host_path.path)
         assert legacy.host_path.type == "Directory"
 
-    def test_hostpath_without_legacy_flag_still_has_empty_capable_mount(self, provisioner_module):
+    def test_hostpath_skills_projection_volumes_are_stable(self, provisioner_module):
         """Visibility changes update contents without recreating the Pod."""
         provisioner_module.SKILLS_PVC_NAME = ""
         volumes = provisioner_module._build_volumes("thread-1")
@@ -394,15 +391,12 @@ class TestBuildVolumeMounts:
     def test_hostpath_skills_legacy_mount(self, provisioner_module):
         """Legacy skills mount at /mnt/skills/legacy, read-only."""
         provisioner_module.SKILLS_PVC_NAME = ""
-        mounts = provisioner_module._build_volume_mounts(
-            "thread-1",
-            include_legacy_skills=True,
-        )
+        mounts = provisioner_module._build_volume_mounts("thread-1")
         assert mounts[2].name == "skills-legacy"
         assert mounts[2].mount_path == "/mnt/skills/legacy"
         assert mounts[2].read_only is True
 
-    def test_hostpath_without_legacy_flag_still_has_legacy_mount(self, provisioner_module):
+    def test_hostpath_skills_projection_mounts_are_stable(self, provisioner_module):
         """Hidden legacy content is represented by an empty mounted view."""
         provisioner_module.SKILLS_PVC_NAME = ""
         mounts = provisioner_module._build_volume_mounts("thread-1")
@@ -665,28 +659,6 @@ class TestBuildPodVolumes:
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         assert len(pod.spec.containers[0].volume_mounts) == 4
 
-    def test_pod_hostpath_with_legacy_has_four_volumes(self, provisioner_module):
-        """Legacy volume should be present when the backend requests it."""
-        provisioner_module.SKILLS_PVC_NAME = ""
-        provisioner_module.USERDATA_PVC_NAME = ""
-        pod = provisioner_module._build_pod(
-            "sandbox-1",
-            "thread-1",
-            include_legacy_skills=True,
-        )
-        assert len(pod.spec.volumes) == 4
-
-    def test_pod_hostpath_with_legacy_has_four_mounts(self, provisioner_module):
-        """Legacy mount should be present when the backend requests it."""
-        provisioner_module.SKILLS_PVC_NAME = ""
-        provisioner_module.USERDATA_PVC_NAME = ""
-        pod = provisioner_module._build_pod(
-            "sandbox-1",
-            "thread-1",
-            include_legacy_skills=True,
-        )
-        assert len(pod.spec.containers[0].volume_mounts) == 4
-
     def test_pod_pvc_has_two_volumes(self, provisioner_module):
         """PVC Pod spec should contain exactly 2 volumes."""
         provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
@@ -746,11 +718,7 @@ class TestBuildPodVolumes:
         """Ensure public/custom/legacy mount paths are correct."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
-        pod = provisioner_module._build_pod(
-            "sandbox-1",
-            "thread-1",
-            include_legacy_skills=True,
-        )
+        pod = provisioner_module._build_pod("sandbox-1", "thread-1")
         mount_paths = {m.name: m.mount_path for m in pod.spec.containers[0].volume_mounts}
         assert mount_paths["skills-public"] == "/mnt/skills/public"
         assert mount_paths["skills-custom"] == "/mnt/skills/custom"

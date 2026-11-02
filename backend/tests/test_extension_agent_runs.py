@@ -343,6 +343,15 @@ async def test_foreign_thread_and_forged_privileged_input_are_rejected(runtime):
 
 
 @pytest.mark.asyncio
+async def test_create_thread_rejects_an_assistant_id_that_names_no_agent(runtime):
+    runs, state, _, _, _ = runtime
+    with pytest.raises(AgentRunError) as rejected:
+        await runs.create_thread(assistant_id="bad name!", thread_id="invalid-agent")
+    assert rejected.value.status_code == 422
+    assert await state.thread_store.get("invalid-agent", user_id=None) is None
+
+
+@pytest.mark.asyncio
 async def test_custom_agent_binding_and_permission_rechecks_use_current_user(runtime, monkeypatch):
     from app.gateway.routers.thread_runs import RunResponse
     from deerflow.runtime.user_context import get_effective_user_id

@@ -472,3 +472,42 @@ html.dark .shiki span {
     cursor: pointer;
   }
 }
+
+/*
+ * Nextra's search panel and highlights use its --nextra-bg and primary color
+ * variables, which only its <Head> component defines. The app never renders
+ * it, so the panel was see-through, the active row's text was unreadable, and
+ * matches rendered white on transparent.
+ * Use the app's tokens instead.
+ */
+.nextra-search-results.nextra-scrollbar {
+  background-color: var(--popover);
+}
+
+/*
+ * Mobile search results live inside the modal sheet's scroll-lock boundary.
+ * Lift the panel above the sheet and its other controls.
+ */
+.nextra-search-results {
+  z-index: 60;
+  pointer-events: auto;
+}
+
+/* Below `sm` search only lives in the mobile sheet; match its input width. */
+@media (max-width: 639px) {
+  .nextra-search-results {
+    width: var(--input-width);
+  }
+}
+
+.nextra-search-results [role="option"][data-focus] {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.nextra-search-results [role="option"] mark {
+  background-color: color-mix(in oklch, var(--foreground) 12%, transparent);
+  color: inherit;
+  font-weight: 600;
+  border-radius: 2px;
+}

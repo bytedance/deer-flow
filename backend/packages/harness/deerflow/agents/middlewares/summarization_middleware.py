@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import logging
@@ -85,7 +86,11 @@ class ContextCompactionResult:
 
 @runtime_checkable
 class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+    """Hook invoked before summarization removes messages from state.
+
+    Hooks are synchronous and may block. The async compaction path runs them
+    in a worker thread, so a hook must not assume it runs on the event loop.
+    """
 
     def __call__(self, event: SummarizationEvent) -> None: ...
 
@@ -933,7 +938,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         summary = str(summary)
         self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize), llm_call_skipped=llm_call_skipped)
         # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        await self._afire_hooks(messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -1037,6 +1042,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             except Exception:
                 hook_name = getattr(hook, "__name__", None) or type(hook).__name__
                 logger.exception("before_summarization hook %s failed", hook_name)
+
+    async def _afire_hooks(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+        runtime: Runtime,
+    ) -> None:
+        """Async counterpart of :meth:`_fire_hooks`, run in a worker thread.
+
+        ``memory_flush_hook`` hands the messages to the memory backend, and
+        the mem0, Honcho and OpenViking backends write over sync HTTP, so
+        running the hooks inline would stall the event loop for the whole
+        request. ``asyncio.to_thread`` copies the context, so hooks still see
+        the run's LangGraph config and user context.
+        """
+        if not self._before_summarization_hooks:
+            return
+        await asyncio.to_thread(self._fire_hooks, messages_to_summarize, preserved_messages, runtime)
 
 
 def _summary_model_thinking_enabled(name: str | None, app_config: Any) -> bool:

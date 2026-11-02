@@ -11,6 +11,33 @@
   font-size: 14px;
   line-height: 1.6;
 }
+.public-state {
+  margin-bottom: 20px;
+  padding: 12px 16px;
+  border: 1px solid var(--team-border);
+  border-radius: 12px;
+  background: var(--team-card);
+}
+.public-state > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.public-state-list {
+  max-height: 320px;
+  overflow: auto;
+}
+.public-state-entry {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--team-border);
+  overflow-wrap: anywhere;
+}
+.public-state-entry:last-child {
+  border-bottom: 0;
+}
+.public-state-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .agent-teams *,
 .agent-teams *::before,
 .agent-teams *::after {

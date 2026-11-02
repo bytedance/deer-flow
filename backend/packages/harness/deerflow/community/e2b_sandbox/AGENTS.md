@@ -57,7 +57,9 @@ and preserve all tracked state so a later `shutdown()` can retry cleanup.
 That fence covers cached sync/async acquisition too: recheck after serializer
 waits and immediately before exposing a reused client. Signal-triggered shutdown
 may report deferred cleanup, but it must still forward the process's original
-SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state.
+SIGTERM/SIGINT/SIGHUP action while retaining the pending E2B state. Under
+`hold_sandbox_shutdown_ownership()` (Gateway lifespan) only SIGHUP is
+installed; the lifespan shuts the provider down after the run drain.
 
 ## File search
 

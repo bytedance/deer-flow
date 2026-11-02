@@ -90,15 +90,17 @@ def test_failed_save_keeps_previous_file_and_cleans_staging(tmp_path, monkeypatc
 
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("content", ["", "first\r\nsecond\r\n", "path=/mnt/user-data/outputs/data.csv\n"])
-def test_successful_save_preserves_bytes_and_path_translation(tmp_path, sandbox, existing, content):
+def test_successful_save_preserves_bytes_verbatim(tmp_path, sandbox, existing, content):
     target = tmp_path / "report.md"
     if existing:
         target.write_bytes(b"previous report\n")
 
     sandbox.write_file("/mnt/user-data/outputs/report.md", content)
 
-    expected = content.replace("/mnt/user-data/outputs", tmp_path.as_posix())
-    assert target.read_bytes() == expected.encode("utf-8")
+    # Markdown is a document, so write_file stores it verbatim: container-path
+    # translation is limited to executable content (see
+    # test_local_sandbox_content_path_translation.py).
+    assert target.read_bytes() == content.encode("utf-8")
     assert sandbox.read_file("/mnt/user-data/outputs/report.md") == content
     assert list(tmp_path.iterdir()) == [target]
 

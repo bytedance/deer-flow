@@ -166,7 +166,7 @@ async def _dataset_rows(
     columns: list[str] | None = None,
     limit: int = 50,
 ) -> str:
-    settings = _load_settings()
+    settings = await asyncio.to_thread(_load_settings)
     if isinstance(settings, str):
         return settings
     if dataset not in settings.datasets:

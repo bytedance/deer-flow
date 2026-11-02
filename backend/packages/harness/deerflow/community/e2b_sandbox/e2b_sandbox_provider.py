@@ -68,7 +68,7 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, host_owns_sandbox_shutdown
 
 from ..aio_sandbox.ownership import (
     OwnershipBackendError,
@@ -584,7 +584,10 @@ class E2BSandboxProvider(SandboxProvider):
                 signal.signal(signum, signal.SIG_DFL)
                 signal.raise_signal(signum)
 
-        for sig_name in ("SIGTERM", "SIGINT", "SIGHUP"):
+        # A host that owns shutdown (the Gateway lifespan) drains runs before
+        # tearing sandboxes down; SIGHUP keeps the fallback uvicorn lacks.
+        sig_names = ("SIGHUP",) if host_owns_sandbox_shutdown() else ("SIGTERM", "SIGINT", "SIGHUP")
+        for sig_name in sig_names:
             sig = getattr(signal, sig_name, None)
             if sig is None:
                 continue

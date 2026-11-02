@@ -326,7 +326,7 @@ def _routing_priority(value: Any) -> int:
     # serialized data), so keep the two coercion rules in sync if either changes.
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

@@ -29,6 +29,7 @@ from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
     run_sync_lifecycle_operation,
     sandbox_lease_owner,
+    sandbox_prewarm_cleanup_registered,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.prewarm import close_sandbox_prewarm, start_sandbox_prewarm
@@ -481,6 +482,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
         await close_sandbox_prewarm(runtime)
+        if sandbox_prewarm_cleanup_registered(runtime.context):
+            # The existing outer execution fence retains this holder through
+            # cancellation and finalization, then performs the ordinary release.
+            return await super().aafter_agent(state, runtime)
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]

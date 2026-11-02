@@ -9,7 +9,39 @@ import type {
   ConversationActionContext,
   FrontendContribution,
   FrontendServices,
+  ExtensionRequestOptions,
 } from "./contracts";
+
+/** Same Gateway and CSRF transport as host calls; never replay an HTTP mutation. */
+export async function requestExtensionRoute(
+  path: string,
+  options: ExtensionRequestOptions = {},
+  signal: AbortSignal,
+  viewerId: string,
+): Promise<Response> {
+  signal.throwIfAborted();
+  if (!viewerId) throw new Error("Reload this extension to bind its viewer");
+  // Decode once for validation only; forward the original encoded resource IDs.
+  const decoded = decodeURIComponent(path.split("?")[0]!);
+  if (
+    !decoded.startsWith("/api/extensions/") ||
+    /[\\\\#\u0000-\u0020]/.test(path) ||
+    decoded.split("/").some((part) => part === "." || part === "..") ||
+    decoded.includes("\\") ||
+    decoded.includes("%")
+  )
+    throw new Error("Expected a contributed extension route");
+  const headers = new Headers(options.headers);
+  headers.set("X-Deerflow-Plugin-Viewer", viewerId);
+  const response = await fetch(`${getBackendBaseURL()}${path}`, {
+    ...options,
+    headers,
+    signal: options.signal ? AbortSignal.any([signal, options.signal]) : signal,
+    redirect: "error",
+  });
+  signal.throwIfAborted();
+  return response;
+}
 
 export type HostServices = Omit<FrontendServices, "callBackend">;
 

@@ -38,6 +38,37 @@ afterEach(() => {
 });
 
 describe("MessageGroup", () => {
+  it("renders each assistant turn's result when provider tool-call ids repeat", () => {
+    const messages: Message[] = ["first", "second"].flatMap((turn) => [
+      {
+        id: `assistant-${turn}`,
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_0",
+            name: "web_fetch",
+            args: { url: `https://example.com/${turn}` },
+          },
+        ],
+      } as Message,
+      {
+        id: `result-${turn}`,
+        type: "tool",
+        name: "web_fetch",
+        tool_call_id: "call_0",
+        content: `# ${turn} fetched title\n\n${turn} result`,
+      } as Message,
+    ]);
+
+    expect(renderGroup(messages.slice(0, 2))).toContain("first fetched title");
+    // Earlier tool steps are collapsed by default; the current card must show
+    // its own result rather than borrowing the first call's fetched title.
+    const html = renderGroup(messages);
+    expect(html).toContain("second fetched title");
+    expect(html).not.toContain("first fetched title");
+  });
+
   it("resolves relative artifact links in chain-of-thought assistant text", () => {
     const html = renderGroup(
       [
@@ -652,13 +683,27 @@ describe("scheduler tool steps", () => {
   ] as const;
 
   it.each(actions)("labels schedule_task %s in en and zh", (action, en, zh) => {
-    expect(
-      scheduleToolLabel("schedule_task", { action }, undefined, enUS),
-    ).toBe(en);
-    expect(
-      scheduleToolLabel("schedule_task", { action }, undefined, zhCN),
-    ).toBe(zh);
+    expect(scheduleToolLabel("schedule_task", { action }, {}, enUS)).toBe(en);
+    expect(scheduleToolLabel("schedule_task", { action }, {}, zhCN)).toBe(zh);
   });
+
+  it.each([undefined, ""])(
+    "does not announce a completed operation for %j",
+    (result) => {
+      expect(
+        scheduleToolLabel("schedule_task", { action: "create" }, result, enUS),
+      ).toBe("Scheduled task operation");
+      expect(
+        scheduleToolLabel("schedule_task", { action: "create" }, result, zhCN),
+      ).toBe("定时任务操作");
+      expect(scheduleToolLabel("stop_scheduled_task", {}, result, enUS)).toBe(
+        "Pause this scheduled task",
+      );
+      expect(scheduleToolLabel("stop_scheduled_task", {}, result, zhCN)).toBe(
+        "暂停此定时任务",
+      );
+    },
+  );
 
   it("labels a coded error result as a failed change", () => {
     const error = { error: "Ask which timezone", code: "timezone_required" };
@@ -680,20 +725,15 @@ describe("scheduler tool steps", () => {
       "定时任务操作没有成功",
     );
     expect(
-      scheduleToolLabel(
-        "schedule_task",
-        { action: "toString" },
-        undefined,
-        enUS,
-      ),
+      scheduleToolLabel("schedule_task", { action: "toString" }, {}, enUS),
     ).toBe("Managed scheduled tasks");
   });
 
   it("labels the self-stop and ignores other tools", () => {
-    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, enUS)).toBe(
+    expect(scheduleToolLabel("stop_scheduled_task", {}, {}, enUS)).toBe(
       "Paused this scheduled task (takes effect when this run ends)",
     );
-    expect(scheduleToolLabel("stop_scheduled_task", {}, undefined, zhCN)).toBe(
+    expect(scheduleToolLabel("stop_scheduled_task", {}, {}, zhCN)).toBe(
       "已暂停此定时任务（本次运行结束后生效）",
     );
     expect(scheduleToolLabel("bash", {}, undefined, enUS)).toBeNull();

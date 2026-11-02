@@ -40,6 +40,10 @@ _KIND_EVENT = "event"
 _KIND_END = "end"
 _REDIS_STREAM_ID_RE = re.compile(r"[0-9]+(-[0-9]+)?")
 _MAX_STREAM_ID_COMPONENT = 2**64 - 1
+# Lua XADD scripts return one of these integers before any event ID.
+_XADD_BLOCKED = 0
+_XADD_ALREADY_ENDED = 1
+_XADD_STREAM_MISSING = 2
 
 # Batch size for ``XREAD``. Reading more than one entry per round-trip collapses
 # a large ``Last-Event-ID`` replay into far fewer calls; live tailing still
@@ -71,9 +75,44 @@ redis.call("expire", KEYS[1], ARGV[2])
 if tonumber(ARGV[3]) > 0 then redis.call("expire", KEYS[2], ARGV[3]) end
 return 1
 """
-_COMPARE_XADD_SCRIPT = """
-if redis.call("get", KEYS[1]) ~= ARGV[1] then return false end
-if redis.call("get", KEYS[2]) ~= ARGV[1] then return false end
+_END_MARKER_CHECK_LUA = """
+local function entry_is_end(fields)
+  for index = 1, #fields, 2 do
+    if fields[index] == "kind" and fields[index + 1] == "end" then
+      return true
+    end
+  end
+  return false
+end
+
+local function tail_is_end(stream_key)
+  local entries = redis.call("xrevrange", stream_key, "+", "-", "COUNT", 1)
+  return #entries > 0 and entry_is_end(entries[1][2])
+end
+
+local function has_end_marker(stream_key, legacy_scan_enabled)
+  if tail_is_end(stream_key) then return true end
+  if legacy_scan_enabled ~= "1" then return false end
+  -- Compatibility path for retained streams written by the old buggy writer:
+  -- an END may precede later entries. The first END on a normal stream also
+  -- reaches this scan; operators may disable it only after legacy buffers drain.
+  local entries = redis.call("xrange", stream_key, "-", "+")
+  for _, entry in ipairs(entries) do
+    if entry_is_end(entry[2]) then return true end
+  end
+  return false
+end
+"""
+_COMPARE_XADD_SCRIPT = (
+    _END_MARKER_CHECK_LUA
+    + """
+if redis.call("get", KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call("get", KEYS[2]) ~= ARGV[1] then return 0 end
+if ARGV[4] == "end" then
+  if has_end_marker(KEYS[3], ARGV[7]) then return 1 end
+elseif tail_is_end(KEYS[3]) then
+  return 1
+end
 local event_id = redis.call(
   "xadd", KEYS[3], "MAXLEN", "=", ARGV[2], "*",
   "kind", ARGV[4], "event", ARGV[5], "data", ARGV[6]
@@ -81,8 +120,17 @@ local event_id = redis.call(
 if tonumber(ARGV[3]) > 0 then redis.call("expire", KEYS[3], ARGV[3]) end
 return event_id
 """
-_XADD_IF_NO_ACTIVE_PRODUCER_SCRIPT = """
-if redis.call("exists", KEYS[1]) == 1 then return false end
+)
+_XADD_IF_NO_ACTIVE_PRODUCER_SCRIPT = (
+    _END_MARKER_CHECK_LUA
+    + """
+if redis.call("exists", KEYS[1]) == 1 then return 0 end
+if ARGV[3] == "end" and redis.call("exists", KEYS[2]) == 0 then return 2 end
+if ARGV[3] == "end" then
+  if has_end_marker(KEYS[2], ARGV[6]) then return 1 end
+elseif tail_is_end(KEYS[2]) then
+  return 1
+end
 local event_id = redis.call(
   "xadd", KEYS[2], "MAXLEN", "=", ARGV[1], "*",
   "kind", ARGV[3], "event", ARGV[4], "data", ARGV[5]
@@ -90,6 +138,7 @@ local event_id = redis.call(
 if tonumber(ARGV[2]) > 0 then redis.call("expire", KEYS[2], ARGV[2]) end
 return event_id
 """
+)
 _CLEANUP_IF_TOKEN_SCRIPT = """
 local tracked = redis.call("get", KEYS[2])
 local active = redis.call("get", KEYS[3])
@@ -139,11 +188,13 @@ class RedisStreamBridge(StreamBridge):
         max_connections: int | None = None,
         stream_ttl_seconds: int | None = 86400,
         producer_lease_recovery_enabled: bool = False,
+        legacy_end_scan_enabled: bool = True,
         client: Redis | None = None,
     ) -> None:
         super().__init__(heartbeat_interval=heartbeat_interval)
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
+        self._legacy_end_scan_enabled = legacy_end_scan_enabled
         self._key_prefix = key_prefix.rstrip(":")
         if stream_ttl_seconds is not None and stream_ttl_seconds > 0:
             self._stream_ttl_seconds = stream_ttl_seconds
@@ -442,11 +493,17 @@ class RedisStreamBridge(StreamBridge):
             fields.get("kind", _KIND_EVENT),
             fields.get("event", ""),
             fields.get("data", ""),
+            int(self._legacy_end_scan_enabled),
         )
-        if result:
-            return
-        self._cancel_lost_producer(run_id, lease)
-        raise RuntimeError(f"Redis stream producer lease was lost for run {run_id}")
+        if result == _XADD_BLOCKED:
+            self._cancel_lost_producer(run_id, lease)
+            raise RuntimeError(f"Redis stream producer lease was lost for run {run_id}")
+        if result == _XADD_ALREADY_ENDED:
+            if fields.get("kind") == _KIND_END:
+                return
+            raise RuntimeError(f"Redis stream for run {run_id} has already ended")
+        # Every remaining successful Lua reply is an XADD stream ID.
+        assert isinstance(result, (str, bytes)), f"Unexpected Redis stream append result: {result!r}"
 
     async def _xadd_without_active_producer(
         self,
@@ -465,10 +522,21 @@ class RedisStreamBridge(StreamBridge):
             fields.get("kind", _KIND_EVENT),
             fields.get("event", ""),
             fields.get("data", ""),
+            int(self._legacy_end_scan_enabled),
         )
-        if result:
-            return
-        raise RuntimeError(f"Cannot publish stream data for run {run_id} because another active producer exists")
+        if result == _XADD_BLOCKED:
+            raise RuntimeError(f"Cannot publish stream data for run {run_id} because another active producer exists")
+        if result == _XADD_ALREADY_ENDED:
+            if fields.get("kind") == _KIND_END:
+                return
+            raise RuntimeError(f"Redis stream for run {run_id} has already ended")
+        if result == _XADD_STREAM_MISSING:
+            if fields.get("kind") == _KIND_END:
+                logger.debug("Skipping stream END for %s: retained stream no longer exists", run_id)
+                return
+            raise RuntimeError(f"Redis stream for run {run_id} no longer exists")
+        # Every remaining successful Lua reply is an XADD stream ID.
+        assert isinstance(result, (str, bytes)), f"Unexpected Redis stream append result: {result!r}"
 
     async def _stop_producer_lease(
         self,

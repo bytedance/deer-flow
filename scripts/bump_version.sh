@@ -5,10 +5,11 @@
 #   scripts/bump_version.sh <version>     # e.g. scripts/bump_version.sh 2.2.0
 #
 # Updates:
-#   backend/pyproject.toml              (version = "...")
-#   backend/uv.lock                     (root package version, via `uv lock`)
-#   frontend/package.json               ("version": "...")
-#   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
+#   backend/pyproject.toml                      (version = "...")
+#   backend/packages/harness/pyproject.toml     (deerflow-harness version = "...")
+#   backend/uv.lock                             (root + harness package versions, via `uv lock`)
+#   frontend/package.json                       ("version": "...")
+#   deploy/helm/deer-flow/Chart.yaml            (version: + appVersion:)
 #
 # Requires `uv` on PATH: backend/uv.lock pins the root package version too, and
 # lint CI runs `uv lock --check`, so the lock has to move with the sources.
@@ -33,10 +34,11 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYPROJECT="$ROOT/backend/pyproject.toml"
+HARNESS_PYPROJECT="$ROOT/backend/packages/harness/pyproject.toml"
 PACKAGE="$ROOT/frontend/package.json"
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
 
-for f in "$PYPROJECT" "$PACKAGE" "$CHART"; do
+for f in "$PYPROJECT" "$HARNESS_PYPROJECT" "$PACKAGE" "$CHART"; do
   if [ ! -f "$f" ]; then
     echo "error: expected version file not found: $f" >&2
     exit 1
@@ -54,20 +56,23 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$PYPROJECT" "$PACKAGE" "$CHART" "$VERSION" <<'PY'
+python3 - "$PYPROJECT" "$HARNESS_PYPROJECT" "$PACKAGE" "$CHART" "$VERSION" <<'PY'
 import re
 import sys
 
-pyproject, package, chart, version = sys.argv[1:5]
+pyproject, harness, package, chart, version = sys.argv[1:6]
 
-# backend/pyproject.toml — version = "..."
-with open(pyproject) as f:
-    src = f.read()
-new = re.sub(r'(?m)^version\s*=\s*".*?"', f'version = "{version}"', src, count=1)
-if new == src:
-    sys.exit(f"error: no top-level 'version' field in {pyproject}")
-with open(pyproject, "w") as f:
-    f.write(new)
+# backend/pyproject.toml and backend/packages/harness/pyproject.toml —
+# version = "..." (deerflow-harness is a workspace member; `uv lock` below
+# moves its backend/uv.lock entry in lockstep)
+for path in (pyproject, harness):
+    with open(path) as f:
+        src = f.read()
+    new = re.sub(r'(?m)^version\s*=\s*".*?"', f'version = "{version}"', src, count=1)
+    if new == src:
+        sys.exit(f"error: no top-level 'version' field in {path}")
+    with open(path, "w") as f:
+        f.write(new)
 
 # frontend/package.json — "version": "..." (preserve indentation; minimal diff)
 with open(package) as f:
@@ -101,6 +106,7 @@ fi
 
 echo "Bumped version to $VERSION in:"
 echo "  backend/pyproject.toml"
+echo "  backend/packages/harness/pyproject.toml"
 echo "  backend/uv.lock"
 echo "  frontend/package.json"
 echo "  deploy/helm/deer-flow/Chart.yaml (version + appVersion)"

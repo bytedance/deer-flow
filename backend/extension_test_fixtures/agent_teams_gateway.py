@@ -138,6 +138,11 @@ def create_app(directory):
             ToolContext(ExtensionPrincipal(owner), {"enabled": True}, payload["source_thread"], agent_runs=runs.bound(owner)),
         )
 
+    @app.post("/preview/state")
+    async def public_state(payload: dict, request: Request):
+        handlers = {"publish": service.publish_state, "read": service.read_state, "update": service.update_state}
+        return await handlers[payload["operation"]](payload["input"], ToolContext(ExtensionPrincipal(request.state.user.id), {"enabled": True}, payload["source_thread"], agent_runs=runs.bound(request.state.user.id)))
+
     @app.get("/api/agents")
     async def catalog():
         return {

@@ -1,5 +1,11 @@
 ### Tool System (`packages/harness/deerflow/tools/`)
 
+`skill_manage_tool.py` stages candidate text with UTF-8 and `newline=""`,
+matching skill storage. Scan the exact submitted bytes for `SKILL.md` and
+supporting files, including overlays on existing trees.
+`tests/test_text_writes_keep_lf_bytes.py` emulates Windows writes and compares
+scanner input with published bytes for LF and CRLF content.
+
 Artifact capture accepts standard top-level `url`/`mime_type` content blocks and
 legacy `source.url`/`source.mime_type`. A present top-level `url` selects that
 shape, even when invalid; never mix its MIME metadata with a conflicting legacy
@@ -131,6 +137,11 @@ from captured child tool messages only when the final/partial report cites those
 opaque source links. This preserves retrieval evidence across the delegation
 boundary without placing provider IDs in model-visible text. Never reconstruct
 source records from the child's prose or replace them with fresh provider reads.
+
+MCP routing priority coercion stays aligned between `tool_search._routing_priority`
+and `McpRoutingMiddleware._normalize_index`: use `int(value)`, falling back to
+`0` on `TypeError`, `ValueError`, or `OverflowError`. Cover both the real builder
+and serialized-index paths when changing this contract.
 
 `DeferredToolCatalog.search` reserves `keywords:` for opt-in literal, casefolded,
 whitespace-separated terms (256 query characters, 16 unique terms). Rank by term

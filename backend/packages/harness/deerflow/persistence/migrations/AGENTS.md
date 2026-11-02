@@ -6,6 +6,12 @@ DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run
 
 **Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
 
+0049 adds nullable producer identities (no backfill) and strict policy. Install
+its PostgreSQL guard in both Alembic and metadata `after_create` for fresh bootstrap.
+Activated policy forbids downgrade; dispose migration engines even on refusal.
+0050 refreshes installed guards to admit host-authorized history seeds. 0051 joins
+that branch with upstream 0049 Run inputs, preserving both revision histories.
+
 | DB state                                  | Action                                  |
 |-------------------------------------------|-----------------------------------------|
 | empty (no DeerFlow tables)                | `create_all` + `alembic stamp head`     |
@@ -34,16 +40,13 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases` (current head). The preference
-revision adds a separate owner/key table with a cascading users foreign key and
-does not alter users; the project-documents revision adds a new owner-scoped
-shelf table, and the MCP lease-token revision adds two nullable token columns to
-`mcp_tasks`. The batch-result revision adds a nullable JSON evidence snapshot
-to `subagent_batch_items`, without changing existing report text or backfilling
-historical evidence. The run-idempotency revision adds a nullable private JSON
-request identity to `runs`; old Gateways ignore the column, so resume digests
-never enter public `kwargs_json`. Both revisions leave the bootstrap
-forward-compat floor unchanged.
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` (head).
+The preference revision uses an owner/key table with a cascading users FK;
+project documents use an owner-scoped shelf. MCP lease tokens, batch evidence,
+and run-idempotency identity add nullable columns without historical backfill or
+changing bootstrap's forward-compatibility floor. Resume identity stays private
+in `idempotency_request_json`, never public `kwargs_json`; legacy rows remain NULL.
+See the revision entries below for schema and test details.
 The incarnation revision deliberately retains the exact id audited by the
 rollback-floor binary; Alembic orders revisions by `down_revision`, not by the
 numeric prefix.
@@ -186,7 +189,7 @@ on installs that never enabled it. The convention is:
 - `migrations/versions/0035_login_throttle.py` — creates `login_throttle` (`ip` PK, `fail_count`, nullable epoch `locked_at`, nullable `lock_duration_seconds`, `updated_at` + `ix_login_throttle_updated_at` for the sweep's stale-counter predicate), the shared failed-login counter behind `POST /api/v1/auth/login/local` selected by `auth.local.throttle_storage` (`persistence/login_throttle/`: `SqlLoginThrottleStore` increments and starts the lock in one dialect-native upsert, applies check decisions with compare-and-set predicates in a separate write transaction, and sweeps served locks plus 24h-idle counters in bounded batches — the sweep's `DELETE` repeats the expiry predicate on its target, not only `ip IN (SELECT … LIMIT n)`, because PostgreSQL READ COMMITTED re-evaluates only the statement's own WHERE on a row it waited for and would otherwise delete a lock a concurrent `check` just extended). Table create/drop is guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0034_run_event_seq_watermark`. Test: `tests/test_migration_0035_login_throttle.py`
 - `migrations/versions/0036_run_idempotency_request.py` — adds nullable `runs.idempotency_request_json` for versioned keyed-resume identities. The field is private persistence state, never part of `kwargs_json` or a run response; this keeps new-writer/old-reader rolling upgrades from exposing resume digests or synthetic input. Legacy rows remain NULL; new readers accept only the exact old-writer identity shape from `kwargs`, while truly identity-less resume fails closed. The bootstrap forward-compat floor is unchanged. Chains after `0035_login_throttle`. Test: `tests/test_migration_0036_run_idempotency_request.py`
 - `migrations/versions/0037_project_document_summaries.py` — adds nullable `project_documents.summary` (best-effort LLM one-line description, off by default; no backfill, so legacy rows stay NULL and the bootstrap forward-compat floor is unchanged); chains after `0036_run_idempotency_request`. Test: `tests/test_migration_0037_project_document_summaries.py`
-- `migrations/versions/0038_channel_thread_bindings.py` — creates `channel_thread_bindings` (`key` PK = the legacy `channel_name:chat_id[:topic_id]` string, parsed `channel_name`/`chat_id`/nullable `topic_id`, `thread_id`, `user_id` (`""` when unknown, never NULL), epoch `Double` `created_at`/`updated_at` + `ix_channel_thread_bindings_channel_chat`), the shared successor of the per-process `channels/store.json` that `ChannelManager` used for unbound IM conversations (`persistence/channel_thread_bindings/`: `SqlChannelThreadBindingRepository` upserts with a dialect-native `ON CONFLICT (key) DO UPDATE` that keeps `created_at`, deletes a chat's base + topic rows by key prefix with `startswith(autoescape=True)`, and imports with batched `ON CONFLICT DO NOTHING` so two replicas importing the same file concurrently neither duplicate nor clobber a row; `app/channels/store.py::SqlChannelStore.import_legacy_json` runs that once from `ChannelService.start()` and renames the file to `store.json.migrated`). The shape is 1:1 with the JSON entries so the import is lossless; `split_binding_key` parses legacy keys on the first two colons exactly as the old `list_entries()` did (lookups always match the full `key`). Table create/drop and the index are guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0037_project_document_summaries`. Test: `tests/test_migration_0038_channel_thread_bindings.py`
+- `migrations/versions/0038_channel_thread_bindings.py` — adds shared `channel_thread_bindings`, replacing per-process `channels/store.json`. Keys preserve legacy `channel_name:chat_id[:topic_id]` spelling (`split_binding_key` splits only the first two colons); unknown users remain `""`. `SqlChannelThreadBindingRepository` uses atomic upserts retaining `created_at`, escaped-prefix chat deletion and batched conflict-ignoring imports. `ChannelService.start()` imports once and renames the JSON file `.migrated`. Table/index create and drop are guarded. No bootstrap-floor change; follows 0037. Test: `tests/test_migration_0038_channel_thread_bindings.py`.
 - `migrations/versions/0042_channel_leases.py` — creates `channel_leases` (`provider` PK, `owner_id`, fencing `epoch` BIGINT, database-clock epoch `Double` `lease_expires_at`/`updated_at`, `transport_running`), the per-provider IM leader lease behind `channels.leader_lease` (`persistence/channel_leases/`: acquire is one dialect-native upsert whose `DO UPDATE ... WHERE lease_expires_at + grace < now OR owner_id = :me` bumps the epoch; renew extends only a live lease at the holder's epoch; release sets the expiry to 0; every `now` is the database clock, never an instance's). Table create/drop is guarded with a fresh inspector in both directions. New table, so the bootstrap forward-compat floor is unchanged; chains after `0041_im_notice_preferences`. Test: `tests/test_migration_0042_channel_leases.py`
 - `migrations/versions/0044_channel_runtime_configs.py` — creates `channel_runtime_configs` (`provider` PK, nullable `config_ciphertext`, `disconnected`, `version` BIGINT, `updated_at`), the shared successor of `channels/runtime-config.json`. `persistence/channel_runtime_configs/` is a sync repository on `app_sync_sqlalchemy_url` (callers run in threads): `save` upserts and bumps `version`, `insert_missing` uses `ON CONFLICT DO NOTHING`. `app/channels/runtime_config_store.py` encrypts the JSON block with `DEER_FLOW_CREDENTIALS_KEY`; a disconnect has NULL ciphertext. Rows are never deleted. Table-guarded both ways; no data moved (the Gateway imports the JSON file). Test: `tests/test_migration_0044_channel_runtime_configs.py`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch provisioning decision, locked revision validation, and the narrow 0019 forward-compatibility exception

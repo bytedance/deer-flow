@@ -12,6 +12,59 @@ import {
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
+  usage: {
+    title: "Token 用量",
+    description: "查看输入、输出及缓存命中 Token 用量。",
+    reportingNote:
+      "统计来自已记录的服务商用量；运行中或服务商未返回用量时可能不完整。缓存命中已包含在输入 Token 中。",
+    period: "统计周期",
+    last7Days: "近 7 天",
+    last30Days: "近 30 天",
+    refresh: "刷新",
+    tokens: "Token 总量",
+    runs: "运行次数",
+    inputTokens: "输入 Token",
+    outputTokens: "输出 Token",
+    cachedTokens: "缓存命中输入 Token",
+    daily: "每日 Token 用量",
+    dailyDetails: "查看每日明细",
+    models: "模型用量分布",
+    noUsage: "此周期内暂无用量记录。",
+    unknown: "未知",
+    timezoneNote: "每日统计使用浏览器当前的 UTC 时区偏移。",
+    date: "日期",
+    model: "模型",
+    noModels: "此周期内暂无模型用量记录。",
+    noRuns: "没有符合筛选条件的运行。",
+    recentRuns: "最近运行",
+    recentRunsHint: "包含所有日期，按最新时间排序，不受上方统计周期限制。",
+    status: "运行状态",
+    allStatuses: "全部状态",
+    pending: "排队中",
+    running: "运行中",
+    success: "已完成",
+    error: "失败",
+    timeout: "超时",
+    interrupted: "已中断",
+    cancelled: "已取消",
+    unknownStatus: "其他状态",
+    previous: "上一页",
+    next: "下一页",
+    page: (page) => `第 ${page} 页`,
+    started: "开始时间",
+    duration: "耗时",
+    conversation: "会话",
+    untitled: "未命名会话",
+    details: "错误详情",
+    loadFailed: "用量数据加载失败，请重试。",
+    retry: "重试",
+    forbidden: "你没有查看用量与运行记录的权限。",
+    unavailable: "当前服务器暂不支持用量统计。",
+    databaseRequired:
+      "用量统计暂不可用，需要 SQLite 或 PostgreSQL 数据库。如问题持续，请联系管理员。",
+    staticUnavailable: "静态演示模式不提供用量统计。",
+    loading: "正在加载用量…",
+  },
   // Locale meta
   locale: {
     localName: "中文",
@@ -83,6 +136,16 @@ export const zhCN: Translations = {
       lightrag: {
         title: "LightRAG",
         description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      },
+      knowledgePlatform: {
+        title: "知识空间与连接",
+        description:
+          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
+      knowledgeCenter: {
+        title: "知识中心",
+        description:
+          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
       },
       knowledgeManagement: {
         title: "知识入库与处理",
@@ -280,6 +343,11 @@ export const zhCN: Translations = {
   home: {
     docs: "文档",
     blog: "博客",
+    searchDocs: "搜索文档…",
+    searchDocsLabel: "搜索文档",
+    searchNoResults: "未找到结果，请尝试更少或不同的关键词。",
+    searchLoadFailed: "搜索暂时不可用。",
+    searchLoading: "加载中…",
   },
 
   // Welcome
@@ -532,6 +600,8 @@ export const zhCN: Translations = {
           "已达到 token 预算。发送消息即可继续，新的运行会重新计算预算。",
         loopCapped:
           "重复工具调用触发了安全停止。调整要求后发送新消息即可重试，目标会保留。",
+        recursionCapped:
+          "运行达到了步数上限，未能完成。发送新消息即可继续，目标会保留。",
         missingEvidence:
           "目标检查：缺少依据。可以让它展示结果或说明卡在哪里；如果目标已不适用，用 /goal clear 清除目标。",
         runFailed:
@@ -603,6 +673,25 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    runInputMode: "运行中发送方式",
+    queueMode: "排队执行",
+    steerMode: "调整当前任务",
+    queueModeHelp: "当前任务结束后再执行",
+    steerModeHelp: "在下一处可处理的位置调整当前任务",
+    runInputSend: "发送补充消息",
+    runInputTextOnly:
+      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputUnavailable:
+      "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
+    stopRun: "停止当前任务",
+    runInputQueued: "排队中",
+    runInputSteering: "等待加入当前任务",
+    runInputUnapplied: "本轮未确认生效",
+    runInputRetry: "重新发送",
+    runInputCancel: "移除这条消息",
+    runInputDispatching: "待确认",
+    runInputReplayUnavailable:
+      "这轮任务中途调整过，请发送新消息继续，暂不支持只重放其中一段。",
     stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
     startTurnUnavailable: "你的角色无权开启新的回合。",
   },
@@ -814,6 +903,18 @@ export const zhCN: Translations = {
     cancel: "取消",
     retryItem: "重试",
     exportResults: "导出 JSONL",
+    viewResult: "查看结果",
+    resultTitle: "批处理结果",
+    resultDescription: "查看该条目的持久化报告和已捕获证据。",
+    report: "报告",
+    evidence: "已捕获证据",
+    noEvidence: "没有已捕获证据",
+    acceptance: "验收结果",
+    noReport: "该条目还没有保存报告。",
+    loadResultFailed: "无法加载批处理结果",
+    truncated: "报告已截断",
+    omittedEvidence: (count) => `${count} 条证据未展示`,
+    pagesLabel: "页码",
     viewItems: "查看条目",
     hideItems: "收起条目",
     itemsFailed: "无法加载批处理条目",
@@ -1165,6 +1266,7 @@ export const zhCN: Translations = {
         noProgress: "连续多轮没有进展",
         tokenCapped: "已达到 token 预算",
         loopCapped: "重复工具调用触发了安全停止",
+        recursionCapped: "运行达到了步数上限",
         evaluatorFailed: "未能检查目标，这次运行本身可能没问题",
         noDurableEndOfTurn: "未能检查目标：没有保存最终回复",
         threadChanged: "未能检查目标：检查期间对话发生了变化",
@@ -1528,7 +1630,8 @@ export const zhCN: Translations = {
     unconfigured: "未配置",
     unavailable: "当前无法使用渠道连接。",
     unavailableShort: "不可用",
-    setupTitle: (name: string) => `连接 ${name}`,
+    setupTitle: (name: string) =>
+      /^[A-Za-z0-9]/.test(name) ? `连接 ${name}` : `连接${name}`,
     setupEditTitle: (name: string) => `修改 ${name}`,
     wechatQr: {
       restart: "重新扫码",
@@ -1585,6 +1688,34 @@ export const zhCN: Translations = {
       expiredTitle: "二维码已过期",
       failedTitle: "连接未完成",
     },
+    // A Latin name keeps the usual spaces ("发给 Slack 机器人"); a Chinese one
+    // does not ("发给飞书机器人").
+    bindingCode: {
+      description: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `把下面这条命令发给 ${provider} 机器人，即可绑定到你的 DeerFlow 账号。`
+          : `把下面这条命令发给${provider}机器人，即可绑定到你的 DeerFlow 账号。`,
+      loading: "正在生成绑定码…",
+      copy: "复制命令",
+      copied: "已复制",
+      copyFailed: "复制失败，请选中上方命令手动复制。",
+      expiresAt: (time: string) => `${time} 过期`,
+      waiting: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `正在等待 ${provider} 中的绑定消息…`
+          : `正在等待${provider}中的绑定消息…`,
+      connected: (provider: string) =>
+        /^[A-Za-z0-9]/.test(provider)
+          ? `${provider} 已连接`
+          : `${provider}已连接`,
+      done: "完成",
+      expired: "绑定码已过期。",
+      newCode: "重新生成绑定码",
+      failed: "无法生成绑定码。",
+      tooManyCodes:
+        "未使用的绑定码太多。请先用已有的绑定码，或等它们过期（约 10 分钟）后再试。",
+      retry: "重试",
+    },
     setupDescription:
       "填写当前服务进程需要的配置值。这些内容不会写入 config.yaml。",
     saveAndConnect: "保存并连接",
@@ -1619,6 +1750,9 @@ export const zhCN: Translations = {
   // Tool calls
   toolCalls: {
     details: "工具详情",
+    failed: "执行失败",
+    scheduleTaskPending: "定时任务操作",
+    stopScheduledTaskPending: "暂停此定时任务",
     toolName: "工具名称",
     callId: "调用 ID",
     input: "输入",
@@ -1933,7 +2067,7 @@ export const zhCN: Translations = {
       lightDescription: "更明亮的配色，适合日间使用。",
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
-      languageDescription: "在不同语言之间切换。",
+      languageDescription: "选择界面语言及回复时优先使用的语言。",
     },
     tools: {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
@@ -2393,6 +2527,9 @@ export const zhCN: Translations = {
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
       account_disabled: "账号已停用，请联系管理员。",
+      invalid_email: "请输入有效的邮箱地址。",
+      password_too_short: "密码至少需要 6 个字符。",
+      registration_password_too_short: "密码至少需要 8 个字符。",
     },
   },
 };

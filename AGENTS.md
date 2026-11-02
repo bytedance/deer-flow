@@ -95,12 +95,11 @@ hard-code business logic into core. Working examples:
 AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
 no multi-Gateway failover or hard currency budget.
 
-Knowledge management is an optional extension at
-`examples/deerflow-extension-knowledge-management/` (see its `AGENTS.md` and
-`CONTRACT.md`). It uses existing plugin/router/principal extension points;
-retrieval has no management dependency. Writes require explicit administrator
-resource/operation grants and upstream authorization. Provider-managed stages
-are not completion evidence; uncertain writes must be reconciled, not retried.
+Knowledge management/space policy: `examples/deerflow-extension-knowledge-{management,platform}/`
+(scoped `AGENTS.md`, `CONTRACT.md`). Use existing plugin/router/principal contracts;
+retrieval stays independent. Space policy intersects administrator/resource/operation
+and upstream grants, never grants chat access. SQLite holds plugin-owned space policy.
+Provider stages are not completion evidence; reconcile uncertain writes, never retry.
 
 Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 `extensions_config.example.json` → `extensions_config.json` (MCP/skills).
@@ -227,6 +226,8 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
+  Skill-creator tests must preserve YAML values/body, restore bytecode settings,
+  and check invalid metadata through offline CLI subprocesses.
   Public skill script regressions live in `tests/skills/` and run in Skill Review CI
   independently of package review. Exercise dependency fallbacks with the optional
   import unavailable and mock HTTP transport to keep tests offline.
@@ -237,13 +238,12 @@ Repo-wide conventions:
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
   Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
   `encoding="utf-8"`. Never rely on the platform locale.
-- **Version sources must stay in lockstep** — a release version must match identically in
-  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
-  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
-  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
-  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
-  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
-  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
-  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Version lockstep** — keep `backend/pyproject.toml`,
+  `backend/packages/harness/pyproject.toml`, `frontend/package.json`, and
+  `deploy/helm/deer-flow/Chart.yaml` (`version`/`appVersion`) identical.
+  `backend/uv.lock` must match both `deer-flow` and `deerflow-harness` in PEP 440 form.
+  Run `scripts/bump_version.sh <ver>` (requires `uv` on `PATH`) to update all five
+  fields and the lock, then `scripts/verify_versions.sh <ver>`. `v*` tag CI blocks
+  all publishing on drift. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

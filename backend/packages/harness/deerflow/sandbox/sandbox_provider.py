@@ -1,6 +1,8 @@
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
@@ -175,6 +177,37 @@ _default_sandbox_provider: SandboxProvider | None = None
 # self-deadlock such a provider and would block every concurrent `get()` during a
 # slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
+
+# Number of hosts (the Gateway lifespan) currently owning provider shutdown.
+# Providers built while it is positive leave SIGTERM/SIGINT to the host, which
+# drains in-flight runs before calling `shutdown_sandbox_provider()`. Guarded by
+# `_provider_lock`; read by provider constructors, never under it.
+_host_shutdown_owners = 0
+
+
+@contextmanager
+def hold_sandbox_shutdown_ownership() -> Iterator[None]:
+    """Declare that the host, not provider signal handlers, shuts sandboxes down.
+
+    Enter this before any provider can be built. Providers built inside it skip
+    their SIGTERM/SIGINT handlers and keep the SIGHUP fallback, since uvicorn
+    does not handle SIGHUP. A provider built earlier keeps the handlers it
+    already installed.
+    """
+    global _host_shutdown_owners
+    with _provider_lock:
+        _host_shutdown_owners += 1
+    try:
+        yield
+    finally:
+        with _provider_lock:
+            _host_shutdown_owners -= 1
+
+
+def host_owns_sandbox_shutdown() -> bool:
+    """Return whether a host currently owns sandbox provider shutdown."""
+    with _provider_lock:
+        return _host_shutdown_owners > 0
 
 
 def get_initialized_sandbox_provider() -> SandboxProvider | None:

@@ -304,7 +304,8 @@ async def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        cfg = _get_tool_config("web_fetch") or {}
+        # Config resolution stats and hashes the config files; keep it off the event loop.
+        cfg = await asyncio.to_thread(_get_tool_config, "web_fetch") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
         url_error = await asyncio.to_thread(
             validate_public_http_url,
@@ -379,7 +380,8 @@ async def web_capture_tool(
         viewport_height: Optional viewport height in pixels.
     """
     try:
-        cfg = _get_tool_config("web_capture") or {}
+        # Config resolution stats and hashes the config files; keep it off the event loop.
+        cfg = await asyncio.to_thread(_get_tool_config, "web_capture") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
 
         url_error = await asyncio.to_thread(_validate_capture_url, url, allow_private_addresses=allow_private_addresses)

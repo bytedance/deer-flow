@@ -58,15 +58,9 @@ logout and restores the complete old tree on any switch failure.
 Offload config/DDGS together. Only returned empties mean `No images found`;
 the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
-### Browser Progress Screenshots (`community/browser_automation/`)
+### Browser Automation
 
-Hidden per-action browser progress frames use JPEG at quality 80 to keep their
-storage and transfer cost bounded relative to lossless PNG. The explicit
-`browser_screenshot` tool remains PNG because it creates a user-requested
-artifact. New automatic capture entry points must reuse the shared progress
-encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
-onto the first free `-N` name.
+Screenshot and session rules: [browser guidance](community/browser_automation/AGENTS.md).
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
@@ -141,3 +135,7 @@ continue, and consume/log its outcome in a completion callback. Prepare-stage
 cancellation retains its handoff/reclaim path. Regressions in
 `tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
 metadata cancellation and text-cache drain/cleanup.
+
+### Project Summary Worker Shutdown (`projects/summaries.py`)
+
+`stop()` closes admission synchronously and shares one shielded `_stop_task`; `start()` reopens admission only after it completes and is cleared. Preserve queue-drop/sentinel/grace semantics. Regressions: `test_stop_drains_workers_before_propagating_repeated_cancellation` and `test_start_after_stop_restarts_worker_pool` in `backend/tests/test_project_summaries.py`.

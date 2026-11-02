@@ -31,6 +31,7 @@ import {
 import { ThreadArchiveStatus } from "@/components/workspace/thread-archive-status";
 import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadExtensionActions } from "@/components/workspace/thread-extension-actions";
+import { ThreadRunInputs } from "@/components/workspace/thread-run-inputs";
 import { ThreadScheduledTasksButton } from "@/components/workspace/thread-scheduled-tasks-button";
 import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
@@ -62,6 +63,7 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { modelTaskInput } from "@/core/models/control";
 import { useModels } from "@/core/models/hooks";
 import { useModelControl } from "@/core/models/use-model-control";
+import { notificationBody } from "@/core/notification/body";
 import { useNotification } from "@/core/notification/hooks";
 import { useProject } from "@/core/projects";
 import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
@@ -203,6 +205,10 @@ export default function ChatPage() {
     thread,
     pendingUsageMessages,
     sendMessage,
+    sendInput,
+    runInputs,
+    canSendInput,
+    activeRunId,
     regenerateMessage,
     editAndRegenerateMessage,
     isUploading,
@@ -231,18 +237,12 @@ export default function ChatPage() {
       // it is open: it has been read.
       markThreadRead();
       if (document.hidden || !document.hasFocus()) {
-        let body = "Conversation finished";
         const lastMessage = state.messages.at(-1);
-        if (lastMessage) {
-          const textContent = textOfMessage(lastMessage);
-          if (textContent) {
-            body =
-              textContent.length > 200
-                ? textContent.substring(0, 200) + "..."
-                : textContent;
-          }
-        }
-        showNotification(state.title, { body });
+        showNotification(state.title, {
+          body: notificationBody(
+            lastMessage ? textOfMessage(lastMessage) : null,
+          ),
+        });
       }
     },
   });
@@ -658,6 +658,7 @@ export default function ChatPage() {
             <main className="flex min-h-0 max-w-full grow flex-col">
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
+                  activeRunId={activeRunId}
                   archiveDownloadsEnabled={
                     isNewThread || isMock || threadMetadata.data != null
                   }
@@ -761,68 +762,78 @@ export default function ChatPage() {
                     </p>
                   )}
                   {mountedRef.current ? (
-                    <InputBox
-                      className={cn(
-                        "bg-background/5 w-full",
-                        isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
-                      )}
-                      isWelcomeMode={isWelcomeMode}
-                      threadId={threadId}
-                      projectId={projectParam ?? affiliatedProjectId}
-                      draftThreadId={isNewThread ? "new" : threadId}
-                      knowledgeScopeControl={
-                        selectorVisible && knowledgeScope ? (
-                          <KnowledgeScopeSelector
-                            agentName="lead_agent"
-                            disabled={thread.isLoading || isUploading}
-                            selection={knowledgeScope}
-                            onChange={setKnowledgeScope}
-                          />
-                        ) : undefined
-                      }
-                      autoFocus={isWelcomeMode}
-                      status={
-                        thread.error
-                          ? "error"
-                          : thread.isLoading
-                            ? "streaming"
-                            : "ready"
-                      }
-                      context={settings.context}
-                      extraHeader={
-                        isWelcomeMode &&
-                        !hasGoal &&
-                        !hasTodos && <Welcome mode={settings.context.mode} />
-                      }
-                      disabled={
-                        isMock ||
-                        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                        isUploading ||
-                        modelControl.busy ||
-                        (!isNewThread && isHistoryLoading)
-                      }
-                      onContextChange={(context, options) => {
-                        if (options?.automatic)
-                          resolveThreadContext(threadId, context);
-                        else setSettings("context", context);
-                      }}
-                      onGoalChange={setLocalGoal}
-                      onPrepareThread={ensureProjectThread}
-                      onReferenceFileAttached={() => {
-                        if (!isNewThread) return;
-                        history.replaceState(
-                          null,
-                          "",
-                          `/workspace/chats/${threadId}`,
-                        );
-                        setThreadId(threadId);
-                        setIsNewThread(false);
-                      }}
-                      onSubmit={handleSubmit}
-                      onStop={handleStop}
-                      canStopStreaming={canStopStreaming}
-                      canCreateRuns={canCreateRuns}
-                    />
+                    <div className="w-full">
+                      <ThreadRunInputs
+                        inputs={runInputs}
+                        threadId={isNewThread || isMock ? undefined : threadId}
+                        isRunning={thread.isLoading}
+                        canCreate={canCreateRuns}
+                        canCancel={canStopStreaming}
+                      />
+                      <InputBox
+                        className={cn(
+                          "bg-background/5 w-full",
+                          isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                        )}
+                        isWelcomeMode={isWelcomeMode}
+                        threadId={threadId}
+                        projectId={projectParam ?? affiliatedProjectId}
+                        draftThreadId={isNewThread ? "new" : threadId}
+                        knowledgeScopeControl={
+                          selectorVisible && knowledgeScope ? (
+                            <KnowledgeScopeSelector
+                              agentName="lead_agent"
+                              disabled={thread.isLoading || isUploading}
+                              selection={knowledgeScope}
+                              onChange={setKnowledgeScope}
+                            />
+                          ) : undefined
+                        }
+                        autoFocus={isWelcomeMode}
+                        status={
+                          thread.error
+                            ? "error"
+                            : thread.isLoading
+                              ? "streaming"
+                              : "ready"
+                        }
+                        context={settings.context}
+                        extraHeader={
+                          isWelcomeMode &&
+                          !hasGoal &&
+                          !hasTodos && <Welcome mode={settings.context.mode} />
+                        }
+                        disabled={
+                          isMock ||
+                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                          isUploading ||
+                          modelControl.busy ||
+                          (!isNewThread && isHistoryLoading)
+                        }
+                        onContextChange={(context, options) => {
+                          if (options?.automatic)
+                            resolveThreadContext(threadId, context);
+                          else setSettings("context", context);
+                        }}
+                        onGoalChange={setLocalGoal}
+                        onPrepareThread={ensureProjectThread}
+                        onReferenceFileAttached={() => {
+                          if (!isNewThread) return;
+                          history.replaceState(
+                            null,
+                            "",
+                            `/workspace/chats/${threadId}`,
+                          );
+                          setThreadId(threadId);
+                          setIsNewThread(false);
+                        }}
+                        onSubmit={handleSubmit}
+                        onBusySubmit={canSendInput ? sendInput : undefined}
+                        onStop={handleStop}
+                        canStopStreaming={canStopStreaming}
+                        canCreateRuns={canCreateRuns}
+                      />
+                    </div>
                   ) : (
                     <div
                       aria-hidden="true"
