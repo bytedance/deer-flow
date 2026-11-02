@@ -124,6 +124,20 @@ class TestFactDedupGate:
         assert merged["source"] == "unknown"  # refreshed from the proposed fact's thread
         assert metrics.get("facts_merged_dedup") == 1
 
+    def test_merge_tolerates_an_unbounded_existing_confidence(self):
+        updater = _updater(fact_dedup_enabled=True)
+        current = _memory(
+            [_stored_fact("fact_old", "User prefers concise answers in chat", confidence=10**400)],
+        )
+
+        result = updater._apply_updates(
+            current,
+            _update([_fact("User prefers concise answers in chat, short form", confidence=0.95)]),
+        )
+
+        assert len(result["facts"]) == 1
+        assert result["facts"][0]["confidence"] == 0.95
+
     def test_merge_keeps_higher_existing_confidence(self):
         updater = _updater(fact_dedup_enabled=True)
         current = _memory([_stored_fact("fact_old", "User prefers concise answers in chat", confidence=0.98)])

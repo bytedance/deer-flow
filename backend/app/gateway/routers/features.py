@@ -101,6 +101,7 @@ class FeaturesResponse(BaseModel):
     scheduled_tasks: ScheduledTasksFeature
     thread_activity: ThreadActivityFeature
     image_generation_management: ImageGenerationManagementFeature
+    run_inputs: bool = False
 
 
 @router.get(
@@ -117,6 +118,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     if image_management_enabled is None:
         image_management_enabled = managed_image_profiles_enabled()
     return FeaturesResponse(
+        run_inputs=getattr(getattr(request.app.state, "run_manager", None), "input_store", None) is not None,
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
         # MCP task bindings and the submitter are startup-scoped. Report the

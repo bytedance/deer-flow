@@ -1,9 +1,11 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
 const mocks = rs.hoisted(() => ({
+  messages: [] as Message[],
   artifactContent: {
     content: undefined as string | undefined,
     url: undefined as string | undefined,
@@ -23,7 +25,10 @@ rs.mock("@/core/artifacts/hooks", () => ({
 }));
 
 rs.mock("@/components/workspace/messages/context", () => ({
-  useThread: () => ({ thread: { isLoading: false }, isMock: false }),
+  useThread: () => ({
+    thread: { isLoading: false, messages: mocks.messages },
+    isMock: false,
+  }),
 }));
 
 rs.mock("@/components/workspace/artifacts/context", () => ({
@@ -90,8 +95,48 @@ function renderDetail(filepath: string) {
 }
 
 beforeEach(() => {
+  mocks.messages = [];
   mocks.artifactContent.content = undefined;
   mocks.artifactContent.sha256 = undefined;
+});
+
+describe("ArtifactFileDetail leading tabular write results", () => {
+  it.each(["OK", "Error: failed", undefined])(
+    "enables table preview only after this call succeeds: %s",
+    (result) => {
+      const path = "/mnt/user-data/outputs/table.csv";
+      mocks.messages = [
+        ...(result === undefined
+          ? []
+          : [
+              {
+                type: "tool",
+                id: "result",
+                tool_call_id: "call_0",
+                content: result,
+              } as Message,
+            ]),
+        {
+          type: "ai",
+          id: "owner",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_0",
+              name: "write_file",
+              args: { path, content: "name,value\nrow,1" },
+            },
+          ],
+        },
+      ];
+      const view = renderDetail(
+        `write-file:${path}?message_id=owner&tool_call_id=call_0`,
+      );
+      expect(view.queryByLabelText("Table preview") !== null).toBe(
+        result === "OK",
+      );
+    },
+  );
 });
 
 describe("ArtifactFileDetail extensionless source files", () => {

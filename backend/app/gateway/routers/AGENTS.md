@@ -1,5 +1,10 @@
 # Router contracts
 
+Trash listing resolves the live retention configuration off-loop before its
+best-effort sweep. Configuration failures skip automatic cleanup and preserve
+the listing; never substitute a default policy for an unreadable one. Resolve
+the policy before consuming the reconciliation throttle window.
+
 HTTP creation holds `goal_thread_lock` from the idempotency lookup through the
 initial checkpoint write. Same-id HTTP creates must return the existing row,
 including in memory mode; retain the native memory store's overwrite contract
@@ -18,7 +23,10 @@ leave the source record unchanged.
 Console usage attributes legacy rows without a per-model usage map to
 `model_name`, including their recorded `total_input_tokens`. Accumulate those
 inputs with newer usage buckets for the same model; do not infer cache hits.
-Regression coverage lives in `tests/test_console_router.py`.
+A counter that does not coerce to an integer contributes zero tokens instead
+of aborting the request, and non-finite pricing leaves that model's cost
+unreported; rows whose counters are all unusable still fall back to run-level
+totals. Regression coverage lives in `tests/test_console_router.py`.
 
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed

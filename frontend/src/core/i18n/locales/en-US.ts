@@ -12,6 +12,60 @@ import {
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
@@ -94,6 +148,11 @@ export const enUS: Translations = {
         title: "Knowledge spaces and connections",
         description:
           "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeCenter: {
+        title: "Knowledge center",
+        description:
+          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
       },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
@@ -656,6 +715,25 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
