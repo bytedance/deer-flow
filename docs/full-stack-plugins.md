@@ -537,6 +537,18 @@ model configuration, tools, Skills and policies. No raw secrets are exposed.
 Missing evidence fails closed; the declarative revision remains a separate preflight
 guard. Evidence describes assembly-time configuration, not external service state.
 
+`AgentRuns.import_artifact(thread_id, filename, content)` (extension API 0.2.10)
+imports at most 2 MiB of retained bytes into an idle thread's uploads directory.
+It requires a plugin-scoped delegated handle and rechecks current thread-write
+authority. The host selects a content-addressed filename; identical calls reuse
+the copy, while a replaced or edited destination fails without overwriting it.
+The result contains `filename`, virtual `path`, `sha256` and `size`. Non-mounted
+sandboxes synchronize those exact bytes through an authorized sandbox lease.
+Cancellation drains publication/synchronization before releasing the thread's
+mutation reservation. Descriptor confinement requires POSIX. This primitive
+stores no team policy, artifact versions or acceptance state; those belong to
+the extension.
+
 `AgentRuns.read_artifact(thread_id, path)` authorizes a bounded (2 MiB) regular
 output-file snapshot, rejects symlink traversal, and reserves the thread against
 concurrent runs/edits while reading off-loop. The workflow extension stores those

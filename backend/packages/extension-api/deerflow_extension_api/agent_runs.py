@@ -108,6 +108,17 @@ class AgentRuns(Protocol):
         """
         ...
 
+    async def import_artifact(self, *, thread_id: str, filename: str, content: bytes) -> dict[str, Any]:
+        """Place at most 2 MiB of retained bytes in an idle thread's uploads.
+
+        Requires a plugin-scoped handle and current thread-write authority.
+        The host selects a content-addressed filename and synchronizes remote
+        sandboxes. Identical calls reuse the copy; a changed destination is
+        rejected without overwriting it. Returns path, filename, sha256 and size.
+        Caller cancellation drains file/sandbox IO before releasing the thread.
+        """
+        ...
+
     async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
         """Opaque revision of declarative Agent/host configuration.
 

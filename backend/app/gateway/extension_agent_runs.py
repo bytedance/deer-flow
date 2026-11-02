@@ -149,10 +149,29 @@ class _BoundAgentRuns:
     async def read_artifact(self, *, thread_id, path):
         from app.gateway.extension_artifacts import read_output_snapshot
         from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.runtime.runs.manager import ConflictError
 
         async with self._request("threads:read", thread_id) as request:
-            async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
-                return await asyncio.to_thread(read_output_snapshot, self._user_id, thread_id, path)
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    return await asyncio.to_thread(read_output_snapshot, self._user_id, thread_id, path)
+            except ConflictError as exc:
+                raise AgentRunError(409, "Producing conversation is busy") from exc
+
+    async def import_artifact(self, *, thread_id, filename, content):
+        from app.gateway.extension_artifacts import import_snapshot
+        from app.gateway.routers.artifacts import reserve_artifact_write
+        from deerflow.runtime.runs.manager import ConflictError
+        from deerflow.utils.file_io import await_drained
+
+        if self._plugin_namespace is None:
+            raise AgentRunError(422, "Artifact import requires a plugin-scoped capability")
+        async with self._request("threads:write", thread_id) as request:
+            try:
+                async with reserve_artifact_write(request, thread_id, user_id=self._user_id):
+                    return await await_drained(import_snapshot(request, self._user_id, thread_id, self._plugin_namespace, filename, content))
+            except ConflictError as exc:
+                raise AgentRunError(409, "Recipient conversation is busy") from exc
 
     async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
         from deerflow.config.agents_config import load_agent_config, load_agent_soul
