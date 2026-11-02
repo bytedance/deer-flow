@@ -34,6 +34,12 @@ This section accumulates work toward the **2.3.0** milestone
   the retry is in flight on SQLite, and the workspace no longer offers Retry
   there. Retrying in a completed, failed, running or paused batch is
   unchanged. ([#7792])
+- **mcp:** An MCP tool that returns an embedded binary resource without a
+  `mimeType` no longer fails the whole call. The field is optional in the MCP
+  spec, but a base64 payload needs one in langchain-core, so the converter
+  raised `ValueError: mime_type is required when using base64 data` and
+  discarded the server's own text blocks with it. The missing type now falls
+  back to `application/octet-stream`. ([#7799])
 
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
@@ -15998,3 +16004,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7797]: https://github.com/bytedance/deer-flow/pull/7799

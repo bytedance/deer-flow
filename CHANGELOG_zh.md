@@ -30,6 +30,11 @@
   批次的重试路由返回 409，包括 SQLite 上取消在重试进行中提交的情况；工作区也不再
   为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
   ([#7792])
+- **MCP：** MCP 工具返回缺少 `mimeType` 的内嵌二进制资源时，不再导致整个调用失败。
+  该字段在 MCP 规范中是可选的，但 base64 载荷在 langchain-core 中必须携带类型，
+  因此转换器此前会抛出 `ValueError: mime_type is required when using base64 data`，
+  并把服务器返回的文本内容一并丢弃。缺失的类型现在回退为
+  `application/octet-stream`。([#7799])
 
 - **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
   空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
@@ -12745,3 +12750,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7797]: https://github.com/bytedance/deer-flow/pull/7799
