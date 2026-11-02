@@ -329,6 +329,11 @@ class RunJournal(BaseCallbackHandler):
         self.thread_id = thread_id
         self._evidence_owner_id = user_id if isinstance(event_store, DbRunEventStore) else AUTO
         self._store: RunEventStore | None = event_store
+        from deerflow.runtime.events.producer import current_producer
+
+        # Callback threads may have an empty Context. Keep the host admission
+        # captured at construction; never infer a replacement from event data.
+        self._event_producer = current_producer()
         self._closed = False
         self._accepting_evidence = True
         self._producer_lock = threading.Lock()
@@ -1216,7 +1221,10 @@ class RunJournal(BaseCallbackHandler):
         store = self._store
         if store is None:
             return
-        store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
+        from deerflow.runtime.events.producer import producer_scope
+
+        with producer_scope(self._event_producer):
+            store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
         try:
             await asyncio.shield(store_task)
         except asyncio.CancelledError:
