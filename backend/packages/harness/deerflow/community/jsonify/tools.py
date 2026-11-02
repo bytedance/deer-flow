@@ -140,7 +140,10 @@ async def _read_rows(settings: _JsonifySettings, args: _RowsArgs) -> dict[str, A
                 truncated = has_more or len(rows) > max_rows
                 break
             # Stop on an empty page or a cursor that does not advance, so a misbehaving endpoint cannot spin the loop.
-            if not has_more or not page_rows or not isinstance(next_offset, int) or next_offset <= offset:
+            if not has_more:
+                break
+            if not page_rows or not isinstance(next_offset, int) or next_offset <= offset:
+                truncated = True
                 break
             offset = next_offset
 

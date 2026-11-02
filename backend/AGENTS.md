@@ -204,6 +204,10 @@ frontend reconnect can deduplicate the user's message.
 
 ## Development Workflow
 
+Jsonify pagination must preserve incomplete-read evidence: when `has_more` is
+true but an empty page or unusable cursor stops the loop, return
+`truncated: true`. Offline regressions live in `tests/test_jsonify_tools.py`.
+
 ### Test-Driven Development (TDD) — MANDATORY
 
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**

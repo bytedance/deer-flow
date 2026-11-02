@@ -195,6 +195,7 @@ async def test_complete_read_is_not_truncated():
     [
         {**PAGE_ONE, "next_offset": 0},
         {**PAGE_ONE, "next_offset": "2"},
+        {**PAGE_ONE, "next_offset": None},
         {**PAGE_ONE, "rows": []},
     ],
 )
@@ -210,6 +211,7 @@ async def test_stops_when_cursor_does_not_advance_or_page_is_empty(page):
 
     assert client.get.call_count == 1
     assert result["row_count"] == len(page["rows"])
+    assert result["truncated"] is True
 
 
 @pytest.mark.anyio
