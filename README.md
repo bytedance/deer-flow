@@ -1703,7 +1703,9 @@ with bge-m3 and GLM-5.3; see that record for coverage limits.
 Configure `knowledge_search` with either
 `deerflow.community.ragflow.tools:knowledge_search_tool` or
 `deerflow.community.lightrag.tools:knowledge_search_tool` in `config.yaml`.
-Both support attributable retrieval evidence. LightRAG and RAGFlow responses
+Both support attributable retrieval evidence. Both clients load HTTP client
+TLS trust in a worker thread before asynchronous requests, keeping synchronous
+certificate loading off the event loop. LightRAG and RAGFlow responses
 without complete provider locators use the shared DeerFlow source contract;
 complete RAGFlow responses retain their existing citation snapshots and scope
 controls. Knowledge citations show the

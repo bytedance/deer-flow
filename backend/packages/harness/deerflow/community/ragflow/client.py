@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -78,7 +79,7 @@ class RAGFlowClient:
             client_kwargs["transport"] = self._transport
 
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, **client_kwargs) as client:
                 response = await client.request(method, path, params=params, json=json)
         except httpx.TimeoutException:
             raise RAGFlowConnectionError(f"RAGFlow request timed out after {self.timeout:g} seconds.") from None
