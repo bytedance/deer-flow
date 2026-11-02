@@ -27,6 +27,7 @@ from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
+from deerflow.config.harness_guard_config import HarnessGuardConfig
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -320,6 +321,7 @@ class AppConfig(BaseModel):
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
+    harness_guard: HarnessGuardConfig = Field(default_factory=HarnessGuardConfig, description="HarnessGuard tool-loop interceptor middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")

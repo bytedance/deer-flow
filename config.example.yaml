@@ -1595,6 +1595,22 @@ read_before_write:
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
 
+# Optional pre-write syntax validation and targeted error remediation guard.
+# When enabled (write_verify_syntax: true), intercepts str_replace to validate
+# spliced .py (ast.parse) and .json (json.loads) syntax before disk I/O.
+# Also classifies tool error outputs (ModuleNotFoundError, SyntaxError,
+# FileNotFoundError, etc.) and injects actionable remediation hints directly into
+# tool results.
+harness_guard:
+  enabled: true
+  write_verify_syntax: false
+  block_on_syntax_error: true
+  targeted_hints_enabled: true
+  max_repeated_error_signatures: 2
+  detect_alternating_loops: true
+  max_loop_history: 20
+  max_tracked_scopes: 1000
+
 # ============================================================================
 # Projects
 # ============================================================================

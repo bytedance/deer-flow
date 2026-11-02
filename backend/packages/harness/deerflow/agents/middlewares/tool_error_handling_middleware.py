@@ -502,6 +502,11 @@ def _build_runtime_middlewares(
 
         tail.append(ReadBeforeWriteMiddleware(config=app_config.read_before_write))
 
+    if getattr(app_config, "harness_guard", None) and app_config.harness_guard.enabled:
+        from deerflow.agents.middlewares.harness_guard_middleware import HarnessGuardMiddleware
+
+        tail.append(HarnessGuardMiddleware(config=app_config.harness_guard))
+
     # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
     # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
     # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
