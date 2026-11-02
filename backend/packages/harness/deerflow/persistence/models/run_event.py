@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, BigInteger, DateTime, Index, String, Text, UniqueConstraint, text
+from sqlalchemy import JSON, BigInteger, DateTime, Index, String, Text, UniqueConstraint, event, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.constants import RUN_EVENT_CATEGORY_MAX_LENGTH, RUN_EVENT_TYPE_MAX_LENGTH
@@ -46,3 +46,11 @@ class RunEventThreadSeqRow(Base):
 
     thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     seq: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _install_producer_guard(metadata, connection, **kwargs):
+    # Empty-DB bootstrap stamps head without executing migration revisions.
+    from deerflow.persistence.run.producer import install_event_guard
+
+    install_event_guard(connection)
