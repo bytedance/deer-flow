@@ -46,7 +46,7 @@ The run worker persists those events to the run event store under the `subagent`
 | `subagent.step`  | `task_id`, `message_index`, `kind` (`ai` or `tool`), `text`, `truncated`; assistant steps add `tool_calls`, tool steps add `tool_name`         |
 | `subagent.end`   | `task_id`, `status` (`completed` / `failed` / `cancelled` / `timed_out`), `model_name`, `usage`, and `result` or `error` with truncation flags |
 
-Step text is capped at 8,192 characters. Events are written in batches of 25, `subagent.end` flushes immediately, and a failed write is re-buffered for the next attempt rather than dropped.
+Step text is capped at 8,192 characters. Events are written in batches of 25 and `subagent.end` flushes immediately. Only a write explicitly confirmed as uncommitted is re-buffered for retry (including transient DB pre-commit failures and successful JSONL I/O rollback). Three consecutive failed attempts, an ambiguous error, or store cancellation stops further subagent-event persistence for that run and releases pending payloads. Live streaming continues, but reloaded history may be incomplete. Finalization logs unconfirmed and skipped event counts plus a bounded sample of affected task IDs. An unconfirmed batch may already be stored; its count is not a count of definitely lost events.
 
 Query endpoint:
 
