@@ -79,6 +79,8 @@ DEFAULT_ASSISTANT_ID = "lead_agent"
 DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
 DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
+HTML_ARTIFACT_SUFFIXES = frozenset({".htm", ".html", ".xhtml"})
+_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 CHANNEL_AGENT_METADATA_KEY = "channel_agent_name"
 THREAD_AGENT_METADATA_KEY = "agent_name"
 CHANNEL_MODEL_METADATA_KEY = "channel_model_name"
@@ -1200,14 +1202,70 @@ def _is_hidden_human_control_message(msg: Mapping[str, Any], *, thread_id: str |
     return additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None
 
 
-def _format_artifact_text(artifacts: list[str]) -> str:
-    """Format artifact paths into a human-readable text block listing filenames."""
+def _normalize_public_base_url(value: str | None) -> str | None:
+    """Return a safe external HTTP(S) base URL without a trailing slash."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    raw_value = value.strip()
+    if any(character.isspace() for character in raw_value):
+        return None
+
+    try:
+        parsed = urlparse(raw_value)
+        # Accessing ``port`` validates malformed values such as ``:not-a-port``.
+        parsed.port
+    except ValueError:
+        return None
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+
+    path = quote(parsed.path.rstrip("/"), safe="/-._~!$&'*,;=:@")
+    return f"{parsed.scheme.lower()}://{parsed.netloc}{path}"
+
+
+def _artifact_browser_url(virtual_path: str, *, thread_id: str | None, public_base_url: str | None) -> str | None:
+    """Build an externally reachable URL for an HTML artifact."""
     import posixpath
 
-    filenames = [posixpath.basename(p) for p in artifacts]
-    if len(filenames) == 1:
-        return f"Created File: 📎 {filenames[0]}"
-    return "Created Files: 📎 " + "、".join(filenames)
+    base_url = _normalize_public_base_url(public_base_url)
+    if not base_url or not thread_id or not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+        return None
+    if posixpath.splitext(virtual_path)[1].lower() not in HTML_ARTIFACT_SUFFIXES:
+        return None
+
+    encoded_thread_id = quote(thread_id, safe="")
+    encoded_artifact_path = "/".join(quote(segment, safe="") for segment in virtual_path.lstrip("/").split("/"))
+    return f"{base_url}/api/threads/{encoded_thread_id}/artifacts/{encoded_artifact_path}"
+
+
+def _escape_markdown_link_label(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+
+
+def _format_artifact_text(
+    artifacts: list[str],
+    *,
+    thread_id: str | None = None,
+    public_base_url: str | None = None,
+) -> str:
+    """Format artifact filenames, linking HTML when an external base URL is set."""
+    import posixpath
+
+    formatted_artifacts: list[str] = []
+    for artifact in artifacts:
+        filename = posixpath.basename(artifact)
+        browser_url = _artifact_browser_url(artifact, thread_id=thread_id, public_base_url=public_base_url)
+        if browser_url:
+            filename = f"[{_escape_markdown_link_label(filename)}]({browser_url})"
+        formatted_artifacts.append(filename)
+
+    if len(formatted_artifacts) == 1:
+        return f"Created File: 📎 {formatted_artifacts[0]}"
+    return "Created Files: 📎 " + "、".join(formatted_artifacts)
 
 
 def _unknown_command_reply(command: str | None = None) -> str:
@@ -1422,6 +1480,7 @@ def _prepare_artifact_delivery(
     artifacts: list[str],
     *,
     user_id: str | None = None,
+    public_base_url: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response.
 
@@ -1437,13 +1496,17 @@ def _prepare_artifact_delivery(
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
     if unresolved:
-        artifact_text = _format_artifact_text(unresolved)
+        artifact_text = _format_artifact_text(unresolved, thread_id=thread_id, public_base_url=public_base_url)
         response_text = (response_text + "\n\n" + artifact_text) if response_text else artifact_text
 
     # Always include resolved attachment filenames as a text fallback so files
     # remain discoverable even when the upload is skipped or fails.
     if attachments:
-        resolved_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+        resolved_text = _format_artifact_text(
+            [attachment.virtual_path for attachment in attachments],
+            thread_id=thread_id,
+            public_base_url=public_base_url,
+        )
         response_text = (response_text + "\n\n" + resolved_text) if response_text else resolved_text
 
     return response_text, attachments
@@ -1594,6 +1657,7 @@ class ChannelManager:
         shutdown_grace_period_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
+        public_base_url: str | None = None,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
@@ -1613,6 +1677,9 @@ class ChannelManager:
         self._shutdown_grace_period_seconds = float(shutdown_grace_period_seconds)
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
+        self._public_base_url = _normalize_public_base_url(public_base_url)
+        if public_base_url and not self._public_base_url:
+            logger.warning("[Manager] ignoring invalid channels.public_base_url; expected an HTTP(S) URL without query or fragment")
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
@@ -3483,11 +3550,11 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id, public_base_url=self._public_base_url)
 
         if not response_text:
             if attachments:
-                response_text = _format_artifact_text([a.virtual_path for a in attachments])
+                response_text = _format_artifact_text([a.virtual_path for a in attachments], thread_id=thread_id, public_base_url=self._public_base_url)
             else:
                 response_text = "(No response from agent)"
 
@@ -3657,7 +3724,7 @@ class ChannelManager:
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id, public_base_url=self._public_base_url)
             if step_limit_text:
                 # The last text is mid-task narration: say the run stopped, in
                 # place of the generic failure, so the user knows to continue.
@@ -3665,7 +3732,7 @@ class ChannelManager:
 
             if not response_text:
                 if attachments:
-                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments], thread_id=thread_id, public_base_url=self._public_base_url)
                 elif stream_error:
                     if _is_admitted_run_conflict(stream_error):
                         response_text = ALREADY_ADMITTED_MESSAGE

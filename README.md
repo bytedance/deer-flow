@@ -1258,6 +1258,8 @@ channels:
   langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
+  # Optional browser-facing DeerFlow URL used for clickable HTML artifact links in IM replies
+  public_base_url: https://deer.example.com
 
   # Maximum queued or provider-reserved inbound messages (default: 1000)
   inbound_queue_maxsize: 1000
@@ -1355,6 +1357,7 @@ Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
+- When `public_base_url` is configured, resolved `.html`, `.htm`, and `.xhtml` artifacts are also listed as Markdown links in IM replies. The normal file attachment remains the fallback. Links use the existing authenticated artifact API, so auth-enabled deployments require the recipient to have a DeerFlow browser session; active HTML stays a download to avoid executing generated scripts on the DeerFlow origin.
 - Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
 - Telegram shutdown retains ongoing cleanup across a timeout or cancellation so a retry can finish it. Stopping during startup also cancels initialization and closes the partially initialized bot's HTTP clients before retiring its worker loop. If the Telegram loop has already stopped, shutdown warns that download clients may remain open and releases the abandoned cleanup state; later stops do not repeat that warning.
 - Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
