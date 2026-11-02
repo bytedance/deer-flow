@@ -61,6 +61,25 @@ def _document_source_text(source: Any) -> str:
     return ""
 
 
+def _document_block_text(block: Mapping[str, Any]) -> str:
+    """Native text of a ``document`` block: title, then context, then its source body.
+
+    ``title`` and ``context`` live on the block, not on ``source``, and
+    ``subagents/context_snapshot.py::_neutralize_document_text`` treats both as native text.
+    The title is often the only signal of what an uploaded file was, so a summary should be able
+    to reference it. Joined with newlines so the parts stay distinguishable.
+    """
+    parts: list[str] = []
+    for key in ("title", "context"):
+        value = block.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    body = _document_source_text(block.get("source"))
+    if body:
+        parts.append(body)
+    return "\n".join(parts)
+
+
 def _text_from_content_blocks(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -75,7 +94,7 @@ def _text_from_content_blocks(content: Any) -> str:
             if block_type == "text" and isinstance(block.get("text"), str):
                 parts.append(block["text"])
             elif block_type == "document":
-                parts.append(_document_source_text(block.get("source")))
+                parts.append(_document_block_text(block))
     return "".join(parts)
 
 
@@ -95,7 +114,7 @@ def _message_source_text(message: AnyMessage) -> str:
                 parts.append(block["text"])
             elif block_type == "document":
                 has_document = True
-                parts.append(_document_source_text(block.get("source")))
+                parts.append(_document_block_text(block))
     return "".join(parts) if has_document else str(message.text)
 
 
