@@ -828,6 +828,12 @@ chat identity. That compatibility applies only to the old group-binding shape;
 a new private binding never authorizes messages from an unbound group. Bind a
 specific group again with a name to make it available as a notification target.
 
+Each WeCom group is its own conversation, with one DeerFlow thread per member;
+a private chat is keyed by the sender alone. A group bound with its own
+`/connect` keeps the thread it had before groups got their own conversation. A
+legacy group binding covers every group of the bot, so its earlier thread is
+not continued in any of them; each group starts a new one.
+
 ### WeChat private notifications
 
 Use the existing iLink QR/bot setup and bind in a private chat. Send one private
