@@ -3385,6 +3385,8 @@ fail the storage operation; retry after access recovers.
 `storage_path` must point to the data root directory, not an existing JSON file.
 Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
 BOM; reads accept it, while writes remain BOM-free UTF-8.
+The opening `memory-json` marker must be on its own line (up to three leading
+spaces). Quoted examples before that block do not replace or hide the saved summary.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime

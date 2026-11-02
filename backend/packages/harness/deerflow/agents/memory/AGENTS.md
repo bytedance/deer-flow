@@ -160,8 +160,10 @@ existing enabled behavior.
 
 `memory.backend_config.storage_class: markdown` opts into tolerant summary
 reads; writes still use JSON. Only a JSON object in a closed `memory-json`
-fence is accepted from Markdown. Decode the value before checking its closing
-fence so embedded backticks and later fenced notes stay lossless. Parser and
+fence is accepted from Markdown. The opening marker must start its own line
+(with at most three leading spaces); quoted examples must not hide the saved
+summary. Decode the value before checking its closing fence so embedded
+backticks and later fenced notes stay lossless. Parser and
 storage regressions belong in `tests/test_memory_storage.py`; configure a data
 root directory, not the existing manifest file. Legacy v1 reads still migrate
 and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
