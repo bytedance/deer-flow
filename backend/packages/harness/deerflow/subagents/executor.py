@@ -2309,6 +2309,22 @@ class SubagentExecutor:
 
         async def run_with_timeout() -> SubagentResult:
             execution_started.set()
+            # Startup half of the pre-start cancellation handshake. The
+            # canceller sets ``cancel_event`` before it decides anything, so a
+            # body that starts after that cancel must decline to create the
+            # execution task: a cancel published from the caller thread may
+            # already have opened the cleanup fence, and creating the task here
+            # would then take a capacity slot the fence promised was gone.
+            # Reading the event first makes "fence opened before this body
+            # started" safe instead of a race.
+            if result.cancel_event.is_set():
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled before the execution started",
+                    tool_receipts=result.snapshot_tool_receipts(),
+                )
+                _mark_background_execution_done(execution_id, result)
+                return result
             execution_task = asyncio.create_task(
                 self._aexecute(task, result),
                 name=f"subagent-{self.config.name}-execution",
@@ -2394,6 +2410,12 @@ class SubagentExecutor:
             # task that exists but has not taken its first step still runs its
             # body. Deciding on the loop, after that step, keeps the cleanup
             # fence closed while the worker can still hold its capacity slot.
+            #
+            # A body that starts after this point cannot take a slot either:
+            # ``result.cancel_event`` is always set before this callback runs,
+            # and ``run_with_timeout`` declines to create the execution task
+            # once it observes it. So "fence opened" here means "no worker will
+            # acquire capacity", not merely "no worker has yet".
             if execution_started.is_set():
                 return
             result.try_set_terminal(

@@ -4495,6 +4495,105 @@ class TestCooperativeCancellation:
             executor_module._background_tasks.pop(execution_id, None)
             executor_module._background_futures.pop(execution_id, None)
 
+    def test_cancel_before_the_submission_callback_never_fences_a_live_slot(
+        self,
+        executor_module,
+        classes,
+        base_config,
+        monkeypatch,
+    ):
+        """A cancel that beats the submission callback must not admit a worker.
+
+        Holding the loop in an earlier callback keeps the submission queued, so
+        ``Future.cancel()`` wins before ``run_coroutine_threadsafe`` has even
+        created the asyncio task. The done-callback then publishes the terminal
+        status and opens the cleanup fence on the loop, one turn *before* that
+        deferred task takes its first step — so the wrapper could still reach
+        ``_aexecute``, take the only capacity slot, and have its registry entry
+        removed while the slot was live.
+
+        The fix is a startup handshake rather than better ordering:
+        ``request_cancel_background_task`` sets ``cancel_event`` before it
+        cancels anything, and a wrapper that starts afterwards declines to
+        create the execution task. The invariant asserted here is the one that
+        matters — the fence never opens while a worker holds a slot.
+        """
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=capacity,
+        )
+
+        admitted = threading.Event()
+        admission_release = asyncio.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+
+        async def hold_admission(*_args, **_kwargs):
+            admitted.set()
+            await admission_release.wait()
+            return {}, [], None
+
+        monkeypatch.setattr(executor, "_build_initial_state", hold_admission)
+
+        hold = threading.Event()
+        release = threading.Event()
+
+        def hold_loop() -> None:
+            hold.set()
+            release.wait(5)
+
+        loop.call_soon_threadsafe(hold_loop)
+        assert hold.wait(5)
+        execution_id = None
+        try:
+            execution_id = executor.execute_async("Task")
+            result = executor_module._background_tasks[execution_id]
+            # The loop is still inside ``hold_loop``, so the submission callback
+            # that would create the asyncio task has not run yet.
+            assert result.status.value == "pending"
+            assert executor_module._background_futures[execution_id].cancel()
+
+            executor_module.request_cancel_background_task(execution_id)
+        finally:
+            release.set()
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (admitted.is_set() or result.execution_done_event.is_set()):
+                time.sleep(0.01)
+
+            if admitted.is_set():
+                # A live worker owns the only slot; handing the entry to cleanup
+                # now would drop it while the release is still unfinished.
+                assert capacity.snapshot().running == 1
+                assert not result.execution_done_event.is_set()
+                loop.call_soon_threadsafe(admission_release.set)
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            assert result.execution_done_event.is_set()
+            assert result.status.value == "cancelled"
+            assert capacity.snapshot().running == 0
+            # The handshake means the wrapper never creates the execution task,
+            # so nothing can acquire a slot after the fence opened.
+            assert not admitted.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            loop.call_soon_threadsafe(admission_release.set)
+            if execution_id is not None:
+                executor_module._background_tasks.pop(execution_id, None)
+                executor_module._background_futures.pop(execution_id, None)
+
     def test_cancel_after_the_task_exists_keeps_the_fence_closed_until_teardown(
         self,
         executor_module,
