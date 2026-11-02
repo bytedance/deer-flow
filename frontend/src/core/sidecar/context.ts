@@ -46,10 +46,14 @@ function labelOfRole(role: SidecarContextRole) {
 }
 
 function truncateContextText(content: string, maxChars: number) {
-  if (content.length <= maxChars) {
+  // Budgets count Unicode code points, not UTF-16 code units: surrogate pairs
+  // (emoji and other astral characters) are one character, and a truncated
+  // prefix never ends in half of a pair.
+  const characters = Array.from(content);
+  if (characters.length <= maxChars) {
     return content;
   }
-  return `${content.slice(0, maxChars).trimEnd()}\n[truncated]`;
+  return `${characters.slice(0, maxChars).join("").trimEnd()}\n[truncated]`;
 }
 
 export function buildParentConversationContext(
@@ -103,7 +107,7 @@ export function buildParentConversationContext(
       ...message,
       content,
     });
-    selectedChars += content.length;
+    selectedChars += Array.from(content).length;
   }
 
   return selectedMessages;
