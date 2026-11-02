@@ -219,13 +219,23 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # this process's singleton cache while rebuilding a user projection.
         from deerflow.config.extensions_config import ExtensionsConfig
 
-        extensions_config = ExtensionsConfig.from_file()
-        skills = [
-            dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
-            if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
-            else s
-            for s in skills
-        ]
+        try:
+            extensions_config = ExtensionsConfig.from_file()
+            skills = [
+                dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
+                if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
+                else s
+                for s in skills
+            ]
+        except Exception as e:
+            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
+            # that cannot be read says nothing about which skills are enabled,
+            # so the per-user AND cannot be evaluated. Raising here would take
+            # the whole user-scoped listing down over an unrelated defect in the
+            # file, so fail closed instead — every skill is listed, none is
+            # enabled.
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled: %s", e)
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]
