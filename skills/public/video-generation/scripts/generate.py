@@ -2,6 +2,7 @@ import base64
 import os
 import sys
 import time
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -167,11 +168,27 @@ def download(url: str, output_file: str) -> None:
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    response = requests.get(url, headers={"x-goog-api-key": gemini_api_key}, timeout=300)
-    response.raise_for_status()
-    _ensure_output_dir(output_file)
-    with open(output_file, "wb") as f:
-        f.write(response.content)
+    for _ in range(11):
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError("Gemini video downloads require HTTPS URLs without embedded credentials")
+        # Requests 不会在跨来源重定向时移除自定义 API-key 头，逐跳限制其来源。
+        trusted = parsed.hostname == "generativelanguage.googleapis.com" and parsed.port in (None, 443)
+        headers = {"x-goog-api-key": gemini_api_key} if trusted else {}
+        response = requests.get(url, headers=headers, timeout=300, allow_redirects=False)
+        response.raise_for_status()
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise ValueError("Gemini video download redirect has no Location")
+            url = urljoin(url, location)
+            continue
+        _ensure_output_dir(output_file)
+        with open(output_file, "wb") as f:
+            f.write(response.content)
+        return
+    raise requests.TooManyRedirects("Gemini video download exceeded 10 redirects")
 
 
 def _generate_video_gemini(prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9") -> str:

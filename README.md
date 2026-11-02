@@ -1766,6 +1766,10 @@ submitted reference with a missing or unrecognized extension raises a clear erro
 before API submission. Filenames must match their contents; image bytes are not
 validated or converted, and provider-specific format restrictions still apply.
 
+Gemini video downloads send the API key only to the HTTPS Gemini API origin.
+External HTTPS media URLs and redirects remain supported without forwarding the
+key; HTTP downgrades and URLs containing embedded credentials are rejected.
+
 The [music-generation skill](skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
 The bundled skill-creator trigger evaluator drains CLI output through EOF, so a completed subprocess does not turn a recorded skill trigger into a false negative.
