@@ -737,7 +737,6 @@ test("reconcile sorts re-anchored rows and preserves a stable retained snapshot"
   );
 });
 
-
 // An interrupted stream (tab closed/backgrounded mid-run, dropped SSE
 // connection) leaves a partially assembled live copy in memory. It must not
 // replace the complete persisted copy: doing so is what re-renders a
@@ -762,5 +761,29 @@ test("a live copy at least as long as the persisted copy still replaces it", () 
   const merged = mergeMessages(history, live, []);
 
   expect(merged.map((message) => message.content)).toEqual(["draft, finished"]);
+  expect(seqsOf(merged)).toEqual([2]);
+});
+
+// The persisted copy often arrives as a content-block array while the live
+// copy holds only the parts that streamed before the drop. Non-text parts
+// contribute nothing to the length, so a thinking-only live fragment must not
+// replace the completed answer.
+test("a thinking-only live fragment never replaces a persisted block answer", () => {
+  const finished = {
+    ...msg("a1", "ai", "", 2),
+    content: [
+      { type: "thinking", thinking: "reasoning about the answer" },
+      { type: "text", text: "the finished answer" },
+    ],
+  } as unknown as Message;
+  const thinkingOnlyLive = {
+    ...msg("a1", "ai", ""),
+    content: [{ type: "thinking", thinking: "reasoning about the answer" }],
+  } as unknown as Message;
+
+  const merged = mergeMessages([finished], [thinkingOnlyLive], []);
+
+  expect(merged).toHaveLength(1);
+  expect(merged[0]!.content).toEqual(finished.content);
   expect(seqsOf(merged)).toEqual([2]);
 });
