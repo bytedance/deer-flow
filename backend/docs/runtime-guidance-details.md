@@ -45,7 +45,7 @@ once the feed's loaded page window no longer reaches back to it.
 store already assigned, keyed by
 `runtime/events/message_identity.py::message_identity` — the backend half of
 the identity rule `frontend/src/core/threads/hooks.ts::messageIdentity` applies
-(tool messages by `tool_call_id`; `X` / `X__user` human copies collapse to
+(tool results by their own message ID; `X` / `X__user` human copies collapse to
 one). The two halves must stay in sync: a mismatch is silent, degrading
 placement rather than raising. `runs/worker.py::_MessageSeqStamper` attaches
 the result as `additional_kwargs.deerflow_seq` on root `values` frames only —
@@ -73,6 +73,26 @@ fetch-and-decode of every message row's tool outputs on long threads.
 `deerflow_seq` is server-owned display metadata: the gateway strips it from
 client input, because a welded-in seq goes stale when a fork re-seeds the feed
 (#4380).
+
+`RunJournal` assigns missing ToolMessage IDs on the returned message object
+before serializing callback results, including `Command` message updates, so
+the graph checkpoint and feed retain the same ID. Middleware results receive
+the same treatment when reconciled. Provider `tool_call_id` values may repeat
+within a run and across runs; they remain protocol correlation data, never
+thread-global result identities. Legacy results without message IDs have no
+dedupe identity or seq lookup rather than aliasing unrelated invocations.
+For a registered lead-agent call, the journal remembers the captured result ID
+until a new canonical assistant response emits that call ID again. Reconciliation
+restores the remembered ID on a copy serialized before its first capture, so
+the copy does not append another result or consume a sequence. An explicit
+message ID is preserved. A later invocation starts fresh even if its provider
+ID and output content are identical; duplicate callbacks for the same LLM run
+do not reset this bookkeeping. Callbacks without a registered lead call still
+assign distinct IDs to their returned objects. This cache is journal-local and
+is cleared on detach, not a fallback identity for historical rows.
+The web execution timeline and write-file preview resolve a provider call ID
+only inside its originating assistant-message occurrence; UI keys include that
+occurrence while outgoing protocol IDs remain unchanged.
 
 **Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
 `RunJournal` records each non-empty artifact update once per tool `Command` for
@@ -332,6 +352,25 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 - Tests: `tests/test_checkpoint_mode.py` (freeze/detect/gate), `tests/test_checkpoint_state.py` (accessor/mutation graph), `tests/test_delta_channel_checkpointers.py` (saver parity), `tests/test_threads_checkpoint_mode.py`, `tests/test_gateway_checkpoint_mode.py` (dual-mode e2e parity), `tests/test_context_compaction.py` (mutation-graph write, no scheduling), `tests/test_run_worker_rollback.py`, `tests/test_cached_history_saver.py` + `tests/test_cached_history_saver_integration.py` (history cache)
 
 ## Deferred terminal commits and lease ownership
+
+RunManager serializes creation, replacement and assembly publication per thread.
+The global registry lock never spans Store I/O; unrelated cached reads and
+heartbeat snapshots do not queue behind an admission gate. Their own Store I/O
+can still encounter database or connection-pool contention. A pending-ID map
+lets readers of preallocated run IDs join the same-thread gate before the record
+is published. Failed or cancelled admissions remove that temporary membership;
+normal creation registers only after its initial write succeeds. Heartbeats use
+the short registry snapshot, not the thread gate, so an admitted run can renew
+while its replacement awaits a Store result. Preserve terminal-attribution and
+cancellation compensation below; changing lock granularity does not grant a new
+worker authority over a durable row.
+
+Assembly evidence persists a full row snapshot. Serialize that write with the
+same run's lease renewal and local acknowledgment, so it cannot restore an old
+lease after renewal. Lock order is thread gate, then snapshot gate, then the
+short registry lock. Renewal uses only the snapshot gate and must release it
+before signaling local cancellation, which acquires the thread gate. Keep the
+lease-expiry timer armed while waiting for the snapshot gate.
 
 **Deferred terminal commit:** With an event store, the worker stages its terminal
 status locally and commits it only after finalization's receipt and duration

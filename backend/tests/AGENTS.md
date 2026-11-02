@@ -23,6 +23,10 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_threads_router.py::test_goal_mutations_reject_run_owned_by_another_worker`
+feeds real PUT/DELETE 409 errors into the IM classifier. Keep this contract check
+so Gateway wording changes cannot silently remove localized busy feedback.
+
 Provider cleanup tests use concrete configuration models and event gates.
 Surface owner-task failures while awaiting lifecycle events; join owners and
 event waiters during teardown.
@@ -30,6 +34,12 @@ event waiters during teardown.
 `test_bench_sandbox_prewarm.py` controls observation timestamps through the
 benchmark module's clock binding. Keep asyncio's clock real, initialize
 `Trace.started` from the controlled clock, and advance ticks at event gates.
+
+`test_bench_opensandbox.py` owns provider-independent sandbox benchmark CLI
+validation. Invalid timing values must be rejected through real `main()` before
+fail-loud factories run; accepted controls must preserve factory inputs and JSONL
+dimensions. Keep live providers stubbed and OpenSandbox's unsupported-option
+checks distinct from shared timing validation.
 
 `test_doctor_script.py` runs a copied doctor from a temporary checkout with an
 empty-model config. Drop inherited `DEER_FLOW_*`, `PYTHONPATH` and `PYTHONHOME`
@@ -213,6 +223,13 @@ The 0033 batch-evidence migration fixture uses the same adapter. Its connection
 contract probes execute the actual migration test setup through SQLAlchemy's
 dialect argument conversion, stopping before database acquisition; the real
 SQLite/PostgreSQL cases still exercise upgrade, downgrade and re-upgrade.
+
+## Batch lease renewal races
+
+`test_batch_lease_lifecycle.py` parks recovery after the per-item expiry SELECT,
+identified by selected item columns; the parent query can contain the same expiry
+predicate. Assert one rejected item UPDATE as well as the preserved row, so an
+empty expiry scan cannot satisfy the concurrency guard.
 
 ## DingTalk stream tasks
 

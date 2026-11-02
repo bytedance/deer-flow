@@ -7,6 +7,7 @@ minutes -- we don't hold connections across long execution.
 
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -45,6 +46,43 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    supports_run_inputs = True
+
+    async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
+        from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
+
+        async with self._sf() as session:
+            # Preserve the existing global-clock -> row lock order (SQLite's
+            # first write serializes peer connections as well).
+            await self._next_change_seq(session)
+            row = (await session.execute(select(RunRow).where(RunRow.run_id == run_id).with_for_update())).scalar_one_or_none()
+            if row is None or (user_id is not None and row.user_id != user_id):
+                raise InputConflict("Run not found")
+            if owner_worker_id is not None:
+                lease = row.lease_expires_at
+                if row.owner_worker_id != owner_worker_id or (lease is not None and lease.replace(tzinfo=UTC) <= datetime.now(UTC)):
+                    raise InputConflict("Run ownership changed")
+            state = copy.deepcopy(row.run_inputs_json or empty_input_state())
+            change(state, self._row_to_dict(row))
+            row.run_inputs_json = state
+            await session.commit()
+            return copy.deepcopy(state)
+
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+        async with self._sf() as session:
+            query = select(RunRow).where(RunRow.thread_id == thread_id, RunRow.run_inputs_json["items"][0]["id"].as_string().is_not(None))
+            if user_id is not None:
+                query = query.where(RunRow.user_id == user_id)
+            rows = await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit))
+            return [self._row_to_dict(row) for row in rows.scalars()]
+
+    async def active_input_run(self, thread_id, *, user_id=None):
+        async with self._sf() as session:
+            query = select(RunRow.run_id).where(RunRow.thread_id == thread_id, RunRow.status.in_(("pending", "running")), RunRow.cancel_action.is_(None), RunRow.run_inputs_json["closed"].as_boolean().is_(False))
+            if user_id is not None:
+                query = query.where(RunRow.user_id == user_id)
+            return (await session.execute(query.order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1))).scalar_one_or_none()
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
@@ -121,6 +159,7 @@ class RunRepository(RunStore):
         # Remap JSON columns to match RunStore interface
         d["metadata"] = d.pop("metadata_json", {})
         d["kwargs"] = d.pop("kwargs_json", {})
+        d["run_inputs"] = d.pop("run_inputs_json", None)
         d["idempotency_request"] = d.pop("idempotency_request_json", None)
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —

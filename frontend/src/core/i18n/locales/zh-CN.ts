@@ -89,6 +89,11 @@ export const zhCN: Translations = {
         description:
           "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
       },
+      knowledgeCenter: {
+        title: "知识中心",
+        description:
+          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:
@@ -615,6 +620,25 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    runInputMode: "运行中发送方式",
+    queueMode: "排队执行",
+    steerMode: "调整当前任务",
+    queueModeHelp: "当前任务结束后再执行",
+    steerModeHelp: "在下一处可处理的位置调整当前任务",
+    runInputSend: "发送补充消息",
+    runInputTextOnly:
+      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputUnavailable:
+      "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
+    stopRun: "停止当前任务",
+    runInputQueued: "排队中",
+    runInputSteering: "等待加入当前任务",
+    runInputUnapplied: "本轮未确认生效",
+    runInputRetry: "重新发送",
+    runInputCancel: "移除这条消息",
+    runInputDispatching: "待确认",
+    runInputReplayUnavailable:
+      "这轮任务中途调整过，请发送新消息继续，暂不支持只重放其中一段。",
     stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
     startTurnUnavailable: "你的角色无权开启新的回合。",
   },

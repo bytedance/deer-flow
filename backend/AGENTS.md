@@ -46,9 +46,9 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
 
-OpenSandbox benchmarks reuse the production lifecycle with scoped config overrides.
-Export only non-secret dimensions; final cleanup failures must fail both the runner
-and JSONL summary. See the sandbox benchmark README for supported options and tests.
+Sandbox benchmarks reuse production lifecycle. Reject negative/NaN timing values
+before provider creation, export no secrets, and fail on final cleanup errors.
+See the sandbox benchmark README for supported options and tests.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -139,6 +139,8 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
+RAGFlow/LightRAG clients offload HTTPX construction (synchronous TLS trust loading)
+with `asyncio.to_thread`; keep request execution and session cleanup on the loop.
 
 ### Harness / App Split
 

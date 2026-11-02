@@ -369,6 +369,10 @@ class ConfiguredMiddlewareSpec(BaseModel):
         default_factory=dict,
         description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
     )
+    apply_to: Literal["both", "lead", "subagent"] = Field(
+        default="both",
+        description="Agent chain that loads this middleware. Omitted scope preserves both chains.",
+    )
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @field_validator("class_path")
@@ -400,7 +404,7 @@ class ExtensionsConfig(BaseModel):
         description=(
             "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
             "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
-            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "'kwargs' and 'apply_to' (both, lead, or subagent; default both). kwargs values must be JSON types; YAML dates and timestamps are coerced to "
             "ISO strings."
         ),
     )

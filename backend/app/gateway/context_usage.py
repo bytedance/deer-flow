@@ -66,7 +66,10 @@ def build_context_usage_payload(*, token_count: int, max_context_tokens: int | N
 async def build_context_usage(request: Request, thread_id: str, run_store: Any, user_id: str | None = None) -> dict[str, Any] | None:
     """Return approximate usage for the latest materialized thread checkpoint."""
     try:
-        app_config = get_config()
+        # ``get_config`` revalidates ``config.yaml`` and
+        # ``extensions_config.json`` on every call (stat + full-file hash), so
+        # reading it here would put that IO on the loop every thread view pays.
+        app_config = await asyncio.to_thread(get_config)
     except HTTPException:
         return None
 
