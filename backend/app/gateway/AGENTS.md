@@ -2,7 +2,14 @@
 
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
-Studio retains sanitized creation metadata.
+[Viewer fence](../../../docs/full-stack-plugins.md).
+
+Studio keeps sanitized creation metadata.
+
+Capability Center `business` validates credentials, creates MCP connections.
+MCP allows only its isolated launcher/credential environment keys; reject
+arbitrary commands/manifest-policy bypasses. Keep admin checks, masked
+atomic edits, cache reloads; exclude credentials from tool schemas.
 
 HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
 `_ensure_thread_metadata`; preserve await-free attachment and cancel/drain
