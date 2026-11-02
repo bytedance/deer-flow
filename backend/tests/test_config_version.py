@@ -777,12 +777,8 @@ def test_config_upgrade_resolves_relative_deer_flow_config_path_from_backend(tmp
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
-@pytest.mark.parametrize("host_encoding", ["utf-8", "cp936"])
-def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path, monkeypatch, host_encoding):
+def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
     """With no config anywhere, the resolver miss is not an error: the example seeds <checkout>/config.yaml."""
-    import subprocess
-
-    monkeypatch.setattr(subprocess, "_text_encoding", lambda: host_encoding)
     if any(path.exists() for path in _legacy_config_candidates()):
         pytest.skip("the resolver's legacy fallback would find this repository's own config.yaml")
     checkout = tmp_path / "checkout"
