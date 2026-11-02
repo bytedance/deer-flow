@@ -4622,6 +4622,7 @@ class TestCooperativeCancellation:
         executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
         task_created = threading.Event()
         execution_ran = threading.Event()
+        factory_release = threading.Event()
         loop = executor_module._get_isolated_subagent_loop()
         previous_factory = loop.get_task_factory()
 
@@ -4635,8 +4636,12 @@ class TestCooperativeCancellation:
             if not task_created.is_set():
                 # The task is queued but cannot step while the loop sits here,
                 # which is exactly the window the caller-side snapshot misreads.
+                # Block on an event rather than a timer: on a loaded worker the
+                # caller may need longer than any fixed delay to request the
+                # cancel, and the body would then start first and invalidate the
+                # window this test is about.
                 task_created.set()
-                time.sleep(0.2)
+                factory_release.wait(5)
             return task
 
         loop.set_task_factory(hold_after_task_creation)
@@ -4654,6 +4659,7 @@ class TestCooperativeCancellation:
                 assert not result.status.is_terminal
                 assert not result.execution_done_event.is_set()
         finally:
+            factory_release.set()
             loop.set_task_factory(previous_factory)
 
         try:
