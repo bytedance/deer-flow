@@ -1187,3 +1187,36 @@ async def test_wecom_group_notification_for_owner_and_multi_group_binding_isolat
         assert len(ws_client.calls) == 2
     finally:
         await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_preferences",
+    [
+        pytest.param(None, id="none"),
+        pytest.param([], id="list"),
+        pytest.param("malformed", id="string"),
+        pytest.param({"run_completed": "false"}, id="string-value"),
+        pytest.param({"run_completed": 1}, id="integer-value"),
+    ],
+)
+async def test_runtime_event_preference_lookup_fails_closed_on_malformed_shape(event_preferences):
+    row = _delivery_row(event="run_completed")
+    row["source_kind"] = "run"
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    worker = NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=lambda provider: channel,
+        resolve_notification_preferences=lambda owner: {"wecom": True},
+        resolve_notification_event_preferences=lambda owner: event_preferences,
+    )
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    # An invalid preference lookup must be retryable, never interpreted as opt-in.
+    assert repo.sent == []
+    assert repo.failed == [("delivery-1", "could not verify notification preference", False)]
+    assert repo.terminal_failures == []
+    assert channel.sent == []
+    assert channel.owners == []
