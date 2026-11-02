@@ -504,8 +504,35 @@ async def _retry_recovered_run_stream_end(
     *,
     retry_delay: float,
     cleanup_delay: float,
+    stream_was_present: bool | None = None,
 ) -> None:
     await asyncio.sleep(max(0.0, retry_delay))
+    if stream_was_present is True:
+        stream_exists = getattr(bridge, "stream_exists", None)
+        if callable(stream_exists):
+            try:
+                if not await stream_exists(run_id):
+                    cleanup_expired_producer = getattr(bridge, "cleanup_expired_producer", None)
+                    if callable(cleanup_expired_producer):
+                        try:
+                            await cleanup_expired_producer(run_id)
+                        except Exception:
+                            logger.warning(
+                                "Failed to clean expired stream producer marker after retry for %s",
+                                run_id,
+                                exc_info=True,
+                            )
+                    logger.debug(
+                        "Skipping recovered stream end retry for %s: stream expired during retry delay",
+                        run_id,
+                    )
+                    return
+            except Exception:
+                logger.debug(
+                    "Failed to recheck recovered stream existence for %s",
+                    run_id,
+                    exc_info=True,
+                )
     await bridge.publish_end(run_id)
     await bridge.cleanup(run_id, delay=cleanup_delay)
 
@@ -520,7 +547,7 @@ async def _publish_recovered_run_stream_end(
     """Terminate retained streams for runs recovered as orphaned."""
     cleanup_tasks: list[tuple[str, asyncio.Task[None]]] = []
 
-    def schedule_retry(record: RunRecord) -> bool:
+    def schedule_retry(record: RunRecord, *, stream_was_present: bool | None = None) -> bool:
         retry_delay = getattr(
             bridge,
             "producer_lease_retry_delay_seconds",
@@ -534,6 +561,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 retry_delay=float(retry_delay),
                 cleanup_delay=cleanup_delay,
+                stream_was_present=stream_was_present,
             )
         )
         task.add_done_callback(
@@ -549,9 +577,11 @@ async def _publish_recovered_run_stream_end(
 
     for record in recovered_runs:
         stream_exists = getattr(bridge, "stream_exists", None)
+        stream_was_present: bool | None = None
         if stream_exists is not None:
             try:
-                if not await stream_exists(record.run_id):
+                stream_was_present = bool(await stream_exists(record.run_id))
+                if not stream_was_present:
                     logger.debug("Skipping recovered stream end for %s: stream already expired", record.run_id)
                     cleanup_expired_producer = getattr(
                         bridge,
@@ -569,7 +599,7 @@ async def _publish_recovered_run_stream_end(
                             )
                             cleaned = False
                         if not cleaned:
-                            schedule_retry(record)
+                            schedule_retry(record, stream_was_present=False)
                     continue
             except Exception:
                 logger.debug("Failed to check recovered stream existence for %s", record.run_id, exc_info=True)
@@ -581,7 +611,7 @@ async def _publish_recovered_run_stream_end(
                 record.run_id,
                 exc_info=True,
             )
-            schedule_retry(record)
+            schedule_retry(record, stream_was_present=stream_was_present)
             continue
         task = asyncio.create_task(bridge.cleanup(record.run_id, delay=cleanup_delay))
         task.add_done_callback(lambda task, run_id=record.run_id: _log_recovered_stream_cleanup_result(task, run_id))
