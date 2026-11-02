@@ -75,8 +75,9 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     The id is derived from the call's position so both the pairing pass and the
     model-bound message agree on it without threading state between them.
 
-    Returns the rewritten list, one ``{original, synthetic, name}`` claim entry per
-    relabelled call, and whether anything changed.
+    Returns the rewritten list, one ``{original, synthetic, name, executable}`` claim
+    entry per relabelled call, and whether anything changed. Invalid calls never
+    execute, so they are flagged unexecutable and excluded from result pairing.
     """
     relabeled: list = []
     assigned: list[dict] = []
@@ -88,7 +89,14 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
         synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
         relabeled.append({**tool_call, "id": synthetic})
         changed = True
-        assigned.append({"original": tool_call.get("id"), "synthetic": synthetic, "name": _tool_call_name(tool_call)})
+        assigned.append(
+            {
+                "original": tool_call.get("id"),
+                "synthetic": synthetic,
+                "name": _tool_call_name(tool_call),
+                "executable": source != "invalid",
+            }
+        )
     return relabeled, assigned, changed
 
 
@@ -107,12 +115,15 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     """Consume the open malformed call that ``result`` answers, returning its new id.
 
     Malformed originals are all equally empty, so they cannot identify their own
-    result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
-    result's name narrows the candidates, and only a *forced* choice is taken:
+    result; ``open_calls`` is already scoped to the issuing turn. Invalid calls never
+    execute, so they are not candidates at all: their ToolMessage is the placeholder
+    this middleware injects, and letting one share a name must not make the only
+    executable call look ambiguous. Within that turn the result's name narrows the
+    remaining candidates, and only a *forced* choice is taken:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
-      holds, i.e. every open call in the turn has a result. Identical parallel calls
+      holds, i.e. every executable call in the turn has a result. Identical parallel calls
       (two ``bash``) are distinguishable by nothing else, and order here is a
       construction guarantee rather than an assumption about the provider: LangGraph's
       ``ToolNode`` builds the results with ``asyncio.gather`` / ``executor.map`` over
@@ -123,7 +134,7 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+    candidates = [position for position, entry in enumerate(open_calls) if entry["executable"] and entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
     if not candidates or (len(candidates) > 1 and not positional):
         return None
     return open_calls.pop(candidates[0])["synthetic"]
@@ -409,7 +420,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
 
                 open_calls = assigned
-                positional = _turn_malformed_result_count(messages, index) == len(assigned)
+                executable_count = sum(1 for entry in assigned if entry["executable"])
+                positional = _turn_malformed_result_count(messages, index) == executable_count
                 if update:
                     rewritten[index] = msg.model_copy(update=update)
                 continue
