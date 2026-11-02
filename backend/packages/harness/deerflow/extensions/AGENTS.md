@@ -234,7 +234,7 @@ both sides when the extension must observe both synchronous and asynchronous exe
 paths.
 
 Lead runs and subagents allocate an `ExtensionData` task store only when middleware,
-task-lifecycle, or system-model observation is registered; services and routers are
+task-lifecycle, system-model or compaction observation is registered; services and routers are
 app-scoped and do not allocate one. Middleware and system-call sites recover the
 live store through `EXTENSION_TASK_STORE_KEY` / `task_store_from_runtime()`; lifecycle
 contributors receive that same store directly. Both hosts seed each store with the task's
