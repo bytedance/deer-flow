@@ -24,7 +24,7 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, Too
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
-from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_mid_run_input
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
@@ -214,14 +214,18 @@ def _run_opening_human_index(messages: list[AnyMessage], run_id: str, pre_existi
     The latest HumanMessage opened this run when it carries this run's
     ``run_id``, or carries none and was not in the thread before the run
     started. A resumed run may not append one, so the latest HumanMessage can
-    belong to an older run. Both the capture window and the decision to close
-    earlier runs' delegations read this, so they cannot disagree.
+    belong to an older run. This run's own steers and task receipts open
+    nothing: a window starting at one would hide the step it interrupted. Both
+    the capture window and the decision to close earlier runs' delegations read
+    this, so they cannot disagree.
     """
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
         if not isinstance(message, HumanMessage):
             continue
         message_run_id = message.additional_kwargs.get("run_id")
+        if message_run_id == run_id and is_mid_run_input(message):
+            continue
         if message_run_id is not None:
             return index if message_run_id == run_id else None
         message_id = _message_id(message)
