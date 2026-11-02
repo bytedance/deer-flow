@@ -97,7 +97,10 @@ def test_cli_rejects_export_over_an_input(cached_inputs, tmp_path, path_kind):
 
     assert [source.read_bytes() for source in sources] == original
     assert completed.returncode == 2
-    assert "--output-file must not overwrite an input file" in completed.stderr
+    input_file = sources[1] if path_kind == "second" else sources[0]
+    assert (
+        f"--output-file {output} refers to input file {input_file}" in completed.stderr
+    )
     assert "Traceback" not in completed.stderr
     assert "Results exported" not in completed.stdout
 

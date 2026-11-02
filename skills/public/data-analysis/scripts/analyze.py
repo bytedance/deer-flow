@@ -569,7 +569,7 @@ def main():
                 args.output_file, file_path
             ):
                 parser.error(
-                    f"--output-file must not overwrite an input file: {file_path}"
+                    f"--output-file {args.output_file} refers to input file {file_path}"
                 )
 
     # Compute file hash for caching
