@@ -16,12 +16,14 @@ from pydantic import ConfigDict
 
 from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
 from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+from deerflow.agents.middlewares.token_usage_middleware import CompletedSubagentUsageMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.token_budget_config import TokenBudgetConfig
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.runs.input_control import ChildInputGate, RunInputControl
 from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY
+from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, make_subagent_additional_kwargs
 
 
 def test_input_control_reaches_the_factory_only_from_the_worker():
@@ -396,6 +398,134 @@ def test_deferred_usage_with_no_ai_message_to_charge_is_reported(caplog):
     with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.token_usage_middleware"):
         assert attribute_deferred_subagent_usage([HumanMessage(content="Only input")], [("lost", usage)]) == []
     assert "lost" in caplog.text
+
+
+class SettledStepModel(InputModel):
+    first_calls: list
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        step = len(self.observed)
+        calls = self.first_calls if step == 1 else [{"name": "follow_up", "args": {}, "id": f"follow-{step}"}] if step == 2 else []
+        message = AIMessage(content=f"Step {step}", tool_calls=calls, usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _delegated(call_id):
+    return {"name": "task", "args": {"description": call_id, "subagent_type": "general-purpose"}, "id": call_id}
+
+
+def _finished_task(call_id, total):
+    usage = {"input_tokens": total - 100, "output_tokens": 100, "total_tokens": total}
+    kwargs = make_subagent_additional_kwargs("completed", result=f"{call_id} report", token_usage=usage)
+    return Command(update={"messages": [ToolMessage(content=f"{call_id} report", tool_call_id=call_id, name="task", additional_kwargs=kwargs)]})
+
+
+def _settled_graph(model, tools, saver, *guards):
+    from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+
+    return create_agent(
+        model, tools=tools, middleware=[RunInputAdmissionMiddleware(), DurableContextMiddleware(), *guards, CompletedSubagentUsageMiddleware(), RunInputMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=saver
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("opening_marked", [True, False])
+async def test_steer_keeps_a_task_finished_in_the_same_step(opening_marked):
+    inputs, saver, control = await _run_controller()
+    finished, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    followed = []
+
+    @tool
+    async def task(description: str, subagent_type: str, tool_call_id: Annotated[str, InjectedToolCallId]):
+        """A child that ends before the steer, so nothing defers its result."""
+        finished.set()
+        return _finished_task(tool_call_id, 1_000_000)
+
+    @tool
+    async def slow() -> str:
+        """A sibling that keeps the step open while the steer arrives."""
+        entered.set()
+        await release.wait()
+        return "Done"
+
+    @tool
+    async def follow_up() -> str:
+        """Lead work that must stop once the child's tokens are charged."""
+        followed.append(True)
+        return "Done"
+
+    budget = TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True, max_tokens=1000))
+    context = {INPUT_CONTEXT_KEY: control, "run_id": "run", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()}
+    model = SettledStepModel(observed=[], first_calls=[_delegated("done"), {"name": "slow", "args": {}, "id": "sibling"}])
+    graph = _settled_graph(model, [task, slow, follow_up], saver, budget)
+    opening = HumanMessage(content="Original task", id="opening", additional_kwargs={"run_id": "run"} if opening_marked else {})
+    run = asyncio.create_task(graph.ainvoke({"messages": [opening]}, {"configurable": {"thread_id": "thread"}}, context=context))
+    try:
+        await asyncio.wait_for(asyncio.gather(finished.wait(), entered.wait()), 5)
+        await inputs.submit("update", "Handle this too", "steer")
+        release.set()
+        result = await asyncio.wait_for(run, 10)
+        [entry] = result["delegations"]
+        assert (entry["id"], entry["status"], entry["result_brief"]) == ("done", "completed", "done report")
+        assert context.get("stop_reason") == "token_capped"
+        assert not followed
+        assert next(x for x in result["messages"] if isinstance(x, AIMessage)).usage_metadata["total_tokens"] == 1_000_011
+        later = await graph.ainvoke({"messages": [HumanMessage(content="Next turn", id="later", additional_kwargs={"run_id": "later"})]}, {"configurable": {"thread_id": "thread"}}, context={"run_id": "later"})
+        assert [entry["status"] for entry in later["delegations"]] == ["completed"]
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), 5)
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_steer_settles_finished_and_pending_siblings_once_each():
+    inputs, saver, control = await _run_controller()
+    finished, entered, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def task(description: str, subagent_type: str, tool_call_id: Annotated[str, InjectedToolCallId]):
+        """One child ends before the steer and the other outlives it."""
+        if tool_call_id == "short":
+            finished.set()
+            return _finished_task(tool_call_id, 100)
+        entered.set()
+        await release.wait()
+        return _finished_task(tool_call_id, 1000)
+
+    @tool
+    async def follow_up() -> str:
+        """Hold the turn until the pending child's receipt is ready."""
+        release.set()
+        async with asyncio.timeout(5):
+            while not control.receipts:
+                await asyncio.sleep(0.01)
+        return "Done"
+
+    model = SettledStepModel(observed=[], first_calls=[_delegated("short"), _delegated("long")])
+    graph = _settled_graph(model, [task, follow_up], saver)
+    context = {INPUT_CONTEXT_KEY: control, "run_id": "run"}
+    run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task", additional_kwargs={"run_id": "run"})]}, {"configurable": {"thread_id": "thread"}}, context=context))
+    try:
+        await asyncio.wait_for(asyncio.gather(finished.wait(), entered.wait()), 5)
+        await inputs.submit("update", "Handle this too", "steer")
+        result = await asyncio.wait_for(run, 10)
+        assert {entry["id"]: entry["status"] for entry in result["delegations"]} == {"short": "completed", "long": "completed"}
+        assert next(x for x in result["messages"] if isinstance(x, AIMessage)).usage_metadata["total_tokens"] == 1111
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), 5)
+        await control.close()
+
+
+def test_steer_does_not_open_a_resumed_runs_delegation_window():
+    from deerflow.agents.middlewares.durable_context_middleware import _run_opening_human_index
+
+    opening = HumanMessage(content="Start", id="opening", additional_kwargs={"run_id": "first"})
+    steer = HumanMessage(content="Update", id="steer", additional_kwargs={"run_id": "first", "run_input_id": "input"})
+    assert _run_opening_human_index([opening, steer], "first", frozenset()) == 0
+    assert _run_opening_human_index([opening, steer], "resumed", frozenset({"opening", "steer"})) is None
 
 
 @pytest.mark.asyncio

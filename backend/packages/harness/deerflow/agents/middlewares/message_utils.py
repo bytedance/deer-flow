@@ -50,6 +50,15 @@ def has_ai_response_after_latest_user_message(messages: list[object]) -> bool:
     return any(isinstance(message, AIMessage) for message in messages[target_index + 1 :])
 
 
+def is_mid_run_input(message: object) -> bool:
+    """Return True for a steer or task receipt delivered inside a running turn.
+
+    These follow the tool results of the step they interrupted, so neither
+    opens a turn nor separates those results from the next AIMessage.
+    """
+    return isinstance(message, HumanMessage) and bool(message.additional_kwargs.get("run_input_id") or message.additional_kwargs.get("origin_task_id"))
+
+
 def requires_input_sanitization(message: object) -> bool:
     """Return True for message content the input guardrail must neutralize.
 
