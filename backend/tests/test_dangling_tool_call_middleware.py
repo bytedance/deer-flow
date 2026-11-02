@@ -1135,6 +1135,41 @@ class TestMalformedToolCallIdRecovery:
         assert results[" call_1 "].content == "result"
         assert results[recovered_id].status == "error"
 
+    def test_executable_call_wins_over_a_same_name_invalid_sibling(self):
+        """An invalid sibling with the same name must not steal the real result (#7821).
+
+        Both calls carry the empty id, so only the name and position can pair them. The
+        invalid call never executes, so its ToolMessage is this middleware's placeholder;
+        the executable call's result is the only real output in the turn. Dropping that
+        result and injecting an "interrupted" placeholder instead is the bug covered here.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[{"name": "ls", "args": {"path": "."}, "id": ""}],
+                invalid_tool_calls=[{"name": "ls", "args": "{", "id": "", "error": "Unterminated object"}],
+                additional_kwargs={},
+                response_metadata={},
+            ),
+            ToolMessage(content="REAL RESULT", tool_call_id="", name="ls"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        (executable_id,) = (tc["id"] for tc in patched[0].tool_calls)
+        (invalid_id,) = (tc["id"] for tc in patched[0].invalid_tool_calls)
+        results = {m.tool_call_id: m for m in patched[1:]}
+
+        # The real output lands on the executable call, not on the sibling's placeholder.
+        assert results[executable_id].content == "REAL RESULT"
+        assert results[executable_id].status == "success"
+        # The invalid call still gets its own injected error placeholder.
+        assert results[invalid_id].status == "error"
+        assert "REAL RESULT" not in results[invalid_id].content
+
 
 class TestWrapModelCall:
     def test_no_patch_passthrough(self):
