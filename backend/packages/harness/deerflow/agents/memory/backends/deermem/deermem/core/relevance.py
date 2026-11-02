@@ -151,7 +151,7 @@ def _coerce_confidence(fact: dict[str, Any]) -> float:
         value = float(fact.get("confidence"))
         if not math.isfinite(value):
             raise ValueError
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
     return min(1.0, max(0.0, value))
 

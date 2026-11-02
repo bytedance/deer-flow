@@ -38,6 +38,7 @@ export interface Translations {
       | "knowledge"
       | "knowledgeManagement"
       | "knowledgePlatform"
+      | "knowledgeCenter"
       | "weknora"
       | "lightrag"
       | "example",

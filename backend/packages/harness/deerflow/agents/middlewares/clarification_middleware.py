@@ -143,7 +143,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(options, str):
             try:
                 options = json.loads(options)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 options = [options]
 
         if options is None:
@@ -159,7 +159,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         normalized: list[str] = []
         seen: set[str] = set()
         for option in options:
-            text = _XML_TAG_RE.sub("", str(option)).strip()
+            try:
+                text = _XML_TAG_RE.sub("", str(option)).strip()
+            except RecursionError:
+                # A native option nested past the limit cannot become a label.
+                continue
             if not text or text in seen:
                 continue
             seen.add(text)
@@ -170,18 +174,17 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     def _flatten_dict_option_values(value: dict[str, Any]) -> list[str | int | float]:
         """Flatten scalar leaves from XML-to-dict option payloads in source order."""
         flattened: list[str | int | float] = []
-
-        def collect(nested: Any) -> None:
-            if isinstance(nested, dict):
-                for item in nested.values():
-                    collect(item)
-            elif isinstance(nested, list):
-                for item in nested:
-                    collect(item)
-            elif isinstance(nested, str | int | float):
-                flattened.append(nested)
-
-        collect(value)
+        # Explicit stack instead of recursion: XML-to-dict payloads are
+        # model-controlled and can nest past the interpreter's limit.
+        stack: list[Any] = [value]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                stack.extend(reversed(list(node.values())))
+            elif isinstance(node, list):
+                stack.extend(reversed(node))
+            elif isinstance(node, str | int | float):
+                flattened.append(node)
         return flattened
 
     @staticmethod
@@ -208,7 +211,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         if isinstance(fields, str):
             try:
                 fields = json.loads(fields)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError, RecursionError):
                 return []
         if not isinstance(fields, list):
             return []

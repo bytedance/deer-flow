@@ -280,6 +280,10 @@ or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob down
 HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
 localized. Browser handoff does not prove the file was saved to disk.
 
+`core/skills/error-detail.ts` reads error JSON as unknown for skill management
+and export. Narrow records and string fields before use; malformed bodies must
+preserve typed HTTP failures and the upload API's soft-failure contract.
+
 Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
 `WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
 thread snapshot and retry UI alive when a partial deletion removes its row.
@@ -406,11 +410,11 @@ and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 
-Follow [invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants) for
-plugin loaders/pages/actions: viewer-bound auth, native actions, i18n and
-mount/dispose/abort fencing. Shadow DOM is not a sandbox. Bundled extensions need
-typed en/zh `core/extensions/catalog.ts` entries with their namespace.
-Catalog entries are not proof of installation or activation.
+Follow [plugin invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants):
+viewer-bound auth/CSRF, native actions, i18n, mount/dispose/abort fences.
+Shadow DOM is not a sandbox. Bundled catalogs need typed en/zh entries, namespaces;
+entries do not prove activation. Optional `requestBackend` binds viewers,
+rejects redirects, never retries; routes retain authorization.
 
 ### Composer references
 

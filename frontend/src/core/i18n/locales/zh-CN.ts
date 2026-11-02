@@ -89,6 +89,11 @@ export const zhCN: Translations = {
         description:
           "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
       },
+      knowledgeCenter: {
+        title: "知识中心",
+        description:
+          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:
