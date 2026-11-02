@@ -547,7 +547,7 @@ def build_lead_runtime_middlewares(
     user_id: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
-    return _build_runtime_middlewares(
+    middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
@@ -562,6 +562,7 @@ def build_lead_runtime_middlewares(
         skill_authorization=skill_authorization,
         user_id=user_id,
     )
+    return middlewares
 
 
 def build_subagent_runtime_middlewares(

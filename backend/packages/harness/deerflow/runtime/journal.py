@@ -37,6 +37,7 @@ from langgraph.types import Command
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.skill_usage import MAX_SKILL_SNAPSHOT_CHARS, SKILL_USAGES_KEY
 from deerflow.runtime.events.catalog import (
+    FINAL_ANSWER_EVIDENCE_EVENT,
     LLM_AI_RESPONSE_EVENT,
     LLM_ERROR_EVENT,
     LLM_HUMAN_INPUT_EVENT,
@@ -1619,6 +1620,43 @@ class RunJournal(BaseCallbackHandler):
             with self._producer_lock:
                 self._pending_producer_callbacks -= 1
 
+    def _record_admitted_producer_event(self, *, event_type: str, category: str, content: dict, label: str, _admitted: bool = False) -> None:
+        """Publish an observational producer event on the journal owner loop."""
+        owner_loop = self._owner_loop
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if owner_loop is not None and running_loop is not owner_loop:
+            if owner_loop.is_closed() or not owner_loop.is_running():
+                logger.warning("Dropping cross-thread %s after run loop shutdown", label)
+                return
+            with self._producer_lock:
+                if not self._accepting_evidence:
+                    return
+                self._pending_producer_callbacks += 1
+                try:
+                    owner_loop.call_soon_threadsafe(
+                        partial(
+                            self._record_admitted_producer_event,
+                            event_type=event_type,
+                            category=category,
+                            content=content,
+                            label=label,
+                            _admitted=True,
+                        )
+                    )
+                except RuntimeError:
+                    self._pending_producer_callbacks -= 1
+                    logger.warning("Dropping cross-thread %s after run loop shutdown", label)
+            return
+        try:
+            self._put(event_type=event_type, category=category, content=content, _admitted=_admitted)
+        finally:
+            if _admitted:
+                with self._producer_lock:
+                    self._pending_producer_callbacks -= 1
+
     def claim_tool_promotions(self, tool_names: Iterable[str]) -> list[str]:
         """Atomically claim names not yet reported by this run's lead agent."""
         candidates = sorted(set(tool_names))
@@ -1661,6 +1699,22 @@ class RunJournal(BaseCallbackHandler):
             },
         )
         self._memory_context_recorded = True
+
+    def record_final_answer_evidence(self, evidence: dict) -> None:
+        """Record bounded, content-free evidence for a visible lead answer.
+
+        The middleware owns claim classification and receipt aggregation. This
+        method is only the run-scoped persistence boundary; it deliberately
+        accepts no message text, arguments, paths, commands, or tool output.
+        """
+        if not isinstance(evidence, dict):
+            raise TypeError("final-answer evidence must be a dict")
+        self._record_admitted_producer_event(
+            event_type=FINAL_ANSWER_EVIDENCE_EVENT.event_type,
+            category=FINAL_ANSWER_EVIDENCE_EVENT.category,
+            content=dict(evidence),
+            label="final-answer evidence",
+        )
 
     def _record_produced_artifacts(self, artifacts: Any, tool_name: str | None) -> None:
         """Accumulate produced artifact paths, deduped by (path, tool_name)."""
