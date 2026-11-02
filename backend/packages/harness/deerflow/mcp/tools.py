@@ -604,7 +604,17 @@ def _convert_call_tool_result(
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    # ``BlobResourceContents.mimeType`` is optional in the MCP spec, but
+                    # langchain-core refuses a base64 block without one. Degrade to a
+                    # generic binary type instead of raising, so the rest of the result —
+                    # including the text blocks the server returned — survives. The
+                    # sibling ``ResourceLink`` branch already degrades the same way.
+                    lc_content.append(
+                        create_file_block(
+                            base64=res.blob,
+                            mime_type=mime or "application/octet-stream",
+                        )
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
