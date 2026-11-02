@@ -513,6 +513,7 @@ def test_feishu_receive_file_replaces_placeholders_in_order():
         result = await channel.receive_file(msg, "thread_1")
 
         assert result.text == "before /mnt/user-data/uploads/a.png middle /mnt/user-data/uploads/b.pdf after"
+        assert result.files == []
 
     _run(go())
 
