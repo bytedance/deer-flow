@@ -164,3 +164,66 @@ def test_action_interaction_cannot_be_forged_in_payload(plugin_client, source):
     response = http.post("/api/plugins/community.check/actions/check", json={"text": "x", "interaction": "session"})
     assert response.status_code == 200
     assert calls[-1][1].interaction == "other"
+
+
+@pytest.mark.parametrize("browser_source", ["session", "auth_disabled"])
+def test_browser_chat_model_capability_is_host_bound(plugin_client, monkeypatch, browser_source):
+    http, role, calls, plugin = plugin_client
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:install"):
+        registry.plugin(replace(plugin, enabled=True))
+    http.app.state.extensions = registry.build()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: SimpleNamespace(models=[SimpleNamespace(name="chat-model")]))
+    from app.gateway.plugin_chat_models import PluginChatModelRuntime
+
+    runtime = PluginChatModelRuntime()
+    role["source"] = browser_source
+    http.app.state.plugin_chat_models = runtime
+    try:
+        result = http.post("/api/plugins/community.check/actions/check", json={"text": "x", "chat_models": "forged"})
+        assert result.status_code == 200
+        assert calls[-1][1].chat_models is not None
+        role["source"] = "internal"
+        assert http.post("/api/plugins/community.check/actions/check", json={"text": "x", "chat_models": "forged"}).status_code == 200
+        assert calls[-1][1].chat_models is None
+    finally:
+        runtime.close()
+
+
+def test_bound_chat_models_invoke_selected_model_without_operator_roles(plugin_client, monkeypatch):
+    from langchain_core.messages import AIMessage
+
+    from app.gateway.plugin_chat_models import PluginChatModelRuntime
+
+    http, role, calls, plugin = plugin_client
+    models = [SimpleNamespace(name="GLM-5-3"), SimpleNamespace(name="GLM-5-2")]
+    config = SimpleNamespace(models=models, get_model_config=lambda name: next((model for model in models if model.name == name), None))
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    authorized = []
+    monkeypatch.setattr("app.gateway.plugin_chat_models.authorize_model_use", lambda user, name, **kw: authorized.append((user.id, name)))
+
+    class Model:
+        async def ainvoke(self, messages, **kwargs):
+            return AIMessage(content="draft using chat model")
+
+    monkeypatch.setattr("deerflow.extensions.model_invocation.create_chat_model", lambda *a, **kw: Model())
+
+    async def generate(payload, context):
+        from deerflow_extension_api import ModelInvocationRequest, ModelMessage
+
+        result = await context.chat_models.invoke(ModelInvocationRequest(messages=[ModelMessage("user", "draft")], model_name=payload["model_name"]))
+        return {"content": result.content, "model": result.resolved_model}
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:install"):
+        registry.plugin(replace(plugin, enabled=True, backend=(BackendAction("generate", generate),)))
+    http.app.state.extensions = registry.build()
+    runtime = PluginChatModelRuntime()
+    http.app.state.plugin_chat_models = runtime
+    try:
+        result = http.post("/api/plugins/community.check/actions/generate", json={"model_name": "GLM-5-2", "user_id": "foreign"})
+        assert result.status_code == 200
+        assert result.json() == {"content": "draft using chat model", "model": "GLM-5-2"}
+        assert authorized == [("user-1", "GLM-5-2")]
+    finally:
+        runtime.close()

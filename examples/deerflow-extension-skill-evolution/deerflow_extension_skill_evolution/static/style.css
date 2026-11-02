@@ -1,0 +1,1125 @@
+/* Host theme tokens with fallbacks, mirroring the agent-teams plugin. */
+.skill-evolution-status {
+  --se-card: var(--card, #fffefa);
+  --se-text: var(--foreground, #262723);
+  --se-muted: var(--muted-foreground, #777a72);
+  --se-border: var(--border, #e5e5de);
+  --se-soft: var(--muted, #f2f2ec);
+  --se-primary: var(--primary, #303d32);
+  --se-on-primary: var(--primary-foreground, #fff);
+  --se-ok: var(--chart-2, #4d7c0f);
+  --se-warn: var(--chart-4, #b45309);
+  --se-down: var(--destructive, #b3261e);
+  color: var(--se-text);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin: 0 auto;
+  max-width: 72rem;
+  padding: 0.5rem 0 2rem;
+  width: 100%;
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.skill-evolution-status .status-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.skill-evolution-status .status-intro {
+  color: var(--se-muted);
+  margin: 0.5rem 0 0;
+  max-width: 46rem;
+}
+
+.skill-evolution-status .status-notice {
+  color: var(--se-muted);
+  margin: 0;
+
+}
+
+.skill-evolution-status .status-notice[role="alert"] {
+  color: var(--se-down);
+}
+
+.skill-evolution-status .status-refresh {
+  align-self: flex-start;
+  background: var(--se-primary);
+  border: 1px solid var(--se-primary);
+  border-radius: 0.5rem;
+  color: var(--se-on-primary);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.375rem 0.875rem;
+}
+
+.skill-evolution-status .status-refresh:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .status-refresh:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.skill-evolution-status .status-card {
+  background: var(--se-card);
+  border: 1px solid var(--se-border);
+  border-radius: 0.75rem;
+  padding: 1rem 1.25rem;
+}
+
+
+.skill-evolution-status .status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.skill-evolution-status .status-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.skill-evolution-status .status-key {
+  color: var(--se-muted);
+}
+
+.skill-evolution-status .status-value {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.skill-evolution-status .status-dot {
+  border-radius: 9999px;
+  display: inline-block;
+  height: 0.5rem;
+  width: 0.5rem;
+}
+
+.skill-evolution-status .tone-ok {
+  background: var(--se-ok);
+}
+
+.skill-evolution-status .tone-warn {
+  background: var(--se-warn);
+}
+
+.skill-evolution-status .tone-down {
+  background: var(--se-down);
+}
+
+.skill-evolution-status .tone-muted {
+  background: var(--se-muted);
+  opacity: 0.6;
+}
+
+.skill-evolution-status .status-detail {
+  border-top: 1px solid var(--se-border);
+  color: var(--se-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.skill-evolution-status .status-note {
+  background: var(--se-soft);
+  border: 1px solid var(--se-border);
+  border-radius: 0.75rem;
+  color: var(--se-muted);
+  margin: 0;
+  padding: 0.75rem 1rem;
+}
+
+.skill-evolution-status .skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.skill-evolution-status .skill-row {
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1rem;
+}
+
+.skill-evolution-status .skill-row-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.skill-evolution-status .skill-name {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-badge {
+  background: var(--se-soft);
+  border: 1px solid var(--se-border);
+  border-radius: 9999px;
+  color: var(--se-muted);
+  font-size: 0.75rem;
+  padding: 0.05rem 0.5rem;
+}
+
+.skill-evolution-status .skill-badge-muted {
+  opacity: 0.65;
+}
+
+.skill-evolution-status .skill-missing {
+  color: var(--se-muted);
+  font-size: 0.75rem;
+  opacity: 0.75;
+}
+
+.skill-evolution-status .skill-desc {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-empty {
+  color: var(--se-muted);
+  margin: 0;
+}
+
+.skill-evolution-status .skill-pager {
+  align-items: center;
+  border-top: 1px solid var(--se-border);
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.skill-evolution-status .skill-page-btn {
+  background: var(--se-soft);
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  color: var(--se-text);
+  cursor: pointer;
+  font: inherit;
+  padding: 0.25rem 0.75rem;
+}
+
+.skill-evolution-status .skill-page-btn:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .skill-page-btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.skill-evolution-status .skill-page-indicator {
+  color: var(--se-muted);
+  min-width: 3rem;
+  text-align: center;
+}
+
+/* Primary skill card sits above the folded deployment details. */
+.skill-evolution-status .skill-card-primary {
+  border-width: 1px;
+}
+
+
+/* Collapsed secondary sections: installation, evolution policy, host
+   capabilities. */
+.skill-evolution-status .status-fold {
+  background: var(--se-card);
+  border: 1px solid var(--se-border);
+  border-radius: 0.75rem;
+  padding: 0.5rem 1.25rem;
+}
+
+.skill-evolution-status .status-fold-title {
+  color: var(--se-muted);
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  list-style: revert;
+  padding: 0.25rem 0;
+}
+
+.skill-evolution-status .status-fold-title:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .status-fold[open] .status-fold-title {
+  color: var(--se-text);
+  margin-bottom: 0.75rem;
+}
+
+.skill-evolution-status .status-fold .status-list {
+  padding-bottom: 0.5rem;
+}
+
+/* Per-skill operation buttons (stage / check / commit / revert), rendered on
+   the right of each row from the operator-granted operations. */
+.skill-evolution-status .skill-ops {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  margin-left: auto;
+}
+
+.skill-evolution-status .skill-op-btn {
+  background: var(--se-soft);
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  color: var(--se-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.7rem;
+}
+
+.skill-evolution-status .skill-op-btn:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .skill-op-btn:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.skill-evolution-status .skill-op-primary {
+  background: var(--se-primary);
+  border-color: var(--se-primary);
+  color: var(--se-on-primary);
+}
+
+/* Inline proposal note and outcome under each skill row. */
+.skill-evolution-status .skill-note {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.8125rem;
+  gap: 0.15rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-proposal {
+  color: var(--se-muted);
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-note-ok {
+  color: var(--se-ok);
+}
+
+.skill-evolution-status .skill-note-err {
+  color: var(--se-down);
+}
+
+/* Inline SKILL.md editor opened by the stage button. */
+.skill-evolution-status .skill-editor {
+  border-top: 1px dashed var(--se-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+}
+
+.skill-evolution-status .skill-editor-area {
+  background: var(--se-card);
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  color: var(--se-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  min-height: 8rem;
+  padding: 0.5rem 0.75rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.skill-evolution-status .skill-editor-area:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .skill-editor-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* Inline version history opened by the revert button: undo the head
+   operation or restore an older version's saved content. */
+.skill-evolution-status .skill-versions {
+  border-top: 1px dashed var(--se-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+}
+
+.skill-evolution-status .skill-versions-hint {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-versions-empty {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-version {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.skill-evolution-status .skill-version-head .skill-version-label {
+  color: var(--se-text);
+  font-weight: 600;
+}
+
+.skill-evolution-status .skill-version-label {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-version-ops {
+  display: inline-flex;
+  gap: 0.375rem;
+}
+
+/* "View changes" on a history entry: the inline diff (and its status lines)
+   take the full row width below the label and buttons. */
+.skill-evolution-status .skill-version > .skill-evo-diff,
+.skill-evolution-status .skill-version-diff-note,
+.skill-evolution-status .skill-version-diff-error {
+  flex-basis: 100%;
+}
+
+.skill-evolution-status .skill-version-diff-note {
+  color: var(--se-muted);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-version-diff-error {
+  color: var(--se-danger, #cf222e);
+  font-size: 0.75rem;
+  margin: 0;
+}
+
+/* Inline usage trajectories opened by the per-row trajectories button: the
+   recent sealed runs that activated the skill, with invocation points
+   highlighted and per-event annotations. */
+.skill-evolution-status .skill-traj {
+  border-top: 1px dashed var(--se-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+}
+
+.skill-evolution-status .skill-traj-hint {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-traj-empty {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  margin: 0;
+}
+
+.skill-evolution-status .skill-traj-run {
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  padding: 0.375rem 0.625rem;
+}
+
+.skill-evolution-status .skill-traj-run-head {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.skill-evolution-status .skill-traj-run-head {
+  cursor: pointer;
+  list-style: none;
+}
+
+.skill-evolution-status .skill-traj-run-head::-webkit-details-marker {
+  display: none;
+}
+
+.skill-evolution-status .skill-traj-run-head:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+
+.skill-evolution-status .skill-traj-run-id::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 0.5rem;
+  color: var(--se-muted);
+}
+
+.skill-evolution-status .skill-traj-run[open] > summary .skill-traj-run-id::before {
+  transform: rotate(90deg);
+}
+
+.skill-evolution-status .skill-traj-run-id {
+  font-weight: 600;
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-traj-run-meta {
+  color: var(--se-muted);
+  font-size: 0.75rem;
+}
+
+.skill-evolution-status .skill-traj-timeline {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.skill-evolution-status .skill-traj-event {
+  align-items: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 0.375rem;
+  color: var(--se-muted);
+  cursor: pointer;
+  display: flex;
+  flex-wrap: wrap;
+  font: inherit;
+  font-size: 0.75rem;
+  gap: 0.375rem;
+  padding: 0.1rem 0.375rem;
+  text-align: left;
+  width: 100%;
+}
+
+.skill-evolution-status .skill-traj-event:hover {
+  background: var(--se-soft);
+}
+
+.skill-evolution-status .skill-traj-event:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 1px;
+}
+
+.skill-evolution-status .skill-traj-invocation {
+  border-color: var(--se-ok);
+  color: var(--se-text);
+}
+
+.skill-evolution-status .skill-traj-badge {
+  background: var(--se-ok);
+  border-radius: 9999px;
+  color: var(--se-on-primary);
+  font-size: 0.6875rem;
+  padding: 0 0.45rem;
+}
+
+.skill-evolution-status .skill-traj-event-meta {
+  color: var(--se-muted);
+  font-size: 0.6875rem;
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-traj-seq {
+  color: var(--se-muted);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.6875rem;
+  min-width: 2.25rem;
+}
+
+.skill-evolution-status .skill-traj-kind {
+  border-radius: 9999px;
+  color: var(--se-on-primary);
+  font-size: 0.6875rem;
+  padding: 0 0.45rem;
+}
+
+.skill-evolution-status .skill-traj-kind-human {
+  background: var(--se-primary);
+}
+
+.skill-evolution-status .skill-traj-kind-ai {
+  background: #8250df;
+}
+
+.skill-evolution-status .skill-traj-kind-tool {
+  background: #9a6700;
+}
+
+.skill-evolution-status .skill-traj-kind-activation {
+  background: var(--se-ok);
+}
+
+.skill-evolution-status .skill-traj-kind-system {
+  background: var(--se-muted);
+}
+
+.skill-evolution-status .skill-traj-tool {
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 0.375rem;
+  color: var(--se-text);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.6875rem;
+  padding: 0 0.3rem;
+}
+
+.skill-evolution-status .skill-traj-preview {
+  color: var(--se-text);
+  flex-basis: 100%;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.skill-evolution-status .skill-traj-note {
+  color: var(--se-warn);
+  font-size: 0.75rem;
+  margin: 0 0 0 0.5rem;
+  word-break: break-word;
+}
+
+.skill-evolution-status .skill-annot {
+  border-left: 2px solid var(--se-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin: 0 0 0 0.5rem;
+  padding: 0.375rem 0 0.125rem 0.625rem;
+}
+
+.skill-evolution-status .skill-annot-area {
+  background: var(--se-card);
+  border: 1px solid var(--se-border);
+  border-radius: 0.5rem;
+  color: var(--se-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  min-height: 3rem;
+  padding: 0.375rem 0.625rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.skill-evolution-status .skill-annot-area:focus-visible {
+  outline: 2px solid var(--se-primary);
+  outline-offset: 2px;
+}
+
+.skill-evolution-status .skill-traj-btn {
+  border-style: dashed;
+}
+
+.skill-evolution-status .skill-draft-btn {
+  border-style: dashed;
+}
+
+.skill-evolution-status .skill-evo {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px dashed var(--se-border, #d0d7de);
+  border-radius: 8px;
+}
+
+.skill-evolution-status .skill-evo-hint {
+  margin: 0 0 8px;
+  color: var(--se-muted, #57606a);
+  font-size: 12px;
+}
+
+.skill-evolution-status .skill-evo-btn {
+  border-style: dashed;
+}
+
+.skill-evolution-status .skill-evo-running {
+  margin: 0;
+  color: var(--se-primary, #0969da);
+  font-size: 12px;
+}
+
+.skill-evolution-status .skill-evo-meta {
+  margin: 0 0 8px;
+  color: var(--se-muted, #57606a);
+  font-size: 12px;
+}
+
+.skill-evolution-status .skill-evo-failed {
+  margin: 0 0 8px;
+  color: var(--se-danger, #cf222e);
+  font-size: 12px;
+}
+
+.skill-evolution-status .skill-evo-published {
+  margin: 0 0 8px;
+  color: var(--se-ok, #1a7f37);
+  font-size: 12px;
+}
+
+/* Grant-configuration card: target skills + evolution models. */
+.skill-evolution-status .skill-config-hint {
+  color: var(--se-muted);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
+.skill-evolution-status .skill-config-group {
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 0.5rem;
+  margin: 0 0 12px;
+  padding: 0.625rem 0.75rem;
+}
+
+.skill-evolution-status .skill-config-group-title {
+  font-size: 0.875rem;
+  margin: 0 0 0.5rem;
+}
+
+.skill-evolution-status .skill-config-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.skill-evolution-status .skill-config-option {
+  align-items: baseline;
+  display: flex;
+  font-size: 0.75rem;
+  gap: 0.5rem;
+}
+
+.skill-evolution-status .skill-config-option-name {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.skill-evolution-status .skill-config-option-desc {
+  color: var(--se-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-evolution-status .skill-config-option-missing {
+  color: var(--se-warn, #9a6700);
+}
+
+.skill-evolution-status .skill-config-input-row {
+  display: flex;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.skill-evolution-status .skill-config-input {
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 0.375rem;
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  flex: 1;
+}
+
+.skill-evolution-status .skill-config-note,
+.skill-evolution-status .skill-config-error {
+  font-size: 0.75rem;
+  margin: 0.5rem 0 0;
+}
+
+.skill-evolution-status .skill-config-note {
+  color: var(--se-muted);
+}
+
+.skill-evolution-status .skill-config-error {
+  color: var(--se-danger, #cf222e);
+}
+
+.skill-evolution-status .skill-config-result {
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 0.5rem;
+  margin: 0 0 12px;
+  padding: 0.625rem 0.75rem;
+}
+
+.skill-evolution-status .skill-config-result.ok {
+  border-color: var(--se-ok, #1a7f37);
+}
+
+.skill-evolution-status .skill-config-result.err {
+  border-color: var(--se-danger, #cf222e);
+}
+
+.skill-evolution-status .skill-config-result p {
+  font-size: 0.75rem;
+  margin: 0 0 0.25rem;
+}
+
+.skill-evolution-status .skill-config-command {
+  background: var(--se-soft);
+  border-radius: 0.375rem;
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  margin: 0.25rem 0;
+  padding: 0.25rem 0.5rem;
+  word-break: break-all;
+}
+
+/* Model picker beside the evolution trigger. */
+.skill-evolution-status .skill-evo-model {
+  align-items: center;
+  display: flex;
+  font-size: 0.75rem;
+  gap: 0.375rem;
+  margin: 0 0 8px;
+}
+
+.skill-evolution-status .skill-evo-model-label {
+  color: var(--se-muted);
+}
+
+.skill-evolution-status .skill-evo-model-note {
+  color: var(--se-muted);
+  font-size: 0.6875rem;
+  margin: 0 0 8px;
+}
+
+.skill-evolution-status .skill-evo-model-select {
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 0.375rem;
+  font: inherit;
+  font-size: 0.75rem;
+  max-width: 16rem;
+  padding: 0.2rem 0.375rem;
+}
+
+.skill-evolution-status .skill-evo-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.skill-evolution-status .skill-evo-diff-summary {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--se-muted, #57606a);
+}
+
+.skill-evolution-status .skill-evo-diff-rows {
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--se-border, #d0d7de);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.skill-evolution-status .skill-evo-diff-row {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.skill-evolution-status .skill-evo-diff-add {
+  background: rgba(46, 160, 67, 0.15);
+  color: #1a7f37;
+}
+
+.skill-evolution-status .skill-evo-diff-del {
+  background: rgba(248, 81, 73, 0.15);
+  color: #cf222e;
+}
+
+.skill-evolution-status .skill-evo-diff-same {
+  color: var(--se-muted, #57606a);
+}
+
+.skill-evolution-status .skill-evo-diff-empty {
+  margin: 0;
+  font-size: 12px;
+  color: var(--se-muted, #57606a);
+}
+
+/* Agent workspace shell. All colors inherit the host light/dark theme. */
+.skill-evolution-status *,
+.skill-evolution-status *::before,
+.skill-evolution-status *::after {
+  box-sizing: border-box;
+}
+
+.skill-evolution-status [hidden],
+.skill-evolution-status .status-notice:empty {
+  display: none;
+}
+
+.skill-evolution-status .evolution-header,
+.skill-evolution-status .evolution-module-head {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.skill-evolution-status .evolution-module-head .status-refresh {
+  align-self: center;
+  flex-shrink: 0;
+}
+
+
+
+.skill-evolution-status .evolution-modules {
+  display: grid;
+  gap: 1rem;
+}
+
+.skill-evolution-status .evolution-module {
+  background: var(--se-card);
+  border: 1px solid var(--se-border);
+  border-radius: 1rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.skill-evolution-status .evolution-module-head {
+  padding: 1.25rem 1.5rem;
+}
+
+.skill-evolution-status .evolution-module-title {
+  font-size: 1.375rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.skill-evolution-status .evolution-module-head .status-intro {
+  font-size: 0.8125rem;
+  margin-top: 0.25rem;
+}
+
+.skill-evolution-status .evolution-module-badge {
+  background: var(--se-soft);
+  border: 1px solid var(--se-border);
+  border-radius: 999px;
+  color: var(--se-muted);
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  padding: 0.2rem 0.625rem;
+}
+
+.skill-evolution-status .evolution-module-available > .evolution-module-head {
+  border-bottom: 1px solid var(--se-border);
+}
+
+.skill-evolution-status .skill-module-content > .status-card {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 1.25rem 1.5rem;
+}
+
+.skill-evolution-status .skill-module-content > .skill-config-card {
+  border-top: 1px solid var(--se-border);
+}
+
+
+.skill-evolution-status .evolution-information {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  margin-top: 0;
+  border-top: 1px solid var(--se-border);
+  padding: 1.25rem 1.5rem;
+}
+
+.skill-evolution-status .evolution-information .status-header {
+  margin-bottom: 0.375rem;
+}
+
+.skill-evolution-status .skill-row {
+  gap: 0.625rem;
+  transition: border-color 160ms ease;
+}
+
+.skill-evolution-status .skill-row:hover {
+  border-color: var(--se-muted);
+}
+
+.skill-evolution-status .skill-desc {
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.skill-evolution-status button:not(:disabled):hover {
+  filter: brightness(0.94);
+}
+
+.skill-evolution-status .skill-config-input,
+.skill-evolution-status .skill-evo-model-select {
+  background: var(--se-card);
+  color: var(--se-text);
+}
+
+@media (max-width: 640px) {
+  .skill-evolution-status .evolution-module-head,
+  .skill-evolution-status .skill-module-content > .status-card { padding: 1rem; }
+  .skill-evolution-status .skill-ops { margin-left: 0; width: 100%; }
+  .skill-evolution-status .status-value { flex-wrap: wrap; }
+  .skill-evolution-status .status-value,
+  .skill-evolution-status .status-row > * { min-width: 0; overflow-wrap: anywhere; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-evolution-status .skill-row { transition: none; }
+}
+
+.skill-evolution-status .skill-module-content > .status-notice:not(:empty) {
+  padding: 1rem 1.5rem 0;
+}
+
+@media (max-width: 640px) {
+  .skill-evolution-status .evolution-information { padding: 1rem; }
+  .skill-evolution-status .evolution-module-head { flex-wrap: wrap; }
+  .skill-evolution-status .evolution-module-head > div { flex: 1; min-width: 10rem; }
+}
+
+.skill-evolution-status .evolution-module-head > div {
+  flex: 1;
+}
+
+/* Consistent h3 section headers beneath the h2 evolution module title. */
+.skill-evolution-status .skill-module-content > .status-card > .status-header {
+  margin-bottom: 1rem;
+}
+
+.skill-evolution-status .status-header .status-intro {
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin-top: 0.375rem;
+}
+
+.skill-evolution-status .evolution-header > .status-intro {
+  margin: 0;
+}
+
+.skill-evolution-status .status-row-hint {
+  color: var(--se-muted);
+  flex-basis: 100%;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  margin: 0;
+}
+
+.skill-evolution-status .status-section-hint {
+  color: var(--se-muted);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  margin: 0 0 0.5rem;
+}
+
+.skill-evolution-status .status-fold .status-row + .status-row {
+  border-top: 1px solid var(--se-border);
+  padding-top: 0.625rem;
+}
+
+.skill-evolution-status .skill-traj-activation-list {
+  color: var(--se-ok);
+  font-size: 0.75rem;
+}
+
+.skill-evolution-status .skill-traj-locate {
+  margin-left: auto;
+}
+
+.skill-evolution-status .skill-traj-context-hint {
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+}
+
+.skill-evolution-status .skill-traj-event.skill-traj-context {
+  background: var(--se-soft);
+  color: var(--se-text);
+}
+
+.skill-evolution-status .skill-traj-event.skill-traj-located {
+  background: var(--se-soft);
+  border-color: var(--se-ok);
+  box-shadow: inset 3px 0 var(--se-ok);
+  color: var(--se-text);
+}
+
+.skill-evolution-status .skill-traj-run-context {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background: var(--se-soft);
+  border-radius: 0.375rem;
+  display: grid;
+  gap: 0.375rem;
+}
+
+.skill-evolution-status .skill-traj-context-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.skill-evolution-status .skill-traj-conversation-link {
+  color: var(--se-primary);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  font-size: 0.8125rem;
+}
+
+.skill-evolution-status .skill-traj-input-label {
+  color: var(--se-muted);
+  font-size: 0.75rem;
+  margin: 0.25rem 0 0;
+}
+
+.skill-evolution-status .skill-traj-input-preview {
+  color: var(--se-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+}

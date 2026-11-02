@@ -935,7 +935,12 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_subagent_batch_submitter(batch_service)
                 app.state.subagent_batches_available = True
 
-        yield
+        try:
+            yield
+        finally:
+            chat_runtime = getattr(app.state, "plugin_chat_models", None)
+            if chat_runtime is not None:
+                chat_runtime.close()
 
         await _shutdown_startup_trash_sweep(app)
         try:
@@ -1254,6 +1259,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         return host.bind(request) if host is not None else None
 
     setattr(app.state, AGENT_RUNS_RESOLVER_KEY, _resolve_extension_agent_runs)
+
+    from app.gateway.plugin_chat_models import PluginChatModelRuntime
+
+    app.state.plugin_chat_models = PluginChatModelRuntime()
 
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
