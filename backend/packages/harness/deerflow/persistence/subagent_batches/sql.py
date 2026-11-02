@@ -627,6 +627,14 @@ class SubagentBatchRepository:
             item.completed_at = None
             item.cancel_requested_at = None
             item.updated_at = now
+            # SQLite ignores FOR UPDATE: flush first so this transaction holds the
+            # write lock, then re-read the batch a cancel may have committed since.
+            await session.flush()
+            await session.refresh(batch)
+            # Cancellation is final; reopening the batch would run work the user
+            # stopped. Returning without commit discards the item reset.
+            if batch.status == "cancelled":
+                return None
             if batch.status != "paused":
                 batch.status = "queued"
                 batch.completed_at = None
