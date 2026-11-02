@@ -19,6 +19,18 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** WeCom group messages now have their own conversation. Every
+  message used the sender's userid as both chat and topic ID, so a member's
+  private chat and every group they wrote in shared one DeerFlow thread
+  wherever no group binding kept them apart: in auth-disabled mode, with
+  `require_bound_identity: false`, and under legacy group bindings. A group
+  reply could then draw on the member's private chat or another group, and a
+  reply sent without its frame went to the private chat. Groups are now keyed
+  by `chatid` with one thread per member, and private chats keep their
+  threads. A group bound with its own `/connect` keeps its thread; a legacy
+  group binding, which covers every group of the bot, starts a new one in
+  each group. ([#7794])
+
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -15990,3 +16002,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
