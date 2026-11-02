@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -69,7 +70,7 @@ class _FakeRepo:
         user = self.users.get(user_id)
         if user is None:
             raise UserNotFoundError(f"User {user_id} no longer exists")
-        if user.system_role == "admin" and system_role != "admin":
+        if user.system_role == "admin" and not user.disabled and system_role != "admin":
             # Active admins only (disabled admins cannot authenticate).
             active = sum(1 for u in self.users.values() if u.system_role == "admin" and not getattr(u, "disabled", False))
             if active <= 1:
@@ -562,6 +563,65 @@ def test_repo_set_disabled_field_scoped_and_last_active_admin():
             asyncio.run(_run())
         finally:
             asyncio.run(close_engine())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["user", "guest"])
+@pytest.mark.parametrize("reenable", [False, True], ids=["keep-disabled", "reenable"])
+async def test_disabled_admin_can_be_demoted_with_one_active_admin(monkeypatch, tmp_path, role, reenable):
+    """Exercise HTTP writes against SQL, including combined role/enable updates."""
+    from httpx import ASGITransport, AsyncClient
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/users.db", sqlite_dir=str(tmp_path))
+    try:
+        repo = SQLiteUserRepository(get_session_factory())
+        admin = await repo.create_user(User(email="active@example.com", system_role="admin"))
+        target = await repo.create_user(User(email="suspended@example.com", system_role="admin", password_hash="saved-hash", token_version=7, oauth_provider="github", oauth_id="saved-oauth-id"))
+        app = make_authed_test_app(user_factory=lambda: admin)
+        app.include_router(admin_users.router)
+        app.dependency_overrides[get_user_repository] = lambda: repo
+        monkeypatch.setattr(admin_users, "assignable_role_names", lambda: {"admin", "user", "guest"})
+        target_url = f"/api/v1/admin/users/{target.id}"
+        admin_url = f"/api/v1/admin/users/{admin.id}"
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            suspended = await client.patch(target_url, json={"disabled": True})
+            assert suspended.status_code == 200
+            before = await repo.get_user_by_id(str(target.id))
+            assert before is not None and before.disabled
+
+            # A disabled peer must never allow the sole active admin to demote.
+            blocked = await client.patch(admin_url, json={"system_role": role})
+            assert blocked.status_code == 409
+
+            body = {"system_role": role}
+            if reenable:
+                body["disabled"] = False
+            demoted = await client.patch(target_url, json=body)
+            assert demoted.status_code == 200, demoted.text
+            assert demoted.json()["system_role"] == role
+            assert demoted.json()["disabled"] is (not reenable)
+
+            stored = await repo.get_user_by_id(str(target.id))
+            assert stored is not None
+            assert stored.model_dump() == before.model_copy(update={"system_role": role, "disabled": not reenable}).model_dump()
+
+            if not reenable:
+                restored = await client.patch(target_url, json={"disabled": False})
+                assert restored.status_code == 200
+                assert restored.json()["system_role"] == role
+                assert restored.json()["disabled"] is False
+
+            # Restoring the demoted account adds no administrator; both guards remain.
+            assert (await client.patch(admin_url, json={"system_role": role})).status_code == 409
+            assert (await client.patch(admin_url, json={"disabled": True})).status_code == 409
+            remaining = await repo.get_user_by_id(str(admin.id))
+            assert remaining is not None and remaining.system_role == "admin" and not remaining.disabled
+    finally:
+        await close_engine()
 
 
 def test_disabled_account_rejected_at_login_and_flagged_for_resolvers():

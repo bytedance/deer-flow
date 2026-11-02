@@ -10,7 +10,7 @@
 ## [未发布]
 
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
-截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
+
 
 ### 新增
 
@@ -23,6 +23,11 @@
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
   `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
+  
+- **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
+  空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
+  GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
+  整个列表失败，与它的对话也会失败。已以 null 描述保存的智能体现在可以重新加载。([#7638])
 
 - **智能体：** 当模型提供方在不同轮次复用同一个工具调用 ID（例如每次响应都是 `call_0`）时，
   澄清提问不再覆盖之前的问题。此前其消息 ID（同时也是人工输入的 `request_id`）只包含调用 ID，
@@ -12723,6 +12728,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727

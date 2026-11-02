@@ -6,7 +6,7 @@ from app.gateway.auth.models import User
 
 
 class LastAdminRemainsError(RuntimeError):
-    """Raised when a role write would demote the last remaining admin.
+    """Raised when a role write would demote the last remaining active admin.
 
     Bootstrap lockout protection: raised inside the same serialized
     transaction that would perform the write, so the check-then-act window
@@ -123,8 +123,9 @@ class UserRepository(ABC):
         Raises:
             UserNotFoundError: the target row does not exist.
             LastAdminRemainsError: the write would demote the only remaining
-                admin (the count and the write share one serialized
+                active admin (the count and the write share one serialized
                 transaction — two concurrent demotions cannot both pass).
+                An already disabled admin may be assigned a different role.
         """
         raise NotImplementedError
 
