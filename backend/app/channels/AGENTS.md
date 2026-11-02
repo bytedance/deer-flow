@@ -11,7 +11,7 @@ Telegram retries share bootstrap/Bot cleanup. Dead loops warn once; clear
 matching futures under `_shutdown_resources_lock` (closure unconfirmed).
 Finalize asyncgens; keep primary errors; propagate lone Bot errors.
 
-**Auth**: SDK/raw-httpx `/goal` use process-local auth + `_csrf_headers()`; internal auth needs CSRF.
+**Auth**: SDK/httpx `/goal` needs internal auth + `_csrf_headers()`. Localize known busy 409s; no echo/retry.
 
 DingTalk retains tasks and logs failures.
 

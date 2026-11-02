@@ -46,6 +46,7 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    supports_event_producer_fencing = True
     supports_run_inputs = True
 
     async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
@@ -232,11 +233,15 @@ class RunRepository(RunStore):
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", **values))
+                row = RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", run_incarnation=uuid4().hex, producer_epoch=uuid4().hex, producer_state="open", **values)
+                session.add(row)
             else:
                 for key, value in values.items():
                     setattr(row, key, value)
+            await session.flush()
+            admitted = self._row_to_dict(row)
             await session.commit()
+            return admitted
 
     async def seal_evidence(self, run_id: str, *, owner_worker_id: str, receipt) -> bool:
         """Persist a completed drain and changed-run position in one fenced transaction."""
@@ -964,6 +969,8 @@ class RunRepository(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         values: dict[str, Any] = {
             "status": "error",
+            "producer_state": "revoked",
+            "producer_epoch": uuid4().hex,
             "error": error,
             "evidence_seal_state": "partial",
             "evidence_seal_error": "Worker lease expired without a completed journal seal.",
@@ -1062,7 +1069,7 @@ class RunRepository(RunStore):
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
-        user_id: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -1089,7 +1096,7 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -1097,6 +1104,9 @@ class RunRepository(RunStore):
 
         values = {
             "thread_id": thread_id,
+            "run_incarnation": uuid4().hex,
+            "producer_epoch": uuid4().hex,
+            "producer_state": "open",
             "evidence_origin": evidence_origin,
             "evidence_agent_id": evidence_agent_id,
             "evidence_seal_state": "pending",
@@ -1169,14 +1179,20 @@ class RunRepository(RunStore):
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                     row.status = "interrupted"
                     row.error = "Cancelled by newer run"
+                    if row.owner_worker_id != owner_worker_id:
+                        row.producer_state = "revoked"
+                        row.producer_epoch = uuid4().hex
                     row.owner_worker_id = owner_worker_id
                     row.updated_at = now
                     row.change_seq = change_seq
                     claimed.append(self._row_to_dict(row))
 
             values["change_seq"] = change_seq
-            session.add(RunRow(run_id=run_id, **values))
+            new_row = RunRow(run_id=run_id, **values)
+            session.add(new_row)
             try:
+                await session.flush()
+                admitted = self._row_to_dict(new_row)
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -1186,5 +1202,4 @@ class RunRepository(RunStore):
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
-            new_row = await session.get(RunRow, run_id)
-            return self._row_to_dict(new_row), claimed
+            return admitted, claimed

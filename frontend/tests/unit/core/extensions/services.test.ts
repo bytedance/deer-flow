@@ -6,6 +6,7 @@ import {
   conversationText,
   latestVisibleAnswer,
   openConversation,
+  requestExtensionRoute,
 } from "@/core/extensions/services";
 import type { AgentThread } from "@/core/threads/types";
 
@@ -22,6 +23,67 @@ rs.mock("@/core/api", () => ({
 
 beforeEach(() => {
   rs.clearAllMocks();
+});
+
+test("extension HTTP transport uses host auth and abort without replaying writes", async () => {
+  const signal = new AbortController().signal;
+  const response = { ok: false, status: 409 };
+  request.mockResolvedValue(response);
+  expect(
+    await requestExtensionRoute(
+      "/api/extensions/example/files?filename=a.txt",
+      {
+        method: "POST",
+        body: "data",
+        headers: { "x-deerflow-plugin-viewer": "forged" },
+      },
+      signal,
+      "alice",
+    ),
+  ).toBe(response);
+  expect(request).toHaveBeenCalledWith(
+    "/api/extensions/example/files?filename=a.txt",
+    expect.objectContaining({
+      method: "POST",
+      body: "data",
+      signal,
+      redirect: "error",
+    }),
+  );
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(
+    request.mock.calls[0]![1].headers.get("X-Deerflow-Plugin-Viewer"),
+  ).toBe("alice");
+});
+
+test("extension transport rejects foreign URLs, traversal and late calls", async () => {
+  const signal = new AbortController().signal;
+  for (const path of [
+    "https://evil.test/api/extensions/a",
+    "//evil.test/api/extensions/a",
+    "/api/plugins",
+    "/api/extensions/../auth/me",
+    "/api/extensions/a/%2e%2e/%2e%2e/auth/me",
+    "/api/extensions/a\\b",
+    "/api/extensions/a#fragment",
+  ]) {
+    await expect(
+      requestExtensionRoute(path, {}, signal, "alice"),
+    ).rejects.toThrow();
+  }
+  const aborted = AbortSignal.abort();
+  await expect(
+    requestExtensionRoute(
+      "/api/extensions/example/spaces",
+      {},
+      aborted,
+      "alice",
+    ),
+  ).rejects.toThrow();
+  expect(request).not.toHaveBeenCalled();
+  await expect(
+    requestExtensionRoute("/api/extensions/example/spaces", {}, signal, ""),
+  ).rejects.toThrow();
 });
 
 test("bookmark receives only the last visible assistant answer", async () => {

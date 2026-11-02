@@ -31,6 +31,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.goal_progress import previous_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS as MAX_GOAL_OBJECTIVE_CHARS
 from deerflow.utils.goal_objective import normalize_goal_objective as normalize_goal_objective
@@ -430,6 +431,9 @@ def create_goal_evaluator_model(
     call to inherit tracing from. It must attach its own model-level tracing
     callbacks, same as the other standalone, non-graph callers
     (``oneshot_llm.run_oneshot_llm``, ``MemoryUpdater``).
+
+    Provider construction can read local credentials, so async callers build
+    the evaluator through ``run_assembly`` instead of on the event loop.
     """
     return create_chat_model(
         name=model_name,
@@ -509,7 +513,7 @@ async def evaluate_goal_completion(
     user_content = f"Active goal:\n{goal['objective']}\n\nVisible conversation evidence:\n{conversation}\n\nIs the active goal fully satisfied?"
 
     if model is None:
-        model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
+        model = await run_assembly(create_goal_evaluator_model, model_name=model_name, app_config=app_config)
     invoke_config: dict[str, Any] = {"run_name": "goal_evaluator"}
     if usage_callback is not None:
         # This critic must not inherit graph callbacks: its usage crosses the

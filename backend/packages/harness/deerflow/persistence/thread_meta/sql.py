@@ -90,9 +90,11 @@ class ThreadMetaRepository(ThreadMetaStore):
                 updated_at=now,
             )
             session.add(row)
+            await session.flush()
+            # A refresh after commit could observe a replacement incarnation.
+            created = self._row_to_dict(row)
             await session.commit()
-            await session.refresh(row)
-            return self._row_to_dict(row)
+            return created
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
         claim_target = table(

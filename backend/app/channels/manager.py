@@ -4031,6 +4031,23 @@ class ChannelManager:
             self._remember_thread_model(thread_id, name)
         return f"Model '{name}' selected. It applies to this conversation from the next message."
 
+    @staticmethod
+    def _is_goal_in_flight_error(error: Exception) -> bool:
+        """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
+        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
+            return False
+        detail = {
+            "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
+            "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
+        }.get(error.request.method)
+        if detail is None:
+            return False
+        try:
+            body = error.response.json()
+        except ValueError:
+            return False
+        return isinstance(body, Mapping) and body.get("detail") == detail
+
     async def _goal_request(
         self,
         method: str,
@@ -4104,7 +4121,9 @@ class ChannelManager:
                 return await self._goal_reply(msg, "cleared")
             try:
                 await self._goal_request("delete", thread_id, headers=headers)
-            except Exception:
+            except Exception as exc:
+                if self._is_goal_in_flight_error(exc):
+                    return await self._goal_reply(msg, "busy")
                 logger.exception("Failed to clear goal through gateway")
                 return await self._goal_reply(msg, "clear_failed")
             return await self._goal_reply(msg, "cleared")
@@ -4114,7 +4133,9 @@ class ChannelManager:
 
         try:
             await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
-        except Exception:
+        except Exception as exc:
+            if self._is_goal_in_flight_error(exc):
+                return await self._goal_reply(msg, "busy")
             logger.exception("Failed to set goal through gateway")
             return await self._goal_reply(msg, "set_failed")
 

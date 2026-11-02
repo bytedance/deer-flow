@@ -8,7 +8,7 @@ from support.postgres import asyncpg_test_url
 @pytest.mark.parametrize("scheme", ["postgres", "postgresql", "postgresql+asyncpg"])
 @pytest.mark.parametrize("sslmode", [None, "disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
 def test_asyncpg_test_url_preserves_tls_credentials_and_other_options(scheme, sslmode):
-    uri = f"{scheme}://user:p%40ss%2Fword@localhost:5432/deerflow_test?target_session_attrs=read-write&channel_binding=prefer"
+    uri = f"{scheme}://user:p%40ss%2Fword@localhost:5432/deerflow_test?target_session_attrs=read-write"
     if sslmode is not None:
         uri += f"&sslmode={sslmode}"
     url = make_url(asyncpg_test_url(uri))
@@ -33,3 +33,9 @@ def test_asyncpg_test_url_preserves_explicit_ssl(query):
 def test_asyncpg_test_url_rejects_conflicting_tls_options():
     with pytest.raises(ValueError, match="Conflicting ssl and sslmode"):
         asyncpg_test_url("postgresql://user:password@localhost/test?ssl=require&sslmode=disable")
+
+
+@pytest.mark.parametrize("mode", ["require", "prefer", "disable"])
+def test_asyncpg_test_url_rejects_unsupported_channel_binding(mode):
+    with pytest.raises(ValueError, match="channel_binding"):
+        asyncpg_test_url(f"postgresql://user:password@localhost/test?channel_binding={mode}")
