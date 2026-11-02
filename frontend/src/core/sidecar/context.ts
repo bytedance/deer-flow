@@ -4,6 +4,7 @@ import {
   extractTextFromMessage,
   isHiddenFromUIMessage,
 } from "@/core/messages/utils";
+import { sliceToCodePoints } from "@/core/utils/text";
 
 export type SidecarContextRole = "user" | "assistant";
 
@@ -41,15 +42,26 @@ function roleOfMessage(message: Message): SidecarContextRole | null {
   return null;
 }
 
+const TRUNCATION_MARKER = "\n[truncated]";
+
 function labelOfRole(role: SidecarContextRole) {
   return role === "user" ? "User" : "Assistant";
 }
 
-function truncateContextText(content: string, maxChars: number) {
-  if (content.length <= maxChars) {
-    return content;
+function truncateContextText(
+  content: string,
+  maxChars: number,
+): { text: string; codePointCount: number } {
+  const bounded = sliceToCodePoints(content, maxChars);
+  if (!bounded.truncated) {
+    return { text: content, codePointCount: bounded.codePointCount };
   }
-  return `${content.slice(0, maxChars).trimEnd()}\n[truncated]`;
+  const prefix = bounded.text.trimEnd();
+  const text = `${prefix}${TRUNCATION_MARKER}`;
+  return {
+    text,
+    codePointCount: Array.from(prefix).length + TRUNCATION_MARKER.length,
+  };
 }
 
 export function buildParentConversationContext(
@@ -95,15 +107,15 @@ export function buildParentConversationContext(
     if (remainingChars <= 0) {
       break;
     }
-    const content = truncateContextText(
+    const truncated = truncateContextText(
       message.content,
       Math.min(maxCharsPerMessage, remainingChars),
     );
     selectedMessages.unshift({
       ...message,
-      content,
+      content: truncated.text,
     });
-    selectedChars += content.length;
+    selectedChars += truncated.codePointCount;
   }
 
   return selectedMessages;
