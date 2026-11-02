@@ -972,3 +972,36 @@ class TestAwrapModelCall:
 
         assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
         assert mw._completion_reminder_count_for_runtime(runtime) == 1
+
+
+class TestMalformedStoredTodos:
+    """State is a boundary: a stored value need not match the write_todos shape.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite directly, so the middleware must not assume every entry is a
+    mapping. One unknown shape used to raise on every model call of the thread.
+    """
+
+    def test_before_model_ignores_entries_it_cannot_render(self):
+        mw = TodoMiddleware()
+        state = {"messages": [HumanMessage(content="hi")], "todos": ["oops", {"content": "Keep me"}]}
+        result = mw.before_model(state, _make_runtime())
+        content = result["messages"][0].content
+        assert "Keep me" in content
+        assert "oops" not in content
+
+    def test_after_model_keeps_guarding_for_the_usable_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": ["oops", {"content": "Keep me", "status": "pending"}]}
+        assert mw.after_model(state, _make_runtime()) == {"jump_to": "model"}
+
+    def test_after_model_ignores_malformed_siblings_of_completed_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
+        assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
+    def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) is None
+        assert mw.before_model({"messages": [HumanMessage(content="hi")], "todos": todos}, _make_runtime()) is None

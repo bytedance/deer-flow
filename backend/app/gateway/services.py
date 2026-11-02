@@ -641,6 +641,36 @@ def _normalize_input_messages(
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
 SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
 
+#: The ``write_todos`` status contract the todo middleware renders.
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+
+
+def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject todo lists the middleware cannot render.
+
+    ``todos`` is a reducer channel a caller may Overwrite directly, and the todo
+    middleware reads it on every model call. A value that is not a list of
+    objects with string content would fail those calls on every turn instead of
+    being refused here, so validate the shape at the boundary the same way
+    ``goal`` is.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of todo objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        content = entry.get("content")
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
+        status = entry.get("status", "pending")
+        if not isinstance(status, str) or status not in _TODO_STATUSES:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+        normalized.append({**entry, "content": content, "status": status})
+    return normalized
+
 
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
@@ -686,6 +716,8 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     for channel, value in values.items():
         if channel == "goal":
             stripped[channel] = _strip_external_metadata_from_message_like(_normalize_external_goal(value, location="values.goal"))
+        elif channel == "todos":
+            stripped[channel] = _normalize_external_todos(value, location="values.todos")
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
         elif channel == "delegations" and isinstance(value, list):
@@ -761,6 +793,8 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             result = {**result, "goal": _normalize_external_goal(result["goal"], location="input.goal"), "goal_outcome": None}
+        if "todos" in result:
+            result = {**result, "todos": _normalize_external_todos(result["todos"], location="input.todos")}
     return result
 
 
