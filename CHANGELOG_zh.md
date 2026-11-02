@@ -20,6 +20,10 @@
 
 ### 修复
 
+- **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
+  不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
+  `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
+  
 - **harness：** 重试失败条目不再重新打开已取消的持久子智能体批次。`retry_item`
   此前只保留已暂停批次的状态，因此重试已取消批次中的失败条目会把批次改回
   `queued`，worker 随即认领并执行该条目，批次最终变为 `completed`。现在对已取消
@@ -12739,4 +12743,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
