@@ -143,7 +143,7 @@ class TaskLifecycleContributor(Protocol):
 
 ### `TaskInfo`
 
-Frozen dataclass.
+Frozen dataclass. The host also stores it in every task store it allocates (for a subagent, only when it has a parent run), so `task_store.get(TaskInfo)` names the task from any hook that receives the store.
 
 | Field            | Type                          | Default |
 | ---------------- | ----------------------------- | ------- |
@@ -260,8 +260,11 @@ Frozen dataclass, captured while both sides of the transform still exist.
 | `output_content_hash`     | `str`             |
 | `compacted_message_count` | `int`             |
 | `kept_message_count`      | `int`             |
+| `task_id`                 | `str \| None = None` |
+| `run_id`                  | `str \| None = None` |
+| `thread_id`               | `str \| None = None` |
 
-Hashes are `canonical_hash(message.content)` of the content passed directly, never a stringified copy. To match a message to an event, hash its `content` the same way.
+The three ids come from the `TaskInfo` in the task store the observer receives. They are `None` when there is no task identity: a manual `/compact`, or a subagent without a parent run. Hashes are `canonical_hash(message.content)` of the content passed directly, never a stringified copy. To match a message to an event, hash its `content` the same way.
 
 ## Services
 
@@ -528,5 +531,6 @@ The host's contract version as a dotted string, `"0.2.4"` for the contract this 
 | 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | Experimental `registry.plugin()` with `PluginContribution`, `BrowserModule`, `BackendAction`, `ModelTool`, `ActionContext`, `ToolContext`, `SettingsField` |
 | 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727), [#5685](https://github.com/bytedance/deer-flow/pull/5685) | Request-scoped run evidence: `resolve_run_evidence_reader`, `require_run_evidence_reader`, `RUN_EVIDENCE_READER_RESOLVER_KEY` (#5727). Packaged browser resources: `BrowserAssets`, and `PluginContribution.frontend` also accepts it (#5685) |
 | 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | Plugin resource authorization: `require_plugin_management`, `arequire_plugin_management`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
+| 0.2.10 | #TBD | `CompactionEvent.task_id`, `run_id`, `thread_id`; compaction observers receive the live task store, and every task store carries its `TaskInfo` |
 
 No release has removed a public name.
