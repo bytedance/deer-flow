@@ -23,6 +23,10 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_threads_router.py::test_goal_mutations_reject_run_owned_by_another_worker`
+feeds real PUT/DELETE 409 errors into the IM classifier. Keep this contract check
+so Gateway wording changes cannot silently remove localized busy feedback.
+
 Provider cleanup tests use concrete configuration models and event gates.
 Surface owner-task failures while awaiting lifecycle events; join owners and
 event waiters during teardown.
