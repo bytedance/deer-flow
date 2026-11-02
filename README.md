@@ -2478,6 +2478,11 @@ Rebuild with `make up` after changing the managed extension set. See
 `config.example.yaml` and the
 [reference extension](examples/deerflow-extension-example/) for a complete example.
 
+For extension-owned relational data, see the optional
+[SQLAlchemy storage adapter example](examples/deerflow-storage-adapters/README.md).
+It supports explicit SQLite/MySQL configuration and does not change core persistence
+or LangGraph checkpoint backends.
+
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions. Follow-up suggestions and input polishing skip content blocks with non-string types, preserving the surrounding text instead of failing the request
 
 Visible-content detection (`has_visible_content`, shared by the empty-response, terminal-response and model-length middlewares) and the subagent dispatch snapshot (`ParentContextSnapshot.from_state`) probe content-block types by equality rather than set membership, so a provider-emitted block with an unhashable type such as `type: []` degrades to a skipped block — keeping the surrounding history — instead of raising TypeError out of the middleware chain
