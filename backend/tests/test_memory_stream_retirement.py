@@ -348,3 +348,77 @@ async def test_gateway_wait_finishes_from_terminal_state_after_retirement(store_
     finally:
         await bridge.close()
         await manager.shutdown()
+
+
+async def _publish_behind_retirement(bridge, run_id, monkeypatch):
+    """Queue cleanup before a producer write on the captured generation."""
+    condition = bridge._streams[run_id].condition
+    real_acquire = condition.acquire
+    retirement_queued = asyncio.Event()
+    publication_queued = asyncio.Event()
+    tasks = []
+
+    async def observe_acquire():
+        if asyncio.current_task() is tasks[0]:
+            retirement_queued.set()
+        else:
+            publication_queued.set()
+        return await real_acquire()
+
+    try:
+        async with condition:
+            monkeypatch.setattr(condition, "acquire", observe_acquire)
+            tasks.append(asyncio.create_task(bridge.cleanup(run_id)))
+            await asyncio.wait_for(retirement_queued.wait(), 1)
+            tasks.append(asyncio.create_task(bridge.publish(run_id, "late", {"value": "late"})))
+            await asyncio.wait_for(publication_queued.wait(), 1)
+        await asyncio.wait_for(asyncio.shield(tasks[0]), 1)
+        await asyncio.wait_for(asyncio.shield(tasks[1]), 1)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_publish_queued_behind_cleanup_is_discarded_from_the_retired_generation(monkeypatch):
+    bridge = MemoryStreamBridge()
+    run_id = "retired-publish"
+    await bridge.publish(run_id, "before", {"value": "before"})
+    stream = bridge._streams[run_id]
+    try:
+        await _publish_behind_retirement(bridge, run_id, monkeypatch)
+
+        assert stream.retired
+        assert stream.events == []
+        assert not await bridge.stream_exists(run_id)
+
+        await bridge.publish(run_id, "fresh", {"value": "fresh"})
+        current = bridge._streams[run_id]
+        assert current is not stream
+        assert current.events[0].id.rsplit("-", 1)[-1] == "0"
+    finally:
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_publish_after_end_is_ignored_without_consuming_an_event_id():
+    bridge = MemoryStreamBridge()
+    run_id = "terminal-publish"
+    try:
+        await bridge.publish(run_id, "before", {"value": "before"})
+        stream = bridge._streams[run_id]
+        event_count = bridge._counters[run_id]
+
+        await bridge.publish_end(run_id)
+        await bridge.publish_end(run_id)
+        await bridge.publish(run_id, "late", {"value": "late"})
+
+        assert bridge._counters[run_id] == event_count
+        assert [entry.event for entry in stream.events] == ["before"]
+
+        replay = [item async for item in bridge.subscribe(run_id)]
+        assert [item.event for item in replay[:-1]] == ["before"]
+        assert replay[-1] is END_SENTINEL
+    finally:
+        await bridge.close()
