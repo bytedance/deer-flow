@@ -342,3 +342,30 @@ async def test_ddg_pacing_settings_are_forwarded_only_when_configured():
         await _run()
     assert "min_interval_seconds" not in ddg.call_args.kwargs
     assert "max_retries" not in ddg.call_args.kwargs
+
+
+@pytest.mark.anyio
+async def test_env_resolved_key_is_redacted_from_failures(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "env-exa-secret")
+    with (
+        _config(providers=["exa"]),
+        patch("deerflow.community.exa.tools._build_exa_client", return_value=_exa_client(error=RuntimeError("bad key env-exa-secret"))),
+    ):
+        raw = await web_search_tool.ainvoke({"query": "deer flow"})
+    out = json.loads(raw)
+    assert "env-exa-secret" not in raw
+    assert "[REDACTED]" in out["attempts"][0]["error"]
+
+
+@pytest.mark.anyio
+async def test_brave_query_goes_through_module_query_hygiene():
+    long_query = "  " + "q" * 500 + "  "
+    with (
+        _config(providers=["brave"], brave={"api_key": "k"}),
+        patch("deerflow.community.brave.tools._brave_get", return_value=(_brave_payload("a"), None)) as brave_get,
+    ):
+        out = json.loads(await web_search_tool.ainvoke({"query": long_query}))
+    assert out["provider"] == "brave"
+    sent_query, sent_params = brave_get.call_args.args[2], brave_get.call_args.args[3]
+    assert sent_query == "q" * 400
+    assert sent_params["q"] == "q" * 400

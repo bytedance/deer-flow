@@ -65,8 +65,16 @@ class _Call:
     settings: dict
 
 
+# Environment fallback for each keyed provider; also used to redact the resolved key.
+KEY_ENV = {"brave": "BRAVE_SEARCH_API_KEY", "tavily": "TAVILY_API_KEY", "exa": "EXA_API_KEY"}
+
+
+def _resolve_key(settings: dict, env_name: str) -> str | None:
+    return resolve_api_key(settings.get("api_key")) or resolve_api_key(os.getenv(env_name))
+
+
 def _require_key(settings: dict, env_name: str) -> str:
-    key = resolve_api_key(settings.get("api_key")) or resolve_api_key(os.getenv(env_name))
+    key = _resolve_key(settings, env_name)
     if not key:
         raise ProviderSkipped(f"{env_name} is not configured")
     return key
@@ -95,15 +103,17 @@ def _objects(value: object, container: str) -> list[dict]:
 async def _brave(call: _Call) -> list[dict]:
     from deerflow.community.brave import tools as brave
 
-    api_key = _require_key(call.settings, "BRAVE_SEARCH_API_KEY")
+    api_key = _require_key(call.settings, KEY_ENV["brave"])
+    # Same strip + length cap as the Brave tool, so an over-long query is not a 422.
+    query = brave._clean_query(call.query)
     params: dict[str, object] = {
-        "q": call.query,
+        "q": query,
         "count": min(call.max_results, brave._BRAVE_WEB_MAX_COUNT),
         "text_decorations": False,
     }
     if call.time_range is not None:
         params["freshness"] = BRAVE_FRESHNESS_BY_TIME_RANGE[call.time_range]
-    data, error_json = await asyncio.to_thread(brave._brave_get, brave._BRAVE_WEB_ENDPOINT, api_key, call.query, params, service_name="Brave Search")
+    data, error_json = await asyncio.to_thread(brave._brave_get, brave._BRAVE_WEB_ENDPOINT, api_key, query, params, service_name="Brave Search")
     if error_json is not None:
         raise ProviderFailed(json.loads(error_json).get("error", error_json))
     web = data.get("web")
@@ -116,7 +126,7 @@ async def _brave(call: _Call) -> list[dict]:
 async def _tavily(call: _Call) -> list[dict]:
     from deerflow.community.tavily import tools as tavily
 
-    api_key = _require_key(call.settings, "TAVILY_API_KEY")
+    api_key = _require_key(call.settings, KEY_ENV["tavily"])
     search_kwargs: dict[str, object] = {"max_results": call.max_results}
     for key in ("include_domains", "exclude_domains"):
         if call.settings.get(key):
@@ -139,7 +149,7 @@ async def _tavily(call: _Call) -> list[dict]:
 async def _exa(call: _Call) -> list[dict]:
     from deerflow.community.exa import tools as exa
 
-    api_key = _require_key(call.settings, "EXA_API_KEY")
+    api_key = _require_key(call.settings, KEY_ENV["exa"])
     if call.time_range is not None:
         raise ProviderSkipped("time_range is not supported by the Exa provider")
     extra = {**call.settings, "api_key": api_key}
@@ -249,7 +259,8 @@ async def web_search_tool(query: str, max_results: int = DEFAULT_MAX_RESULTS, ti
             attempts.append({"provider": name, "status": "skipped", "reason": str(e)})
             continue
         except Exception as e:
-            secret = resolve_api_key(settings.get("api_key"))
+            # Redact the key the adapter actually used, whether from config or the environment.
+            secret = _resolve_key(settings, KEY_ENV[name]) if name in KEY_ENV else None
             error = redact_secret(f"{type(e).__name__}: {e}" if not isinstance(e, ProviderFailed) else e, secret)
             logger.warning("search_chain provider %s failed: %s", name, error)
             attempts.append({"provider": name, "status": "failed", "error": error})
