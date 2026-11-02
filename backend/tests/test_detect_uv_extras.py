@@ -193,6 +193,7 @@ def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
     [
         ("tools:\n  - name: browser_navigate\n    engine: camoufox\n", ["browser", "camoufox"]),
         ("tools:\n- engine: 'Camoufox'\n  name: browser_navigate\n", ["browser", "camoufox"]),
+        ("tools:\n  - name: browser_navigate\n    engine: ' Camoufox '\n", ["browser", "camoufox"]),
         ("tools:\n  - name: browser_navigate\n    engine: chromium\n", ["browser"]),
         ("tools:\n  - name: browser_navigate\n    # engine: camoufox\n", ["browser"]),
         # Another tool's engine field never applies to browser_navigate.
@@ -203,6 +204,18 @@ def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
 def test_detect_camoufox_engine_on_browser_navigate(tmp_path, text, expected):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(text)
+    assert detect.detect_from_config(cfg) == expected
+
+
+@pytest.mark.parametrize(("env_value", "expected"), [("camoufox", ["browser", "camoufox"]), (" Camoufox ", ["browser", "camoufox"]), ("chromium", ["browser"]), (None, ["browser"])])
+def test_detect_camoufox_engine_from_env_reference(tmp_path, monkeypatch, env_value, expected):
+    # The runtime resolves `$VAR` before reading engine, so the detector must too.
+    if env_value is None:
+        monkeypatch.delenv("BROWSER_ENGINE", raising=False)
+    else:
+        monkeypatch.setenv("BROWSER_ENGINE", env_value)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("tools:\n  - name: browser_navigate\n    engine: $BROWSER_ENGINE\n")
     assert detect.detect_from_config(cfg) == expected
 
 

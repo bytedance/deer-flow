@@ -131,6 +131,13 @@ def _unquote(value: str) -> str:
     return value
 
 
+def _resolve_env_reference(value: str) -> str:
+    """Mirror ``AppConfig.resolve_env_variables``: a whole-value ``$NAME`` reads the environment."""
+    if value.startswith("$"):
+        return os.environ.get(value[1:], "")
+    return value
+
+
 def section_value(lines: list[str], section: str, key: str) -> str | None:
     """Return the value of `section.key` from a flat-ish YAML, or None.
 
@@ -394,7 +401,8 @@ def detect_from_config(path: Path) -> list[str]:
             extras.add(provider)
     if tools_include_name(lines, "browser_navigate"):
         extras.add("browser")
-        if (tool_field_value(lines, "browser_navigate", "engine") or "").lower() == "camoufox":
+        # Normalize like the runtime does, or startup sync could drop the extra it needs.
+        if _resolve_env_reference(tool_field_value(lines, "browser_navigate", "engine") or "").strip().lower() == "camoufox":
             extras.add("camoufox")
     for provider in models_use_providers(lines):
         extra = _PROVIDER_EXTRAS.get(provider)
