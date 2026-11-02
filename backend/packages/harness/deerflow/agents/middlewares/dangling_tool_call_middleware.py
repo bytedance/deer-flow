@@ -137,11 +137,8 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     """Consume the open malformed call that ``result`` answers, returning its new id.
 
     Malformed originals are all equally empty, so they cannot identify their own
-    result; ``open_calls`` is already scoped to the issuing turn. Invalid calls never
-    execute, so they are not candidates at all: their ToolMessage is the placeholder
-    this middleware injects, and letting one share a name must not make the only
-    executable call look ambiguous. Within that turn the result's name narrows the
-    remaining candidates, and only a *forced* choice is taken:
+    result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
+    result's name narrows the candidates, and only a *forced* choice is taken:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
@@ -153,13 +150,30 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
       A *missing* result means a call was interrupted — this middleware's own trigger —
       so the surviving results can no longer be trusted to line up with the calls.
 
+    Claiming is two-tier, executable first. An invalid call never executes, so a result
+    that an executable call can take must go to it: a same-name invalid sibling must not
+    make the only executable call look ambiguous (#7821), and it must not take that
+    call's result. When no executable call matches, an invalid entry still claims the
+    result — a real ToolMessage already in history for an invalid call is that call's own
+    output, and dropping it would swap real output for the recovery placeholder (#2894).
+
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["executable"] and _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
-    if not candidates or (len(candidates) > 1 and not positional):
-        return None
-    return open_calls.pop(candidates[0])["synthetic"]
+
+    def compatible(executable: bool) -> list[int]:
+        return [position for position, entry in enumerate(open_calls) if entry["executable"] is executable and _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
+
+    for executable in (True, False):
+        candidates = compatible(executable)
+        if not candidates:
+            continue
+        # A multi-match under one tier is ambiguous; the invalid tier is no more
+        # resolvable than the executable one, so stop rather than fall through.
+        if len(candidates) > 1 and not positional:
+            return None
+        return open_calls.pop(candidates[0])["synthetic"]
+    return None
 
 
 def _normalize_tool_name(name: object) -> str:
