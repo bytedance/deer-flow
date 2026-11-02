@@ -103,6 +103,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
 
         return {
             "suppress_truncated_tool_calls": True,
+            "mark_text_only_length_termination": True,
             "length_notice_hash": canonical_hash(_MODEL_LENGTH_CAPPED_CONTENT),
         }
 
@@ -157,7 +158,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         content_source = clone_ai_message_with_tool_calls(last.model_copy(update={"invalid_tool_calls": []}), [])
         contains_tool_call = has_tool_call_intent(last) or content_source.content is not last.content
         contains_visible_content = has_visible_content(content_source)
-        if not contains_tool_call and contains_visible_content:
+        if not contains_tool_call and contains_visible_content and (last.additional_kwargs or {}).get("model_length_termination"):
             return None
 
         additional_kwargs = dict(last.additional_kwargs or {})
@@ -175,7 +176,9 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         }
         replacement = content_source.model_copy(
             update={
-                "content": append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT),
+                # Text-only caps still need the terminal marker for downstream
+                # guards, but preserve their visible response without a notice.
+                "content": append_visible_text(content_source, _MODEL_LENGTH_CAPPED_CONTENT) if contains_tool_call or not contains_visible_content else content_source.content,
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,
