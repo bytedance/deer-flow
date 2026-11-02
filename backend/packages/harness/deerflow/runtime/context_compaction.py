@@ -15,6 +15,7 @@ from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -155,7 +156,9 @@ async def compact_thread_context(
     app_config: AppConfig | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
-    resolved_app_config = app_config or get_app_config()
+    # Off the event loop (see utils/AGENTS.md): reading the live config stats
+    # and hashes config.yaml. The route passes no app_config.
+    resolved_app_config = app_config or await run_assembly(get_app_config)
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
     snapshot_config = snapshot.config or {}
@@ -182,7 +185,10 @@ async def compact_thread_context(
         agent_config=agent_config,
     )
     memory_enabled = binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
-    middleware = _create_compaction_middleware(
+    # Building the middleware constructs its summarization models, and provider
+    # construction can read local credentials; keep it off the loop too.
+    middleware = await run_assembly(
+        _create_compaction_middleware,
         app_config=resolved_app_config,
         keep=keep,
         run_model_name=run_model_name,

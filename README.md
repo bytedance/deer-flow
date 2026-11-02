@@ -2479,9 +2479,9 @@ Backend response cleanup preserves unrelated tag names such as `<think-tank>` an
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
 Input polishing, follow-up suggestions, background project-file summaries, the
-LLM skill scanner, and the `/goal` evaluator construct their model providers off
-the Gateway event loop, so local credential reads do not stall unrelated
-requests.
+LLM skill scanner, the `/goal` evaluator, and manual context compaction
+(`/compact`) construct their model providers off the Gateway event loop, so
+local credential reads do not stall unrelated requests.
 
 When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input. Accompanying answer text stays outside the execution steps panel, and answering the request keeps previously completed text in the conversation while the agent continues.
 

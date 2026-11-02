@@ -123,17 +123,22 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 One-shot input-polish, follow-up-suggestion, and project-file-summary helpers,
 skill moderation (`scan_skill_content`) and the goal evaluator build providers
 through `run_assembly` before awaiting inference; the run worker calls its
-cached evaluator factory the same way. Provider construction can read local
+cached evaluator factory the same way, and manual compaction
+(`compact_thread_context`) builds its summarization middleware, with the models
+it builds eagerly, there too. Provider construction can read local
 credentials; keep it off the event loop and the default executor while
 preserving request context. Cancellation during construction must not start
 inference. A scan without `app_config` (in-graph `skill_manage`) reads the live
 config in the same pool, and its fail-closed fallback reuses that config rather
-than reading it again on the loop. Other model construction is separate and
-not covered here: manual compaction (`compact_thread_context` builds the
-summarization middleware and its models inline) and, inside graph runs, title
+than reading it again on the loop. Compaction without `app_config` (the
+`/compact` route) reads the live config in that pool as well. Other model
+construction is separate and not covered here: the middleware's lazy rebuild
+of the run model during summary generation when its eager build failed
+(`DeerFlowSummarizationMiddleware._model_for`) and, inside graph runs, title
 generation, summarization and subagent construction.
-Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py` and
-`tests/blocking_io/test_system_model_offloop.py`.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`,
+`tests/blocking_io/test_system_model_offloop.py` and
+`tests/blocking_io/test_compaction_model_offloop.py`.
 
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
