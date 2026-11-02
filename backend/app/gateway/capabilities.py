@@ -194,6 +194,10 @@ class LarkAdapter:
 
 class SkillAdapter:
     async def list_installations(self, context: AdapterContext) -> list[CapabilityInstallation]:
+        # The listing reports the enabled flag, which the storage layer fails
+        # closed on an unreadable extensions config; keep this read surface
+        # loud about the broken config instead of serving the degraded list.
+        skills._assert_extensions_config_readable()
         response = await asyncio.to_thread(lambda: skills._get_user_skill_storage(context.config).load_skills(enabled_only=False))
         response = await skills._filter_visible_skills(context.request, context.config, response)
         return [
