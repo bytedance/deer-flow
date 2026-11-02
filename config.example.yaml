@@ -940,12 +940,9 @@ tools:
   #   providers: [brave, tavily, exa, searxng, ddg]
   #   max_results: 5
   #   fallback_on_empty: false   # true: an empty result also moves to the next provider
-  #   brave:
-  #     api_key: $BRAVE_SEARCH_API_KEY   # Optional if the env var is set
-  #   tavily:
-  #     api_key: $TAVILY_API_KEY         # Optional if the env var is set
-  #   exa:
-  #     api_key: $EXA_API_KEY            # Optional if the env var is set; skipped for time_range searches
+  #   # Keys come from BRAVE_SEARCH_API_KEY, TAVILY_API_KEY and EXA_API_KEY; a provider
+  #   # without one is skipped. Add e.g. `brave: {api_key: ...}` only to override the env
+  #   # var. Exa is also skipped for time_range searches.
   #   searxng:
   #     base_url: http://localhost:8088  # Required for SearXNG (Docker: http://searxng:8080)
   #   ddg:

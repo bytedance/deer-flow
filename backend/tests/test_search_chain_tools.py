@@ -388,3 +388,29 @@ async def test_searxng_empty_answer_with_failed_engines_fails_over():
     assert attempt["provider"] == "searxng"
     assert attempt["status"] == "failed"
     assert "google (timeout)" in attempt["error"]
+
+
+def _uncommented_chain_example() -> str:
+    from pathlib import Path
+
+    lines = (Path(__file__).resolve().parents[2] / "config.example.yaml").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if "use: deerflow.community.search_chain.tools:web_search_tool" in line) - 2
+    block = []
+    for line in lines[start:]:
+        if not line.strip():
+            break
+        block.append(line.replace("  # ", "", 1))
+    return "\n".join(block)
+
+
+def test_config_example_chain_block_loads_on_a_keyless_install():
+    # Uncommenting the documented example must not stop the Gateway from loading
+    # when no provider key is set: the chain skips unconfigured providers itself.
+    import yaml
+
+    from deerflow.config.app_config import AppConfig
+
+    [entry] = yaml.safe_load(_uncommented_chain_example())
+    assert entry["use"] == "deerflow.community.search_chain.tools:web_search_tool"
+    resolved = AppConfig.resolve_env_variables(entry)
+    assert resolved["providers"] == ["brave", "tavily", "exa", "searxng", "ddg"]
