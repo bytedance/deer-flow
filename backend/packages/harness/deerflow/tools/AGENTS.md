@@ -122,6 +122,11 @@ E2B output sync records remote file versions and actual host file metadata in a 
 
 **ACP agent tools**:
 - `invoke_acp_agent` - Invokes external ACP-compatible agents from `config.yaml`
+- Preserve ACP `max_tokens` / `max_turn_requests` stop reasons in the returned
+  string with a `Partial results:` notice. Keep streamed text and empty-output
+  fallback; normal `end_turn` output is unchanged. The shared result normalizer
+  recognizes this notice as `partial_success`, without treating incidental
+  response text as an authentication failure. Do not retry a limited invocation.
 - ACP launchers must be real ACP adapters. The standard `codex` CLI is not ACP-compatible by itself; configure a wrapper such as `npx -y @zed-industries/codex-acp` or an installed `codex-acp` binary
 - MiniMax Code speaks ACP directly: configure `command: mcode` with `args: ["acp"]`. It receives DeerFlow's enabled MCP servers and uses the per-thread ACP workspace; the Gateway process must have an authenticated `mcode` executable on `PATH`
 - `timeout_seconds` is one deadline shared by initialization, session creation, and prompt after process launch. Keep the SDK process context outside the timeout so teardown finishes before the tool returns; workspace/MCP preparation and teardown are outside the protocol budget. Real-process regressions in `tests/test_invoke_acp_agent_tool.py` cover every hung phase, the shared budget, success, and caller cancellation. Only report budget expiry when the timeout context's `expired()` is true; otherwise propagate SDK `TimeoutError` to `_format_invocation_error`.

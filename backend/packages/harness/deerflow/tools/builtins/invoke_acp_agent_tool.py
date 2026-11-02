@@ -363,7 +363,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             )
             mcp_servers = []
 
-        async def _converse(conn) -> None:
+        async def _converse(conn) -> Any:
             await conn.initialize(
                 protocol_version=PROTOCOL_VERSION,
                 client_capabilities=ClientCapabilities(),
@@ -373,7 +373,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             if agent_config.model:
                 session_kwargs["model"] = agent_config.model
             session = await conn.new_session(**session_kwargs)
-            await conn.prompt(
+            return await conn.prompt(
                 session_id=session.session_id,
                 prompt=[text_block(prompt)],
             )
@@ -388,7 +388,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 logger.info("Spawning ACP agent '%s' with command '%s' and args %s in cwd %s", agent, cmd, args, physical_cwd)
                 try:
                     async with asyncio.timeout(agent_config.timeout_seconds) as deadline:
-                        await _await_while_agent_runs(_converse(conn), proc)
+                        prompt_response = await _await_while_agent_runs(_converse(conn), proc)
                 except TimeoutError:
                     if not deadline.expired():
                         raise
@@ -423,6 +423,9 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             result = client.collected_text
             logger.info("ACP agent '%s' returned %s", agent, result[:1000])
             logger.info("ACP agent '%s' returned %d characters", agent, len(result))
+            stop_reason = getattr(prompt_response, "stop_reason", None)
+            if stop_reason in ("max_tokens", "max_turn_requests"):
+                return f"Partial results: ACP agent '{agent}' stopped with {stop_reason}; the response may be incomplete.\n\n{result or '(no response)'}"
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)
