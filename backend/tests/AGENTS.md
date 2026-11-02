@@ -508,6 +508,9 @@ smoke checks. Keep config content and secret stability checks portable; isolate
 POSIX owner-only permission assertions so Windows skips only those checks.
 Nginx path expectations must include quoted-string escaping for native paths.
 
+Version-bump retries use the real shell scripts in an isolated checkout. Fail
+`uv lock` once, then rerun the same version and assert the lock refresh and
+verification occur while already aligned source bytes remain unchanged.
 ## Launcher dotenv parsing
 
 `serve.sh` never sources root `.env`: stdlib-only `scripts/dotenv_exports.py`
