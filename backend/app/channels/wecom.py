@@ -40,6 +40,10 @@ else:
 _WECOM_ACK_REJECTION_PREFIX = "Reply ack error"
 
 
+def _group_workspace_id(aibotid: str | None, chatid: str) -> str:
+    return f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+
+
 def _file_md5(path: str) -> str:
     md5_hasher = hashlib.md5()
     with open(path, "rb") as file_obj:
@@ -587,8 +591,12 @@ class WeComChannel(Channel):
         }
         if body.get("chatid") is not None:
             inbound_metadata["chatid"] = body.get("chatid")
+        # A group's conversation is the group, a private chat's the sender.
+        # Keyed by sender alone, a member's private chat and every group they
+        # wrote in shared one thread wherever no group connection kept them apart.
+        group_chatid = str(body.get("chatid") or "").strip() if body.get("chattype") == "group" else ""
         inbound = self._make_inbound(
-            chat_id=user_id,  # keep user's conversation in memory
+            chat_id=group_chatid or user_id,
             user_id=user_id,
             text=text,
             msg_type=inbound_type,
@@ -596,7 +604,7 @@ class WeComChannel(Channel):
             files=files or [],
             metadata=inbound_metadata,
         )
-        inbound.topic_id = user_id  # keep the same thread
+        inbound.topic_id = user_id  # one thread per member in each conversation
 
         stream_id = generate_req_id("stream")
         self._ws_frames[msg_id] = frame
@@ -614,6 +622,8 @@ class WeComChannel(Channel):
                 pass
 
             inbound = await self._attach_connection_identity(inbound)
+            if group_chatid:
+                await self._carry_over_sender_keyed_group_thread(inbound, group_chatid)
             self._commit_reserved_inbound(reservation, inbound)
         finally:
             reservation.release()
@@ -625,7 +635,7 @@ class WeComChannel(Channel):
         if chattype == "group":
             if not chatid or self._connection_repo is None:
                 return inbound
-            workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+            workspace_id = _group_workspace_id(aibotid, chatid)
             inbound = await attach_connection_identity(inbound, repo=self._connection_repo, provider="wecom", workspace_id=workspace_id, fallback_without_workspace=False)
             if inbound.connection_id:
                 return inbound
@@ -645,6 +655,35 @@ class WeComChannel(Channel):
             provider="wecom",
             workspace_id=aibotid,
             fallback_without_workspace=True,
+        )
+
+    async def _carry_over_sender_keyed_group_thread(self, inbound: InboundMessage, chatid: str) -> None:
+        """Rebind a group connection's thread from the sender key it used to have.
+
+        Group messages were once keyed like private ones (``userid``, ``userid``).
+        A group connection belongs to one group, so its thread under that key is
+        this group's and moves to the group key once. A legacy group binding
+        spans every group of the bot; its old thread is left behind rather than
+        continued in whichever group writes first.
+        """
+        repo = self._connection_repo
+        if repo is None or not inbound.connection_id or not inbound.owner_user_id:
+            return
+        aibotid = str(inbound.metadata.get("aibotid") or "").strip() or None
+        if inbound.workspace_id != _group_workspace_id(aibotid, chatid):
+            return
+        if await repo.get_thread_id(inbound.connection_id, inbound.chat_id, inbound.topic_id) is not None:
+            return
+        previous = await repo.get_thread_id(inbound.connection_id, inbound.user_id, inbound.user_id)
+        if previous is None:
+            return
+        await repo.claim_thread_id(
+            connection_id=inbound.connection_id,
+            owner_user_id=inbound.owner_user_id,
+            provider=self.name,
+            external_conversation_id=inbound.chat_id,
+            external_topic_id=inbound.topic_id,
+            thread_id=previous,
         )
 
     async def _bind_connection_from_connect_code(self, *, frame: dict[str, Any], user_id: str, code: str) -> bool:
@@ -669,7 +708,7 @@ class WeComChannel(Channel):
             if not chatid:
                 await self._send_connection_reply(frame, await self._connect_reply_text("incomplete", owner_user_id=state["owner_user_id"]))
                 return True
-            workspace_id = f"{aibotid}:group:{chatid}" if aibotid else f"group:{chatid}"
+            workspace_id = _group_workspace_id(aibotid, chatid)
             raw_group_name = str(body.get("chatname") or body.get("group_name") or "").strip()
             workspace_name = notification_group_display_name(state.get("metadata")) or raw_group_name[:256] or None
             metadata: dict[str, Any] = {
