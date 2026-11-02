@@ -2,6 +2,7 @@
 
 import json
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import httpx
@@ -423,6 +424,14 @@ def test_coerce_bool(value, default, expected):
     [
         (30, 10, 30),
         ("45", 10, 45),
+        (1, 10, 1),
+        (" 1 ", 10, 1),
+        (0, 10, 10),
+        (-1, 10, 10),
+        ("0", 10, 10),
+        ("-1", 10, 10),
+        pytest.param(10**400, 10, 10, id="unrepresentable-int"),
+        pytest.param(str(10**400), 10, 10, id="unrepresentable-string"),
         ("not-a-number", 10, 10),
         (True, 10, 10),
         (False, 10, 10),
@@ -431,7 +440,7 @@ def test_coerce_bool(value, default, expected):
     ],
 )
 def test_coerce_timeout(value, default, expected):
-    """_coerce_timeout accepts ints and numeric strings, rejecting bools and junk."""
+    """Only positive, representable integer timeouts override the default."""
     assert _coerce_timeout(value, default) == expected
 
 
@@ -449,3 +458,56 @@ def test_coerce_timeout(value, default, expected):
 def test_coerce_proxy(value, expected):
     """_coerce_proxy trims strings and treats empty/non-string values as None."""
     assert _coerce_proxy(value) == expected
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_retries", [0, 1])
+@pytest.mark.parametrize(
+    ("configured_timeout", "expected_timeout"),
+    [
+        pytest.param(0, 10, id="zero-int"),
+        pytest.param(-1, 10, id="negative-int"),
+        pytest.param("0", 10, id="zero-string"),
+        pytest.param("-1", 10, id="negative-string"),
+        pytest.param(10**400, 10, id="unrepresentable-int"),
+        pytest.param(str(10**400), 10, id="unrepresentable-string"),
+        pytest.param(30, 30, id="positive-int"),
+        pytest.param("45", 45, id="positive-string"),
+        pytest.param(None, 10, id="default"),
+        pytest.param(True, 10, id="boolean"),
+    ],
+)
+async def test_web_fetch_tool_normalizes_timeout_before_http_request(monkeypatch, configured_timeout, expected_timeout, max_retries):
+    """Tool configuration must produce a usable Jina header and HTTPX timeout."""
+    requests = []
+    clients = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, text="<html>Fetched page</html>")
+
+    original_client = httpx.AsyncClient
+
+    def make_client(**kwargs):
+        clients.append(kwargs)
+        return original_client(transport=httpx.MockTransport(handle), **kwargs)
+
+    # Replace only the provider's HTTPX binding, preserving other clients/tests.
+    monkeypatch.setattr(jina_client_module, "httpx", SimpleNamespace(**(vars(httpx) | {"AsyncClient": make_client})))
+    tool_config = SimpleNamespace(model_extra={"timeout": configured_timeout, "trust_env": False, "max_retries": max_retries, "retry_budget_seconds": 60})
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: tool_config))
+
+    def extract_article(html, *, url):
+        assert html == "<html>Fetched page</html>"
+        assert url == "https://example.com"
+        return SimpleNamespace(to_markdown=lambda: "Fetched page")
+
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.readability_extractor", SimpleNamespace(extract_article=extract_article))
+
+    assert await web_fetch_tool.ainvoke("https://example.com") == "Fetched page"
+    assert len(clients) == 1
+    assert "proxy" not in clients[0]
+    assert clients[0]["trust_env"] is False
+    assert len(requests) == 1
+    assert requests[0].headers["X-Timeout"] == str(expected_timeout)
+    assert requests[0].extensions["timeout"] == dict.fromkeys(("connect", "read", "write", "pool"), expected_timeout)

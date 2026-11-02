@@ -1,4 +1,5 @@
 import asyncio
+import math
 
 from langchain.tools import tool
 
@@ -22,16 +23,13 @@ def _coerce_bool(value: object, default: bool) -> bool:
 
 
 def _coerce_timeout(value: object, default: int) -> int:
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
         return default
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return default
-    return default
+    try:
+        timeout = int(value)
+        return timeout if timeout > 0 and math.isfinite(timeout) else default
+    except (ValueError, OverflowError):
+        return default
 
 
 def _coerce_proxy(value: object) -> str | None:
