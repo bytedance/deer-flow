@@ -1,5 +1,9 @@
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
+`supports_lazy_agent_skill_isolation` defaults false. Opt in only for
+read-only projections on acquire/reuse, not uploads. Defer only
+fresh state/context-unbound runs; rebind others. Gate first tool.
+
 Sandbox restore requires a thread ID, even forks.
 
 Signal managed bash before draining cancellation. Stop only the lease owner’s

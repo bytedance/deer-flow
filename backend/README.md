@@ -74,6 +74,12 @@ receive a transient hint on the next model request.
 
 ### Sandbox System
 
+With lazy initialization, a fresh AIO run prepares its authorized Agent skill
+view without acquiring a container until a sandbox-backed tool needs one.
+Existing sandbox state still requires eager policy rebinding; upload-based
+providers still acquire and synchronize skills eagerly. Explicit sandbox
+prewarming remains a separate opt-in behavior.
+
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
