@@ -2592,6 +2592,10 @@ historical user messages do not grant current authorization. See
 
 Automatic and manual compaction exclude old todo reminder messages from both the
 summary input and retained context. The current todo list stays in thread state.
+Manual thread-state updates and run input must send it as a list of objects with
+string `content` and a `pending` / `in_progress` / `completed` status; another
+shape is rejected with HTTP 400, and an already-stored entry of an unusable shape
+is ignored instead of failing the model call.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.

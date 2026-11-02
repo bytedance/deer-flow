@@ -195,6 +195,10 @@ and an explicit invalid/null top-level value clears a legacy preference. Treat
 `disable_clarification` like `non_interactive`. Before run/state writes,
 `_normalize_input_messages` rejects canonical external system/developer roles;
 only `AUTH_SOURCE_INTERNAL` run input may retain them.
+`_normalize_external_todos` applies the same per-entry 400 boundary to
+caller-written `todos` (object entries, string content, a known status), and the
+todo middleware drops stored entries of any other shape so an already-persisted
+or directly integrated value cannot abort every model call on the thread.
 
 `contracts/ui_locales.v1.json` pins the UI/Gateway locale allowlists in tests;
 DeerMem's portable map stays separate. Scheduled/MCP notification runs omit
