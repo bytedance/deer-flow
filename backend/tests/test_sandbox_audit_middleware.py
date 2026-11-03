@@ -1184,3 +1184,88 @@ def test_fork_bomb_pattern_matches_static_scan_gate():
     from deerflow.skills.skillscan.orchestrator import _FORK_BOMB_PATTERN
 
     assert any(pattern.pattern == _FORK_BOMB_PATTERN for pattern in _HIGH_RISK_PATTERNS)
+
+
+class TestDestructiveRmFlagAndTargetSpellings:
+    """`rm` must be judged from its tokens, not from one flag word plus an end-of-line anchor.
+
+    The text rule reads `rm`, one flag word containing `r`, then the target and
+    nothing after it. That misses four real shapes and all four delete the same
+    directory: `-r -f` (the `r` is its own word), `--recursive` (long form),
+    `--` (end-of-options marker between flags and target), and any trailing word
+    such as a comment or a second operand. `$HOME` / `${HOME}` name the same
+    directory as `~`, and an unexpanded `$HOME` survives into the token list
+    because the sandbox runs the command through a shell, not Python.
+    """
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # --- same deletion, four flag shapes ---
+            "rm -rf ~/",
+            "rm -r -f ~/",
+            "rm -f -r /home",
+            "rm --recursive ~/",
+            "rm --recursive --force /home",
+            "rm -Rf $HOME/*",
+            "/bin/rm -Rf $HOME/*",
+            "sudo rm -rf $HOME",
+            # --- the end-of-options marker hides the target from the text rule ---
+            "rm -rf -- ~/",
+            "rm -rf -- $HOME/",
+            "rm -rf -- ~/ # comment",
+            # --- a trailing word after the target defeats the line anchor ---
+            "rm -rf ~/ # cleanup",
+            "rm -rf ~/ x",
+            "rm -rf $HOME/ --",
+            # --- the home directory under its variable spellings ---
+            "rm -rf $HOME/",
+            "rm -rf $HOME",
+            "rm -rf ${HOME}",
+            'rm -rf "$HOME/"',
+            "rm -rf '${HOME}'/*",
+            # --- inside a compound command ---
+            "cd /workspace && rm -rf -- $HOME/",
+            "safe;rm -rf -r $HOME",
+            "rm -rf /home/dev/",  # the standard trees by prefix, not only bare
+            # --- startup files under the variable spellings ---
+            "> $HOME/.bashrc",
+            ">> ${HOME}/.zshrc",
+            '> "$HOME/.bash_profile"',
+        ],
+    )
+    def test_destructive_rm_classified_as_block(self, cmd):
+        assert _classify_command(cmd) == "block", f"Expected 'block' for: {cmd!r}"
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # --- false-positive guards: must stay allowed ---
+            "rm -rf ./build",
+            "rm -r -f /tmp/foo",
+            "rm -rf /homekit",  # `/home` as a word boundary, not a prefix
+            "rm -rf /rootfs/tmp",
+            "rm -rf ~user/",  # another user's home is not `$HOME`
+            "rm -rf $HOMELESS/x",  # a different variable that merely starts with $HOME
+            "rm -f ~/notes.txt",  # no recursion: outside this rule's scope
+            "rm -r --dry-run ~/x",
+            "rm -- -rf ~/",  # after `--` a dash-word is an operand: no recursion, so no tree goes
+            "echo $HOME",
+            "ls -la ~/",
+        ],
+    )
+    def test_benign_rm_classified_as_pass(self, cmd):
+        assert _classify_command(cmd) == "pass", f"Expected 'pass' for: {cmd!r}"
+
+    def test_rm_options_are_not_treated_as_operands(self):
+        """`rm` has no option whose value is a separate word, which is what makes the
+        token walk above sound. Pinned so a future flag list that does (e.g. a
+        wrapper's `--backup=…` style option) is noticed here rather than silently
+        shifting an operand."""
+        from deerflow.agents.middlewares.sandbox_audit_middleware import _rm_recursively_deletes_home_or_root
+
+        assert _rm_recursively_deletes_home_or_root(["rm", "-rf", "--", "~/"]) is True
+        assert _rm_recursively_deletes_home_or_root(["rm", "--", "./build"]) is False
+        # After `--`, a leading dash is an operand, not a flag: in
+        # `rm -- -rf ~/` nothing is recursive, so no tree can go.
+        assert _rm_recursively_deletes_home_or_root(["rm", "--", "-rf", "~/"]) is False

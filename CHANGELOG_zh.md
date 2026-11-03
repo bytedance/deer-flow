@@ -20,6 +20,13 @@
 
 ### 修复
 
+- **沙箱：** 现在无论怎么写，递归删除主目录或系统根目录的 `rm` 都会被拦。此前的审计规则只认
+  「一个含 `r` 的短选项词 ＋ 紧跟目标 ＋ 行尾」这一种写法，所以 `rm -r -f ~/`、
+  `rm --recursive --force /home`、`rm -rf -- ~/`、`rm -rf ~/ # cleanup` 都被判为安全，
+  `~` 的 `$HOME` / `${HOME}` 写法也一概不认识。现在按 token 解析 `rm` 的参数，覆盖启动文件的重定向规则
+  也接受变量写法。正常删除不受影响：不带递归（`rm -f ~/notes.txt`）、`--` 之后名为 `-rf` 的文件、
+  其他用户的主目录（`~user`）、`/homekit` 与 `/rootfs` 仍然放行。([#7851])
+
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
   `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
@@ -12745,3 +12752,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7851]: https://github.com/bytedance/deer-flow/pull/7851
