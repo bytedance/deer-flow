@@ -26,6 +26,12 @@
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
 
+- **智能体：** 当模型提供方把工具调用 ID 传成 `null` 时，被读前写闸门拦截的写入、
+  或被工具进度保护拦截的 `[TOOL_BLOCKED]` 结果，现在能正常送到模型。此前两个闸门
+  会把缺失的 ID 写成字面量 `"None"`，悬空调用修复把它当成有效 ID，于是结果被当作
+  孤儿丢弃并替换成“调用被中断”。现在闸门写入空 ID，修复逻辑也会把 null 和空字符串
+  视为同一种缺失身份。([#7857])
+
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
   `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
@@ -12752,3 +12758,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7857]: https://github.com/bytedance/deer-flow/pull/7857

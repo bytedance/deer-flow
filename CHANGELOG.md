@@ -28,6 +28,14 @@ This section accumulates work toward the **2.3.0** milestone
   and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
   extensions keep working. ([#7831])
 
+- **agents:** A blocked write (read-before-write gate) or `[TOOL_BLOCKED]`
+  progress-guard result now reaches the model when the provider sent `null` as
+  the tool-call id. Both gates wrote the missing id as the literal string
+  `"None"`, which looked valid to the dangling-call repair, so the result was
+  dropped as an orphan and replaced with "call was interrupted". The gates now
+  write an empty id, and the repair pass treats null and empty as the same
+  missing identity. ([#7857])
+
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
   or during a DingTalk outage. dingtalk-stream logs a failed card request and
@@ -16008,3 +16016,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7857]: https://github.com/bytedance/deer-flow/pull/7857
