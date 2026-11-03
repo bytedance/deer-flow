@@ -74,7 +74,7 @@ async def test_native_async_stream_preserves_deltas_custom_events_and_history(mo
 
 
 @pytest.mark.asyncio
-async def test_async_assembly_does_not_block_loop_or_mix_callers(monkeypatch):
+async def test_async_assembly_runs_off_loop_and_preserves_caller_traces(monkeypatch):
     loop_thread = threading.get_ident()
     assembly_threads = []
     observed = []
@@ -263,15 +263,49 @@ async def test_overlapping_assembly_keeps_each_callers_graph(monkeypatch):
     client = make_client(monkeypatch, first)
     first_graph = client._agent
     second_graph = make_client(monkeypatch, second)._agent
+    first_assembled = threading.Event()
+    release_first = threading.Event()
+
+    class ObservedAssemblyLock:
+        """Release the first builder only when a real peer contends for its lock."""
+
+        def __init__(self):
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                release_first.set()
+                assert self.lock.acquire(timeout=5)
+            return self
+
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    client._assembly_lock = ObservedAssemblyLock()
 
     def ensure(config, *, context):
-        client._agent = first_graph if context["user_id"] == "alice" else second_graph
+        if context["user_id"] == "alice":
+            client._agent = first_graph
+            first_assembled.set()
+            assert release_first.wait(5)
+        else:
+            client._agent = second_graph
+            # With the production lock removed, this overwrite releases alice
+            # before she captures her graph, deterministically exposing the mixup.
+            release_first.set()
 
     client._ensure_agent = ensure
-    assert await asyncio.gather(
-        client.achat("hello", thread_id="model-a", user_id="alice"),
-        client.achat("hello", thread_id="model-b", user_id="bob"),
-    ) == ["first model", "second model"]
+    calls = [asyncio.create_task(client.achat("hello", thread_id="model-a", user_id="alice"))]
+    try:
+        assert await asyncio.to_thread(first_assembled.wait, 5)
+        calls.append(asyncio.create_task(client.achat("hello", thread_id="model-b", user_id="bob")))
+        assert await asyncio.wait_for(asyncio.gather(*calls), timeout=10) == ["first model", "second model"]
+    finally:
+        release_first.set()
+        for call in calls:
+            if not call.done():
+                call.cancel()
+        await asyncio.gather(*calls, return_exceptions=True)
 
 
 @pytest.mark.asyncio
