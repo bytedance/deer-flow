@@ -11,12 +11,6 @@ Only `finally` closes write ends.
 
 On Linux/macOS, LocalSandbox non-append text writes use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation; retain the source descriptor through metadata transfer. Preserve symlink mapping; publish only regular files. Pre-replace failures retain the old file and clean staging. Append/other platforms write in place. Replacement needs parent-directory write and metadata permissions; hard-link aliases retain the old inode. No concurrent-writer arbitration or power-loss recovery. Tests: `tests/test_local_sandbox_atomic_writes.py`.
 
-Read-before-write evidence comes from `sandbox/read_snapshot.py`: a per-call
-ContextVar holder carries the full source hash across `to_thread`. During capture,
-`read_file` reads the complete source once, then derives range/empty/truncated
-views from that same text. Preserve provider error strings without recording
-evidence. Without capture, direct ranged reads retain their provider I/O path.
-
 PowerShell command mapping escapes host-path whitespace/metacharacters for the caller's quote context in both user-data and provider mappings. Preserve wildcards; Bash/cmd mapping stays unchanged. Keep portable string assertions alongside native Windows smoke tests. The public bash tool's existing POSIX-quoted cwd prefix requires PowerShell 7 (`&&`) and workspace paths without apostrophes; mapping does not repair that prefix.
 
 Local `grep` skips non-regular entries before reading. File reads and directory scans propagate errors, except `ENOENT`/`ENOTDIR`/`ELOOP`/`EISDIR`/`ESTALE` races (`ESTALE` when available). Error filenames are reverse-resolved at the local sandbox boundary, including custom mounts; permission errors identify the virtual failing path.
@@ -151,7 +145,7 @@ symlinks, and visible depth/size bounds.
 - `ls` - Directory listing (tree format, max 2 levels). Remote commands precheck root existence and emit `__DF_FIND_STATUS__:missing`; `find` status 1 is always an incomplete-traversal `OSError`. `AioSandbox.list_dir` parses only `completed`/`None` on #5634's selected generation: `hard_timeout` raises `TimeoutError` and keeps that generation reusable; an ambiguous timeout or status raises `OSError`, replays nothing, and fences that generation. Missing-session 404s drop the stale id without replay. Persistent/scoped shells fence all `httpx.TransportError`s before cleanup.
 - `glob` - Find files or directories below a root directory with bounded results
 - `grep` - Search one text file or recursively search a directory, with optional glob filtering and bounded line-level results
-- `read_file` - Read file contents with optional line range; full reads keep stored line endings (Local `read_file`/`grep` read `newline="\n"`, writes `newline=""`), ranged reads join with `\n`; remote providers slice with `split_file_lines`, not `splitlines()`
+- `read_file` - Read optional line ranges. Full reads keep stored endings (Local `read_file`/`grep`: `newline="\n"`; writes: `newline=""`); ranges join with `\n`. Remotes use `split_file_lines`, not `splitlines()`. Gate reads derive views and hashes from one `read_snapshot`; uncaptured reads keep provider I/O.
 - `write_file` - Create/overwrite text, or append with `append=True`. Enforces read-before-write when enabled. Reject exact elision placeholders before sync/async sandbox initialization; [matching rules](../agents/middlewares/TOOL_OUTPUT_PERSISTENCE.md#model-bound-write-elision).
 - `str_replace` - Substring replacement (single or all occurrences); `_match_line_endings` gives `old_str`/`new_str` a CRLF file's endings; same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 

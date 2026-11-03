@@ -381,6 +381,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         else:
             start = max(1, line_count - 29)
             read_hint = f"Call read_file on it first (e.g. start_line={start}, end_line={line_count}), check what is already there, then retry."
+            read_hint += " If a write remains blocked after a ranged read, call read_file without start_line or end_line, then retry."
         blocked = ToolMessage(
             content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint),
             tool_call_id=str(tool_call.get("id", "")),
