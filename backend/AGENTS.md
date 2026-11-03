@@ -22,10 +22,9 @@ Service roles and ports: [root service topology](../AGENTS.md#service-topology).
 - Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](packages/harness/deerflow/config/AGENTS.md). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.
 - MCP cache reset scope and discovery fencing: [MCP guide](packages/harness/deerflow/mcp/AGENTS.md).
 
-**Layout:** `app/` owns Gateway/channels; `packages/harness/deerflow/` the runtime;
-`packages/extension-api/` public contracts. Tests/docs/benchmarks live in `tests/`,
-`docs/`, `scripts/benchmark/`. See the [root map](../AGENTS.md#repository-map) and
-scoped `AGENTS.md` files for ownership.
+**Layout:** [Repository map](../AGENTS.md#repository-map). Tests: `tests/`;
+docs: `docs/`; benchmarks: `scripts/benchmark/`. Read module-local `AGENTS.md`
+for implementation boundaries.
 
 ## Important Development Guidelines
 
