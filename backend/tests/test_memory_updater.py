@@ -870,7 +870,7 @@ def test_import_memory_data_defaults_overflowing_confidence_without_crossing_sco
 
     result = updater.import_memory_data(incoming, agent_name="researcher", user_id="alice", replace_shared_summaries=False)
 
-    assert {fact["id"]: fact["confidence"] for fact in result["facts"]} == {"valid": 0.87, "legacy": 0.5}
+    assert {fact["id"]: fact["confidence"] for fact in result["facts"]} == {"valid": 0.87, "legacy": 1.0 if confidence > 0 else 0.0}
     assert result["user"] == other_agent["user"]
     reloaded = MemoryUpdater(config, FileMemoryStorage(config), MagicMock())
     assert reloaded.get_memory_data("researcher", user_id="alice") == result

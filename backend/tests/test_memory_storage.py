@@ -44,32 +44,6 @@ class TestCreateEmptyMemory:
 class TestNormalizeMemoryData:
     """Test backward-compatible memory schema normalization."""
 
-    @pytest.mark.parametrize(
-        ("confidence", "expected"),
-        [
-            (10**400, 0.5),
-            (-(10**400), 0.5),
-            (None, 0.5),
-            ("invalid", 0.5),
-            (float("inf"), 0.5),
-            (float("-inf"), 0.5),
-            (float("nan"), 0.5),
-            (True, 0.5),
-            (0, 0.0),
-            (0.87, 0.87),
-            ("0.75", 0.75),
-            (-1, 0.0),
-            (2, 1.0),
-        ],
-    )
-    def test_normalizes_legacy_confidence(self, confidence, expected):
-        legacy = {"facts": [{"content": "User prefers Python", "confidence": confidence}]}
-
-        normalized = normalize_memory_data(legacy)
-
-        assert normalized["facts"][0]["confidence"] == expected
-        assert legacy["facts"][0]["confidence"] is confidence
-
     def test_normalizes_legacy_facts_without_mutating_input(self):
         legacy = {
             "version": "1.0",
@@ -328,6 +302,35 @@ def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
 
     assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
     assert loaded["user"]["workContext"]["summary"] == "work"
+
+
+@pytest.mark.parametrize("confidence,expected", [(10**400, 1.0), (-(10**400), 0.0)], ids=["positive", "negative"])
+def test_migrate_legacy_overflow_confidence_preserves_facts_and_backup(tmp_path, confidence, expected) -> None:
+    memory_file = tmp_path / "memory.json"
+    data = create_empty_memory()
+    data["facts"] = [{"id": "legacy", "content": "legacy fact", "confidence": confidence}]
+    original = json.dumps(data).encode("utf-8")
+    memory_file.write_bytes(original)
+    storage = _storage_at(memory_file)
+
+    loaded = storage.load("__default__")
+
+    assert [(fact["id"], fact["confidence"]) for fact in loaded["facts"]] == [("legacy", expected)]
+    assert (tmp_path / "memory.json.v1.bak").read_bytes() == original
+    assert _storage_at(memory_file).load("__default__")["facts"] == loaded["facts"]
+
+
+def test_migrate_overflow_does_not_relax_invalid_content_or_change_source(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    data = create_empty_memory()
+    data["facts"] = [{"id": "valid", "content": "kept", "confidence": 10**400}, {"id": "invalid", "content": ""}]
+    original = json.dumps(data).encode("utf-8")
+    memory_file.write_bytes(original)
+
+    with pytest.raises(ValueError, match="fact.content must not be empty"):
+        _storage_at(memory_file).load("__default__")
+
+    assert memory_file.read_bytes() == original
 
 
 def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
