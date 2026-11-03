@@ -23,11 +23,20 @@ class Runs:
         self.files = {}
         self.imports = []
 
-    async def read_artifact(self, *, thread_id, path):
+    async def validate_artifact_source(self, *, thread_id, run_id, idempotency_key):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        run = self.runs.get(run_id)
+        if run is None or run.thread_id != thread_id or run.status != "running" or run_id != idempotency_key:
+            raise AgentRunError(422, "Register files during the executing team run")
+
+    async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
         if self.denied:
             raise AgentRunError(403, "revoked")
         if (thread_id, path) not in self.files:
             raise AgentRunError(422, "File unavailable")
+        if expected_checkpoint_id is not None and (await self.get_state(thread_id=thread_id))["checkpoint_id"] != expected_checkpoint_id:
+            raise AgentRunError(412, "Producing checkpoint changed")
         return self.files[thread_id, path]
 
     async def import_artifact(self, *, thread_id, filename, content):
@@ -51,15 +60,22 @@ class Runs:
     async def get_state(self, *, thread_id):
         if self.denied or thread_id not in self.threads:
             raise AgentRunError(403, "unavailable")
-        return self.threads[thread_id]
+        state = self.threads[thread_id]
+        return {**state, "checkpoint_id": str(len(state["values"]["messages"]))}
 
-    async def start(self, *, thread_id, input, idempotency_key):
+    async def start(self, *, thread_id, input, idempotency_key, artifact_imports=None):
         if self.denied:
             raise AgentRunError(403, "revoked")
         if idempotency_key in self.runs:
             return self.runs[idempotency_key]
         if any(r.thread_id == thread_id and r.status == "running" for r in self.runs.values()):
             raise AgentRunError(409, "busy")
+        if artifact_imports:
+            import hashlib
+
+            for item in artifact_imports:
+                if hashlib.sha256(self.files.get((thread_id, item["path"]), b"")).hexdigest() != item["sha256"]:
+                    raise AgentRunError(422, "Attached artifact copy changed; inspect the team artifacts")
         self.starts.append((thread_id, input))
         self.threads[thread_id]["values"]["messages"].extend(input["messages"])
         run = AgentRun(thread_id, idempotency_key, "running")
@@ -104,7 +120,8 @@ def plugin(tmp_path, monkeypatch):
 
 def context(runs, owner="alice", thread=None):
     if thread:
-        return ToolContext(ExtensionPrincipal(owner), {"enabled": True}, thread, agent_runs=runs)
+        run_id = next((r.run_id for r in getattr(runs, "runs", {}).values() if r.thread_id == thread and r.status == "running"), None)
+        return ToolContext(ExtensionPrincipal(owner), {"enabled": True}, thread, agent_runs=runs, run_id=run_id)
     return ActionContext(ExtensionPrincipal(owner), {"enabled": True}, agent_runs=runs)
 
 
@@ -371,7 +388,8 @@ async def test_team_artifact_registration_and_retrieval_use_native_tool_node(plu
 
     async def invoke(name, payload, thread):
         tool = next(tool for tool in tools if name in tool.name)
-        result = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": payload, "id": name}])]}, context={"thread_id": thread, "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs})
+        execution = {"thread_id": thread, "run_id": context(runs, thread=thread).run_id, "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs}
+        result = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": payload, "id": name}])]}, context=execution)
         return next(message for message in result["messages"] if message.type == "tool")
 
     path = "/mnt/user-data/outputs/report.txt"

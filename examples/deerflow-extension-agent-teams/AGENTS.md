@@ -81,6 +81,11 @@ changes. The preview fixture has synthetic authentication and must remain
 loopback-only; never use it as a deployed Gateway.
 
 Artifact declarations belong to the authenticated member's executing team job.
+Use host-stamped run identity and validate its execution key/status before new
+registrations; frozen queue input is not execution proof. Retried registrations
+remain readable after completion. Capture checks the previously inspected
+checkpoint under the host reservation. Persist import receipts with frozen
+input and pass them to first admission; reconcile existing keys before validation.
 Stable request IDs deduplicate publication; append numeric versions without
 overwriting older snapshots. Capture only after successful execution through
 AgentRuns.read_artifact, before releasing the source conversation's queue head.

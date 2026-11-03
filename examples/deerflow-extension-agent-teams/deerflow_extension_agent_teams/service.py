@@ -577,6 +577,11 @@ class Teams(Artifacts):
             except ValueError:
                 await self.finish(owner, team, job, "failed", "An attached artifact version is unavailable; inspect the team artifacts")
                 return
+            except AgentRunError as exc:
+                if exc.status_code in (403, 409, 503) or not 400 <= exc.status_code < 500:
+                    raise
+                await self.finish(owner, team, job, "failed", "An attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request")
+                return
             try:
                 state = await runs.get_state(thread_id=thread)
             except AgentRunError as exc:
@@ -599,9 +604,20 @@ class Teams(Artifacts):
             ) + json.dumps({"request": job["text"], "your_member_id": job["member_id"], "source_thread": job["source"], "kind": job["kind"], "artifacts": imported, **shared(team)}, ensure_ascii=False)
             # Freeze and persist input before start(): tick releases reservations only while input is None.
             job["input"] = {"messages": [{"role": "user", "id": "team-" + job["id"], "content": content}]}
+            job["artifact_imports"] = [{key: item[key] for key in ("filename", "path", "sha256", "size")} for item in imported]
             await self.save_job(owner, team["id"], job)
         if job["run_id"] is None:
-            run = await runs.start(thread_id=thread, input=job["input"], idempotency_key=job["id"])
+            if job.get("artifacts") and not job.get("artifact_imports"):
+                await self.finish(owner, team, job, "failed", "Attached artifact admission receipts unavailable; send a new request")
+                return
+            options = {"artifact_imports": job["artifact_imports"]} if job.get("artifact_imports") else {}
+            try:
+                run = await runs.start(thread_id=thread, input=job["input"], idempotency_key=job["id"], **options)
+            except AgentRunError as exc:
+                if exc.status_code != 422 or not options:
+                    raise
+                await self.finish(owner, team, job, "failed", "An attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request")
+                return
             job["run_id"] = run.run_id
             job["initial_run_id"] = run.run_id
             if job["status"] != "cancelling":
@@ -644,7 +660,8 @@ class Teams(Artifacts):
             await self.save_job(owner, team["id"], job)
             return
         if run.status != "success":
-            await self.finish(owner, team, job, "failed", f"Agent ended with status {run.status}")
+            detail = "An attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request" if getattr(run, "stop_reason", None) == "artifact_conflict" else f"Agent ended with status {run.status}"
+            await self.finish(owner, team, job, "failed", detail)
             return
         messages = state.get("values", {}).get("messages", [])
         # The host's dynamic-context middleware may replace the original ID
@@ -698,6 +715,7 @@ class Teams(Artifacts):
         if not isinstance(answer, str):
             answer = "\n".join(p.get("text", "") for p in answer if isinstance(p, dict) and p.get("type") == "text")
         encoded = answer.encode()
+        job["capture_checkpoint_id"] = state.get("checkpoint_id")
         await self.finish(owner, team, job, "completed", encoded[:6000].decode(errors="ignore") + ("\n[Truncated; open the member conversation for the full answer.]" if len(encoded) > 6000 else ""), truncated=len(encoded) > 6000)
 
     async def finish(self, owner, team, job, status, answer, *, truncated=False):

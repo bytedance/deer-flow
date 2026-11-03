@@ -47,7 +47,7 @@ def pending(team, job):
     return any(entry["status"] == "pending" and {"artifact_id": entry["artifact_id"], "version": entry["version"]} in job.get("artifacts", []) for entry in team.get("artifacts", []))
 
 
-def register(team, payload, context):
+def register(team, payload, context, executing_run_id=None, executing_job_id=None):
     required = {"team_id", "request_id", "name", "path"}
     if not required <= set(payload) or set(payload) - required - {"artifact_id"}:
         raise ValueError("Unexpected request fields")
@@ -64,9 +64,10 @@ def register(team, payload, context):
         if existing["_request"] != stamp:
             raise ValueError("Request ID already used for another artifact")
         return {"artifact": public(existing)}
-    job = next((job for job in team["jobs"] if job["id"] == source["job_id"]), None)
-    if job is None or job["status"] in TERMINAL:
+    job = next((job for job in team["jobs"] if job["id"] == executing_job_id and job["thread_id"] == context.thread_id), None) if executing_run_id else None
+    if job is None or job["input"] is None or job["status"] in TERMINAL or job["status"] == "waiting_input" or executing_run_id != context.run_id:
         raise ValueError("Register files during an executing team task")
+    source = {"thread_id": context.thread_id, "job_id": job["id"]}
     if len(entries) >= MAX_VERSIONS or sum(entry["source"]["job_id"] == job["id"] for entry in entries) >= MAX_PER_JOB:
         raise ValueError("Artifact version limit reached (20 per team, four per task)")
     artifact_id = text(payload, "artifact_id", 64) if "artifact_id" in payload else version_id
@@ -83,7 +84,7 @@ def register(team, payload, context):
         "status": "pending",
         "sha256": None,
         "size": None,
-        "source": {**source, "member_id": member_id, "run_id": job["run_id"]},
+        "source": {**source, "member_id": member_id, "run_id": executing_run_id},
         "created_at": datetime.now(UTC).isoformat(),
         "error": None,
         "_request": stamp,
@@ -94,7 +95,17 @@ def register(team, payload, context):
 
 class Artifacts:
     async def register_artifact(self, payload, context):
-        return await self.db("change", context.principal.user_id, text(payload, "team_id", 64), lambda team: register(team, payload, context))
+        team = await self.member_snapshot(payload, context)
+        version_id = fingerprint(team["id"], context.thread_id, text(payload, "request_id", 128))
+        existing = any(entry["id"] == version_id for entry in team.get("artifacts", []))
+        run_id = getattr(context, "run_id", None)
+        job = next((job for job in team["jobs"] if job["thread_id"] == context.thread_id and job["status"] not in TERMINAL), None)
+        if not existing:
+            if not run_id or context.agent_runs is None or job is None or job["input"] is None or job["status"] == "waiting_input":
+                raise ValueError("Register files during an executing team task")
+            key = job["resume"]["key"] if job.get("resume") and job["resume"].get("started", True) else job["id"]
+            await context.agent_runs.validate_artifact_source(thread_id=context.thread_id, run_id=run_id, idempotency_key=key)
+        return await self.db("change", context.principal.user_id, team["id"], lambda current: register(current, payload, context, run_id if not existing else None, job["id"] if job else None))
 
     async def list_artifacts(self, payload, context):
         team = await self.member_snapshot(payload, context)
@@ -148,7 +159,10 @@ class Artifacts:
             error = "Producing task did not complete" if status != "completed" else None
             if error is None:
                 try:
-                    content = await self.handles[owner, team_id].read_artifact(thread_id=job["thread_id"], path=entry["path"])
+                    checkpoint_id = job.get("capture_checkpoint_id")
+                    if not checkpoint_id:
+                        raise ValueError("Producing checkpoint unavailable")
+                    content = await self.handles[owner, team_id].read_artifact(thread_id=job["thread_id"], path=entry["path"], expected_checkpoint_id=checkpoint_id)
                     await self.db("capture_artifact", owner, team_id, entry["id"], content, job["run_id"])
                     continue
                 except AgentRunError as exc:

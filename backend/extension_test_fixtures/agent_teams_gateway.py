@@ -85,17 +85,25 @@ class PreviewRuns:
                 state = await host.graph.aget_state({"configurable": {"thread_id": thread_id}})
                 if not state.values:
                     raise AgentRunError(404, "No checkpoint")
-                return {"values": {"messages": [m.model_dump() for m in state.values["messages"]]}, "next": list(state.next)}
+                return {"values": {"messages": [m.model_dump() for m in state.values["messages"]]}, "next": list(state.next), "checkpoint_id": state.config["configurable"]["checkpoint_id"]}
 
-            async def read_artifact(self, *, thread_id, path):
+            async def validate_artifact_source(self, *, thread_id, run_id, idempotency_key):
                 self.check(thread_id)
+                run = host.runs.get(run_id)
+                if run is None or run.thread_id != thread_id or run.status != "running" or run_id != idempotency_key:
+                    raise AgentRunError(422, "Producing run is not executing")
+
+            async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
+                self.check(thread_id)
+                if expected_checkpoint_id is not None and (await self.get_state(thread_id=thread_id))["checkpoint_id"] != expected_checkpoint_id:
+                    raise AgentRunError(412, "Producing checkpoint changed")
                 return await asyncio.to_thread(read_output_snapshot, owner, thread_id, path)
 
             async def import_artifact(self, *, thread_id, filename, content):
                 self.check(thread_id)
                 return await asyncio.to_thread(write_import_snapshot, owner, thread_id, "community.agent-teams", filename, content)
 
-            async def start(self, *, thread_id, input, idempotency_key):
+            async def start(self, *, thread_id, input, idempotency_key, artifact_imports=None):
                 self.check(thread_id)
                 if idempotency_key in host.runs:
                     return host.runs[idempotency_key]
@@ -186,7 +194,7 @@ def create_app(directory):
             await asyncio.to_thread(write)
             return await service.register_artifact(
                 {"team_id": team["id"], "request_id": payload["request_id"], "name": payload["name"], "path": "/mnt/user-data/outputs/report.bin", **({"artifact_id": payload["artifact_id"]} if "artifact_id" in payload else {})},
-                ToolContext(ExtensionPrincipal(owner), {"enabled": True}, member["thread_id"], agent_runs=bound),
+                ToolContext(ExtensionPrincipal(owner), {"enabled": True}, member["thread_id"], agent_runs=bound, run_id=next(r.run_id for r in runs.runs.values() if r.thread_id == member["thread_id"] and r.status == "running")),
             )
         finally:
             runs.artifact_gate.set()

@@ -75,12 +75,13 @@ async def test_remote_import_retries_the_same_bytes_after_a_lost_sync_ack(tmp_pa
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     calls = []
 
-    def sync(path, content):
-        calls.append((path, content))
+    def sync(sandbox, filename, content):
+        calls.append(("/mnt/user-data/uploads/" + filename, content))
         if len(calls) == 1:
             raise OSError("Lost remote acknowledgement")
 
     lease = SimpleNamespace(denied=False, sandbox=SimpleNamespace(update_file=sync), release=AsyncMock())
+    monkeypatch.setattr("deerflow.sandbox.artifact_snapshot.publish_snapshot", sync)
     monkeypatch.setattr("app.gateway.extension_artifacts.get_sandbox_provider", lambda: SimpleNamespace(uses_thread_data_mounts=False))
     acquire = AsyncMock(return_value=lease)
     monkeypatch.setattr("app.gateway.extension_artifacts.try_acquire_sandbox_for_request", acquire)
@@ -102,7 +103,7 @@ async def test_remote_import_cancellation_drains_io_before_releasing_lease(tmp_p
     finish = threading.Event()
     exited = threading.Event()
 
-    def sync(path, content):
+    def sync(sandbox, filename, content):
         entered.set()
         finish.wait(5)
         exited.set()
@@ -111,6 +112,7 @@ async def test_remote_import_cancellation_drains_io_before_releasing_lease(tmp_p
         assert exited.is_set()
 
     lease = SimpleNamespace(denied=False, sandbox=SimpleNamespace(update_file=sync), release=AsyncMock(side_effect=release))
+    monkeypatch.setattr("deerflow.sandbox.artifact_snapshot.publish_snapshot", sync)
     monkeypatch.setattr("app.gateway.extension_artifacts.get_sandbox_provider", lambda: SimpleNamespace(uses_thread_data_mounts=False))
     monkeypatch.setattr("app.gateway.extension_artifacts.try_acquire_sandbox_for_request", AsyncMock(return_value=lease))
     task = asyncio.create_task(await_drained(import_snapshot(None, "alice", "thread", "plugin", "report.pdf", b"bytes")))

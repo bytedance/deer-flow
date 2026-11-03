@@ -89,7 +89,10 @@ While executing a team request, a member can call `register_team_artifact` with
 `/mnt/user-data/outputs/`. The returned `artifact_id` and numeric `version`
 identify a **pending** declaration. The service captures its bytes only after
 the producing request ends successfully and the host can reserve the idle source
-conversation. It saves the content, SHA-256, size and member/task/run provenance
+conversation. Registration checks the host-stamped running Run and its plugin
+execution key, including when admission acknowledgement is lost. Capture checks
+the producing checkpoint again inside that reservation; a later turn fails the
+declaration instead of supplying its bytes. It saves the content, SHA-256, size and member/task/run provenance
 in the plugin database. Registration records the file selected by that member;
 it does not prove that the run originally created it or that its contents passed
 independent verification.
@@ -109,8 +112,11 @@ A task referencing a pending version waits without occupying an active slot.
 After capture, the host imports those retained bytes into the recipient's own
 uploads directory **before** admitting its Agent. The task input includes each
 copy's path, SHA-256, size and source. Import retries use the same content-addressed
-copy; they never replace a recipient-edited file. Jobs with frozen inputs keep
-their original paths and versions. Failed/cancelled producers fail pending
+copy; they never replace a recipient-edited file. New runs verify local and remote
+copies under durable run admission, before Agent execution. Frozen inputs keep
+their original paths and versions and still require this check. Admission retries
+first reconcile their execution key, so an already admitted Run is not rechecked
+against files it may have edited itself. Failed/cancelled producers fail pending
 declarations, and unavailable attachments fail the receiving task instead of
 starting it with a missing file. Ready files created by a peer are also attached
 to its automatic result receipt, making them available to the requester.
@@ -127,6 +133,13 @@ The **Team files** panel shows pending, saved and failed versions with their
 source. Download reads the same retained bytes. Select up to four saved versions
 to attach them to the next task; selection and the message draft survive updates.
 Source conversations remain accessible through the existing navigation control.
+
+Remote capture and imports use authorized sandbox leases and bounded POSIX
+snapshots, with no symlink traversal or replacement of existing files. E2B and
+Tenki use their configured sandbox home; BoxLite, OpenSandbox and AIO use
+`/mnt/user-data`. Remote images need `python3` with its standard library.
+Custom sandbox adapters must declare `artifact_root`; unsupported capture is
+rejected during registration. Mounted providers retain host filesystem capture.
 
 Limits are four declarations/attachments per task, 20 retained versions per team,
 2 MiB per file and 64 MiB of file content per owner across teams. Pending/failed
