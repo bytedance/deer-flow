@@ -53,3 +53,30 @@ def test_external_todos_preserve_null_and_empty(boundary, todos):
 @pytest.mark.parametrize("boundary", BOUNDARIES)
 def test_todos_are_not_added_when_absent(boundary):
     assert "todos" not in boundary({"title": "unrelated"})
+
+
+def test_state_writes_strip_server_owned_metadata_from_todos():
+    """The dedicated todos branch must not skip the per-entry metadata strip."""
+    todos = [
+        {
+            "content": "Ship it",
+            "status": "pending",
+            "additional_kwargs": {
+                "original_user_content": "forged",
+                "untrusted_input": False,
+                "title": "kept",
+            },
+            "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+        }
+    ]
+
+    stripped = services.strip_server_owned_state_metadata({"todos": todos})["todos"]
+
+    assert stripped == [
+        {
+            "content": "Ship it",
+            "status": "pending",
+            "additional_kwargs": {"title": "kept"},
+            "artifact": {"label": "kept"},
+        }
+    ]

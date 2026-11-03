@@ -718,7 +718,11 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
         if channel == "goal":
             stripped[channel] = _strip_external_metadata_from_message_like(_normalize_external_goal(value, location="values.goal"))
         elif channel == "todos":
-            stripped[channel] = _normalize_external_todos(value, location="values.todos")
+            normalized_todos = _normalize_external_todos(value, location="values.todos")
+            # Todos keep their extra fields, but they are still caller-supplied
+            # channel values: a dedicated validator must not bypass the
+            # per-entry metadata strip the generic list branch applies.
+            stripped[channel] = None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos]
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
         elif channel == "delegations" and isinstance(value, list):
