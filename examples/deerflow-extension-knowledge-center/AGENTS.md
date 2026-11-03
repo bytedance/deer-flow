@@ -21,3 +21,5 @@ writes, retain failed drafts, and prune detached controls. Keep versions guarded
 restoration copies only the selected snapshot's title/content/summary. Browser
 drafts are not durable; ordinary-link/reload guards cannot cover host programmatic
 navigation. Graphs use real bounded IDs/edges with an accessible list and evidence.
+Fence rejected reads with the same epochs as successful reads before shared
+feedback changes. Check busy state before pagination prompts or draft clearing.

@@ -736,7 +736,7 @@ for (const zh of [false, true]) {
       await page.screenshot({
         path: path.join(
           process.env.KNOWLEDGE_SCREENSHOT_DIR,
-          zh ? "library-zh-mobile.png" : "library-en.png",
+          zh ? "library-zh-mobile.png" : "library-en-dark.png",
         ),
         fullPage: true,
       });
@@ -869,4 +869,96 @@ test("a directory read started before cancellation cannot render stale rows", as
   await expect(
     page.getByRole("button", { name: "Stale directory entry", exact: true }),
   ).toHaveCount(0);
+});
+
+test("obsolete directory failures preserve successful mutation feedback", async ({
+  page,
+}) => {
+  await setupLibrary(page);
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page.getByRole("button", { name: "Team guide", exact: true }).click();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${api}/**/library/documents?**`, async (route) => {
+    await gate;
+    await route.fulfill({ status: 502, json: {} });
+  });
+  try {
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(
+      page.getByText("Loading\u2026", { exact: true }),
+    ).toBeVisible();
+    await page
+      .getByRole("button", { name: "Cancel processing", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect(page.getByText(/Submission returned/)).toBeVisible();
+  } finally {
+    release();
+  }
+  await expect(page.getByText("Loading\u2026", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Submission returned/)).toBeVisible();
+});
+
+test("pagination cannot discard a pending save draft", async ({ page }) => {
+  await setupLibrary(page);
+  await page.route(`**${api}/**/library/entries?**`, async (route) => {
+    await route.fulfill({
+      json: {
+        provider: "weknora",
+        connection_id: "local",
+        dataset_id: "wk1_fixture",
+        page_size: 20,
+        total: 40,
+        entries: [
+          {
+            key: "concept/cedar",
+            title: "Cedar",
+            version: 2,
+            status: "published",
+          },
+        ],
+      },
+    });
+  });
+  await page.goto(pageURL, { waitUntil: "domcontentloaded" });
+  await page
+    .getByRole("button", { name: "Knowledge entries", exact: true })
+    .click();
+  await page.getByRole("button", { name: "Cedar", exact: true }).click();
+  const editor = page.getByLabel("Entry content", { exact: true });
+  await editor.fill("Keep this draft");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**${api}/**/entry`, async (route) => {
+    await gate;
+    await route.fulfill({ status: 409, json: {} });
+  });
+  let dialogs = 0;
+  page.on("dialog", async (dialog) => {
+    dialogs++;
+    await dialog.accept();
+  });
+  try {
+    await page.getByRole("button", { name: "Save entry", exact: true }).click();
+    await expect(editor).toBeDisabled();
+    const next = page.getByRole("button", { name: "Next page", exact: true });
+    // Dispatch also covers a queued click after controls were disabled.
+    await next.dispatchEvent("click");
+    await expect(editor).toHaveValue("Keep this draft");
+    expect(dialogs).toBe(0);
+  } finally {
+    release();
+  }
+  await expect(editor).toHaveValue("Keep this draft");
+  await expect(
+    page.getByRole("button", {
+      name: "I checked the upstream result",
+      exact: true,
+    }),
+  ).toBeVisible();
 });

@@ -39,3 +39,6 @@ after capability I/O and after library responses; a failed post-write check stil
 requires reconciliation. Existing Resource operations default to the legacy set;
 adding library names to the policy alone must not grant new operations. Viewer
 roles only receive reads within an explicit operator resource ceiling.
+Separate Provider invocation from result decoding: client ValueError remains 422,
+invalid results become 502. Entry edit JSON allows 8 MiB for escaped Unicode;
+policy and other JSON bodies retain their 1 MiB ceiling.

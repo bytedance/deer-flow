@@ -70,8 +70,8 @@ async def bounded(request, limit):
     return bytes(data)
 
 
-async def body(request, model):
-    data = await bounded(request, 1024 * 1024)
+async def body(request, model, *, limit=1024 * 1024):
+    data = await bounded(request, limit)
     try:
         return model.model_validate_json(data)
     except ValidationError:
@@ -127,7 +127,7 @@ def build_router(platform):
 
     @router.put(prefix + "/entry")
     async def edit_entry(request: Request, space: str, resource: str, caller=Depends(manager)):
-        return await invoke(platform.library(caller, space, resource, "entry_edit", await body(request, EditEntry)))
+        return await invoke(platform.library(caller, space, resource, "entry_edit", await body(request, EditEntry, limit=8 * 1024 * 1024)))
 
     @router.post(prefix + "/entry/restore")
     async def restore_entry(request: Request, space: str, resource: str, caller=Depends(manager)):

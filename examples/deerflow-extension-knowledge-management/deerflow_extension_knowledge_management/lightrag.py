@@ -15,7 +15,7 @@ from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from .contracts import Capabilities, ManagementCredentialUnavailable, Model
 from .library import Entity, Evidence, Graph, LibraryQuery, LibraryResult, Relation
 from .weknora import Grant
-from .weknora_library import rows, text
+from .weknora_library import text
 
 
 def graph_id(conn, value):
@@ -23,6 +23,15 @@ def graph_id(conn, value):
     if not isinstance(value, str) or not value or len(value) > 500 or (key and key in value):
         raise RuntimeError("Graph identity cannot be safely represented")
     return value
+
+
+def graph_rows(value, limit):
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise RuntimeError("Invalid graph rows")
+    # The HTTP byte cap bounds input; project only the advertised row budget.
+    return value[:limit]
 
 
 class Connection(Model):
@@ -99,25 +108,30 @@ class LightRAGLibrary:
                     payload = json.loads(raw)
         except (httpx.HTTPError, ValueError):
             raise RuntimeError("Graph response unavailable") from None
-        if not isinstance(payload, dict) or payload.get("status") != "success" or not isinstance(payload.get("data"), dict):
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
             raise RuntimeError("Invalid graph response")
         data = payload["data"]
+        empty = payload.get("status") == "failure" and payload.get("message") == "Query returned empty dataset." and all(data.get(name) == [] for name in ("entities", "relationships", "chunks"))
+        if payload.get("status") != "success" and not empty:
+            raise RuntimeError("Invalid graph response")
         try:
             evidence = {}
-            for row in rows(data.get("chunks"), 100):
+            for row in graph_rows(data.get("chunks"), 100):
                 item = Evidence(id=graph_id(conn, row.get("chunk_id")), content=text(conn, row.get("content"), 100_000))
                 if item.id in evidence:
                     raise RuntimeError("Ambiguous graph evidence")
                 evidence[item.id] = item
             entities = {}
-            for row in rows(data.get("entities"), 100):
+            for row in graph_rows(data.get("entities"), 200):
                 item = Entity(id=graph_id(conn, row.get("entity_name")), description=text(conn, row.get("description"), 10000))
                 if item.id in entities:
                     raise RuntimeError("Ambiguous graph entity")
                 entities[item.id] = item
             relations = []
-            for row in rows(data.get("relationships"), 100):
+            for row in graph_rows(data.get("relationships"), 100):
                 source, target = graph_id(conn, row.get("src_id")), graph_id(conn, row.get("tgt_id"))
+                if len(entities.keys() | {source, target}) > 200:
+                    continue
                 # Endpoints named by real edges are real returned identities.
                 for endpoint in (source, target):
                     entities.setdefault(endpoint, Entity(id=endpoint))

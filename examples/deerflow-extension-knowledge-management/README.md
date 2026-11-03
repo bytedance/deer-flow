@@ -5,8 +5,10 @@ This package implements the first management slice of [#6269's second stage](htt
 The supplied adapter targets **WeKnora v0.8.3**, commit `3e22822c1d2397be730c458c7539d0eb8c113a24`. API mappings were checked against its handlers and `superbuzzy/deer-flow`'s `community/weknora/documents.py`. This is a new independent extension using the current host contracts, not a merge of that branch.
 
 Version **0.1.1** also supplies optional [library capabilities](LIBRARY.md) for
-phase-4 consumers: WeKnora document directories, Wiki editing/history/guarded
-restoration, and a separate LightRAG entity-graph Provider. New operations require
+phase-4 consumers: WeKnora document directories, Wiki browsing/history,
+and a separate LightRAG entity-graph Provider. WeKnora v0.8.3 Wiki editing and
+restoration are disabled because its upstream version check can lose concurrent
+edits; generic mutation contracts remain available to capable Providers. New operations require
 explicit grants and platform resource ceilings; existing ingestion-only Providers
 remain compatible. The UI is still a separately installed package.
 

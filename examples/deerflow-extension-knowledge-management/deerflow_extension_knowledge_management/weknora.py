@@ -179,8 +179,9 @@ class WeKnoraManagement:
         if not isinstance(flags, dict):
             raise RuntimeError("Invalid provider capabilities")
         operations = frozenset(op for g in conn.grants if g.user_id == context.principal.user_id and base in g.knowledge_base_ids for op in g.operations)
+        # v0.8.3 cannot atomically guard Wiki writes with the caller version.
         # Pipeline extraction does not imply a stored entity-graph query API.
-        operations -= {"graph"}
+        operations -= {"graph", "entry_edit", "entry_restore"}
         if flags.get("wiki") is not True:
             operations -= {"entries", "entry", "revisions", "revision", "entry_edit", "entry_restore"}
         pipeline = {

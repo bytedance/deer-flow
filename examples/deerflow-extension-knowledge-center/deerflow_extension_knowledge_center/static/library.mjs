@@ -61,18 +61,23 @@ export function mountLibrary(root, options) {
     const writeEpoch = options.readEpoch();
     const epoch = selection,
       version = ++reading;
+    const stale = () =>
+      !active() ||
+      epoch !== selection ||
+      version !== reading ||
+      writeEpoch !== options.readEpoch() ||
+      isBusy();
     let settled = false;
     target.replaceChildren(make("p", w.loading, { role: "status" }));
     await run(async () => {
-      const result = await read(operation, query);
-      if (
-        !active() ||
-        epoch !== selection ||
-        version !== reading ||
-        writeEpoch !== options.readEpoch() ||
-        isBusy()
-      )
-        return;
+      let result;
+      try {
+        result = await read(operation, query);
+      } catch (cause) {
+        if (stale()) return;
+        throw cause;
+      }
+      if (stale()) return;
       target.replaceChildren();
       settled = true;
       render(result);
@@ -182,7 +187,7 @@ export function mountLibrary(root, options) {
             [w.next, page + 1, page * result.page_size >= result.total],
           ]) {
             const control = button(label, () => {
-              if (!safeToLeave()) return;
+              if (isBusy() || !safeToLeave()) return;
               markDirty(false);
               detail.replaceChildren();
               void load(number);

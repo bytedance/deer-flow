@@ -39,8 +39,9 @@ class Platform:
         latest, _ = await self._admit(principal, space_id, resource, operation)
         if latest != revision:
             raise RevisionConflict("Policy changed during library admission")
+        response = await provider.library(context, connection, base, operation, payload)
         try:
-            result = LibraryResult.model_validate(await provider.library(context, connection, base, operation, payload))
+            result = LibraryResult.model_validate(response)
         except ValueError:
             raise RuntimeError("Invalid library response") from None
         if (result.provider, result.connection_id, result.dataset_id) != (item["provider"], connection, item["dataset_id"]):

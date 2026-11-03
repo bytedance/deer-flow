@@ -1,5 +1,47 @@
 # Phase-4 knowledge center validation
 
+## Review corrections on 2026-11-03
+
+This record supersedes the WeKnora mutation claims below. The v0.8.3 PUT handler
+checks the caller version, but its service re-reads the page and uses that newer
+version in the atomic repository write. The adapter therefore removes edit and
+restore capabilities and rejects direct mutations before upstream I/O; no operator
+override is offered. Generic editor/restore routes and UI remain available to
+Providers with verified atomic caller-version protection. This is a Provider
+limitation, not evidence that concurrent WeKnora writes are safe.
+
+The review update also makes entry directories metadata-only, rejects submitted
+credentials before I/O, accepts omitted empty historical bodies, recognizes the
+exact LightRAG empty-dataset response, and projects graphs to a shared 200-node
+budget. Provider input errors retain 422, malformed responses produce 502, and
+entry edit bodies allow 8 MiB while policy bodies retain 1 MiB. Obsolete read
+failures cannot replace newer mutation feedback; pending-save pagination cannot
+discard a draft. Screenshot generation uses the committed `library-en-dark.png`
+filename.
+
+| Check rerun for the review update | Result |
+| --- | --- |
+| Library/center/management/platform/guidance backend regression | 182 passed; library suite now 48 cases |
+| Entire strict blocking-I/O suite | 363 passed, 8 skipped |
+| Frontend extension/API units | 192 passed |
+| Knowledge-center Chromium browser suite | 19 passed |
+| Screenshot-generation browser cases | 2 passed; correct English/dark and Chinese/mobile output names |
+| `pnpm check` | Passed: ESLint and TypeScript |
+| Backend/example Ruff format and lint | Passed |
+| Three wheels and sdists, fresh isolated wheel installation | Passed: entry points, library routes and all 7 browser assets match source |
+
+The added regressions first failed on the prior implementation (including
+credential submission, directory disclosure, empty revisions/results, graph
+budgets and both browser ordering/draft cases). HTTP responses remain synthetic;
+no live Provider acceptance is claimed. The existing production-built host was
+used for browser checks with current shipped assets; no host runtime source or
+dependency manifest changed. The previous temporary install environment had
+missing dependency metadata, so the wheels were installed with fresh dependencies
+in a new isolated environment. Local application control blocked the `pytest`
+launcher; the passing backend commands used `uv run --no-sync python -m pytest`.
+Remote CI for this new commit must be checked separately from the already-green
+previous head.
+
 ## Library completion on 2026-11-02
 
 This follow-up to merged #7518 completes the remaining capability-aware phase-4

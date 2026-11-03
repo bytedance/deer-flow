@@ -53,15 +53,18 @@ class RestoreEntry(Model):
     _key = field_validator("entry")(entry_key)
 
 
-class Entry(Model):
+class EntrySummary(Model):
     key: str
     title: str = Field(max_length=500)
-    content: str = Field(default="", max_length=500_000)
-    summary: str = Field(default="", max_length=10000)
     version: int = Field(ge=1, strict=True)
     status: str = Field(max_length=32)
 
     _key = field_validator("key")(entry_key)
+
+
+class Entry(EntrySummary):
+    content: str = Field(default="", max_length=500_000)
+    summary: str = Field(default="", max_length=10000)
 
 
 class Document(Model):
@@ -117,7 +120,7 @@ class LibraryResult(Model):
     dataset_id: str
     title: str = Field(default="", max_length=500)
     documents: tuple[Document, ...] = Field(default=(), max_length=50)
-    entries: tuple[Entry, ...] = Field(default=(), max_length=50)
+    entries: tuple[EntrySummary, ...] = Field(default=(), max_length=50)
     revisions: tuple[Revision, ...] = Field(default=(), max_length=50)
     entry: Entry | None = None
     total: int = Field(default=0, ge=0, strict=True)
