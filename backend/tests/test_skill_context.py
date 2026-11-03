@@ -294,6 +294,31 @@ class TestExtractSkills:
         assert "expected_path=/mnt/skills/public/data-analysis/SKILL.md" in caplog.text
         assert "metadata_path=/mnt/skills/public/other/SKILL.md" in caplog.text
 
+    def test_extract_skills_pairs_a_reused_tool_call_id_with_the_call_of_its_own_turn(self, caplog):
+        msgs = [
+            _ai_read("call_0", "/mnt/skills/public/a/SKILL.md"),
+            ToolMessage(
+                content="A",
+                tool_call_id="call_0",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md"),
+            ),
+            _ai_read("call_0", "/mnt/skills/custom/b/SKILL.md"),
+            ToolMessage(
+                content="B",
+                tool_call_id="call_0",
+                additional_kwargs=_skill_metadata("/mnt/skills/custom/b/SKILL.md"),
+            ),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            entries = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert [entry["path"] for entry in entries] == [
+            "/mnt/skills/public/a/SKILL.md",
+            "/mnt/skills/custom/b/SKILL.md",
+        ]
+        assert "mismatched skill read metadata" not in caplog.text
+
     def test_extract_skills_rebuilds_name_from_validated_read_path(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),

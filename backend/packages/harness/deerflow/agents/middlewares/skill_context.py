@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import posixpath
 import re
+from collections import defaultdict, deque
 from collections.abc import Collection, Mapping
 from html import escape
 from typing import Any, TypedDict
@@ -144,27 +145,33 @@ def extract_skills(
     normalized_root = posixpath.normpath(skills_root.rstrip("/") or "/")
     read_names = frozenset(read_tool_names)
 
-    skill_paths_by_id: dict[str, str] = {}
-    for message in messages:
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) not in read_names:
-                continue
-            tool_call_id = _tool_call_id(tool_call)
-            raw_path = _tool_call_path(tool_call)
-            path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
-            if tool_call_id and path and _is_skill_file(path):
-                skill_paths_by_id[tool_call_id] = path
-
+    # A tool-call id is unique per response, not per conversation, so each
+    # ToolMessage answers a call from the most recent preceding AIMessage only
+    # (the rule `pair_tool_call_results` applies). Building one map over the
+    # whole conversation let a later turn that reused an id claim an earlier
+    # turn's read: the earlier result was matched against the wrong path and
+    # dropped from the ledger.
+    open_reads: dict[str, deque[str]] = defaultdict(deque)
     entries: list[SkillEntry] = []
     for index, message in enumerate(messages):
+        if isinstance(message, AIMessage):
+            open_reads = defaultdict(deque)
+            for tool_call in message.tool_calls or []:
+                if _tool_call_name(tool_call) not in read_names:
+                    continue
+                tool_call_id = _tool_call_id(tool_call)
+                raw_path = _tool_call_path(tool_call)
+                path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
+                if tool_call_id and path and _is_skill_file(path):
+                    open_reads[tool_call_id].append(path)
+            continue
         if not isinstance(message, ToolMessage):
             continue
         if getattr(message, "status", "success") == "error":
             continue
         tool_call_id = str(message.tool_call_id) if message.tool_call_id else ""
-        expected_path = skill_paths_by_id.get(tool_call_id)
+        queue = open_reads.get(tool_call_id)
+        expected_path = queue.popleft() if queue else None
         if expected_path is None:
             continue
         if (message.additional_kwargs or {}).get(SKILL_CONTEXT_DENIED_KEY):
