@@ -335,6 +335,10 @@ fences, including unclosed fences, in complete and streamed replies.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
 
+   The OpenAI preset routes `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+   `gpt-6-sol` and `gpt-6-luna` through the Responses API for tool calling,
+   with model-specific thinking and reasoning-effort defaults.
+
    The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
    `kimi-k3.1-pro-highspeed` with required thinking, image input and native
    `low` / `high` / `max` reasoning effort (default `max`). Thinking stays on
