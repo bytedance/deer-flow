@@ -426,6 +426,11 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
             stop_reason = getattr(prompt_response, "stop_reason", None)
             if stop_reason in ("max_tokens", "max_turn_requests"):
                 return f"Partial results: ACP agent '{agent}' stopped with {stop_reason}; the response may be incomplete.\n\n{result or '(no response)'}"
+            if stop_reason not in (None, "end_turn"):
+                # refusal, cancelled, or any future non-end_turn reason: surface it
+                # explicitly instead of returning a silent success. The "Error:"
+                # prefix lets tool_result_meta stamp the result as non-success.
+                return f"Error: ACP agent '{agent}' stopped with {stop_reason}: {result or '(no response)'}"
             return result or "(no response)"
         except Exception as e:
             logger.error("ACP agent '%s' invocation failed: %s", agent, e)

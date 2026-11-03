@@ -984,9 +984,9 @@ async def test_invoke_acp_agent_completes_within_timeout(acp_subprocess_tool):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stop_reason", ["end_turn", "max_tokens", "max_turn_requests"])
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"])
 @pytest.mark.parametrize("response_text", ["", "Report section one.\nRemaining sections: 401, 403."])
-async def test_invoke_acp_agent_reports_output_limits(acp_subprocess_tool, stop_reason, response_text):
+async def test_invoke_acp_agent_reports_stop_reasons(acp_subprocess_tool, stop_reason, response_text):
     from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
 
     tool = acp_subprocess_tool.build_tool(stop_reason=stop_reason, response_text=response_text, timeout_seconds=10)
@@ -998,12 +998,17 @@ async def test_invoke_acp_agent_reports_output_limits(acp_subprocess_tool, stop_
     if stop_reason == "end_turn":
         assert message.content == (response_text or "(no response)")
         assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "success"
-    else:
+    elif stop_reason in ("max_tokens", "max_turn_requests"):
         assert message.content.startswith("Partial results:")
         assert stop_reason in message.content
         assert message.content.endswith(response_text or "(no response)")
         assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "partial_success"
         assert normalized.additional_kwargs[TOOL_META_KEY]["error_type"] is None
+    else:
+        assert message.content.startswith("Error:")
+        assert stop_reason in message.content
+        assert message.content.endswith(response_text or "(no response)")
+        assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "error"
     assert acp_subprocess_tool.captured["proc"].returncode is not None
 
 
