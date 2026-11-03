@@ -271,13 +271,17 @@ class AioSandbox(Sandbox):
         message = body.get("message")
         return isinstance(message, str) and "session not found" in message.casefold()
 
-    def _cleanup_bash_session_best_effort(self, client, session_id: str) -> None:
+    def _cleanup_bash_session_best_effort(self, client, session_id: str, *, may_be_running: bool = False) -> None:
         try:
-            client.bash.close_session(
+            result = client.bash.close_session(
                 session_id,
                 request_options=self._bounded_cleanup_request_options(),
             )
+            if getattr(result, "success", None) is False:
+                raise RuntimeError("AIO did not confirm bash session closure")
         except Exception as cleanup_error:
+            if may_be_running:
+                self._command_cleanup_failed = True
             logger.warning(
                 "Failed to release transient bash session %s: %s",
                 session_id,
@@ -1053,6 +1057,7 @@ class AioSandbox(Sandbox):
     def _run_owned_bash(self, command, env, timeout, scope):
         scope.check()
         session_id = self._create_bash_session(self._client)
+        completed = False
         started = time.monotonic()
         try:
             prepared = f"exec < /dev/null\nexport {COMMAND_OWNER_ENV}={scope.token}\n{command}"
@@ -1083,6 +1088,7 @@ class AioSandbox(Sandbox):
                 if scope.cancelled.is_set():
                     continue
                 if status != "running":
+                    completed = status in ("completed", "timed_out", "killed")
                     return self._render_bash_output("".join(stdout), "".join(stderr), command_info.exit_code, status, timeout)
                 if (data.stdout and data.offset is None) or (data.stderr and data.stderr_offset is None):
                     self._command_cleanup_failed = True
@@ -1091,7 +1097,7 @@ class AioSandbox(Sandbox):
                 offset = data.offset if data.offset is not None else offset
                 stderr_offset = data.stderr_offset if data.stderr_offset is not None else stderr_offset
         finally:
-            self._cleanup_bash_session_best_effort(self._client, session_id)
+            self._cleanup_bash_session_best_effort(self._client, session_id, may_be_running=not completed)
 
     def _run_bash_exec(
         self,
@@ -1104,6 +1110,7 @@ class AioSandbox(Sandbox):
         with command_lock(self._lock, scope):
             for attempt in range(2):
                 session_id: str | None = None
+                completed = False
                 try:
                     if scope is not None:
                         return self._run_owned_bash(command, env, timeout, scope)
@@ -1123,6 +1130,9 @@ class AioSandbox(Sandbox):
                         request_options=self._command_request_options(timeout),
                     )
                     data = result.data if result else None
+                    status = getattr(data, "status", None)
+                    exit_code = getattr(data, "exit_code", None)
+                    completed = getattr(result, "success", None) is not False and (status in ("completed", "timed_out", "killed") or (status is None and exit_code is not None))
                     return self._render_bash_output(getattr(data, "stdout", None) or "", getattr(data, "stderr", None) or "", getattr(data, "exit_code", None), getattr(data, "status", None), timeout)
                 except httpx.TimeoutException:
                     return self._transport_timeout_error(timeout), "transport_timeout"
@@ -1144,7 +1154,7 @@ class AioSandbox(Sandbox):
                     return f"Error: {e}", None
                 finally:
                     if session_id is not None:
-                        self._cleanup_bash_session_best_effort(self._client, session_id)
+                        self._cleanup_bash_session_best_effort(self._client, session_id, may_be_running=not completed)
             return "Error: bash.exec session disappeared after retry", None
 
     def read_file(

@@ -28,7 +28,10 @@ Legacy Shell needs a same-line owner prefix. Poll by returned session/command id
 a separate fixed control command with pidfds. Missing command state or cleanup
 receipts fence reuse through existing quarantine. New output from a running
 command needs its next offset; empty polls retain the previous offsets.
-Markers support cooperative cleanup, not hostile-code isolation.
+Markers support cooperative cleanup, not hostile-code isolation. Bash exec/poll
+errors plus failed or rejected close receipts set `_command_cleanup_failed`;
+confirmed terminal commands do not. Cover both sync and managed paths in
+`test_aio_bash_cleanup_recycle.py`.
 
 ## Reuse admission
 

@@ -2955,7 +2955,8 @@ successful empty or partial searches. Binary files and files that disappear
 during scanning remain excluded.
 
 AIO sandboxes recycle after an uncertain implicit-shell outcome or session
-creation; a confirmed `hard_timeout` remains eligible for warm reuse. The Gateway
+creation, or when a Bash command's termination and session closure are both
+unconfirmed. Confirmed terminal commands remain eligible for warm reuse. The Gateway
 waits for all execution and upload holders to finish, including command-session
 cleanup. An in-flight session creation alone does not trigger recycling or
 interrupt a concurrent run. Before recycling, the Gateway records the container ID or Pod UID under
