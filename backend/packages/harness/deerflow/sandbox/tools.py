@@ -3226,9 +3226,11 @@ def _read_file_from_sandbox(
     *,
     start_line: int | None = None,
     end_line: int | None = None,
+    sandbox: Sandbox | None = None,
 ) -> str:
     """Read through the sandbox while preserving provider-owned mount paths."""
-    sandbox = ensure_sandbox_initialized(runtime)
+    if sandbox is None:
+        sandbox = ensure_sandbox_initialized(runtime)
     ensure_thread_directories_exist(runtime)
     if is_local_sandbox(runtime):
         path = _resolve_local_read_path(path, get_thread_data(runtime))
@@ -3318,10 +3320,12 @@ def read_file_tool(
         if read_snapshot_requested(path):
             # The gate already needs a complete version hash. Read once and
             # derive both that evidence and the ranged/truncated view from it.
-            source = read_current_file_content(runtime, path)
-            if source.startswith("Error:"):
+            sandbox = ensure_sandbox_initialized(runtime)
+            source = _read_file_from_sandbox(runtime, path, sandbox=sandbox)
+            if not isinstance(sandbox, LocalSandbox) and source.startswith("Error:"):
                 # Some remote providers report read failures as text. Never
                 # turn that failure into a range view or version evidence.
+                # LocalSandbox raises failures; its Error: lines are file data.
                 return _truncate_read_file_output(source, _read_file_output_max_chars())
             displayed = _format_read_file_snapshot(source, start_line=start_line, end_line=end_line)
             record_read_snapshot(path, source, displayed)

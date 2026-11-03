@@ -87,6 +87,107 @@ def test_custom_reader_grants_evidence_only_for_an_observed_complete_version(tmp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invocation", ["sync", "async"])
+@pytest.mark.parametrize("returned", ["", "(empty)", []], ids=["literal-empty-string", "empty-display-sentinel", "nontext-empty-list"])
+@pytest.mark.parametrize("original", ["", "not empty"], ids=["empty-file", "nonempty-control"])
+async def test_custom_empty_views_only_authorize_actual_text_reads_of_empty_files(tmp_path, invocation, returned, original):
+    path = tmp_path / "empty.txt"
+    path.write_bytes(original.encode())
+    request = _request(str(path))
+    gate = ReadBeforeWriteMiddleware(content_reader=lambda runtime, name: path.read_bytes().decode())
+
+    def read(req):
+        assert path.read_bytes() == original.encode()
+        return ToolMessage(content=returned, tool_call_id="read")
+
+    if invocation == "sync":
+        result = gate.wrap_tool_call(request, read)
+    else:
+
+        async def aread(req):
+            return read(req)
+
+        result = await gate.awrap_tool_call(request, aread)
+    can_authorize = original == "" and isinstance(returned, str)
+    if can_authorize:
+        assert result.additional_kwargs[READ_MARK_KEY]["hash"] == hashlib.sha256(b"").hexdigest()
+    else:
+        assert READ_MARK_KEY not in result.additional_kwargs
+    write_request = ToolCallRequest(
+        tool_call={"name": "write_file", "args": {"path": str(path), "content": "updated"}, "id": "write"},
+        tool=None,
+        state={"messages": [result]},
+        runtime=request.runtime,
+    )
+
+    def write(req):
+        path.write_bytes(req.tool_call["args"]["content"].encode())
+        return ToolMessage(content="OK", tool_call_id="write")
+
+    if invocation == "sync":
+        written = gate.wrap_tool_call(write_request, write)
+    else:
+
+        async def awrite(req):
+            return write(req)
+
+        written = await gate.awrap_tool_call(write_request, awrite)
+    assert written.status == ("success" if can_authorize else "error")
+    assert path.read_bytes() == (b"updated" if can_authorize else original.encode())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation", ["sync", "async"])
+@pytest.mark.parametrize("runtime_id", ["local:log-reader", "independent-test-id"])
+@pytest.mark.parametrize(
+    "line_range,expected",
+    [
+        pytest.param({}, "Error: initial failure\nrecovered=true\n\n", id="full"),
+        pytest.param({"start_line": 2, "end_line": 2}, "recovered=true", id="second-line"),
+        pytest.param({"start_line": 3, "end_line": 3}, "(empty)", id="blank-line"),
+    ],
+)
+async def test_local_error_prefixed_logs_keep_requested_view_and_source_evidence(tmp_path, monkeypatch, invocation, runtime_id, line_range, expected):
+    content = "Error: initial failure\nrecovered=true\n\n"
+    (tmp_path / "report.log").write_bytes(content.encode())
+    sandbox = LocalSandbox("local:actual-reader", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path))])
+    acquisitions = []
+
+    def initialize(runtime):
+        acquisitions.append(runtime)
+        return sandbox
+
+    async def initialize_async(runtime):
+        return initialize(runtime)
+
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized", initialize)
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized_async", initialize_async)
+    request = _request("/mnt/user-data/workspace/report.log", line_range)
+    request.runtime.state.update(sandbox={"sandbox_id": runtime_id}, thread_data={"workspace_path": str(tmp_path)})
+    gate = ReadBeforeWriteMiddleware()
+
+    def result(text):
+        return ToolMessage(content=text, tool_call_id="read", status="success")
+
+    if invocation == "sync":
+        actual = gate.wrap_tool_call(request, lambda req: result(tools.read_file_tool.func(runtime=req.runtime, **req.tool_call["args"])))
+    else:
+
+        async def read(req):
+            return result(await tools.read_file_tool.coroutine(runtime=req.runtime, **req.tool_call["args"]))
+
+        actual = await gate.awrap_tool_call(request, read)
+    assert actual.content == expected
+    assert actual.additional_kwargs[READ_MARK_KEY]["hash"] == hashlib.sha256(content.encode()).hexdigest()
+    if invocation == "sync":
+        assert len(acquisitions) == 1
+    else:
+        # The async bridge initializes once before its sync tool body; the
+        # snapshot source must not add another lookup beyond the body entry.
+        assert len(acquisitions) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation", ["sync", "async"])
 async def test_parallel_first_party_reads_bind_each_result_to_its_own_source(tmp_path, monkeypatch, invocation):
     sources = {"first.txt": "alpha source\n", "second.txt": "header\r\nbeta source\r\n"}
     for name, content in sources.items():

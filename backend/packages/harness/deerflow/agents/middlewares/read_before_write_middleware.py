@@ -476,7 +476,9 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         # READ_FILE_EMPTY is a successful read of an empty file or a valid range
         # containing only blank lines. Like any successful ranged read, it stamps
         # the current full-file hash and can satisfy the gate.
-        tool_content = message.content if isinstance(message.content, str) else ""
+        if not isinstance(message.content, str):
+            return
+        tool_content = message.content
         if tool_content.strip() in READ_FILE_NO_CONTENT_RESULTS - {READ_FILE_EMPTY}:
             logger.debug(
                 "read-before-write mark skipped for %r: in-band no-content result from read_file",
@@ -502,7 +504,8 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
         # returning the exact complete content. A range/truncated view cannot
         # prove whether an unseen part changed before this inspection.
         args = request.tool_call.get("args") or {}
-        if args.get("start_line") is not None or args.get("end_line") is not None or (content or READ_FILE_EMPTY) != tool_content:
+        complete_matches = tool_content == content or (content == "" and tool_content == READ_FILE_EMPTY)
+        if args.get("start_line") is not None or args.get("end_line") is not None or not complete_matches:
             logger.debug("read-before-write mark skipped for %r: result does not match the inspected version", path)
             return
         message.additional_kwargs[READ_MARK_KEY] = {
