@@ -607,6 +607,36 @@ async def test_resumed_run_is_not_charged_for_an_earlier_runs_steered_step():
     assert context.get("stop_reason") is None
 
 
+@pytest.mark.asyncio
+async def test_resumed_runs_own_steer_does_not_charge_it_for_an_earlier_step():
+    followed = []
+
+    @tool
+    async def follow_up() -> str:
+        """Lead work of the resumed run."""
+        followed.append(True)
+        return "Done"
+
+    budget = TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True, max_tokens=1000))
+    model = ScriptedStepModel(observed=[], steps=[[{"name": "follow_up", "args": {}, "id": "follow"}]])
+    graph = create_agent(model, tools=[follow_up], middleware=[budget, CompletedSubagentUsageMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "thread"}}
+    # The earlier run was cancelled once its child's result was checkpointed;
+    # the resumed run receives its own steer before its first model call.
+    earlier = [
+        HumanMessage(content="Original task", id="opening", additional_kwargs={"run_id": "earlier"}),
+        AIMessage(content="", tool_calls=[_delegated("done")], id="dispatch"),
+        _finished_task("done", 1_000_000).update["messages"][0].model_copy(update={"id": "result"}),
+    ]
+    steer = HumanMessage(content="Handle this too", id="steer", additional_kwargs={"run_id": "resumed", "run_input_id": "input"})
+    await graph.aupdate_state(config, {"messages": [*earlier, steer]}, as_node="tools")
+    context = {"run_id": "resumed", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset(message.id for message in earlier)}
+    await graph.ainvoke(None, config, context=context)
+
+    assert followed
+    assert context.get("stop_reason") is None
+
+
 def test_steer_does_not_open_a_resumed_runs_delegation_window():
     from deerflow.agents.middlewares.durable_context_middleware import _run_opening_human_index
 

@@ -26,7 +26,8 @@ current-work control. Preserve permissions, pool caps and token/loop stops.
 A task finishing after Steer charges usage to its dispatch `AIMessage` when its
 receipt is delivered (newest `AIMessage` if compacted); budgets read only those.
 A run's own steers and receipts open no turn and end no tool step: ledger capture
-and usage attribution still read results before them (`is_mid_run_input`). If
+and usage attribution still read results before them (`is_mid_run_input`), but
+attribution stops at results from before the run (pre-existing message IDs). If
 compaction drops the run's opener, capture covers what remains of the run.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
