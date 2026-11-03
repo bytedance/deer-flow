@@ -120,7 +120,7 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
-      holds, i.e. every executable call in the turn has a result. Identical parallel calls
+      holds, i.e. every open call in the turn has a result. Identical parallel calls
       (two ``bash``) are distinguishable by nothing else, and order here is a
       construction guarantee rather than an assumption about the provider: LangGraph's
       ``ToolNode`` builds the results with ``asyncio.gather`` / ``executor.map`` over
@@ -434,8 +434,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
 
                 open_calls = assigned
-                executable_count = sum(1 for entry in assigned if entry["executable"])
-                positional = _turn_malformed_result_count(messages, index) == executable_count
+                positional = _turn_malformed_result_count(messages, index) == len(assigned)
                 if update:
                     rewritten[index] = msg.model_copy(update=update)
                 continue
