@@ -78,9 +78,11 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
     elif first_kind == "truncated":
         first_content = json.dumps({"error": "Unauthorized", "details": "sample line\n" * 10000})
     if first_kind != "missing":
-        (outputs / "response.json").write_text(first_content, encoding="utf-8")
+        # newline="\n" pins LF: LocalSandbox.read_file preserves stored line endings,
+        # and the readback comparison below expects the fixture bytes.
+        (outputs / "response.json").write_text(first_content, encoding="utf-8", newline="\n")
     notes = "The saved response belongs to an earlier request.\n"
-    (outputs / "notes.txt").write_text(notes, encoding="utf-8")
+    (outputs / "notes.txt").write_text(notes, encoding="utf-8", newline="\n")
 
     sandbox = LocalSandbox("json-result-test")
     reads = []
