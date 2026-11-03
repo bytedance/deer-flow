@@ -142,9 +142,9 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         messages = state.get("messages")
         if not isinstance(messages, list):
             return None
-        tool_call_id = request.tool_call.get("id") or ""
+        tool_call_id = _tool_call_id(request.tool_call)
         for message in reversed(messages):
-            if isinstance(message, AIMessage) and any((tool_call.get("id") or "") == tool_call_id for tool_call in message.tool_calls):
+            if isinstance(message, AIMessage) and any(_tool_call_id(tool_call) == tool_call_id for tool_call in message.tool_calls):
                 return message.id or None
         return None
 
