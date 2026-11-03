@@ -1,5 +1,6 @@
 """Real DuckDB cache lifetimes, using the production CSV loader without spatial."""
 
+import errno
 import json
 import multiprocessing
 import runpy
@@ -115,22 +116,31 @@ def publication_worker(cache, source, published, release, results):
     """Pause after real manifest publication, before its caller continues."""
     try:
         scope = configure(cache, source)
+
         # The regression also runs against the flat-cache implementation. Its
         # publication point exposes the map before closing the DuckDB writer.
-        hook = (
-            "_publish_cache_manifest"
-            if "_publish_cache_manifest" in scope
-            else "save_table_map"
-        )
-        publish = scope[hook]
-
-        def pause_after_publication(*args):
-            publish(*args)
+        def pause():
             published.set()
             if not release.wait(10):
                 raise TimeoutError("parent did not release publication")
 
-        scope[hook] = pause_after_publication
+        if "save_table_map" in scope:
+            save = scope["save_table_map"]
+
+            def pause_after_map(*args):
+                save(*args)
+                pause()
+
+            scope["save_table_map"] = pause_after_map
+        else:
+            replace = scope["os"].replace
+
+            def pause_after_replace(source_path, destination):
+                replace(source_path, destination)
+                if Path(destination).parent == cache / "generations-v1":
+                    pause()
+
+            scope["os"].replace = pause_after_replace
         scope["action_inspect"] = lambda con, _: con.execute(
             "SELECT value FROM report"
         ).fetchall()
@@ -377,6 +387,30 @@ def test_load_interruption_cleans_private_build(tmp_path, input_file, failure):
     assert list(cache.rglob("*.json")) == []
     scope["load_files"] = loader
     scope["main"]()
+
+
+@pytest.mark.parametrize(
+    ("module", "operation"),
+    [("tempfile", "mkstemp"), ("json", "dump"), ("os", "fsync")],
+)
+def test_manifest_preparation_failure_cleans_private_generation(
+    tmp_path, input_file, monkeypatch, module, operation
+):
+    cache = tmp_path / "cache"
+    scope = configure(cache, input_file)
+
+    def fail(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "manifest preparation ran out of space")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scope[module], operation, fail)
+        with pytest.raises(OSError) as error:
+            scope["main"]()
+    assert error.value.errno == errno.ENOSPC
+    assert list((cache / "generations-v1").iterdir()) == []
+
+    with scope["open_analysis_cache"]([str(input_file)]) as (con, _):
+        assert con.execute("SELECT value FROM report").fetchall() == [(7,)]
 
 
 def test_publication_failure_preserves_prior_manifest(

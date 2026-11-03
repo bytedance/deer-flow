@@ -16,6 +16,7 @@ import sys
 import tempfile
 import uuid
 from collections import Counter
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -129,10 +130,11 @@ def _open_cached_generation(root: Path, files_hash: str):
         raise
 
 
-def _publish_cache_manifest(
-    root: Path, files_hash: str, generation: str, table_map: dict[str, str]
-) -> None:
-    """Publish the database identity and map together, after its writer closed."""
+@contextmanager
+def _prepare_cache_manifest(
+    root: Path, generation: str, table_map: dict[str, str]
+) -> Iterator[str]:
+    """Write and flush a private manifest before its atomic publication."""
     fd, temporary = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=root)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -143,7 +145,7 @@ def _publish_cache_manifest(
             )
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, root / f"{files_hash}.json")
+        yield temporary
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -183,10 +185,11 @@ def open_analysis_cache(files: list[str]):
         # Never expose a database still owned by a writer, including the first
         # invocation's analysis action. Other processes may already be readers.
         con = duckdb.connect(str(database), read_only=True)
-        # Retain complete generations once publication may have happened, even
-        # if interrupted immediately after replace. A reader may have its ID.
-        publication_started = True
-        _publish_cache_manifest(root, files_hash, generation, table_map)
+        destination = root / f"{files_hash}.json"
+        with _prepare_cache_manifest(root, generation, table_map) as temporary:
+            # A reader may have its ID if replace succeeds before an interruption.
+            publication_started = True
+            os.replace(temporary, destination)
         logger.info("Loaded %s table(s): %s", len(table_map), ", ".join(table_map))
         yield con, table_map
     finally:
