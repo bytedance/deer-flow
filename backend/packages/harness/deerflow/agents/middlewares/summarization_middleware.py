@@ -23,7 +23,7 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
-from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.agents.middlewares.message_utils import genuine_user_turn_id, is_genuine_user_message
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
 from deerflow.config.app_config import get_app_config
@@ -755,15 +755,18 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # lock its id here and rescue by exact id. This keeps the current request
         # without "moving cutoff" — which would also retain early AI/Tool turns and
         # never compress a first-turn long analysis. A Human Input Card reply is
-        # hidden from the UI but is still the user's current request.
+        # hidden from the UI but is still the user's current request. A Steer
+        # only adds to the Run's opening request, which also anchors turn-scoped
+        # state such as deferred tool promotions, so that request survives too.
         latest_user_id: str | None = None
         for msg in reversed(messages):
             if is_genuine_user_message(msg):
                 latest_user_id = msg.id
                 break
+        user_ids = {user_id for user_id in (latest_user_id, genuine_user_turn_id(messages)) if user_id}
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
+        messages_to_summarize, preserved_messages = self._preserve_required_context(messages_to_summarize, preserved_messages, user_ids=user_ids)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -989,7 +992,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         *,
-        latest_user_id: str | None = None,
+        user_ids: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
         """Keep system messages, tagged dynamic-context reminders and the current user request out of compression.
 
@@ -1003,9 +1006,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         call without its instructions. The untagged ``__user`` peer is deliberately NOT
         rescued by ID-swap prefix: it is a stale historical request that must be
         allowed to compress — the source of cross-turn prompt contamination. The
-        *current* request is instead identified by ``latest_user_id``, so a
-        first-turn long analysis keeps its ``__user`` request while its early
-        AI/Tool turns still compress.
+        *current* request is instead identified by ``user_ids`` (the latest user
+        message and, after a Steer, the Run's opening request), so a first-turn
+        long analysis keeps its ``__user`` request while its early AI/Tool
+        turns still compress.
 
         Rescuing the whole partition is legitimate: ``_prepare_compaction``
         skips compaction when there is no history left to summarize.
@@ -1013,7 +1017,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
+            if isinstance(msg, SystemMessage) or is_dynamic_context_reminder(msg) or msg.id in user_ids:
                 rescued.append(msg)
             else:
                 remaining.append(msg)

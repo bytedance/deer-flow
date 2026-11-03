@@ -9,6 +9,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from _agent_e2e_helpers import FakeToolCallingModel
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -21,6 +22,7 @@ from deerflow.agents.middlewares.deferred_tool_filter_middleware import Deferred
 from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
 from deerflow.agents.middlewares.message_utils import genuine_user_turn_id
 from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.runtime.runs.input_control import RunInputControl
 from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
@@ -55,24 +57,24 @@ class SteeredModel(BaseChatModel):
         results = {m.name for m in messages if isinstance(m, ToolMessage)}
         steered = any(m.additional_kwargs.get("run_input_id") for m in messages)
         opening = _latest_opening(messages)
-        if opening.id != "user-1":
+        if opening is not None and opening.id != "user-1":
             message = AIMessage(content="hello")
-        elif not any(isinstance(m, AIMessage) for m in messages[messages.index(opening) :]):
+        elif opening is not None and not any(isinstance(m, AIMessage) for m in messages[messages.index(opening) :]):
             message = AIMessage(content="", tool_calls=[{"name": "tool_search", "args": {"query": "select:mcp_create_issue"}, "id": "search"}])
-        elif "slow_build" not in results:
-            message = AIMessage(content="", tool_calls=[{"name": "slow_build", "args": {}, "id": "build"}])
         elif steered and "mcp_create_issue" not in results:
             message = AIMessage(content="", tool_calls=[{"name": "mcp_create_issue", "args": {"title": "Build failure"}, "id": "issue"}])
+        elif not steered and "slow_build" not in results:
+            message = AIMessage(content="", tool_calls=[{"name": "slow_build", "args": {}, "id": "build"}])
         else:
             message = AIMessage(content="done")
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 def _latest_opening(messages):
-    return next(m for m in reversed(messages) if isinstance(m, HumanMessage) and not m.additional_kwargs.get("run_input_id"))
+    return next((m for m in reversed(messages) if isinstance(m, HumanMessage) and not m.additional_kwargs.get("run_input_id")), None)
 
 
-async def _run_with_steer(steer_text, *, routing_index=None):
+async def _run_with_steer(steer_text, *, routing_index=None, summarizer=None):
     entered, release = asyncio.Event(), asyncio.Event()
     created = []
 
@@ -96,6 +98,8 @@ async def _run_with_steer(steer_text, *, routing_index=None):
 
     setup = build_deferred_tool_setup([slow_build, tag_mcp_tool(mcp_create_issue), tag_mcp_tool(mcp_add_label)], enabled=True)
     middleware = [RunInputAdmissionMiddleware()]
+    if summarizer is not None:
+        middleware.append(summarizer)
     if routing_index is not None:
         middleware.append(McpRoutingMiddleware(routing_index, setup.catalog_hash, 3))
     middleware += [DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash), RunInputMiddleware()]
@@ -151,3 +155,18 @@ async def test_steer_routing_adds_to_tools_promoted_earlier_in_the_run():
     assert created == ["Build failure"]
     assert result["promoted"]["turn_id"] == "user-1"
     assert sorted(result["promoted"]["names"]) == ["mcp_add_label", "mcp_create_issue"]
+
+
+@pytest.mark.asyncio
+async def test_compaction_after_a_steer_keeps_the_promotion_scope():
+    summarizer = DeerFlowSummarizationMiddleware(model=FakeToolCallingModel(responses=[AIMessage(content="searched, then built")] * 3), trigger=("messages", 6), keep=("messages", 1), token_counter=len)
+    _, _, model, result, created = await _run_with_steer("Mention the failing step in the issue", summarizer=summarizer)
+
+    # The compaction before the third model call summarized the search and the build.
+    assert result["summary_text"]
+    assert not any(isinstance(m, ToolMessage) and m.name == "slow_build" for m in result["messages"])
+    assert all("mcp_create_issue" in names for names in model.bound[1:])
+    assert created == ["Build failure"]
+    # The Run's opening request survives next to the Steer and keeps anchoring the scope.
+    assert [m.id for m in result["messages"] if isinstance(m, HumanMessage)][0] == "user-1"
+    assert result["promoted"]["turn_id"] == "user-1"
