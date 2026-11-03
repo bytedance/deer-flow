@@ -30,6 +30,13 @@ receipts fence reuse through existing quarantine. New output from a running
 command needs its next offset; empty polls retain the previous offsets.
 Markers support cooperative cleanup, not hostile-code isolation.
 
+Scoped env calls register in the same scope table and hold its lock through
+fresh bash creation, execution, polling and cleanup. Only that private path
+skips the shared implicit-shell lock. Close/release drain the registered lock;
+queued calls recheck registry identity before creating a session. Keep same-scope
+ordering, fresh env sessions, cancellation ownership and closed admission.
+Regressions: `tests/test_aio_scoped_env_concurrency.py`.
+
 ## Reuse admission
 
 An implicit-shell fence is sticky for the container's lifetime, even after a

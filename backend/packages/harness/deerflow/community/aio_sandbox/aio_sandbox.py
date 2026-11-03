@@ -5,6 +5,7 @@ import math
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import httpx
@@ -43,7 +44,7 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
 
 @dataclass
 class _ScopedShellSession:
-    """One server-side shell session serialized within an agent execution."""
+    """An execution's command lock and optional persistent shell session."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     session_id: str | None = None
@@ -588,13 +589,13 @@ class AioSandbox(Sandbox):
         *,
         scope_id: str | None = None,
     ) -> str:
-        """Run no-env commands in one persistent session per subagent run.
+        """Serialize commands within a subagent scope, independently of others.
 
         Commands within a scope remain serialized, while independent subagents
         use distinct server-side sessions and can execute concurrently. Secret-
         bearing commands keep the existing fresh ``bash.exec`` behavior.
         """
-        if env or scope_id is None:
+        if scope_id is None:
             return self.execute_command(command, env=env, timeout=timeout)
         _validate_extra_env(env)
 
@@ -618,6 +619,11 @@ class AioSandbox(Sandbox):
                 client = self._client
                 if client is None:
                     raise RuntimeError("sandbox client is closed")
+                if env:
+                    # This registry entry also makes close()/scope release drain
+                    # fresh bash work. Keep per-call env sessions independent of
+                    # the shared implicit shell and of other execution scopes.
+                    return self._execute_with_env(command, env, self._effective_command_timeout(timeout), scope_lock_held=True)
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
@@ -978,6 +984,8 @@ class AioSandbox(Sandbox):
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> str:
         """Execute a command with per-call environment variables injected.
 
@@ -1009,10 +1017,10 @@ class AioSandbox(Sandbox):
         """
         if self._bash_exec_unsupported:
             return _BASH_EXEC_UNSUPPORTED_ERROR
-        output, status = self._run_bash_exec(command, env, timeout)
+        output, status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
         if status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
-            retried, retry_status = self._run_bash_exec(command, env, timeout)
+            retried, retry_status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
             if retry_status not in (None, "completed"):
                 return retried
             if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
@@ -1098,10 +1106,15 @@ class AioSandbox(Sandbox):
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> tuple[str, str | None]:
         """Single bash.exec invocation in an explicitly released fresh session."""
         scope = current_command_scope(self)
-        with command_lock(self._lock, scope):
+        # Scoped callers already hold their registered execution lock, which
+        # close() and release_command_scope() drain before detaching the client.
+        # Unscoped calls retain the shared lock for that lifecycle guarantee.
+        with nullcontext() if scope_lock_held else command_lock(self._lock, scope):
             for attempt in range(2):
                 session_id: str | None = None
                 try:
