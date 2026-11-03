@@ -19,6 +19,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **sandbox:** A recursive `rm` of the home directory or a system root is now
+  blocked whichever way it is spelled. The audit rule matched one flag word
+  containing `r`, then the target, then the end of the line, so `rm -r -f ~/`,
+  `rm --recursive --force /home`, `rm -rf -- ~/` and `rm -rf ~/ # cleanup` were
+  all classified clean — as was every `$HOME` / `${HOME}` spelling of `~`.
+  `rm`'s arguments are now judged from the token list, and the shell
+  startup-file rule accepts the variable spellings too. Benign deletes are
+  unchanged: no recursion (`rm -f ~/notes.txt`), a file literally named `-rf`
+  after `--`, another user's home (`~user`), `/homekit` and `/rootfs` all stay
+  allowed. ([#7851])
+
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
   or during a DingTalk outage. dingtalk-stream logs a failed card request and
@@ -15998,3 +16009,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7851]: https://github.com/bytedance/deer-flow/pull/7851
