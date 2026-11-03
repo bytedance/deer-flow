@@ -87,6 +87,16 @@ It also clears deterministic local proxy/network leftovers before recreation;
 unknown cleanup errors retain the quarantine record.
 Explicit stop failures use that same generation-bound quarantine before dropping
 tracking. Failed record writes retain metadata and fence cached lookups in memory.
+Snapshot quarantine receipts before presence/identity probes; both full retirement
+and replacement pruning may delete only unchanged receipts from that snapshot.
+Each mark atomically replaces its receipt, including `unknown`; legacy empty
+records remain supported. A short per-sandbox sidecar file lock serializes mark,
+snapshot and compare/delete, never backend IO; keep the lock outside the removable
+record directory and never unlink it. Its persistent mutation token also protects
+empty crash-residue fences without relying on filesystem timestamps. Pass the
+yielded lease check
+through snapshot waits, retirement, backend `destroy` and `complete_absent_teardown`;
+backends check before each new resource operation and retain unreleased ports.
 Warm-to-active promotion clears an obsolete in-memory fence under the metadata
 lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,

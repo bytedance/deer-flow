@@ -1091,7 +1091,10 @@ that no port is available instead of attempting an out-of-range bind.
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
 before completing cleanup. Healthy replacements with the same logical ID remain
-reusable, including after background recovery into the warm pool.
+reusable, including after background recovery into the warm pool. Cleanup retires
+only the quarantine record versions captured before that verification, preserving
+newer fences even if its ownership lease expires. Confirmed lease loss defers
+further cleanup until the current owner can retry it.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode. For absolute skills paths and custom directory mappings on Linux, macOS, Windows, WSL, or a Docker Gateway, see [Skills and sandbox paths](backend/docs/CONFIGURATION.md#skills-and-sandbox-paths).
 

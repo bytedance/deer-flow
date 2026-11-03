@@ -677,6 +677,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         destroyer that crashes mid-stop still releases the container one TTL later
         instead of marking it undestroyable forever.
 
+        The yielded check stops quarantined cleanup from issuing further IO after
+        the heartbeat observes a peer takeover. An already-issued stop cannot be
+        recalled; receipt snapshots separately protect marks made before that
+        loss is observed.
+
         The final release is the heartbeat's own last act, not the caller's. A
         refresh ``claim`` still in flight when the context exits (the socket
         timeout bounds it, but it can be mid-call) would otherwise land *after* a
@@ -687,6 +692,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         refresh, so no claim can follow it.
         """
         stop = threading.Event()
+        lease_lost = threading.Event()
 
         def beat() -> None:
             interval = self._ownership_config.renewal_interval_seconds
@@ -694,6 +700,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 while not stop.wait(interval):
                     try:
                         if not self._ownership.claim(sandbox_id, for_destroy=True):
+                            lease_lost.set()
                             # Only reachable if the store lost our marker *and* a
                             # peer took it (e.g. a flush mid-stop). The stop is
                             # already in flight and cannot be recalled, so say so
@@ -718,8 +725,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         beater = threading.Thread(target=beat, name="sandbox-teardown-lease", daemon=True)
         beater.start()
+
+        def check_lease() -> None:
+            if lease_lost.is_set():
+                raise SandboxPolicyReplacementDeferredError(
+                    sandbox_id,
+                    reason="lost its teardown lease; cleanup is deferred and its quarantine is retained",
+                )
+
         try:
-            yield
+            yield check_lease
         finally:
             stop.set()
             beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
@@ -2552,8 +2567,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     sandbox_id,
                     reason="is quarantined and owned by a peer; its cleanup is deferred until that owner releases it",
                 )
-            with self._held_teardown_lease(sandbox_id):
-                self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=True)
+            with self._held_teardown_lease(sandbox_id) as check_lease:
+                self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=True, check_lease=check_lease)
         finally:
             self._finish_local_teardown(sandbox_id)
 
@@ -2564,13 +2579,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         info.requires_replacement = True
         self._quarantine_store().mark(info)
 
-    def _complete_quarantined_teardown(self, sandbox_id: str, store: SandboxQuarantine, *, retire_replaced: bool) -> bool:
+    def _complete_quarantined_teardown(self, sandbox_id: str, store: SandboxQuarantine, *, retire_replaced: bool, check_lease: Callable[[], None]) -> bool:
         """Retry under the caller's local reservation and ownership heartbeat."""
+        check_lease()
+        info = SandboxInfo(sandbox_id, "")
+        snapshot = store.snapshot(info, check=check_lease)
+        check_lease()
         if self._backend.is_absent(sandbox_id) is not True:
+            check_lease()
             inspect_runtime = getattr(self._backend, "inspect_runtime", None)
             if not callable(inspect_runtime):
                 raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
             current = inspect_runtime(sandbox_id)
+            check_lease()
             if current is not None:
                 if not isinstance(current, SandboxInfo) or current.sandbox_id != sandbox_id:
                     raise RuntimeError(f"Runtime inspection returned invalid identity for sandbox {sandbox_id}")
@@ -2584,14 +2605,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # just written for this live generation.
                 if not store.contains(current):
                     if retire_replaced:
-                        store.retire_replaced_generations(current)
+                        check_lease()
+                        store.retire_replaced_generations(current, snapshot=snapshot, check=check_lease)
                         with self._lock:
                             getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
                     return False
                 # Inspection recovers runtime identity, but replacement
                 # cleanup must also remove its previous policy resources.
                 current.requires_replacement = True
-                self._backend.destroy(current)
+                check_lease()
+                self._backend.destroy(current, check=check_lease)
+            check_lease()
             # DELETE acceptance cannot prove the Pod/container vanished.
             # Also recheck when it disappeared between our observations.
             if self._backend.is_absent(sandbox_id) is not True:
@@ -2599,8 +2623,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     sandbox_id,
                     reason="is quarantined and its previous runtime is still present; the fence is retained",
                 )
-        self._backend.complete_absent_teardown(sandbox_id)
-        store.retire(SandboxInfo(sandbox_id, ""))
+        check_lease()
+        self._backend.complete_absent_teardown(sandbox_id, check=check_lease)
+        check_lease()
+        store.retire(info, snapshot=snapshot, check=check_lease)
         with self._lock:
             getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
         return True
@@ -2929,7 +2955,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if retry_cleanup:
             # A previous failed stop may have lost its endpoint or been replaced
             # under the same logical ID. Use the existing authoritative probes.
-            with self._held_teardown_lease(sandbox_id):
+            with self._held_teardown_lease(sandbox_id) as check_lease:
                 if info is not None:
                     self._remove_tracked_sandbox(sandbox_id, expected_info=info)
                 if sandbox is not None:
@@ -2937,7 +2963,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         sandbox.close()
                     except Exception as e:
                         logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
-                return self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=False)
+                return self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=False, check_lease=check_lease)
 
         if info:
             # The marker must outlast the stop, not the TTL it was written with,

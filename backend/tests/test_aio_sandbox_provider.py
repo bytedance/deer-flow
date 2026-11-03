@@ -2150,7 +2150,8 @@ async def test_absent_teardown_completion_precedes_quarantine_retirement_under_f
     provider._backend.is_absent.side_effect = [True] if initially_absent else [False, True]
     completed = []
 
-    def complete_absent_teardown(sandbox_id):
+    def complete_absent_teardown(sandbox_id, *, check):
+        check()
         assert sandbox_id == old.sandbox_id
         assert provider._backend.is_absent.call_count == (1 if initially_absent else 2)
         lease = provider._ownership._leases[sandbox_id]
@@ -2179,7 +2180,7 @@ async def test_absent_teardown_completion_precedes_quarantine_retirement_under_f
         assert provider._sandbox_infos[old.sandbox_id] is fresh
         assert not provider._quarantine_store().contains(old)
     assert completed == [old.sandbox_id]
-    provider._backend.complete_absent_teardown.assert_called_once_with(old.sandbox_id)
+    provider._backend.complete_absent_teardown.assert_called_once_with(old.sandbox_id, check=ANY)
     assert old.sandbox_id not in provider._local_teardown
 
 
@@ -2207,7 +2208,9 @@ async def test_quarantined_runtime_without_endpoint_is_deleted_before_replacemen
         operations.append("inspect")
         return current
 
-    def destroy(info):
+    def destroy(info, *, check=None):
+        if check is not None:
+            check()
         assert info is current
         # Runtime inspection restores identity, not the original cleanup intent.
         # Force full replacement cleanup even after the deployment switches open.
@@ -2256,13 +2259,16 @@ async def test_cancelled_quarantine_retry_drains_cleanup_before_releasing_fences
         assert finish_cleanup.wait(5)
         cleanup_finished.set()
 
-    def destroy(info):
+    def destroy(info, *, check=None):
+        if check is not None:
+            check()
         assert info is current
         assert info.requires_replacement is True
         if blocked_step == "destroy":
             wait_cleanup()
 
-    def complete_absent_teardown(sandbox_id):
+    def complete_absent_teardown(sandbox_id, *, check):
+        check()
         assert sandbox_id == old.sandbox_id
         assert provider._backend.is_absent.call_count == 2
         if blocked_step == "absent-completion":
@@ -2346,7 +2352,7 @@ async def test_accepted_delete_keeps_quarantine_until_runtime_disappears(failure
         else:
             await asyncio.to_thread(provider.acquire, "thread-failure-recovery", user_id="alice")
 
-    provider._backend.destroy.assert_called_once_with(current)
+    provider._backend.destroy.assert_called_once_with(current, check=ANY)
     provider._backend.create.assert_not_called()
     assert provider._quarantine_store().contains(old)
     assert old.sandbox_id not in provider._local_teardown
@@ -3301,7 +3307,9 @@ def test_destroy_failure_keeps_durable_runtime_target_for_cleanup_retry(tmp_path
     info.container_id = "generation-one"
     running = _observe_destroy_target(provider, info)
 
-    def stop(target):
+    def stop(target, *, check=None):
+        if check is not None:
+            check()
         if provider._backend.destroy.call_count == 1:
             raise RuntimeError("stop failed")
         running.pop(target.sandbox_id)
@@ -3356,6 +3364,149 @@ def test_destroy_retry_preserves_a_different_runtime_generation(tmp_path):
         assert not provider._quarantine_store().contains(new)
     finally:
         provider.reset()
+
+
+@pytest.mark.parametrize("generation", ["new-generation", None], ids=["known-generation", "unknown-generation"])
+@pytest.mark.parametrize("observe_lease_loss", [True, False], ids=["loss-observed", "heartbeat-paused"])
+def test_stale_destroy_retry_keeps_a_peers_new_quarantine(failure_recovery_lifecycle, tmp_path, monkeypatch, generation, observe_lease_loss):
+    """A lost teardown lease must not let yesterday's absence erase today's fence.
+
+    Exercise public destroy/acquire with real shared leases, creation flock and
+    durable records. Only container I/O and the heartbeat's pause are simulated.
+    """
+    from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    old_worker, _, shell, old = failure_recovery_lifecycle
+    module = importlib.import_module(type(old_worker).__module__)
+    if generation is None:
+        old.container_id = None
+    clock = [0.0]
+    old_worker._ownership._now = lambda: clock[0]
+    old_worker._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.01, ttl_multiplier=4)
+    running = {old.sandbox_id: old}
+    entered, finish, heartbeat_entered, resume_heartbeat, lease_lost, retired = (threading.Event() for _ in range(6))
+
+    def discover(sandbox_id):
+        current = running.get(sandbox_id)
+        return type(old).from_dict(current.to_dict()) if current is not None else None
+
+    def failed_old_stop(info):
+        running.pop(info.sandbox_id, None)
+        raise RuntimeError("old stop timed out after removing the container")
+
+    old_worker._backend.destroy.side_effect = failed_old_stop
+    old_worker._backend.is_absent = MagicMock(side_effect=lambda sid: sid not in running)
+    old_worker._backend.inspect_runtime = MagicMock(side_effect=discover)
+
+    def complete_old_cleanup(_sandbox_id, **_kwargs):
+        entered.set()
+        assert finish.wait(10), "old cleanup was not resumed"
+
+    old_worker._backend.complete_absent_teardown = MagicMock(side_effect=complete_old_cleanup)
+
+    def peer(owner_id):
+        worker = _make_provider(tmp_path)
+        worker._owner_id = owner_id
+        worker._lock = threading.Lock()
+        worker._sandbox_infos = {}
+        worker._warm_pool = {}
+        worker._thread_sandboxes = {}
+        worker._last_activity = {}
+        worker._ownership = MemoryOwnershipStore(owner_id=owner_id, ttl_seconds=600, time_source=lambda: clock[0])
+        worker._ownership._leases = old_worker._ownership._leases
+        worker._ownership._lock = old_worker._ownership._lock
+        worker._backend = SimpleNamespace(
+            discover=MagicMock(side_effect=discover),
+            inspect_runtime=MagicMock(side_effect=discover),
+            is_absent=MagicMock(side_effect=lambda sid: sid not in running),
+            complete_absent_teardown=MagicMock(),
+            destroy=MagicMock(side_effect=RuntimeError("replacement stop failed")),
+        )
+        monkeypatch.setattr(worker, "_sandbox_id_for_thread", lambda *_args: old.sandbox_id)
+        monkeypatch.setattr(worker, "_ensure_skills_projection", lambda *_args: None)
+        monkeypatch.setattr(worker, "_get_extra_mounts", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(worker, "_local_config_mount_exclusion_root", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(worker, "_lark_integration_active", lambda *_args: False)
+        monkeypatch.setattr(worker, "_lark_broker_active", lambda *_args, **_kwargs: False)
+        return worker
+
+    new_worker, restarted_worker = peer("new-owner"), peer("restarted-owner")
+
+    def create(_thread_id, sandbox_id, **_kwargs):
+        assert sandbox_id not in running
+        running[sandbox_id] = type(old)(sandbox_id, old.sandbox_url, container_id=generation)
+        return running[sandbox_id]
+
+    new_worker._backend.create = MagicMock(side_effect=create)
+    monkeypatch.setattr(module, "wait_for_sandbox_ready", lambda *_args, **_kwargs: True)
+    claim = old_worker._ownership.claim
+    retire = old_worker._quarantine_store().retire
+
+    def observe_retirement(*args, **kwargs):
+        try:
+            return retire(*args, **kwargs)
+        finally:
+            retired.set()
+
+    def paused_claim(sandbox_id, *, for_destroy=False):
+        if threading.current_thread().name == "sandbox-teardown-lease":
+            heartbeat_entered.set()
+            assert resume_heartbeat.wait(10), "old heartbeat was not resumed"
+        granted = claim(sandbox_id, for_destroy=for_destroy)
+        if not granted:
+            lease_lost.set()
+        return granted
+
+    executor = module.ThreadPoolExecutor(max_workers=1)
+    retry = None
+    try:
+        with pytest.raises(RuntimeError, match="old stop timed out"):
+            old_worker.destroy(old.sandbox_id)
+        assert old_worker._quarantine_store().contains(old)
+        monkeypatch.setattr(old_worker._ownership, "claim", paused_claim)
+        monkeypatch.setattr(old_worker._quarantine_store(), "retire", observe_retirement)
+        retry = executor.submit(old_worker.destroy, old.sandbox_id)
+        assert entered.wait(10) and heartbeat_entered.wait(10)
+
+        # Control: a live teardown lease rejects the peer's public acquire.
+        with pytest.raises(module.SandboxPolicyReplacementDeferredError):
+            new_worker.acquire("thread-failure-recovery", user_id="alice")
+        new_worker._backend.create.assert_not_called()
+
+        clock[0] = 601.0
+        assert new_worker.acquire("thread-failure-recovery", user_id="alice") == old.sandbox_id
+        replacement = running[old.sandbox_id]
+        if observe_lease_loss:
+            resume_heartbeat.set()
+            assert lease_lost.wait(10), "the real heartbeat did not observe the peer takeover"
+
+        shell.exec_command.side_effect = httpx.ReadTimeout("uncertain replacement command")
+        new_worker.get(old.sandbox_id).execute_command("uncertain-command")
+        with pytest.raises(RuntimeError, match="replacement stop failed"):
+            new_worker.destroy(old.sandbox_id)
+        assert new_worker._quarantine_store().contains(replacement)
+        assert new_worker.get(old.sandbox_id) is None
+
+        finish.set()
+        if not observe_lease_loss:
+            assert retired.wait(10), "the old cleanup did not attempt retirement"
+            resume_heartbeat.set()
+        try:
+            stale_success = retry.result(timeout=10)
+        except module.SandboxPolicyReplacementDeferredError:
+            stale_success = False
+        assert restarted_worker._quarantine_store().contains(replacement), "old cleanup erased the replacement's durable fence"
+        if observe_lease_loss:
+            assert stale_success is False, "a cleanup that lost its lease must defer"
+        with pytest.raises(module.SandboxPolicyReplacementDeferredError):
+            restarted_worker.acquire("thread-failure-recovery", user_id="alice")
+    finally:
+        finish.set()
+        resume_heartbeat.set()
+        executor.shutdown(wait=True)
+        new_worker.reset()
+        restarted_worker.reset()
 
 
 @pytest.mark.parametrize("admission", ["discovery", "orphan-adoption"])
@@ -3463,7 +3614,9 @@ def test_failed_destroy_record_write_blocks_cached_reuse_until_retry(tmp_path, m
     provider._active_sandbox_identity[info.sandbox_id] = ("alice", "thread")
     running = _observe_destroy_target(provider, info)
 
-    def stop(target):
+    def stop(target, *, check=None):
+        if check is not None:
+            check()
         if provider._backend.destroy.call_count == 1:
             raise RuntimeError("stop failed")
         running.pop(target.sandbox_id)
@@ -3515,7 +3668,9 @@ def test_destroy_keeps_reservation_while_stop_is_pending(tmp_path):
     entered, finish = threading.Event(), threading.Event()
     errors = []
 
-    def stop(_info):
+    def stop(_info, *, check=None):
+        if check is not None:
+            check()
         entered.set()
         assert finish.wait(5)
 
@@ -3551,7 +3706,9 @@ def test_destroy_completion_does_not_remove_a_replacement_runtime(tmp_path):
     replacement = module.SandboxInfo(sandbox_id="same-id", sandbox_url="http://new", container_id="new-generation")
     new_client = MagicMock()
 
-    def stop(info):
+    def stop(info, *, check=None):
+        if check is not None:
+            check()
         assert info is old_info
         # A replacement published by a stale/external callback must survive the
         # completion of destruction of the old immutable generation.
@@ -3602,7 +3759,9 @@ def test_shutdown_retains_only_failed_resources_and_retries_them(tmp_path, monke
 
     monkeypatch.setattr(store, "mark", record)
 
-    def stop(info):
+    def stop(info, *, check=None):
+        if check is not None:
+            check()
         nonlocal failed
         if info.sandbox_id == failed_id and not failed:
             failed = True
@@ -3640,7 +3799,9 @@ def test_shutdown_retry_still_closes_unfinished_executions(tmp_path):
     manager = get_sandbox_lease_manager(provider)
     manager.retain("unfinished-run", info.sandbox_id, thread_id="thread", user_id="alice")
 
-    def stop(target):
+    def stop(target, *, check=None):
+        if check is not None:
+            check()
         if provider._backend.destroy.call_count == 1:
             raise RuntimeError("stop failed")
         running.pop(target.sandbox_id)
