@@ -1135,6 +1135,49 @@ class TestMalformedToolCallIdRecovery:
         assert results[" call_1 "].content == "result"
         assert results[recovered_id].status == "error"
 
+    def test_invalid_sibling_result_does_not_disable_positional_pairing(self):
+        """A result only an invalid call can own must not turn positional pairing off.
+
+        Two identical executable ``bash`` calls plus one invalid sibling, all with the
+        empty id, and three real results. The invalid call's own result is a legitimate
+        member of the turn, so the turn is fully accounted for and position still
+        identifies which result belongs to which executable call. Counting only
+        executable results in the denominator made this turn look incomplete, and all
+        three real outputs were dropped in favour of error placeholders.
+        """
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content="",
+                type="ai",
+                tool_calls=[
+                    {"name": "bash", "args": {"cmd": "one"}, "id": ""},
+                    {"name": "bash", "args": {"cmd": "two"}, "id": ""},
+                ],
+                invalid_tool_calls=[
+                    {"name": "bash", "args": "{", "id": "", "error": "Unterminated object"},
+                ],
+                additional_kwargs={},
+                response_metadata={},
+            ),
+            ToolMessage(content="EXEC ONE", tool_call_id="", name="bash"),
+            ToolMessage(content="EXEC TWO", tool_call_id="", name="bash"),
+            ToolMessage(content="INVALID OWN OUTPUT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        results = {m.tool_call_id: m for m in patched[1:]}
+        contents = sorted(m.content for m in patched[1:])
+        # Every real result survives; none is swapped for the interrupted placeholder.
+        assert contents == ["EXEC ONE", "EXEC TWO", "INVALID OWN OUTPUT"]
+        assert all(m.status != "error" for m in patched[1:])
+        # The two executable calls keep their own outputs in call order.
+        (first, second) = (tc["id"] for tc in patched[0].tool_calls)
+        assert results[first].content == "EXEC ONE"
+        assert results[second].content == "EXEC TWO"
+
     def test_executable_call_wins_over_a_same_name_invalid_sibling(self):
         """An invalid sibling with the same name must not steal the real result (#7821).
 
