@@ -107,6 +107,19 @@ def test_official_gpt6_reasoning_parameters(model_id, effort, expected):
     assert client.use_responses_api is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", ("gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"))
+@pytest.mark.parametrize("effort", ["minimal", "low", "high"])
+async def test_flash_mode_disables_reasoning_even_with_explicit_effort(wire, model_id, effort):
+    profile = ManagedModel(provider="openai", model=model_id, api_key="test-key")
+    config = AppConfig.model_validate({"models": [profile.runtime_config()], "sandbox": {"use": "test"}})
+    model = create_chat_model("connection-check", app_config=config, thinking_enabled=False, reasoning_effort=effort, attach_tracing=False)
+
+    await collect(model.bind_tools([TOOL]), [HumanMessage(content="Call connection_check.")])
+
+    assert wire[0][1]["reasoning"]["effort"] == "none"
+
+
 @pytest.mark.parametrize("provider,model_id", [("openai-compatible", "gpt-6.1-sol"), ("openai", "gpt-6-future"), ("openai", "gpt-4.1"), ("qwen-cn", "gpt-6.1-sol")])
 def test_unrelated_routes_are_unchanged(provider, model_id):
     kwargs = {"base_url": "https://proxy.example.com/v1"} if provider == "openai-compatible" else {}

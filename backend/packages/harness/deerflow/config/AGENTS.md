@@ -230,9 +230,9 @@ endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 The five exact OpenAI GPT-6 IDs in `OPENAI_GPT6_MODELS` explicitly select Responses:
 their preset supplies `base_url`, which intentionally bypasses the factory's
 fallback routing. Astra and 6.1 Sol require thinking; Terra, Sol and Luna can
-disable it with `none`. Optional presets use enable/disable templates without an
-effort default so the factory does not overwrite `none`. Keep custom endpoints
-and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
+disable it with `none`. For optional presets, the enable template defaults to
+`medium` and the disabled template's `none` takes precedence over request effort.
+Keep custom endpoints and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
 `tests/test_managed_openai_gpt6.py`.
 
 Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.

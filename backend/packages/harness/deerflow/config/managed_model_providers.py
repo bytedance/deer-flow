@@ -100,8 +100,7 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
             effort["default"] = "medium"
         else:
             effort["values"].insert(0, "none")
-            # No effort default: the factory applies explicit effort after
-            # templates, so a default would overwrite the disable path's none.
+            # Pick the default effort from the effective thinking mode.
             result["when_thinking_enabled"] = {"reasoning_effort": "medium"}
             result["when_thinking_disabled"] = {"reasoning_effort": "none"}
     elif provider == "openai" and model in {"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"}:

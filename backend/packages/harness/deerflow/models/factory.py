@@ -272,8 +272,9 @@ def _apply_contract_thinking_settings(
     * Disabled: ``when_thinking_disabled`` when present, else the dialect's
       disable payload. No effort value is ever synthesized here.
     * Effort: written last at ``effort.path`` so a validated request wins over
-      a template value; ``None`` leaves any profile/template value in place. A
-      model without an effort contract never forwards ``reasoning_effort``.
+      a template value. An explicit top-level ``reasoning_effort: "none"`` in
+      the disabled template takes precedence because it is the off switch.
+      A model without an effort contract never forwards ``reasoning_effort``.
     """
     dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
     # Both directions mirror whichever vLLM switch the template declares, so a
@@ -290,6 +291,8 @@ def _apply_contract_thinking_settings(
         _merge_thinking_payload(settings, payload)
     elif model_config.when_thinking_disabled is not None:
         _merge_thinking_payload(settings, model_config.when_thinking_disabled)
+        if contract.effort is not None and contract.effort.path == "reasoning_effort" and model_config.when_thinking_disabled.get("reasoning_effort") == "none":
+            requested_reasoning_effort = None
     else:
         _merge_thinking_payload(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None or contract.effort.path != "reasoning_effort":
