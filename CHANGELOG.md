@@ -12,12 +12,22 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **images:** Administrators can configure and test image models in Settings or
+  use a typed server configuration. When both a server model and a web profile
+  are available, interactive runs ask which to use; unattended runs use the
+  server model. PPT generation can resume verified slides after a model change.
+  ([#7827])
+
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
 ### Fixed
+
+- **skills:** PPT composition now saves and validates a temporary deck before
+  replacing the requested output. A failed save leaves an existing PPTX intact
+  and removes the incomplete temporary file. ([#7827])
 
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission

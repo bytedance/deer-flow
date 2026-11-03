@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import tempfile
 from io import BytesIO
 from pathlib import Path
 from runpy import run_path
@@ -63,7 +64,9 @@ def generate_ppt(
     slides_info = plan.get("slides", [])
     # Older image-only plans may omit slide metadata. A declared slide list or
     # progress record must still match exactly before composing a deck.
-    if ("slides" in plan or progress_file is not None) and len(slide_images) != len(slides_info):
+    if ("slides" in plan or progress_file is not None) and len(slide_images) != len(
+        slides_info
+    ):
         raise ValueError(
             f"Expected {len(slides_info)} slide images, received {len(slide_images)}"
         )
@@ -145,8 +148,23 @@ def generate_ppt(
                 if text_frame is not None:
                     text_frame.text = "\n".join(notes)
 
-    # Save presentation
-    prs.save(output_file)
+    # Publish only a readable deck. Keep the temporary file beside the output
+    # so replacement is atomic on the destination filesystem.
+    target = Path(output_file)
+    with tempfile.NamedTemporaryFile(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".pptx",
+        delete=False,
+    ) as temporary_file:
+        temporary = Path(temporary_file.name)
+    try:
+        prs.save(temporary)
+        if len(Presentation(temporary).slides) != len(slide_images):
+            raise ValueError("Saved presentation has an unexpected slide count")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
 
     return f"Successfully generated presentation with {len(slide_images)} slides to {output_file}"
 

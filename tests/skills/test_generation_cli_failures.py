@@ -2,9 +2,15 @@
 
 import json
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from zipfile import BadZipFile
+
+import pytest
+from PIL import Image
+from pptx.presentation import Presentation as PresentationClass
 
 
 SKILLS = Path(__file__).resolve().parents[2] / "skills" / "public"
@@ -110,6 +116,7 @@ def test_ppt_cli_composes_complete_deck(tmp_path):
     for index, path in enumerate(images):
         Image.new("RGB", (320, 180), (index * 100, 50, 180)).save(path)
     output = tmp_path / "deck.pptx"
+    output.write_bytes(b"previous deck")
     result = subprocess.run(
         [
             sys.executable,
@@ -127,3 +134,55 @@ def test_ppt_cli_composes_complete_deck(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert len(Presentation(output).slides) == 2
+    assert not list(tmp_path.glob(".deck.pptx.*"))
+
+
+def test_ppt_save_failure_preserves_existing_deck(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"slides": [{"title": "One"}]}), encoding="utf-8")
+    image = tmp_path / "slide.png"
+    Image.new("RGB", (32, 18), "blue").save(image)
+    output = tmp_path / "deck.pptx"
+    output.write_bytes(b"previous complete deck")
+    saved_paths = []
+
+    def fail_during_save(self, path):
+        saved_paths.append(Path(path))
+        Path(path).write_bytes(b"partial deck")
+        raise OSError("disk full during save")
+
+    monkeypatch.setattr(PresentationClass, "save", fail_during_save)
+    generate_ppt = runpy.run_path(
+        str(SKILLS / "ppt-generation" / "scripts" / "generate.py")
+    )["generate_ppt"]
+
+    with pytest.raises(OSError, match="disk full during save"):
+        generate_ppt(str(plan), [str(image)], str(output))
+
+    assert saved_paths and saved_paths[0] != output
+    assert saved_paths[0].parent == output.parent
+    assert output.read_bytes() == b"previous complete deck"
+    assert not saved_paths[0].exists()
+
+
+def test_ppt_invalid_saved_deck_preserves_existing_deck(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"slides": [{"title": "One"}]}), encoding="utf-8")
+    image = tmp_path / "slide.png"
+    Image.new("RGB", (32, 18), "blue").save(image)
+    output = tmp_path / "deck.pptx"
+    output.write_bytes(b"previous complete deck")
+
+    def save_invalid_deck(self, path):
+        Path(path).write_bytes(b"not a PPTX")
+
+    monkeypatch.setattr(PresentationClass, "save", save_invalid_deck)
+    generate_ppt = runpy.run_path(
+        str(SKILLS / "ppt-generation" / "scripts" / "generate.py")
+    )["generate_ppt"]
+
+    with pytest.raises(BadZipFile):
+        generate_ppt(str(plan), [str(image)], str(output))
+
+    assert output.read_bytes() == b"previous complete deck"
+    assert not list(tmp_path.glob(".deck.pptx.*"))
