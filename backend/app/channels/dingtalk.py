@@ -10,6 +10,7 @@ import re
 import stat
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
@@ -202,7 +203,6 @@ class DingTalkChannel(Channel):
         self._stream_lock = threading.Lock()
         self._incoming_messages: dict[str, Any] = {}
         self._incoming_messages_lock = threading.Lock()
-        self._card_repliers: dict[str, Any] = {}
         # Serialize inbound-file writes into the uploads directory to avoid
         # racing writers clobbering one another (mirrors FeishuChannel).
         self._file_write_lock = threading.Lock()
@@ -263,7 +263,6 @@ class DingTalkChannel(Channel):
         self._dingtalk_client = None
         with self._incoming_messages_lock:
             self._incoming_messages.clear()
-        self._card_repliers.clear()
         self._card_track_ids.clear()
         if self._thread:
             # The thread exits once its loop has stopped; keep the join off the
@@ -351,12 +350,10 @@ class DingTalkChannel(Channel):
                 logger.warning("[DingTalk] card stream failed, falling back to sampleMarkdown")
                 if msg.is_final:
                     self._card_track_ids.pop(source_key, None)
-                    self._card_repliers.pop(out_track_id, None)
                     await self._send_markdown_fallback(robot_code, conversation_type, sender_staff_id, conversation_id, msg.text)
                     return
             if msg.is_final:
                 self._card_track_ids.pop(source_key, None)
-                self._card_repliers.pop(out_track_id, None)
             return
 
         async def send_markdown() -> None:
@@ -1244,29 +1241,41 @@ class DingTalkChannel(Channel):
             logger.warning("[DingTalk] SDK client or chatbot_message unavailable, skipping AI card")
             return None
 
+        out_track_id = uuid.uuid4().hex
         try:
-            from dingtalk_stream.card_replier import AICardReplier
-        except ImportError:
-            logger.warning("[DingTalk] dingtalk-stream card_replier not available")
-            return None
-
-        try:
-            token_client = _CardTokenClient(self._dingtalk_client.credential)
-            token_client.access_token = await self._get_access_token()
-            replier = AICardReplier(token_client, chatbot_message)
-            card_instance_id = await replier.async_create_and_deliver_card(
-                card_template_id=self._card_template_id,
-                card_data={"content": initial_text},
-            )
-            if not card_instance_id:
-                return None
-
-            self._card_repliers[card_instance_id] = replier
-            logger.info("[DingTalk] AI card created: outTrackId=%s", card_instance_id)
-            return card_instance_id
+            await self._card_request("POST", "/v1.0/card/instances/createAndDeliver", self._card_create_body(out_track_id, chatbot_message, initial_text))
         except Exception:
             logger.exception("[DingTalk] failed to create AI card")
             return None
+
+        logger.info("[DingTalk] AI card created: outTrackId=%s", out_track_id)
+        return out_track_id
+
+    def _card_create_body(self, out_track_id: str, chatbot_message: Any, initial_text: str) -> dict[str, Any]:
+        """The ``createAndDeliver`` body dingtalk-stream's ``AICardReplier`` sends."""
+        body: dict[str, Any] = {
+            "cardTemplateId": self._card_template_id,
+            "outTrackId": out_track_id,
+            "cardData": {"cardParamMap": {"content": initial_text}},
+            "callbackType": "STREAM",
+            "imGroupOpenSpaceModel": {"supportForward": True},
+            "imRobotOpenSpaceModel": {"supportForward": True},
+        }
+        hosting_context = getattr(chatbot_message, "hosting_context", None)
+        conversation_type = str(chatbot_message.conversation_type)
+        if conversation_type == _CONVERSATION_TYPE_GROUP:
+            body["openSpaceId"] = f"dtv1.card//IM_GROUP.{chatbot_message.conversation_id}"
+            deliver_model: dict[str, Any] = {"robotCode": self._client_id}
+            body["imGroupOpenDeliverModel"] = deliver_model
+        elif conversation_type == _CONVERSATION_TYPE_P2P:
+            body["openSpaceId"] = f"dtv1.card//IM_ROBOT.{chatbot_message.sender_staff_id}"
+            deliver_model = {"spaceType": "IM_ROBOT"}
+            body["imRobotOpenDeliverModel"] = deliver_model
+        else:
+            return body
+        if hosting_context is not None:
+            deliver_model["extension"] = {"hostingRepliedContext": json.dumps({"userId": hosting_context.user_id})}
+        return body
 
     async def _stream_update_card(
         self,
@@ -1276,19 +1285,34 @@ class DingTalkChannel(Channel):
         is_finalize: bool = False,
         is_error: bool = False,
     ) -> None:
-        replier = self._card_repliers.get(out_track_id)
-        if not replier:
-            raise RuntimeError(f"No AICardReplier found for track ID {out_track_id}")
-
-        replier.dingtalk_client.access_token = await self._get_access_token()
-        await replier.async_streaming(
-            card_instance_id=out_track_id,
-            content_key="content",
-            content_value=content,
-            append=False,
-            finished=is_finalize,
-            failed=is_error,
+        await self._card_request(
+            "PUT",
+            "/v1.0/card/streaming",
+            {
+                "outTrackId": out_track_id,
+                "guid": str(uuid.uuid4()),
+                "key": "content",
+                "content": content,
+                "isFull": True,
+                "isFinalize": is_finalize,
+                "isError": is_error,
+            },
         )
+
+    async def _card_request(self, method: str, path: str, body: dict[str, Any]) -> None:
+        """Send an AI card request with the channel token; raise if it fails.
+
+        dingtalk-stream's ``AICardReplier`` logs a failed card request and
+        returns as if it succeeded; its create call even returns the card ID.
+        Neither the running reply's text fallback nor the sampleMarkdown
+        fallback in ``send`` could then run, so the reply was lost.
+        """
+        token = await self._get_access_token()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            response = await client.request(method, f"{DINGTALK_API_BASE}{path}", headers=self._api_headers(token), json=body)
+            if response.is_error:
+                logger.warning("[DingTalk] card request %s %s returned %s: %s", method, path, response.status_code, response.text[:500])
+            response.raise_for_status()
 
     # -- media upload --------------------------------------------------------
 
@@ -1316,26 +1340,6 @@ class DingTalkChannel(Channel):
         except (httpx.HTTPError, OSError):
             logger.exception("[DingTalk] failed to upload media: %s", file_path)
             return None
-
-
-class _CardTokenClient:
-    """The client ``AICardReplier`` sees: it serves the channel's access token.
-
-    The replier's async methods call ``dingtalk_client.get_access_token()``
-    inline, and dingtalk-stream's version refreshes through ``requests.post``
-    with no timeout, so on the Gateway loop every refresh (about every two
-    hours) blocked the loop for the whole request, indefinitely if DingTalk
-    stalled. The channel sets ``access_token`` from its own bounded
-    ``_get_access_token()`` before every replier call, so the replier never
-    fetches a token itself.
-    """
-
-    def __init__(self, credential: Any) -> None:
-        self.credential = credential
-        self.access_token = ""
-
-    def get_access_token(self) -> str:
-        return self.access_token
 
 
 class _DingTalkMessageHandler:

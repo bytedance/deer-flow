@@ -10,7 +10,7 @@ import string
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 
 from langchain.tools import tool
@@ -27,6 +27,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.command_scope import command_owner
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
     SandboxError,
@@ -2325,12 +2326,16 @@ async def _run_sync_tool_after_async_sandbox_init(
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
         async with sandbox_authorization_scope_async(runtime):
-            await ensure_sandbox_initialized_async(runtime)
+            sandbox = await ensure_sandbox_initialized_async(runtime)
 
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await run_sync_lifecycle_operation(func, runtime, *args)
+            owner = sandbox_lease_owner(runtime.context)
+            signal_cancel = None
+            if func is bash_tool.func and owner and getattr(sandbox, "supports_command_cancellation", False):
+                signal_cancel = partial(sandbox.request_command_cancel, owner)
+            return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
@@ -2346,19 +2351,20 @@ def _execute_bash_command(
     timeout: float | None = None,
 ) -> str:
     """Route subagent bash calls through their isolated shell-session scope."""
-    scope_id = sandbox_command_scope(runtime.context)
-    scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
-    if scope_id is not None and callable(scoped_execute):
-        return scoped_execute(
-            command,
-            env=env,
-            timeout=timeout,
-            scope_id=scope_id,
-        )
-    # Keep duck-typed custom providers and test doubles compatible: the scoped
-    # method is an additive Sandbox API, and ordinary/lead executions retain
-    # the original execute_command path.
-    return sandbox.execute_command(command, env=env, timeout=timeout)
+    with command_owner(sandbox, sandbox_lease_owner(runtime.context)):
+        scope_id = sandbox_command_scope(runtime.context)
+        scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
+        if scope_id is not None and callable(scoped_execute):
+            return scoped_execute(
+                command,
+                env=env,
+                timeout=timeout,
+                scope_id=scope_id,
+            )
+        # Keep duck-typed custom providers and test doubles compatible: the scoped
+        # method is an additive Sandbox API, and ordinary/lead executions retain
+        # the original execute_command path.
+        return sandbox.execute_command(command, env=env, timeout=timeout)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:

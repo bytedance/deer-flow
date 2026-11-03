@@ -234,10 +234,12 @@ both sides when the extension must observe both synchronous and asynchronous exe
 paths.
 
 Lead runs and subagents allocate an `ExtensionData` task store only when middleware,
-task-lifecycle, or system-model observation is registered; services and routers are
+task-lifecycle, system-model or compaction observation is registered; services and routers are
 app-scoped and do not allocate one. Middleware and system-call sites recover the
 live store through `EXTENSION_TASK_STORE_KEY` / `task_store_from_runtime()`; lifecycle
-contributors receive that same store directly. Each task resolves the immutable
+contributors receive that same store directly. Both hosts seed each store with the task's
+`TaskInfo` whether or not a lifecycle contributor exists (subagents only with a parent
+`run_id`), so any hook holding the store can name its task. Each task resolves the immutable
 loaded-extension snapshot once and binds that same object through task-store allocation,
 hooks, and synchronous agent construction, so a concurrent singleton replacement cannot
 mix two extension generations without changing the LangGraph graph-factory ABI. The
@@ -306,9 +308,10 @@ permanently empty. `notify_context_compacted()` is a
 synchronous, fire-and-forget entry point — both the sync and async compaction paths call it
 without an `await` — that dispatches to the same registered extension-notification loop
 system-model-call cancellation uses, reusing `_notify_each`'s per-observer fail-open
-containment. There is no live task to attach at that call site, so observers receive a
-detached task store, the same fallback `notify_system_model_call` uses when its caller
-supplies none.
+containment. Both compaction paths pass the live store from `task_store_from_runtime()`;
+observers receive it and the event's `task_id`/`run_id`/`thread_id` come from its seeded
+`TaskInfo`. Manual `/compact` runs outside any task, so it falls back to a detached store
+with `None` ids, as `notify_system_model_call` does.
 
 Gateway services start in registration order after the persistence engine and session
 factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
