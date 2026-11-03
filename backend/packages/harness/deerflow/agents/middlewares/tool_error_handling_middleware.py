@@ -699,7 +699,7 @@ def build_subagent_runtime_middlewares(
 
     from deerflow.agents.middlewares.configured_extensions import load_configured_extension_middlewares
 
-    middlewares.extend(load_configured_extension_middlewares(app_config))
+    middlewares.extend(load_configured_extension_middlewares(app_config, scope="subagent"))
 
     # Same provider output-length guard the lead agent uses. A subagent answer
     # cut off at the model's output limit would otherwise reach the lead as a

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -48,7 +49,7 @@ def sql_store(tmp_path):
 def test_crud_and_signature(request, store_fixture):
     store = request.getfixturevalue(store_fixture)
     empty_signature = store.signature()
-    definition = _definition()
+    definition = _definition(thinking_enabled=True, reasoning_effort="xhigh")
 
     store.create(definition)
     assert store.get("RESEARCHER") == definition
@@ -60,6 +61,8 @@ def test_crud_and_signature(request, store_fixture):
     store.update(updated)
     assert store.get("researcher").enabled is False
     assert store.get("researcher").max_turns == 75
+    assert store.get("researcher").thinking_enabled is True
+    assert store.get("researcher").reasoning_effort == "xhigh"
     updated_signature = store.signature()
     assert updated_signature != created_signature
 
@@ -68,6 +71,24 @@ def test_crud_and_signature(request, store_fixture):
     assert store.delete("researcher") is False
     with pytest.raises(FileNotFoundError):
         store.get("researcher")
+
+
+@pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])
+def test_legacy_definition_without_reasoning_fields_keeps_defaults(request, store_fixture, tmp_path):
+    store = request.getfixturevalue(store_fixture)
+    legacy = {"name": "researcher", "description": "Research", "system_prompt": "Research the task."}
+    if store_fixture == "file_store":
+        root = tmp_path / "managed-subagents"
+        root.mkdir()
+        (root / "researcher.json").write_text(json.dumps(legacy), encoding="utf-8")
+    else:
+        with store._Session() as session:
+            session.add(ManagedSubagentRow(id="legacy", name="researcher", definition=legacy))
+            session.commit()
+    definition = store.get("researcher")
+    assert definition.thinking_enabled is None
+    assert definition.reasoning_effort is None
+    assert store.list() == [definition]
 
 
 def test_sql_signature_detects_update_behind_existing_max_timestamp(sql_store):

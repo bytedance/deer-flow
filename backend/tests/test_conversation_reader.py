@@ -6,7 +6,7 @@ import asyncio
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
-from app.gateway.conversation_reader import read_visible_message_page
+from app.gateway.conversation_reader import _is_thread_history_hidden_message_row, read_visible_message_page
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import EditReplayVisibility
 
@@ -134,3 +134,16 @@ def test_reader_reports_exhaustion_when_only_filtered_messages_remain():
         )
 
     assert asyncio.run(exercise()) == ([], False)
+
+
+def test_reader_logs_and_keeps_rows_with_malformed_metadata(caplog):
+    row = {
+        "seq": 4,
+        "metadata": [],
+        "content": {"type": "ai", "content": "visible", "additional_kwargs": {}},
+    }
+
+    with caplog.at_level("WARNING", logger="app.gateway.conversation_reader"):
+        assert _is_thread_history_hidden_message_row(row, thread_id="source-thread") is False
+
+    assert any("thread source-thread" in record.message and "row seq 4" in record.message for record in caplog.records)
