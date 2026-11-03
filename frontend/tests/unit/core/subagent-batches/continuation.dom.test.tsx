@@ -8,10 +8,16 @@ import {
   useSubagentBatches,
 } from "@/core/subagent-batches/hooks";
 import type { SubagentBatch } from "@/core/subagent-batches/types";
-import { threadHistoryQueryKey } from "@/core/threads/hooks";
+import { threadHistoryQueryKey, useThreadRuns } from "@/core/threads/hooks";
 import { runInputsKey } from "@/core/threads/run-inputs";
 
-const api = rs.hoisted(() => ({ batches: [] as SubagentBatch[] }));
+const api = rs.hoisted(() => ({
+  batches: [] as SubagentBatch[],
+  runs: [] as Array<{ run_id: string; status: string }>,
+}));
+rs.mock("@/core/api", () => ({
+  getAPIClient: () => ({ runs: { list: async () => api.runs } }),
+}));
 rs.mock("@/core/subagent-batches/api", () => ({
   fetchSubagentBatches: async () => api.batches,
   controlSubagentBatch: rs.fn(),
@@ -62,4 +68,45 @@ test("a persisted follow-up refreshes the existing run and history observers onc
   const calls = invalidate.mock.calls.length;
   rerender();
   expect(invalidate.mock.calls).toHaveLength(calls);
+});
+
+test("a newly admitted follow-up is discovered before Run inputs open", async () => {
+  api.batches = [];
+  api.runs = [];
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(client);
+  client.setQueryData(runInputsKey("thread"), {
+    items: [],
+    active_run_id: null,
+  });
+  const { result } = renderHook(
+    () => ({
+      batches: useSubagentBatches("thread", { polling: false }),
+      runs: useThreadRuns("thread"),
+    }),
+    {
+      wrapper: ({ children }: { children: ReactNode }) =>
+        createElement(QueryClientProvider, { client }, children),
+    },
+  );
+  await waitFor(() => expect(result.current.runs.data).toEqual([]));
+  api.runs = [{ run_id: "follow-up", status: "pending" }];
+  api.batches = [
+    {
+      id: "batch",
+      status: "completed",
+      continuation_status: "dispatched",
+      continuation_run_id: "follow-up",
+    } as SubagentBatch,
+  ];
+  await act(async () => {
+    await client.invalidateQueries({ queryKey: subagentBatchesKey("thread") });
+  });
+  await waitFor(() => expect(result.current.runs.data).toEqual(api.runs));
+  expect(client.getQueryData(runInputsKey("thread"))).toEqual({
+    items: [],
+    active_run_id: null,
+  });
 });

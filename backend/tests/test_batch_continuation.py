@@ -73,6 +73,42 @@ async def test_cancel_wins_over_an_inflight_followup_receipt(repo):
 
 
 @pytest.mark.asyncio
+async def test_deferred_continuations_yield_to_other_conversations_after_reopen(repo):
+    for index in range(17):
+        await repo.create_batch(
+            batch_id=f"batch-{index:02}",
+            user_id=f"owner-{index}",
+            thread_id=f"thread-{index}",
+            run_id=f"run-{index}",
+            tool_call_id="call",
+            submission_key=f"submit-{index}",
+            title="Summary",
+            subagent_type="general-purpose",
+            items=[{"key": "a", "prompt": "Read"}],
+            max_live_items=1,
+            max_running_items=1,
+            max_attempts=1,
+            execution_spec={},
+            continuation={"prompt": "Summarize"},
+        )
+    items = await repo.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=120, limit=17)
+    assert len(items) == 17
+    for item in items:
+        await repo.finalize_item(
+            item["id"], lease_owner="worker", succeeded=True, result="Done", result_preview="Done", result_truncated=False, error=None, stop_reason=None, token_usage=None, model_name="local", completed_at=datetime.now(UTC)
+        )
+    seen = set()
+    for index in range(3):
+        reopened = SubagentBatchRepository(get_session_factory())
+        owner = f"followup-{index}"
+        claimed = await reopened.claim_continuations(now=datetime.now(UTC), lease_owner=owner, lease_seconds=30, limit=8)
+        seen.update(batch["id"] for batch in claimed)
+        for batch in claimed:
+            assert await reopened.finish_continuation(batch["id"], lease_owner=owner, status="pending")
+    assert seen == {f"batch-{index:02}" for index in range(17)}
+
+
+@pytest.mark.asyncio
 async def test_manual_item_retry_defers_an_unadmitted_followup(repo):
     now = await completed_batch(repo, succeeded=False)
     await repo.claim_continuations(now=now, lease_owner="before-retry", lease_seconds=30)

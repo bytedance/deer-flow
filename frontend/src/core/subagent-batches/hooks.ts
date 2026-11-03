@@ -59,6 +59,7 @@ export function useSubagentBatches(
       ) ?? [];
     if (!newRuns.length) return;
     for (const runId of newRuns) observed.current.runs.add(runId);
+    void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
     void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
     void queryClient.invalidateQueries({
       queryKey: threadHistoryQueryKey(threadId),

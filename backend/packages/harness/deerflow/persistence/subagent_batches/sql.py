@@ -274,7 +274,7 @@ class SubagentBatchRepository:
             .join(prerequisite, prerequisite.id == SubagentBatchDependencyRow.prerequisite_id)
             .where(
                 prerequisite.batch_id == batch.id,
-                or_(prerequisite.status.in_(("failed", "cancelled")), prerequisite.stop_reason.is_not(None)),
+                or_(prerequisite.status.in_(("failed", "cancelled")), (prerequisite.status == "succeeded") & prerequisite.stop_reason.is_not(None)),
             )
             .cte("blocked_batch_dependencies", recursive=True)
         )
@@ -305,7 +305,7 @@ class SubagentBatchRepository:
                     await session.execute(
                         select(SubagentBatchRow)
                         .where(SubagentBatchRow.status.in_(("completed", "failed")), SubagentBatchRow.id.not_in(exclude_batch_ids), ready)
-                        .order_by(SubagentBatchRow.completed_at, SubagentBatchRow.id)
+                        .order_by(SubagentBatchRow.updated_at, SubagentBatchRow.completed_at, SubagentBatchRow.id)
                         .limit(limit)
                         .with_for_update(skip_locked=True)
                     )
@@ -355,7 +355,7 @@ class SubagentBatchRepository:
                     SubagentBatchRow.continuation_status == "dispatching",
                     SubagentBatchRow.continuation_owner == lease_owner,
                 )
-                .values(continuation_status=status, continuation_run_id=run_id, continuation_owner=None, continuation_lease_expires_at=None)
+                .values(continuation_status=status, continuation_run_id=run_id, continuation_owner=None, continuation_lease_expires_at=None, updated_at=datetime.now(UTC))
             )
             await session.commit()
             return changed.rowcount == 1

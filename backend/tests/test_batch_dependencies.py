@@ -31,7 +31,7 @@ async def repo(tmp_path, request):
         await close_engine()
 
 
-async def create(repo, items):
+async def create(repo, items, *, max_attempts=1):
     return await repo.create_batch(
         batch_id="batch",
         user_id="owner",
@@ -44,7 +44,7 @@ async def create(repo, items):
         items=items,
         max_live_items=3,
         max_running_items=3,
-        max_attempts=1,
+        max_attempts=max_attempts,
         execution_spec={},
     )
 
@@ -134,3 +134,28 @@ async def test_cancelled_batch_does_not_release_waiting_dependencies(repo):
     await finish(repo, running[0])
     assert await claim(repo) == []
     assert (await repo.get_batch("batch", user_id="owner"))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_capped_attempt_can_retry_before_releasing_its_dependent(repo):
+    await create(repo, [{"key": "a", "prompt": "A"}, {"key": "b", "prompt": "Use A", "depends_on": ["a"]}], max_attempts=3)
+    first = (await claim(repo))[0]
+    await repo.finalize_item(
+        first["id"],
+        lease_owner="worker",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="No usable partial result",
+        stop_reason="turn_capped",
+        token_usage=None,
+        model_name="local-test",
+        completed_at=datetime.now(UTC),
+    )
+    retry = (await claim(repo))[0]
+    assert retry["item_key"] == "a" and retry["attempt"] == 2
+    await finish(repo, retry)
+    ready = await claim(repo)
+    assert [item["item_key"] for item in ready] == ["b"]
+    assert ready[0]["attempt"] == 1

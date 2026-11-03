@@ -167,6 +167,126 @@ async def test_revoked_original_account_cannot_launch_followup(batch_host):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"version": 1, "mode": "disabled"},
+        {"version": 1, "mode": "selected", "dataset_ids": ["approved"], "document_filters": [{"dataset_id": "approved", "document_ids": ["one"]}]},
+    ],
+)
+async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_host, monkeypatch, scope):
+    from types import SimpleNamespace
+
+    from langgraph.runtime import Runtime
+    from langgraph.types import interrupt
+    from test_batch_task_tool import tool_module
+
+    from app.gateway import services
+    from deerflow.config.app_config import AppConfig, set_app_config
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+    from deerflow.subagents.batch_service import SubagentBatchService
+
+    controller, _, repo, runs, state, request = batch_host
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    service = SubagentBatchService(repository=repo, config=SubagentBatchesConfig(enabled=True), runtime_config=SubagentRuntimeConfig(), prepare_continuation=controller.prepare, dispatch_continuation=controller.dispatch)
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: service)
+    observed = []
+    factory = services.resolve_agent_factory("lead_agent")
+
+    async def answer(values, runtime: Runtime, config):
+        if values["messages"][-1].content == "scoped work":
+            interrupt("Continue?")
+            record = await state.run_manager.get(runtime.context["run_id"])
+            assert record.kwargs["input"] is None
+            command = await tool_module.batch_task.coroutine(
+                title="Scoped batch",
+                items=[tool_module.BatchTaskItem(key="a", prompt="Read authorized records")],
+                subagent_type="general-purpose",
+                runtime=SimpleNamespace(context=runtime.context, state=values, config=config),
+                tool_call_id="scoped-call",
+                continuation="Present the result",
+            )
+            assert command.update["messages"][0].status != "error", command.update["messages"][0].content
+        observed.append(runtime.context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY))
+        return {"messages": [AIMessage(content="Finished")]}
+
+    def scoped_factory(*, config):
+        graph = StateGraph(MessagesState)
+        graph.add_node("answer", answer)
+        graph.set_entry_point("answer")
+        graph.set_finish_point("answer")
+        return replace(factory(config=config), graph=graph.compile())
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: scoped_factory)
+    thread = await runs.create_thread(thread_id="scoped-resume")
+    first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "scoped work", "additional_kwargs": {KNOWLEDGE_SCOPE_KEY: scope}}]})
+    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    resumed = await runs.resume(thread_id=thread, resume="yes")
+    assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
+    assert observed == [scope]
+    now = datetime.now(UTC)
+    item = (await repo.claim_items(now=now, lease_owner="scoped-worker", lease_seconds=120, limit=1))[0]
+    await repo.finalize_item(item["id"], lease_owner="scoped-worker", succeeded=True, result="Done", result_preview="Done", result_truncated=False, error=None, stop_reason=None, token_usage=None, model_name="fixture", completed_at=now)
+    batch = (await repo.claim_continuations(now=datetime.now(UTC), lease_owner="scoped-followup", lease_seconds=120))[0]
+    assert batch["continuation"]["knowledge_scope"] == scope
+    launched = await controller.dispatch(batch)
+    assert (await runs.wait(thread_id=thread, run_id=launched["run_id"], timeout=5)).status == "success"
+    assert observed == [scope, scope]
+
+
+@pytest.mark.asyncio
+async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, monkeypatch):
+    from langchain_core.messages import ToolMessage
+
+    from app.gateway import services
+    from deerflow.agents.human_input import extract_unanswered_human_input_request
+
+    controller, batch, _, runs, state, _ = batch_host
+    factory = services.resolve_agent_factory("lead_agent")
+    question = {"kind": "human_input_request", "request_id": "recipient", "question": "Which recipient?", "source": "ask_clarification"}
+
+    async def answer(values):
+        if values["messages"][-1].content == "ask":
+            return {
+                "messages": [
+                    AIMessage(content="", tool_calls=[{"name": "ask_clarification", "args": {}, "id": "ask"}]),
+                    ToolMessage(content="Which recipient?", tool_call_id="ask", name="ask_clarification", artifact={"human_input": question}),
+                ]
+            }
+        return {"messages": [AIMessage(content="Understood")]}
+
+    def question_factory(*, config):
+        graph = StateGraph(MessagesState)
+        graph.add_node("answer", answer)
+        graph.set_entry_point("answer")
+        graph.set_finish_point("answer")
+        return replace(factory(config=config), graph=graph.compile())
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: question_factory)
+    asked = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "ask"}]})
+    assert (await runs.wait(thread_id=batch["thread_id"], run_id=asked.run_id, timeout=5)).status == "success"
+    assert (await state.run_manager.get(asked.run_id)).human_input_request == question
+    assert await controller.dispatch(batch) is None
+    pending = await runs.get_state(thread_id=batch["thread_id"])
+    assert extract_unanswered_human_input_request(pending["values"]["messages"]) == question
+    answered = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "Use the team inbox"}]})
+    assert (await runs.wait(thread_id=batch["thread_id"], run_id=answered.run_id, timeout=5)).status == "success"
+    launched = await controller.dispatch(batch)
+    assert (await runs.wait(thread_id=batch["thread_id"], run_id=launched["run_id"], timeout=5)).status == "success"
+    assert await controller.dispatch(batch) == launched
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("status", "reason", "cancelled"), [("error", None, True), ("success", "token_capped", True), ("success", "loop_capped", True), ("success", "subagent_limit_capped", False)])
 async def test_source_completion_preserves_existing_hard_stop_policy(batch_host, status, reason, cancelled):
     from types import SimpleNamespace

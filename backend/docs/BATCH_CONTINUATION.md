@@ -15,6 +15,7 @@ The existing scheduler promotes an item only after every prerequisite succeeds
 without a guardrail stop reason. Waiting items remain pending and consume no
 worker slot. Exhausted failed, cancelled or capped prerequisites make their
 unstarted dependents fail with an explanatory error. Independent items continue.
+Retryable attempts leave dependents waiting until a terminal outcome is known.
 
 Dependencies order execution. They do not certify factual accuracy or turn an
 advisory acceptance verdict into a mandatory gate. Item prompts must still name
@@ -31,9 +32,12 @@ owner-scoped results with `read_batch_result` or read the supplied output paths.
 
 The originating turn can end while the batch works. The follow-up uses ordinary
 Gateway Run admission in the same conversation, preserving model/reasoning
-context, recursion limit and admitted knowledge scope. An occupied conversation
-defers admission. A stable idempotency key reconciles an uncertain launch after
-restart; it does not start the follow-up twice. Without a Goal, a follow-up cannot
+context, recursion limit and admitted knowledge scope. The scope comes from the
+batch execution context, including Runs resumed without a new user message.
+An occupied conversation or unanswered human-input request defers follow-up,
+even without a Goal. Deferred batches yield their place to other ready work.
+A stable idempotency key reconciles an uncertain launch after restart; it does
+not start the follow-up twice. Without a Goal, a follow-up cannot
 register a second automatic follow-up. Explicit item retries do not re-arm a
 dispatched follow-up; a follow-up not yet admitted waits for the retried item.
 

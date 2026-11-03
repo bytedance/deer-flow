@@ -5,6 +5,7 @@ import json
 
 from deerflow_extension_api.agent_runs import AgentRunError, ExecutionFence
 
+from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.runtime.goal import goal_waits_for_external_result, read_thread_goal
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
@@ -16,7 +17,6 @@ class BatchContinuations:
 
     async def prepare(self, request):
         from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS
-        from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY
 
         host = self.app.state.agent_runs_host
         grant = host.capture_batch_authority(request.continuation_authority, user_id=request.user_id)
@@ -32,10 +32,7 @@ class BatchContinuations:
         context = {key: value for key, value in captured.get("context", {}).items() if key in _CONTEXT_CONFIGURABLE_KEYS and key not in ("agent_name", "is_bootstrap")}
         if isinstance(captured.get("context", {}).get("locale"), str):
             context["locale"] = captured["context"]["locale"]
-        scope = None
-        for message in ((record.kwargs or {}).get("input") or {}).get("messages", []):
-            if message.get("type", message.get("role")) in ("human", "user"):
-                scope = message.get("additional_kwargs", {}).get(KNOWLEDGE_SCOPE_KEY)
+        scope = request.execution_spec.get("knowledge_scope")
         return {
             "prompt": request.continuation,
             "grant": grant,
@@ -63,7 +60,10 @@ class BatchContinuations:
             if thread is None or thread.get("incarnation") != continuation.get("thread_incarnation"):
                 return {"status": "suppressed"}
             state = await runs.get_state(thread_id=batch["thread_id"])
-            goal = state.get("values", {}).get("goal")
+            values = state.get("values", {})
+            if extract_unanswered_human_input_request(values.get("messages")) is not None:
+                return None
+            goal = values.get("goal")
             goal_identity = {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None
             expected_goal = continuation.get("goal")
             if goal_identity != expected_goal:

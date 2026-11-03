@@ -26,6 +26,15 @@ def test_routing_requires_clear_net_benefit(monkeypatch) -> None:
     assert "side-effect risk" in section
 
 
+def test_durable_batch_guidance_allows_only_explicit_prerequisites(monkeypatch) -> None:
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    section = prompt_module._build_subagent_section(3, batch_enabled=True)
+    assert "depends_on" in section
+    assert "must not depend on another item's output" not in section
+    assert "simultaneously runnable items independent" in section
+    assert "depends_on" not in prompt_module._build_subagent_section(3, batch_enabled=False)
+
+
 def test_hard_vetoes_apply_to_parallel_dispatch_not_single_agent_chains(monkeypatch) -> None:
     section = _build_section(monkeypatch)
 
