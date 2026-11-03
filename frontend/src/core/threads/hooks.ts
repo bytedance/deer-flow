@@ -2856,6 +2856,7 @@ export function useThreadStream({
       );
 
       const newOptimistic: Message[] = [];
+      const uploadStatusMessageId = `opt-ai-${humanMessageId}`;
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
@@ -2872,7 +2873,7 @@ export function useThreadStream({
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
-          id: `opt-ai-${Date.now()}`,
+          id: uploadStatusMessageId,
           content: t.uploads.uploadingFiles,
           additional_kwargs: { element: "task" },
         });
@@ -2921,23 +2922,23 @@ export function useThreadStream({
                 status: "uploaded" as const,
               }));
 
-              // Update optimistic human message with uploaded status + paths
-              setOptimisticMessages((messages) => {
-                if (messages.length > 1 && messages[0]) {
-                  const humanMessage: Message = messages[0];
-                  return [
-                    {
-                      ...humanMessage,
-                      additional_kwargs: buildHumanMessageAdditionalKwargs(
-                        options?.additionalKwargs,
-                        uploadedFiles,
-                      ),
-                    },
-                    ...messages.slice(1),
-                  ];
-                }
-                return messages;
-              });
+              // Upload status ends independently of the human echo. Match this
+              // send's IDs so a late upload cannot rewrite another turn.
+              setOptimisticMessages((messages) =>
+                messages
+                  .filter((message) => message.id !== uploadStatusMessageId)
+                  .map((message) =>
+                    message.id === humanMessageId
+                      ? {
+                          ...message,
+                          additional_kwargs: buildHumanMessageAdditionalKwargs(
+                            options?.additionalKwargs,
+                            uploadedFiles,
+                          ),
+                        }
+                      : message,
+                  ),
+              );
             }
           } catch (error) {
             const errorMessage =

@@ -2614,6 +2614,8 @@ In the Web UI, the latest completed user turn can also be edited and rerun from 
 
 Web UI chat links percent-encode custom thread identifiers before placing them in route segments, so reserved URL characters such as `#` and `?` do not change which conversation is opened.
 
+Submitted questions stay visible while a response streams, including before the server confirms their position in the conversation. The file-upload indicator ends when uploading finishes, while the question and its uploaded attachments remain visible.
+
 ### Chat Archive
 
 Deleting a chat from the sidebar requires confirmation showing its title. Deletion removes the conversation and its files and cannot be undone.
