@@ -61,4 +61,4 @@ pnpm exec playwright test tests/e2e/knowledge-center.spec.ts
 
 Tests load the real extension/static registry, exercise Gateway authentication middleware over HTTP (including root paths and stale viewers), and load shipped native browser modules through the real host with mocked management HTTP. This is synthetic contract coverage, not a live WeKnora or production multi-user acceptance claim. Results are recorded in [VALIDATION.md](VALIDATION.md).
 
-Screenshots: [English desktop / dark](screenshots/library-en-dark.png) and [Chinese mobile / light](screenshots/library-zh-mobile.png), rendered with synthetic data through the host sidebar entry point.
+Set `KNOWLEDGE_SCREENSHOT_DIR` when running the browser suite to generate local English desktop/dark and Chinese mobile/light screenshots with synthetic data through the host sidebar entry point.

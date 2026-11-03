@@ -16,8 +16,9 @@ exact LightRAG empty-dataset response, and projects graphs to a shared 200-node
 budget. Provider input errors retain 422, malformed responses produce 502, and
 entry edit bodies allow 8 MiB while policy bodies retain 1 MiB. Obsolete read
 failures cannot replace newer mutation feedback; pending-save pagination cannot
-discard a draft. Screenshot generation uses the committed `library-en-dark.png`
-filename.
+discard a draft. Screenshot generation uses the `library-en-dark.png` output
+filename. The two library screenshots are generated locally and are not tracked,
+as requested during review; the browser generation cases remain available.
 
 | Check rerun for the review update | Result |
 | --- | --- |
@@ -72,11 +73,9 @@ credential-bearing or oversized editable content, graph identity and exact evide
 joins. Browser cases cover English/dark desktop and Chinese/light 375px mobile,
 directory query parameters, draft and pending-input locks, historical preview,
 confirmed restoration, uncertain-write reconciliation, bounded graphs and a late
-directory response after cancellation. The new screenshot artifacts show synthetic
-data in the actual host, including the sidebar entry point:
-
-- [English desktop, dark](screenshots/library-en-dark.png)
-- [Chinese mobile, light](screenshots/library-zh-mobile.png)
+directory response after cancellation. Local screenshot generation covered English
+desktop/dark and Chinese mobile/light with synthetic data in the actual host,
+including the sidebar entry point. These library images are not tracked.
 
 WeKnora routes and version semantics were checked against v0.8.3 source commit
 `3e22822c1d2397be730c458c7539d0eb8c113a24`. The optional LightRAG graph adapter
