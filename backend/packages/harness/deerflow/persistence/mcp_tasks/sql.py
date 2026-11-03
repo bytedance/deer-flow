@@ -720,10 +720,11 @@ class McpTaskRepository:
             rows = list((await session.execute(stmt)).scalars())
             expires_at = now + timedelta(seconds=lease_seconds)
             # SQLite ignores ``FOR UPDATE``, so a claim is also fenced on the
-            # state this read saw. A peer claim (future lease, changed phase) or
-            # a newer recorded event changes one of those columns, the
-            # conditional UPDATE matches no row, and the paused claim has no
-            # side effects instead of overwriting the winning worker.
+            # state this read saw. A peer claim (future lease, changed phase), a
+            # release/defer moving the next attempt, or a newer recorded event
+            # changes one of those columns, the conditional UPDATE matches no
+            # row, and the paused claim has no side effects instead of
+            # overwriting the winning worker or bypassing its backoff.
             sqlite = session.get_bind().dialect.name == "sqlite"
             claimed: list[McpTaskRow] = []
             for row in rows:
@@ -743,6 +744,7 @@ class McpTaskRepository:
                     else row.dispatch_event
                 )
                 dispatch_version_fence = McpTaskRow.dispatch_version.is_(None) if row.dispatch_version is None else McpTaskRow.dispatch_version == row.dispatch_version
+                next_notification_fence = McpTaskRow.next_notification_at.is_(None) if row.next_notification_at is None else McpTaskRow.next_notification_at == row.next_notification_at
                 if event is None:
                     # The condition behind this snapshot resolved before delivery
                     # (for example tracking recovered, or an input_required prompt
@@ -809,6 +811,7 @@ class McpTaskRepository:
                             McpTaskRow.event_version == row.event_version,
                             McpTaskRow.notification_status == row.notification_status,
                             dispatch_version_fence,
+                            next_notification_fence,
                             or_(
                                 McpTaskRow.notification_lease_expires_at.is_(None),
                                 McpTaskRow.notification_lease_expires_at < now,
