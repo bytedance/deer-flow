@@ -34,21 +34,27 @@ def test_independent_subagent_commands_enter_distinct_sessions_concurrently(monk
     shim.chmod(0o755)
     bookkeeping = threading.Lock()
     sessions = {}
-    running = peak = 0
+    in_flight = peak = 0
     entered = threading.Event()
     requests = []
 
     def complete(session):
-        nonlocal running
+        nonlocal in_flight
         if session.get("finished"):
             return
-        stdout, stderr = session["process"].communicate(timeout=5)
-        session.update(stdout=stdout, stderr=stderr, finished=True)
-        with bookkeeping:
-            running -= 1
+        try:
+            # Keep each service-side operation admitted until all peers have
+            # entered. Correctness must not depend on their sleep windows
+            # overlapping on a busy host.
+            assert entered.wait(5), "Independent commands did not all reach the service before any completion"
+            stdout, stderr = session["process"].communicate(timeout=5)
+            session.update(stdout=stdout, stderr=stderr, finished=True)
+        finally:
+            with bookkeeping:
+                in_flight -= 1
 
     def transport(request):
-        nonlocal running, peak
+        nonlocal in_flight, peak
         path = request.url.path
         payload = json.loads(request.content) if request.content else {}
         with bookkeeping:
@@ -70,9 +76,9 @@ def test_independent_subagent_commands_enter_distinct_sessions_concurrently(monk
             session = {"process": process, "command": payload["command"], "id": session_id}
             with bookkeeping:
                 sessions[session_id] = session
-                running += 1
-                peak = max(peak, running)
-                if running == 3:
+                in_flight += 1
+                peak = max(peak, in_flight)
+                if in_flight == 3:
                     entered.set()
             data = {"session_id": session_id, "command": payload["command"], "status": "running"}
             if path == "/v1/bash/exec":
@@ -140,19 +146,21 @@ def test_independent_subagent_commands_enter_distinct_sessions_concurrently(monk
         try:
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [executor.submit(worker, index) for index in range(3)]
-                results = [future.result(timeout=10) for future in futures]
+                results = [future.result(timeout=20) for future in futures]
             elapsed = time.perf_counter() - started
             assert results == ["done"] * 3
             assert len(sessions) == 3, "Each operation received its own real SDK session identity"
             print(
-                "AIO_PARALLELISM "
+                "AIO_ADMISSION_REGRESSION "
                 + json.dumps(
                     {
                         "mode": mode,
                         "commands": 3,
                         "sleep_seconds": 0.4,
-                        "elapsed_seconds": round(elapsed, 4),
-                        "peak_processes": peak,
+                        # Diagnostic only: this includes the admission gate and
+                        # is not the separate ungated audit benchmark.
+                        "gated_elapsed_seconds": round(elapsed, 4),
+                        "peak_admitted_commands": peak,
                         "all_entered_together": entered.is_set(),
                         "exec_requests": sum(path in ("/v1/shell/exec", "/v1/bash/exec") for _, path, _ in requests),
                     }
@@ -163,7 +171,7 @@ def test_independent_subagent_commands_enter_distinct_sessions_concurrently(monk
             for session in sessions.values():
                 if session["process"].poll() is None:
                     session["process"].terminate()
-                    session["process"].wait(5)
+                session["process"].communicate(timeout=5)
             sandbox.close()
 
 
