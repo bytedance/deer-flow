@@ -1572,6 +1572,8 @@ export function MessageList({
                   </div>,
                 );
               } else if (group.type === "assistant:subagent") {
+                const groupTasks =
+                  renderedSubtasks.tasksByGroup.get(groupIndex);
                 const tasks = new Set<Subtask>();
                 for (const message of group.messages) {
                   if (message.type !== "ai") {
@@ -1579,7 +1581,7 @@ export function MessageList({
                   }
                   for (const toolCall of message.tool_calls ?? []) {
                     const task = toolCall.id
-                      ? renderedSubtasks.tasks.get(toolCall.id)
+                      ? groupTasks?.get(toolCall.id)
                       : undefined;
                     if (toolCall.name === "task" && task) {
                       tasks.add(task);
@@ -1633,7 +1635,7 @@ export function MessageList({
                       : [],
                   );
                   for (const taskId of taskIds ?? []) {
-                    const fallbackTask = renderedSubtasks.tasks.get(taskId);
+                    const fallbackTask = groupTasks?.get(taskId);
                     if (!fallbackTask) {
                       continue;
                     }
@@ -1648,6 +1650,13 @@ export function MessageList({
                           runId={(message as { run_id?: string }).run_id}
                           isLoading={groupIsLoading}
                           fallbackTask={fallbackTask}
+                          // The shared live map is keyed by bare call id, so
+                          // when a provider reuses one across runs only the
+                          // latest turn's card may take it as its own state.
+                          live={
+                            renderedSubtasks.ownerGroupByTaskId.get(taskId) ===
+                            groupIndex
+                          }
                           resultMessage={findSubtaskResultMessage(
                             group,
                             taskId,

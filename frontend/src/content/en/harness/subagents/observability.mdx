@@ -14,7 +14,7 @@ Every `task` call in a conversation has a subtask card (`SubtaskCard`). Its data
 | Information             | Source                                                                                                                                          |
 | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | Model name, token total | Live from `task_started` / `task_running` events; after a reload from the tool result metadata `subagent_model_name` / `subagent_token_usage`    |
-| Step timeline           | Live from `task_running` events; when the card is expanded with no local steps, backfilled from the run-events endpoint as `subagent.step`        |
+| Step timeline           | Live from `task_running` events for the latest turn that used the id; when the card is expanded with no local steps, backfilled from the run-events endpoint as `subagent.step` |
 | Terminal status         | Only from the tool result metadata `subagent_status`, never inferred from `task_completed` and similar events                                    |
 
 Status mapping: `completed` shows as completed; `failed`, `cancelled`, `timed_out`, and `polling_timed_out` all show as failed. Structured metadata without a status counts as in progress. Only legacy messages with no structured metadata at all fall back to parsing text prefixes.
@@ -25,7 +25,7 @@ Token labels are gated by `token_usage.enabled`, which the frontend reads from `
 
 ## SSE custom events
 
-During a delegation the `task` tool emits the following custom events through the stream writer. `task_id` is always the provider `tool_call_id`, matching the card one to one; the server-side execution id is never exposed.
+During a delegation the `task` tool emits the following custom events through the stream writer. `task_id` is always the provider `tool_call_id`, so it identifies the card of the turn that issued the call; the server-side execution id is never exposed. Providers may reuse one call id across runs, so several turns' cards can share a `task_id`: only the latest turn that used it reads live task state and step updates from these events, while earlier turns render their own message-derived snapshot and keep backfilled steps local.
 
 | Event            | Payload                                                                        | Notes                                                                                           |
 | ---------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
