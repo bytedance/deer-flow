@@ -240,7 +240,9 @@ def test_stop_signal_with_main_thread_provider_destroys_sandboxes_only_after_run
     events = []
 
     class Backend:
-        def destroy(self, info):
+        def destroy(self, info, *, check=None):
+            if check is not None:
+                check()
             events.append(f"destroy:{info.sandbox_id}")
 
         def list_running(self):

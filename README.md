@@ -2971,10 +2971,17 @@ after the backend confirms that no container or Pod remains, while holding the
 normal teardown fences. This also permits recovery when a runtime cannot report
 a generation. If a partial deletion leaves a container or a Pod behind, the
 Gateway inspects it independently of health checks and Service availability,
-then retries cleanup only for a quarantined generation. A replacement generation
-keeps its resources. A delete acknowledgement or failed health check is
-insufficient to clear the records.
+then retries destruction only when its generation and quarantine still match
+the observation captured before those probes. New marks survive stale cleanup,
+including interrupted writes beside older records. If the running generation
+cannot be identified, cleanup defers until absence is confirmed. Confirmed lease
+loss also defers cleanup and keeps it retryable, including at completion.
+A replacement generation keeps its resources. A delete acknowledgement or
+failed health check is insufficient to clear the records.
 Recovery also clears leftover local proxy and network resources before recreation.
+Update all Gateways sharing these runtimes to preserve this behavior. Before
+rolling back, let the updated Gateways finish quarantine cleanup for interrupted
+writes; older versions do not recognize the new pending records.
 
 Lark broker provisioning requires confirmed capabilities. Probe failures cannot
 select credential mounts or overwrite a known broker requirement. Update the

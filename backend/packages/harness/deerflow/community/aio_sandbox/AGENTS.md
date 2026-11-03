@@ -89,14 +89,20 @@ Explicit stop failures use that same generation-bound quarantine before dropping
 tracking. Failed record writes retain metadata and fence cached lookups in memory.
 Snapshot quarantine receipts before presence/identity probes; both full retirement
 and replacement pruning may delete only unchanged receipts from that snapshot.
-Each mark atomically replaces its receipt, including `unknown`; legacy empty
-records remain supported. A short per-sandbox sidecar file lock serializes mark,
-snapshot and compare/delete, never backend IO; keep the lock outside the removable
-record directory and never unlink it. Its persistent mutation token also protects
-empty crash-residue fences without relying on filesystem timestamps. Pass the
-yielded lease check
-through snapshot waits, retirement, backend `destroy` and `complete_absent_teardown`;
-backends check before each new resource operation and retain unreleased ports.
+Each mark first publishes a uniquely named pending fence for its generation,
+including `unknown`, then atomically replaces its receipt. Failed writes retain
+the pending fence even beside older receipts; retirement versions both kinds.
+Pending names stay within the 16-character Windows path budget and store the
+generation in their body; incomplete contents fence every generation.
+Legacy empty records remain supported. A short sidecar lock serializes storage
+mutations, never backend IO. Keep its inode stable and write its mutation token
+through the locking descriptor (CIFS rejects another handle); timestamps are not
+versions. Retry destruction requires an identified generation whose pre-probe
+receipt snapshot still matches; unknown identity defers until confirmed absence.
+Pass the yielded lease check through initial quarantined stops, replacement,
+snapshot waits, retirement, and each backend operation. Recheck storage completion
+and heartbeat exit before clearing retry state; preserve the original exception.
+Failed stops persist their fence before releasing the lease or detaching metadata.
 Warm-to-active promotion clears an obsolete in-memory fence under the metadata
 lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,

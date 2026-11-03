@@ -1,6 +1,7 @@
 """Quarantine follows a container generation across provider restarts."""
 
 import multiprocessing
+import os
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,6 +110,64 @@ def test_quarantine_keys_are_truncated_for_windows_max_path():
     assert len(SandboxQuarantine._key("old-generation")) == 16
 
 
+def test_mark_keeps_pending_files_within_the_existing_windows_path_budget(tmp_path, monkeypatch):
+    root = tmp_path / ("x" * (180 - len(str(tmp_path)) - 1))
+    assert len(str(root)) == 180
+    original_open = Path.open
+
+    def limited_open(path, *args, **kwargs):
+        if len(str(path)) >= 260:
+            raise FileNotFoundError("emulated Windows MAX_PATH exceeded")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", limited_open)
+    store = SandboxQuarantine(root, "provisioner")
+    info = SandboxInfo("thread-sandbox", "", container_id="generation")
+    store.mark(info)
+    store.mark(info)
+    assert store.contains(info)
+    store.retire(info, snapshot=store.snapshot(info))
+    assert not store.contains(info)
+
+
+@pytest.mark.parametrize("content", [b"", b"123", b"x" * 16, b"\xff" * 16, b"unknown"])
+def test_incomplete_pending_generation_fences_reuse_and_replacement_pruning(tmp_path, content):
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    old = SandboxInfo("thread-sandbox", "", container_id="old")
+    live = SandboxInfo(old.sandbox_id, "", container_id="new")
+    store.mark(old)
+    (store._directory(old) / ("p" + "0" * 15)).write_bytes(content)
+
+    restarted = SandboxQuarantine(tmp_path, "provisioner")
+    assert restarted.contains(live)
+    snapshot = restarted.snapshot(live)
+    assert not restarted.matches(live, snapshot=snapshot)
+    restarted.retire_replaced_generations(live, snapshot=snapshot)
+    assert restarted.contains(live)
+    restarted.retire(live, snapshot=restarted.snapshot(live))
+    assert not restarted.contains(live)
+
+
+def test_pending_publication_during_contains_cannot_hide_the_fence(tmp_path, monkeypatch):
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    old = SandboxInfo("thread-sandbox", "", container_id="old")
+    live = SandboxInfo(old.sandbox_id, "", container_id="new")
+    store.mark(old)
+    directory = store._directory(live)
+    pending = directory / ("p" + "0" * 15)
+    pending.write_bytes(store._key(live.container_id).encode("ascii"))
+    read_bytes = Path.read_bytes
+
+    def finish_publication(path):
+        if path == pending:
+            (directory / store._key(live.container_id)).write_bytes(b"new-receipt")
+            pending.unlink()
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", finish_publication)
+    assert store.contains(live)
+
+
 @pytest.mark.parametrize("method", ["retire", "retire_replaced_generations"])
 def test_retirement_keeps_generations_marked_after_the_snapshot(tmp_path, method):
     store = SandboxQuarantine(tmp_path, "provisioner")
@@ -159,6 +218,111 @@ def test_snapshot_read_failure_retains_the_quarantine(tmp_path, monkeypatch):
     with pytest.raises(PermissionError, match="receipt storage unavailable"):
         store.snapshot(info)
     assert store.contains(info)
+
+
+@pytest.mark.parametrize("failure", ["first-fsync", "sidecar-fsync", "receipt-fsync", "publish"])
+@pytest.mark.parametrize("generation", ["new-generation", None], ids=["known", "unknown"])
+def test_failed_mark_stays_fenced_with_older_generation_records(tmp_path, monkeypatch, failure, generation):
+    from deerflow.community.aio_sandbox import quarantine as module
+
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    old = SandboxInfo("thread-sandbox", "", container_id="old-generation")
+    new = SandboxInfo(old.sandbox_id, "", container_id=generation)
+    discovered = SandboxInfo(old.sandbox_id, "", container_id=generation or "discovered-generation")
+    store.mark(old)
+    stale_snapshot = store.snapshot(old)
+    fsync = module.os.fsync
+    failures = []
+    sync_count = 0
+
+    def fail_sync(fd):
+        nonlocal sync_count
+        sync_count += 1
+        if sync_count == {"first-fsync": 1, "sidecar-fsync": 2, "receipt-fsync": 3}.get(failure):
+            failures.append(True)
+            raise OSError("receipt storage unavailable")
+        fsync(fd)
+
+    def fail_publish(*_args):
+        failures.append(True)
+        raise OSError("receipt storage unavailable")
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(module.os, "fsync", fail_sync)
+        if failure == "publish":
+            patcher.setattr(module.os, "replace", fail_publish)
+        with pytest.raises(OSError, match="receipt storage unavailable"):
+            store.mark(new)
+    assert failures == [True]
+    restarted = SandboxQuarantine(tmp_path, "provisioner")
+    assert restarted.contains(discovered), "a failed mark must remain visible after restart"
+    restarted.retire(old, snapshot=stale_snapshot)
+    assert restarted.contains(discovered), "an old cleanup must retain an unfinished new mark"
+    restarted.retire(new, snapshot=restarted.snapshot(new))
+    assert not restarted.contains(new), "a new absence proof can finish interrupted marking"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CIFS flock descriptor contract is POSIX-only")
+def test_mark_syncs_the_locked_file_through_its_own_descriptor(tmp_path, monkeypatch):
+    import fcntl
+
+    from deerflow.community.aio_sandbox import quarantine as module
+
+    flock, fsync = fcntl.flock, module.os.fsync
+    lock_owner = []
+
+    def tracked_lock(fd, operation):
+        flock(fd, operation)
+        if operation == fcntl.LOCK_UN:
+            lock_owner.clear()
+        else:
+            lock_owner[:] = [fd]
+
+    def mandatory_sync(fd):
+        owner = lock_owner[0]
+        if os.fstat(fd).st_ino == os.fstat(owner).st_ino and fd != owner:
+            raise PermissionError("CIFS rejects IO through a separately opened descriptor")
+        fsync(fd)
+
+    monkeypatch.setattr(fcntl, "flock", tracked_lock)
+    monkeypatch.setattr(module.os, "fsync", mandatory_sync)
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    info = SandboxInfo("thread-sandbox", "", container_id="generation")
+    store.mark(info)
+    assert store.contains(info)
+    store.retire(info, snapshot=store.snapshot(info))
+    assert not store.contains(info)
+
+
+@pytest.mark.parametrize("finish", ["rmdir", "changed-identity"])
+def test_retirement_reports_lease_loss_during_its_last_storage_operation(tmp_path, monkeypatch, finish):
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    info = SandboxInfo("thread-sandbox", "", container_id="generation")
+    store.mark(info)
+    snapshot = store.snapshot(info)
+    directory = store._directory(info)
+    lost = threading.Event()
+    stat, rmdir = Path.stat, Path.rmdir
+
+    def changed_identity(path, *args, **kwargs):
+        result = stat(path, *args, **kwargs)
+        if path == directory:
+            lost.set()
+            return SimpleNamespace(st_dev=result.st_dev, st_ino=result.st_ino + 1)
+        return result
+
+    def finish_removal(path):
+        rmdir(path)
+        if path == directory:
+            lost.set()
+
+    def check():
+        if lost.is_set():
+            raise RuntimeError("teardown lease lost")
+
+    monkeypatch.setattr(Path, "stat" if finish == "changed-identity" else "rmdir", changed_identity if finish == "changed-identity" else finish_removal)
+    with pytest.raises(RuntimeError, match="teardown lease lost"):
+        store.retire(info, snapshot=snapshot, check=check)
 
 
 @pytest.mark.parametrize("empty_snapshot", [False, True], ids=["old-record", "old-crash-residue"])
@@ -321,6 +485,40 @@ def _mark_quarantine_in_peer(root, info, started, finished):
     started.set()
     store.mark(info)
     finished.set()
+
+
+def _crash_before_receipt_publication(root, info):
+    from deerflow.community.aio_sandbox import quarantine as module
+
+    module.os.replace = lambda *_args: os._exit(71)
+    SandboxQuarantine(root, "provisioner").mark(info)
+
+
+@pytest.mark.parametrize("generation", ["new-generation", None], ids=["known", "unknown"])
+def test_interrupted_mark_survives_peer_cleanup(tmp_path, generation):
+    store = SandboxQuarantine(tmp_path, "provisioner")
+    old = SandboxInfo("thread-sandbox", "", container_id="old-generation")
+    new = SandboxInfo(old.sandbox_id, "", container_id=generation)
+    discovered = SandboxInfo(old.sandbox_id, "", container_id=generation or "discovered-generation")
+    store.mark(old)
+    stale = store.snapshot(old)
+    peer = multiprocessing.get_context("spawn").Process(target=_crash_before_receipt_publication, args=(tmp_path, new))
+    peer.start()
+    try:
+        peer.join(15)
+        assert peer.exitcode == 71, "the peer did not stop at receipt publication"
+        restarted = SandboxQuarantine(tmp_path, "provisioner")
+        assert restarted.contains(discovered)
+        restarted.retire(old, snapshot=stale)
+        assert restarted.contains(discovered)
+        restarted.retire_replaced_generations(discovered, snapshot=restarted.snapshot(discovered))
+        assert restarted.contains(discovered)
+        restarted.retire(discovered, snapshot=restarted.snapshot(discovered))
+        assert not restarted.contains(discovered)
+    finally:
+        if peer.is_alive():
+            peer.terminate()
+        peer.join(10)
 
 
 def test_mark_and_receipt_comparison_are_serialized_across_processes(tmp_path, monkeypatch):

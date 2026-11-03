@@ -14,7 +14,7 @@ import signal
 import threading
 import time
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -657,7 +657,7 @@ def test_reconcile_replaces_mismatched_policy_after_orphan_grace_and_destroy_cla
     ):
         worker._reconcile_orphans()
 
-    worker._backend.destroy.assert_called_once_with(info)
+    worker._backend.destroy.assert_called_once_with(info, check=ANY)
     assert claims == [True]
     assert info.sandbox_id not in worker._warm_pool
 
@@ -1689,7 +1689,9 @@ def test_destroy_holds_the_teardown_marker_for_its_stop():
     stop_entered = threading.Event()
     release_stop = threading.Event()
 
-    def slow_destroy(entry):
+    def slow_destroy(entry, *, check=None):
+        if check is not None:
+            check()
         stop_entered.set()
         release_stop.wait(timeout=5)
 
@@ -2420,7 +2422,7 @@ def test_reuse_does_not_return_a_sandbox_reserved_during_its_health_check():
 
     assert not reaper.is_alive(), "the idle reaper never finished"
     assert handed_out is None, "reuse returned a sandbox whose local teardown reservation had already won"
-    provider._backend.destroy.assert_called_once_with(info)
+    provider._backend.destroy.assert_called_once_with(info, check=ANY)
     assert provider.get("idlerace") is None
 
 
