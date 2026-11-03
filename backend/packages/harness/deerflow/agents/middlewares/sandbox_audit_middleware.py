@@ -59,10 +59,15 @@ _STDIN_SCRIPT_FLAGS = r"(?:--?[-\w]*\s+){0,4}"
 # The repetition is bounded to keep the alternation from backtracking on long input.
 _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
 
+# ``$HOME`` and ``${HOME}`` name the same directory as ``~``, so a destructive
+# target written either way is the same deletion. The braces form is listed
+# separately because ``$HOME`` alone would also match inside ``$HOMELESS``.
+_HOME_TARGET = r"(?:~|\$HOME|\$\{HOME\})"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
+    re.compile(rf"rm\s+-[^\s]*r[^\s]*\s+(/\*?|{_HOME_TARGET}/?\*?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
@@ -85,7 +90,7 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- overwrite system binaries ---
     re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
     # --- overwrite shell startup files ---
-    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    re.compile(rf">+\s*{_HOME_TARGET}/?\.(bashrc|profile|zshrc|bash_profile)"),
     # --- process environment leakage ---
     re.compile(r"/proc/[^/]+/environ"),
     # --- dynamic linker hijack (one-step escalation) ---
@@ -137,6 +142,80 @@ _STDIN_INTERPRETER_HEAD_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_ST
 # ordinary argument, and a noexec shell (`bash -n <(curl u)`) only parses it.
 _PROCESS_SUBSTITUTION_RE = re.compile(rf"<\s*\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}[^)]*\)")
 _PROCESS_SUBSTITUTION_PROGRAM_RE = re.compile(rf"^{_COMMAND_POSITION_PREFIX}({_CODE_STRING_INTERPRETERS})\s+({_STDIN_SCRIPT_FLAGS})(?=<\s*\()")
+
+
+# A recursive delete of a home or system root is the same deletion whatever
+# shape the flags are in: `-r -f` puts the `r` in its own word, `--recursive`
+# spells it long, and a bare `--` end-of-options marker sits between the flags
+# and the target. All three hide the target from the single-line rule above,
+# which needs one flag word containing `r` immediately before it. The trailing
+# `\s*$` is a fourth hole: `rm -rf ~/ # cleanup` and `rm -rf ~/ x` both delete
+# the same directory and slip past it. So this is decided from the token list,
+# the way the stdin/process-substitution rules above already are.
+_RM_EXECUTABLE = "rm"
+_RM_RECURSIVE_SHORT = frozenset("rR")
+_RM_RECURSIVE_LONG = "recursive"
+# Exact operands, after the shell's own spelling of the home directory.
+_DESTRUCTIVE_RM_TARGETS = frozenset(
+    {
+        "/",
+        "/*",
+        "~",
+        "~/",
+        "~/*",
+        "$HOME",
+        "$HOME/",
+        "$HOME/*",
+        "${HOME}",
+        "${HOME}/",
+        "${HOME}/*",
+        "/home",
+        "/root",
+    }
+)
+# `/home\b` and `/root\b` in the pattern above mean those trees, not `/homekit`.
+_DESTRUCTIVE_RM_PREFIXES = ("/home/", "/root/")
+
+
+def _is_destructive_rm_target(operand: str) -> bool:
+    """Return True when *operand* is the home directory or a system root."""
+    value = operand.strip("\"'")
+    if value in _DESTRUCTIVE_RM_TARGETS:
+        return True
+    return value.startswith(_DESTRUCTIVE_RM_PREFIXES)
+
+
+def _rm_recursively_deletes_home_or_root(tokens: list[str]) -> bool:
+    """Return True when an ``rm`` in *tokens* recursively targets home or root.
+
+    ``rm`` takes no option whose value is a separate word, so every non-flag
+    token after it is an operand, and `--` only ends option parsing. The scan
+    starts at any ``rm`` token, which keeps wrappers (`sudo rm`, `/bin/rm`) in
+    scope exactly as the unanchored pattern above already does.
+    """
+    for index, token in enumerate(tokens):
+        if token.rsplit("/", 1)[-1] != _RM_EXECUTABLE:
+            continue
+        recursive = False
+        operands: list[str] = []
+        end_of_options = False
+        for argument in tokens[index + 1 :]:
+            # Checked first: `--` also starts with a dash, and a marker that is
+            # swallowed as a flag word would leave the operand scan treating the
+            # file named `-rf` below it as recursion.
+            if argument == "--":
+                end_of_options = True
+                continue
+            if not end_of_options and argument.startswith("-") and argument != "-":
+                if argument.startswith("--"):
+                    recursive = recursive or argument[2:].split("=", 1)[0] == _RM_RECURSIVE_LONG
+                else:
+                    recursive = recursive or bool(_RM_RECURSIVE_SHORT.intersection(argument[1:]))
+                continue
+            operands.append(argument)
+        if recursive and any(_is_destructive_rm_target(operand) for operand in operands):
+            return True
+    return False
 
 
 def _stdin_program_substitution(command: str) -> bool:
@@ -398,6 +477,8 @@ def _classify_single_command(command: str) -> str:
         tokens = shlex.split(command)
         joined = " ".join(tokens)
         if _matches_high_risk(joined):
+            return "block"
+        if _rm_recursively_deletes_home_or_root(tokens):
             return "block"
     except ValueError:
         # Heredocs and other multiline shell forms may be valid bash but
