@@ -19,10 +19,10 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Preserve required context; fold all selected source in order. Convert native
-text documents on copies; PII before splitting, budgets before escaping. Never
-decode/fetch opaque media. Commit hooks/history/removal only on success.
-Chunk/carry/cooldown invariants and regressions:
+Fold selected source in order; preserve required context. Copy document metadata
+and direct plaintext; no media decoding/fetching or nested-document traversal.
+PII before splitting, budgets before escaping; hooks/history/removal on success.
+Chunk/carry/cooldown invariants and tests:
 [contract](../../../../../docs/summarization.md).
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).

@@ -49,32 +49,30 @@ _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
 
 
 def _document_summary_text(block: object) -> str | None:
-    """Expose native document plaintext without decoding or fetching media."""
+    """Expose document metadata and direct plaintext, without fetching media."""
     if not isinstance(block, dict) or block.get("type") != "document":
         return None
-    source = block.get("source")
-    if not isinstance(source, dict):
-        return None
-    if source.get("type") == "text":
-        body = source.get("data")
-    elif source.get("type") == "content":
-        content = source.get("content")
-        if isinstance(content, str):
-            body = content
-        elif isinstance(content, (list, tuple)):
-            body = "\n".join(part if isinstance(part, str) else part["text"] for part in content if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)))
-        else:
-            return None
-    else:
-        return None
-    if not isinstance(body, str) or not body:
-        return None
-    parts = ["Document:"]
+    parts = []
     for key in ("title", "context"):
         value = block.get(key)
         if isinstance(value, str) and value:
             parts.append(f"{key}: {value}")
-    return "\n" + "\n".join([*parts, body]) + "\n"
+    source = block.get("source")
+    body = None
+    if isinstance(source, dict):
+        if source.get("type") == "text":
+            body = source.get("data")
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                body = content
+            elif isinstance(content, (list, tuple)):
+                body = "\n".join(part if isinstance(part, str) else part["text"] for part in content if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)))
+    if isinstance(body, str) and body:
+        parts.append(body)
+    if not parts:
+        return None
+    return "\n" + "\n".join(["Document:", *parts]) + "\n"
 
 
 def _summary_message(message: AnyMessage) -> AnyMessage:
