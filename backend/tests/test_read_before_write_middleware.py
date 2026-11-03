@@ -137,6 +137,19 @@ class TestWriteGate:
         assert result.tool_call_id == "call-1"
         assert "read" in result.content.lower()
 
+    def test_blocked_message_gives_missing_call_id_an_empty_id(self):
+        """A null call id must not become the literal string "None".
+
+        "None" is a valid id, so the contrasting repair pass would treat it as an
+        already-paired result and drop the block; an empty id is the malformed
+        marker it knows how to re-point at the call's recovered id.
+        """
+        mw = _middleware({self.PATH: "v1"})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"}, tool_call_id=None)
+        result = mw.wrap_tool_call(request, MagicMock())
+        assert result.status == "error"
+        assert result.tool_call_id == ""
+
     def test_append_without_read_blocked(self):
         mw = _middleware({self.PATH: "v1"})
         request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "more", "append": True})

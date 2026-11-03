@@ -242,6 +242,22 @@ def test_repeated_no_results_reaches_warned():
 # Scenario 3: Non-recoverable errors escalate warned → blocked
 
 
+def test_blocked_message_gives_missing_call_id_an_empty_id():
+    """A null call id must not become the literal string "None".
+
+    "None" is a valid id, so the repair pass would treat the block as already
+    paired and drop it; an empty id is the malformed marker it re-points at the
+    call's recovered id.
+    """
+    mw = _make_mw()
+    req = SimpleNamespace(tool_call={"name": "web_search", "id": None}, runtime=_make_runtime())
+
+    result = mw._make_blocked_message(req, "web_search", "stop retrying")
+
+    assert result.status == "error"
+    assert result.tool_call_id == ""
+
+
 def test_warned_to_blocked_after_escalation():
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=2)
     rt = _make_runtime()

@@ -799,6 +799,45 @@ class TestMalformedToolCallIdRecovery:
         assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
         assert patched[1].status != "error"
 
+    def test_empty_id_tool_result_pairs_with_a_none_id_call(self):
+        """The tool gates leave a null call id as ""; the call may still carry None.
+
+        The two spellings are both "missing", so a gate's own error message must
+        pair with its call and reach the model instead of being dropped as an
+        orphan while a placeholder replaces it.
+        """
+        mw = DanglingToolCallMiddleware()
+        blocked = ToolMessage(content="Error: read the file before writing it", tool_call_id="", name="write_file", status="error")
+        msgs = [_ai_with_tool_calls([_tc("write_file", None)]), blocked]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert patched[1].content == "Error: read the file before writing it"
+        assert patched[1].status == "error"
+        assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
+
+    def test_two_gate_results_pair_with_distinct_none_id_calls(self):
+        """Parallel blocked calls each keep their own reason and recovered id.
+
+        The gates write "" for every null id, so the two results are told apart
+        the same way as any other malformed pair: names narrow the candidates,
+        and position breaks a tie while the turn is fully answered.
+        """
+        mw = DanglingToolCallMiddleware()
+        write_block = ToolMessage(content="Error: read the file before writing it", tool_call_id="", name="write_file", status="error")
+        replace_block = ToolMessage(content="[TOOL_BLOCKED] stop retrying", tool_call_id="", name="str_replace", status="error")
+        msgs = [_ai_with_tool_calls([_tc("write_file", None), _tc("str_replace", None)]), write_block, replace_block]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        first_id, second_id = (tc["id"] for tc in patched[0].tool_calls)
+        assert first_id != second_id
+        assert [m.tool_call_id for m in patched[1:]] == [first_id, second_id]
+        assert [m.content for m in patched[1:]] == [write_block.content, replace_block.content]
+
     def test_multiple_empty_ids_get_distinct_ids_and_pair_in_order(self):
         mw = DanglingToolCallMiddleware()
         msgs = [

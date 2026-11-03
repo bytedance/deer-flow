@@ -103,6 +103,18 @@ def _turn_malformed_result_count(messages: list, start: int) -> int:
     return count
 
 
+def _malformed_ids_can_pair(original: object, result_id: object) -> bool:
+    """Whether two malformed ids are the same "missing" identity.
+
+    A call that omitted its id can surface as ``None``, ``""`` or whitespace,
+    depending on the provider parser and on the middleware that copied the id.
+    None of those spellings carries identity, so they must not fail to match each
+    other: a gate that writes ``""`` for a ``None`` call id still produced that
+    call's result.
+    """
+    return not _valid_tool_call_id(original) and not _valid_tool_call_id(result_id)
+
+
 def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional: bool) -> str | None:
     """Consume the open malformed call that ``result`` answers, returning its new id.
 
@@ -123,7 +135,7 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+    candidates = [position for position, entry in enumerate(open_calls) if _malformed_ids_can_pair(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
     if not candidates or (len(candidates) > 1 and not positional):
         return None
     return open_calls.pop(candidates[0])["synthetic"]
