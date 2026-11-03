@@ -29,8 +29,6 @@ class SubagentBatchRow(Base):
     continuation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     continuation_status: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
     continuation_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    continuation_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    continuation_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

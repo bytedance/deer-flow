@@ -283,6 +283,31 @@ def _explicit_submitter() -> AsyncMock:
     return explicit
 
 
+@pytest.mark.asyncio
+async def test_followup_captures_configurable_settings_with_context_precedence(monkeypatch):
+    _mock_subagent_catalog(monkeypatch)
+    submitter = _explicit_submitter()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    runtime = _runtime()
+    runtime.config["configurable"].update(thinking_enabled=False, reasoning_effort="high", max_concurrent_subagents=2, max_total_subagents=4)
+    runtime.context["reasoning_effort"] = "low"
+    await tool_module.batch_task.coroutine(
+        title="Meeting records",
+        items=[BatchTaskItem(key="a", prompt="Read")],
+        subagent_type="general-purpose",
+        continuation="Summarize",
+        runtime=runtime,
+        tool_call_id="batch-call",
+    )
+    captured = submitter.submit.call_args.args[0].continuation_context["context"]
+    assert {key: captured[key] for key in ("thinking_enabled", "reasoning_effort", "max_concurrent_subagents", "max_total_subagents")} == {
+        "thinking_enabled": False,
+        "reasoning_effort": "low",
+        "max_concurrent_subagents": 2,
+        "max_total_subagents": 4,
+    }
+
+
 def test_bound_batch_tools_sync_path_uses_the_explicit_submitter(monkeypatch) -> None:
     """Sync invocation of a bound copy must not bypass the explicit submitter.
 

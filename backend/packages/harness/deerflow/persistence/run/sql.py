@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -1080,6 +1081,7 @@ class RunRepository(RunStore):
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
         execution_fence=None,
+        admission_check: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -1192,6 +1194,10 @@ class RunRepository(RunStore):
             session.add(new_row)
             try:
                 await session.flush()
+                if admission_check is not None:
+                    await admission_check()
+                    if execution_fence is not None:
+                        await lock_execution_fence(session, execution_fence, resolved_user_id)
                 admitted = self._row_to_dict(new_row)
                 await session.commit()
             except IntegrityError as exc:

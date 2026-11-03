@@ -337,7 +337,7 @@ class SubagentBatchService:
             if not saved and run_id and self._cancel_continuation is not None:
                 current = await self._repository.get_batch(batch["id"], user_id=batch["user_id"])
                 if current is None or current.get("continuation_status") in ("cancelled", "suppressed"):
-                    await self._cancel_continuation(batch["id"], batch["user_id"], run_id)
+                    await self._cancel_continuation(batch["id"], batch["user_id"])
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -425,7 +425,7 @@ class SubagentBatchService:
             if self._item_batches.get(item_id) == batch_id:
                 request_cancel_background_task(execution_id)
         if batch.get("continuation_status") == "cancelled" and self._cancel_continuation is not None:
-            await self._cancel_continuation(batch_id, user_id, batch.get("continuation_run_id"))
+            await self._cancel_continuation(batch_id, user_id)
         # Normal ids are not prefixed; the renew loop observes the durable
         # cancellation within lease_seconds/3. Keeping cancellation durable is
         # what lets another worker own the HTTP control request safely.

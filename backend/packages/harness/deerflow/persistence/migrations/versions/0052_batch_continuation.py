@@ -20,8 +20,6 @@ def upgrade():
         sa.Column("continuation_json", sa.JSON(), nullable=True),
         sa.Column("continuation_status", sa.String(24), nullable=True),
         sa.Column("continuation_run_id", sa.String(64), nullable=True),
-        sa.Column("continuation_owner", sa.String(128), nullable=True),
-        sa.Column("continuation_lease_expires_at", sa.DateTime(timezone=True), nullable=True),
     ):
         safe_add_column("subagent_batches", column)
     if "ix_subagent_batches_continuation_status" not in {index["name"] for index in sa.inspect(op.get_bind()).get_indexes("subagent_batches")}:
@@ -42,5 +40,5 @@ def downgrade():
         op.drop_table("subagent_batch_dependencies")
     if "ix_subagent_batches_continuation_status" in {index["name"] for index in sa.inspect(op.get_bind()).get_indexes("subagent_batches")}:
         op.drop_index("ix_subagent_batches_continuation_status", table_name="subagent_batches")
-    for name in ("continuation_json", "continuation_status", "continuation_run_id", "continuation_owner", "continuation_lease_expires_at"):
+    for name in ("continuation_json", "continuation_status", "continuation_run_id"):
         safe_drop_column("subagent_batches", name)

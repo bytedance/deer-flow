@@ -31,8 +31,8 @@ async def repo(tmp_path, request):
         await close_engine()
 
 
-async def create(repo, items, *, max_attempts=1):
-    return await repo.create_batch(
+async def create(repo, items, **overrides):
+    values = dict(
         batch_id="batch",
         user_id="owner",
         thread_id="thread",
@@ -44,29 +44,30 @@ async def create(repo, items, *, max_attempts=1):
         items=items,
         max_live_items=3,
         max_running_items=3,
-        max_attempts=max_attempts,
+        max_attempts=1,
         execution_spec={},
     )
+    return await repo.create_batch(**(values | overrides))
 
 
 async def claim(repo):
     return await repo.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=120, limit=3)
 
 
-async def finish(repo, item, *, succeeded=True):
-    return await repo.finalize_item(
-        item["id"],
+async def finish(repo, item, *, succeeded=True, stop_reason=None, **overrides):
+    values = dict(
         lease_owner="worker",
         succeeded=succeeded,
         result="A useful result" if succeeded else None,
         result_preview="A useful result" if succeeded else None,
         result_truncated=False,
         error=None if succeeded else "Source unavailable",
-        stop_reason=None,
+        stop_reason=stop_reason,
         token_usage=None,
         model_name="local-test",
         completed_at=datetime.now(UTC),
     )
+    return await repo.finalize_item(item["id"], **(values | overrides))
 
 
 @pytest.mark.asyncio
@@ -140,19 +141,7 @@ async def test_cancelled_batch_does_not_release_waiting_dependencies(repo):
 async def test_capped_attempt_can_retry_before_releasing_its_dependent(repo):
     await create(repo, [{"key": "a", "prompt": "A"}, {"key": "b", "prompt": "Use A", "depends_on": ["a"]}], max_attempts=3)
     first = (await claim(repo))[0]
-    await repo.finalize_item(
-        first["id"],
-        lease_owner="worker",
-        succeeded=False,
-        result=None,
-        result_preview=None,
-        result_truncated=False,
-        error="No usable partial result",
-        stop_reason="turn_capped",
-        token_usage=None,
-        model_name="local-test",
-        completed_at=datetime.now(UTC),
-    )
+    await finish(repo, first, succeeded=False, stop_reason="turn_capped", error="No usable partial result")
     retry = (await claim(repo))[0]
     assert retry["item_key"] == "a" and retry["attempt"] == 2
     await finish(repo, retry)

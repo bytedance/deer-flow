@@ -245,14 +245,23 @@ class _BoundAgentRuns:
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence)
 
-    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
+    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, checkpoint_id, goal_wakeup=None):
         """Native single follow-up; the existing SQL admission fences cancellation."""
         from app.gateway.run_models import RunCreateRequest
         from app.gateway.services import resolve_thread_assistant_id, start_run
+        from deerflow.runtime.runs.manager import ConflictError
         from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, batch_continuation_key
 
         if self._origin != make_origin("subagent_batch") or execution_fence.namespace != BATCH_CONTINUATION_NAMESPACE or execution_fence.resource_id != batch_id:
             raise AgentRunError(403, "Invalid native batch continuation")
+
+        async def check_checkpoint():
+            # Called after the SQL insert excludes every other thread writer,
+            # before commit: a stale blocker check leaves no follow-up Run.
+            current = await self._host.app.state.checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+            if current is None or current.config.get("configurable", {}).get("checkpoint_id") != checkpoint_id:
+                raise ConflictError("Conversation changed before batch follow-up")
+
         async with self._request("runs:create", thread_id) as request:
             request.state.extension_execution_fence = execution_fence
             assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
@@ -264,7 +273,7 @@ class _BoundAgentRuns:
                 metadata={"batch_goal_wakeup": _json_object(goal_wakeup)} if goal_wakeup is not None else None,
                 on_disconnect="continue",
             )
-            record = await start_run(body, thread_id, request, idempotency_key=batch_continuation_key(batch_id), require_existing_thread=True)
+            record = await start_run(body, thread_id, request, idempotency_key=batch_continuation_key(batch_id), require_existing_thread=True, admission_check=check_checkpoint)
             return _view(record)
 
     async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:

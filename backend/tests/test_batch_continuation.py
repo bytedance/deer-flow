@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from test_batch_dependencies import create, finish
 from test_batch_dependencies import repo as _repo_fixture
 
 from deerflow.persistence.engine import get_session_factory
@@ -12,26 +13,18 @@ repo = _repo_fixture
 
 
 async def completed_batch(repo, *, succeeded=True):
-    await repo.create_batch(
-        batch_id="batch",
-        user_id="owner",
-        thread_id="thread",
-        run_id="run",
-        tool_call_id="call",
-        submission_key="run:call",
+    await create(
+        repo,
+        [{"key": "a", "prompt": "Read A"}],
         title="Summarize records",
-        subagent_type="general-purpose",
-        items=[{"key": "a", "prompt": "Read A"}],
         max_live_items=1,
         max_running_items=1,
-        max_attempts=1,
-        execution_spec={},
         continuation={"prompt": "Write the requested summary", "grant": {"token_version": 1}},
     )
     now = datetime.now(UTC)
     assert await repo.claim_continuations(now=now, lease_owner="first", lease_seconds=30) == []
     item = (await repo.claim_items(now=now, lease_owner="worker", lease_seconds=120, limit=1))[0]
-    await repo.finalize_item(item["id"], lease_owner="worker", succeeded=succeeded, result="Read A", result_preview="Read A", result_truncated=False, error=None, stop_reason=None, token_usage=None, model_name="local", completed_at=now)
+    await finish(repo, item, succeeded=succeeded, result="Read A", result_preview="Read A", error=None, model_name="local", completed_at=now)
     return now
 
 
@@ -75,28 +68,22 @@ async def test_cancel_wins_over_an_inflight_followup_receipt(repo):
 @pytest.mark.asyncio
 async def test_deferred_continuations_yield_to_other_conversations_after_reopen(repo):
     for index in range(17):
-        await repo.create_batch(
+        await create(
+            repo,
+            [{"key": "a", "prompt": "Read"}],
             batch_id=f"batch-{index:02}",
             user_id=f"owner-{index}",
             thread_id=f"thread-{index}",
             run_id=f"run-{index}",
-            tool_call_id="call",
             submission_key=f"submit-{index}",
-            title="Summary",
-            subagent_type="general-purpose",
-            items=[{"key": "a", "prompt": "Read"}],
             max_live_items=1,
             max_running_items=1,
-            max_attempts=1,
-            execution_spec={},
             continuation={"prompt": "Summarize"},
         )
     items = await repo.claim_items(now=datetime.now(UTC), lease_owner="worker", lease_seconds=120, limit=17)
     assert len(items) == 17
     for item in items:
-        await repo.finalize_item(
-            item["id"], lease_owner="worker", succeeded=True, result="Done", result_preview="Done", result_truncated=False, error=None, stop_reason=None, token_usage=None, model_name="local", completed_at=datetime.now(UTC)
-        )
+        await finish(repo, item, result="Done", result_preview="Done", model_name="local")
     seen = set()
     for index in range(3):
         reopened = SubagentBatchRepository(get_session_factory())

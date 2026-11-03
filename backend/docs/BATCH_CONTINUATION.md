@@ -1,86 +1,62 @@
 # Native batch dependencies and follow-up
 
-These optional fields extend the existing SQL-backed `batch_task` service. Keep
-items read-only or idempotent under its existing retry and recovery policy.
-Omitting the new fields retains independent batch execution.
+Optional fields extend the existing SQL-backed batch service. Omitting them keeps
+independent batch execution. Items remain read-only or idempotent under the existing
+retry/recovery policy.
 
 ## Dependencies
 
-An item may name other item keys in `depends_on`. Keys must exist in the same
-submission; self references and cycles are rejected before a batch is saved.
-For example, a comparison item can depend on `sales` and `risks`, while an
-independent appendix continues running.
+Use `depends_on` to name prerequisite item keys in the same batch. Unknown keys,
+self-references and cycles are rejected before saving. Dependent items consume no
+worker slot until every prerequisite succeeds without a guardrail stop reason.
+Retryable attempts keep dependents waiting; exhausted failures, cancellation or
+terminal capped results fail unstarted descendants. Independent items continue.
 
-The existing scheduler promotes an item only after every prerequisite succeeds
-without a guardrail stop reason. Waiting items remain pending and consume no
-worker slot. Exhausted failed, cancelled or capped prerequisites make their
-unstarted dependents fail with an explanatory error. Independent items continue.
-Retryable attempts leave dependents waiting until a terminal outcome is known.
-
-Dependencies order execution. They do not certify factual accuracy or turn an
-advisory acceptance verdict into a mandatory gate. Item prompts must still name
-their input/output paths; full reports are not copied into every dependent's
-context. Existing result inspection and acceptance evidence remain available.
+Item prompts must name their input/output paths. Ordering does not certify factual
+accuracy or make advisory acceptance mandatory. Use existing result readers; full
+reports are not copied into every dependent's context.
 
 ## Requested follow-up
 
-`continuation` is a short description of remaining work the user has already
-requested, such as combining item results and presenting two files. The lead
-Agent performs it once after terminal batch results are persisted. It is not a
-progress-polling instruction or a new batch item. It may inspect the existing
-owner-scoped results with `read_batch_result` or read the supplied output paths.
+`continuation` describes remaining work the user already requested. After terminal
+batch results are saved, the lead performs that work in the original conversation
+through ordinary Run admission. Preserve the originating model selection, reasoning,
+limits and admitted retrieval scope. Busy conversations or unanswered questions
+wait. The checked conversation version is revalidated inside admission before any
+follow-up input is written; a changed version rolls back admission and retries later.
 
-The originating turn can end while the batch works. The follow-up uses ordinary
-Gateway Run admission in the same conversation, preserving model/reasoning
-context, recursion limit and admitted knowledge scope. The scope comes from the
-batch execution context, including Runs resumed without a new user message.
-An occupied conversation or unanswered human-input request defers follow-up,
-even without a Goal. Deferred batches yield their place to other ready work.
-A stable idempotency key reconciles an uncertain launch after restart; it does
-not start the follow-up twice. Without a Goal, a follow-up cannot
-register a second automatic follow-up. Explicit item retries do not re-arm a
-dispatched follow-up; a follow-up not yet admitted waits for the retried item.
+A stable idempotency key reconciles lost admission replies without another Run.
+Pending claims rotate so busy conversations do not starve others. Manual item retries
+hold an unadmitted follow-up but do not re-arm one already dispatched. Without a Goal,
+a follow-up cannot request another automatic follow-up.
 
-For an active Goal, completion can wake that same Goal after its evaluator records
-`external_wait`. This consumes one of the existing Goal continuations, once per
-admitted Run even after recovery. Continuation and no-progress limits still apply;
-other blockers and hard stops stay stopped. A Goal-owned follow-up may submit more
-work within those limits. Changing or clearing the Goal suppresses pending batch
-follow-ups. A cancelled, failed or hard-stopped originating Run cannot restart
-through this feature.
+An active Goal wakes only from its own `external_wait`, consuming one existing
+continuation allowance, once even after recovery. Other blockers, no-progress limits
+and hard stops remain effective. Goal replacement, clearing and thread deletion
+suppress pending work; a failed, cancelled or hard-stopped source Run cannot restart.
 
-## Authorization and cancellation
+## Authority, cancellation and recovery
 
-Automatic follow-up requires a session-authorized Gateway AgentRuns capability
-(or the existing local auth-disabled mode). Internal/PAT callers and embedded
-runtimes without this host support cannot request it. Ordinary batch execution
-remains available on its existing paths.
+Follow-up needs a session-authorized Gateway AgentRuns capability or local auth-disabled
+mode. Internal/PAT callers and unsupported embedded runtimes retain ordinary batches.
+Persist only the original permission ceiling, account token version and auth source;
+no cookie, API key or Python capability. Restore checks current account/permissions,
+conversation ownership and incarnation. Private continuation data is not returned.
 
-Only the original host-granted permission ceiling, account token version and
-auth source are persisted. No session cookie, API key or Python capability is
-serialized. Recovery rechecks the account, current permissions, conversation
-ownership and incarnation. These records are excluded from public batch views.
+Batch cancellation revokes the existing SQL execution fence and stops an admitted
+follow-up, including after a lost launch reply. HTTP cancellation of a batch with a
+follow-up also requires `runs:cancel`. Trusted internal cleanup retains its existing
+path. Claim ownership/expiry lives only in the existing execution-lease table.
+Completed item results remain available. The Web panel discovers follow-up Runs
+through existing observers; refresh never launches work. Chat Stop remains available.
 
-Cancel the batch to suppress its follow-up. Cancellation and Goal/deletion
-operations revoke the existing SQL execution fence checked inside Run admission.
-If admission already committed, cancellation locates and stops that Run, including
-when its reply was lost before the batch stored the Run ID. Completed item results
-remain inspectable. Existing native execution cleanup and timeout semantics apply.
+## Upgrade and verification
 
-The Web batch panel keeps observing a pending follow-up and refreshes the existing
-chat Run/history observers when its Run appears. Browser refresh does not dispatch
-work. Stopping an already running follow-up uses the normal chat Stop control.
+Migration `0052_batch_continuation` adds dependency edges and nullable follow-up data,
+status and Run ID. Existing rows need no backfill. Upgrade all batch workers before
+using dependencies. Do not downgrade with opted-in work outstanding; downgrade drops
+new metadata while retaining items and reports.
 
-## Storage and validation
-
-Migration `0052_batch_continuation` adds same-batch dependency edges and nullable
-follow-up fields. Existing batch rows require no backfill. Rolling back drops
-dependency/follow-up metadata while retaining items and their reports; do not
-roll back while opted-in work is outstanding.
-Finish upgrading all batch workers before using dependency fields: older workers
-do not understand prerequisite ordering.
-
-Focused offline regressions are in `test_batch_dependencies.py`,
-`test_batch_continuation.py` and `test_batch_followup_host.py`. They exercise
-real SQL claims, reopen, normal AgentRuns/worker admission, lost launch replies,
-authorization revocation and cancellation/Goal changes racing admission.
+Focused regressions cover dependency/retry ordering, SQL claims and recovery,
+permission revocation, admission races, Goal limits and page reconnection. PostgreSQL
+coverage uses `TEST_POSTGRES_URI`; browser backend timing is simulated.

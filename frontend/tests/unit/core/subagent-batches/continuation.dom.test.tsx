@@ -31,45 +31,6 @@ afterEach(() => {
   for (const client of clients.splice(0)) client.clear();
 });
 
-test("a persisted follow-up refreshes the existing run and history observers once", async () => {
-  api.batches = [];
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  clients.push(client);
-  const invalidate = rs.spyOn(client, "invalidateQueries");
-  const { result, rerender } = renderHook(
-    () => useSubagentBatches("thread", { polling: false }),
-    {
-      wrapper: ({ children }: { children: ReactNode }) =>
-        createElement(QueryClientProvider, { client }, children),
-    },
-  );
-  await waitFor(() => expect(result.current.isSuccess).toBe(true));
-  api.batches = [
-    {
-      id: "batch",
-      status: "completed",
-      continuation_status: "dispatched",
-      continuation_run_id: "follow-up",
-    } as SubagentBatch,
-  ];
-  await act(async () => {
-    await client.invalidateQueries({ queryKey: subagentBatchesKey("thread") });
-  });
-  await waitFor(() =>
-    expect(invalidate).toHaveBeenCalledWith({
-      queryKey: runInputsKey("thread"),
-    }),
-  );
-  expect(invalidate).toHaveBeenCalledWith({
-    queryKey: threadHistoryQueryKey("thread"),
-  });
-  const calls = invalidate.mock.calls.length;
-  rerender();
-  expect(invalidate.mock.calls).toHaveLength(calls);
-});
-
 test("a newly admitted follow-up is discovered before Run inputs open", async () => {
   api.batches = [];
   api.runs = [];
@@ -81,7 +42,8 @@ test("a newly admitted follow-up is discovered before Run inputs open", async ()
     items: [],
     active_run_id: null,
   });
-  const { result } = renderHook(
+  const invalidate = rs.spyOn(client, "invalidateQueries");
+  const { result, rerender } = renderHook(
     () => ({
       batches: useSubagentBatches("thread", { polling: false }),
       runs: useThreadRuns("thread"),
@@ -92,6 +54,7 @@ test("a newly admitted follow-up is discovered before Run inputs open", async ()
     },
   );
   await waitFor(() => expect(result.current.runs.data).toEqual([]));
+  await waitFor(() => expect(result.current.batches.isSuccess).toBe(true));
   api.runs = [{ run_id: "follow-up", status: "pending" }];
   api.batches = [
     {
@@ -105,6 +68,13 @@ test("a newly admitted follow-up is discovered before Run inputs open", async ()
     await client.invalidateQueries({ queryKey: subagentBatchesKey("thread") });
   });
   await waitFor(() => expect(result.current.runs.data).toEqual(api.runs));
+  expect(invalidate).toHaveBeenCalledWith({
+    queryKey: threadHistoryQueryKey("thread"),
+  });
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: runInputsKey("thread") });
+  const calls = invalidate.mock.calls.length;
+  rerender();
+  expect(invalidate.mock.calls).toHaveLength(calls);
   expect(client.getQueryData(runInputsKey("thread"))).toEqual({
     items: [],
     active_run_id: null,

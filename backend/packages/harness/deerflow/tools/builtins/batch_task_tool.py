@@ -239,7 +239,7 @@ async def batch_task(
         goal = state.get("goal") if isinstance(state, dict) else None
         continuation_context = {
             "goal": {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None,
-            "context": dict(context),
+            "context": {**(runtime.config.get("configurable") or {}), **context},
             "config": {"recursion_limit": runtime.config["recursion_limit"]} if "recursion_limit" in runtime.config else {},
         }
         if metadata.get("model_name"):

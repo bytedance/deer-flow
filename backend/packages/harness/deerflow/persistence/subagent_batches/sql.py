@@ -297,7 +297,16 @@ class SubagentBatchRepository:
 
     async def claim_continuations(self, *, now: datetime, lease_owner: str, lease_seconds: int, limit: int = 8, exclude_batch_ids: tuple[str, ...] = ()) -> list[dict]:
         """Claim one follow-up after terminal results commit; retries retain the batch ID."""
-        ready = or_(SubagentBatchRow.continuation_status == "pending", (SubagentBatchRow.continuation_status == "dispatching") & (SubagentBatchRow.continuation_lease_expires_at < now))
+        live_claim = (
+            select(ExtensionExecutionLeaseRow.resource_id)
+            .where(
+                ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE,
+                ExtensionExecutionLeaseRow.resource_id == SubagentBatchRow.id,
+                ExtensionExecutionLeaseRow.expires_at >= now.timestamp(),
+            )
+            .exists()
+        )
+        ready = or_(SubagentBatchRow.continuation_status == "pending", (SubagentBatchRow.continuation_status == "dispatching") & ~live_claim)
         claimed = []
         async with self._sf() as session:
             rows = (
@@ -315,14 +324,7 @@ class SubagentBatchRepository:
             )
             for batch in rows:
                 changed = await session.execute(
-                    update(SubagentBatchRow)
-                    .where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("completed", "failed")), ready)
-                    .values(
-                        continuation_status="dispatching",
-                        continuation_owner=lease_owner,
-                        continuation_lease_expires_at=now + timedelta(seconds=lease_seconds),
-                    )
-                    .execution_options(synchronize_session=False)
+                    update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("completed", "failed")), ready).values(continuation_status="dispatching").execution_options(synchronize_session=False)
                 )
                 if changed.rowcount == 1:
                     await session.refresh(batch)
@@ -353,9 +355,15 @@ class SubagentBatchRepository:
                 .where(
                     SubagentBatchRow.id == batch_id,
                     SubagentBatchRow.continuation_status == "dispatching",
-                    SubagentBatchRow.continuation_owner == lease_owner,
+                    select(ExtensionExecutionLeaseRow.resource_id)
+                    .where(
+                        ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE,
+                        ExtensionExecutionLeaseRow.resource_id == batch_id,
+                        ExtensionExecutionLeaseRow.holder_id == lease_owner,
+                    )
+                    .exists(),
                 )
-                .values(continuation_status=status, continuation_run_id=run_id, continuation_owner=None, continuation_lease_expires_at=None, updated_at=datetime.now(UTC))
+                .values(continuation_status=status, continuation_run_id=run_id, updated_at=datetime.now(UTC))
             )
             await session.commit()
             return changed.rowcount == 1
@@ -814,8 +822,6 @@ class SubagentBatchRepository:
                 return None
             if batch.continuation_status in ("pending", "dispatching"):
                 batch.continuation_status = "pending"
-                batch.continuation_owner = None
-                batch.continuation_lease_expires_at = None
                 await session.flush()
                 await session.execute(
                     update(ExtensionExecutionLeaseRow)

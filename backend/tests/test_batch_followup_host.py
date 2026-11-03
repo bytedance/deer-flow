@@ -8,30 +8,44 @@ import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
 from langgraph.graph import MessagesState, StateGraph
+from test_batch_dependencies import repo as _repo_fixture
 from test_extension_agent_runs import host as _host_fixture
 from test_extension_agent_runs import runtime as _runtime_fixture
 
 host = _host_fixture
 runtime = _runtime_fixture
+repo = _repo_fixture
+
+
+def graph_factory(factory, answer, schema=MessagesState):
+    def build(*, config):
+        graph = StateGraph(schema)
+        graph.add_node("answer", answer)
+        graph.set_entry_point("answer")
+        graph.set_finish_point("answer")
+        return replace(factory(config=config), graph=graph.compile())
+
+    return build
 
 
 @pytest_asyncio.fixture
-async def batch_host(runtime, monkeypatch, tmp_path):
+async def batch_host(runtime, repo, monkeypatch, request):
     from app.gateway import services
     from app.subagent_batches.continuation import BatchContinuations
-    from deerflow.config.database_config import DatabaseConfig
-    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.run.sql import RunRepository
-    from deerflow.persistence.subagent_batches import SubagentBatchRepository
     from deerflow.runtime import RunManager
     from deerflow.subagents.batch_runtime import BatchSubmitRequest
+    from deerflow.subagents.batch_service import SubagentBatchService
 
+    settings = getattr(request, "param", {})
     runs, state, request, _, _ = runtime
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db")))
     sf = get_session_factory()
     state.run_store = RunRepository(sf)
     state.run_manager = RunManager(store=state.run_store)
-    state.subagent_batch_repo = repo = SubagentBatchRepository(sf)
+    state.subagent_batch_repo = repo
     entered, release = asyncio.Event(), asyncio.Event()
     factory = services.resolve_agent_factory("lead_agent")
 
@@ -42,14 +56,7 @@ async def batch_host(runtime, monkeypatch, tmp_path):
             await release.wait()
         return {"messages": [AIMessage(content="finished:" + text)]}
 
-    def gated(*, config):
-        graph = StateGraph(MessagesState)
-        graph.add_node("answer", answer)
-        graph.set_entry_point("answer")
-        graph.set_finish_point("answer")
-        return replace(factory(config=config), graph=graph.compile())
-
-    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: gated)
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, answer))
     thread = await runs.create_thread(thread_id="native-batch-followup")
     source = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "source"}]})
     await asyncio.wait_for(entered.wait(), 5)
@@ -70,25 +77,10 @@ async def batch_host(runtime, monkeypatch, tmp_path):
         {"thread_incarnation": thread_row["incarnation"]},
         continuation="Write the requested summary",
         continuation_authority=runs,
-        continuation_context={"goal": None, "context": {"mode": "flash", "locale": "en-US"}, "config": {"recursion_limit": 99}},
+        continuation_context={"goal": None, "context": {"mode": "flash", "locale": "en-US", **settings}, "config": {"recursion_limit": 99}},
     )
-    continuation = await controller.prepare(submission)
-    await repo.create_batch(
-        batch_id="batch",
-        user_id=owner,
-        thread_id=thread,
-        run_id=source.run_id,
-        tool_call_id="call",
-        submission_key="submission",
-        title="Process records",
-        subagent_type="general-purpose",
-        items=submission.items,
-        max_live_items=1,
-        max_running_items=1,
-        max_attempts=1,
-        execution_spec=submission.execution_spec,
-        continuation=continuation,
-    )
+    service = SubagentBatchService(repository=repo, config=SubagentBatchesConfig(enabled=True, max_attempts=1), runtime_config=SubagentRuntimeConfig(), prepare_continuation=controller.prepare, dispatch_continuation=controller.dispatch)
+    await service.submit(submission)
     release.set()
     assert (await runs.wait(thread_id=thread, run_id=source.run_id, timeout=5)).status == "success"
     now = datetime.now(UTC)
@@ -102,7 +94,6 @@ async def batch_host(runtime, monkeypatch, tmp_path):
     finally:
         release.set()
         await state.run_manager.shutdown()
-        await close_engine()
 
 
 @pytest.mark.asyncio
@@ -118,6 +109,14 @@ async def test_followup_runs_once_and_reconciles_an_unknown_admission(batch_host
     assert record.kwargs["config"]["recursion_limit"] == 99
     assert record.metadata["deerflow_origin"]["kind"] == "subagent_batch"
     assert await repo.finish_continuation(batch["id"], lease_owner="continuation-worker", status="dispatched", run_id=first["run_id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch_host", [{"model_name": "parent", "model_selection_requested": "parent", "subagent_model_name": "child"}], indirect=True)
+async def test_followup_preserves_explicit_model_controls(batch_host):
+    context = batch_host[1]["continuation"]["context"]
+    assert context["model_selection_requested"] == context["model_name"] == "parent"
+    assert context["subagent_model_name"] == "child"
 
 
 @pytest.mark.asyncio
@@ -220,14 +219,7 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
         observed.append(runtime.context.get(KNOWLEDGE_SCOPE_RUNTIME_KEY))
         return {"messages": [AIMessage(content="Finished")]}
 
-    def scoped_factory(*, config):
-        graph = StateGraph(MessagesState)
-        graph.add_node("answer", answer)
-        graph.set_entry_point("answer")
-        graph.set_finish_point("answer")
-        return replace(factory(config=config), graph=graph.compile())
-
-    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: scoped_factory)
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, answer))
     thread = await runs.create_thread(thread_id="scoped-resume")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "scoped work", "additional_kwargs": {KNOWLEDGE_SCOPE_KEY: scope}}]})
     assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
@@ -245,13 +237,14 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
 
 
 @pytest.mark.asyncio
-async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, monkeypatch):
+@pytest.mark.parametrize("late", [False, True], ids=["already-pending", "after-state-read"])
+async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, monkeypatch, late):
     from langchain_core.messages import ToolMessage
 
     from app.gateway import services
     from deerflow.agents.human_input import extract_unanswered_human_input_request
 
-    controller, batch, _, runs, state, _ = batch_host
+    controller, batch, repo, runs, state, _ = batch_host
     factory = services.resolve_agent_factory("lead_agent")
     question = {"kind": "human_input_request", "request_id": "recipient", "question": "Which recipient?", "source": "ask_clarification"}
 
@@ -265,18 +258,29 @@ async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, mo
             }
         return {"messages": [AIMessage(content="Understood")]}
 
-    def question_factory(*, config):
-        graph = StateGraph(MessagesState)
-        graph.add_node("answer", answer)
-        graph.set_entry_point("answer")
-        graph.set_finish_point("answer")
-        return replace(factory(config=config), graph=graph.compile())
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, answer))
 
-    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: question_factory)
-    asked = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "ask"}]})
-    assert (await runs.wait(thread_id=batch["thread_id"], run_id=asked.run_id, timeout=5)).status == "success"
-    assert (await state.run_manager.get(asked.run_id)).human_input_request == question
+    async def ask():
+        asked = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "ask"}]})
+        assert (await runs.wait(thread_id=batch["thread_id"], run_id=asked.run_id, timeout=5)).status == "success"
+        assert (await state.run_manager.get(asked.run_id)).human_input_request == question
+
+    if late:
+        start = services.start_run
+        inserted = False
+
+        async def question_before_admission(*args, **kwargs):
+            nonlocal inserted
+            if kwargs.get("idempotency_key") and not inserted:
+                inserted = True
+                await ask()
+            return await start(*args, **kwargs)
+
+        monkeypatch.setattr(services, "start_run", question_before_admission)
+    else:
+        await ask()
     assert await controller.dispatch(batch) is None
+    assert await repo.continuation_run_id(batch["id"], user_id=batch["user_id"]) is None
     pending = await runs.get_state(thread_id=batch["thread_id"])
     assert extract_unanswered_human_input_request(pending["values"]["messages"]) == question
     answered = await runs.start(thread_id=batch["thread_id"], input={"messages": [{"role": "user", "content": "Use the team inbox"}]})
@@ -320,17 +324,10 @@ async def test_worker_wakes_the_same_waiting_goal_and_accounts_once(batch_host, 
         observed.append(values["goal"]["continuation_count"])
         return {"messages": [AIMessage(content="The requested work is finished.")]}
 
-    def with_goal(*, config):
-        graph = StateGraph(ThreadState)
-        graph.add_node("answer", answer)
-        graph.set_entry_point("answer")
-        graph.set_finish_point("answer")
-        return replace(factory(config=config), graph=graph.compile())
-
     async def evaluated(*args, **kwargs):
         return {"satisfied": True, "blocker": "none", "reason": "The controlled work finished"}
 
-    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: with_goal)
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, answer, ThreadState))
     monkeypatch.setattr("deerflow.runtime.runs.worker.create_goal_evaluator_model", lambda **_: None)
     monkeypatch.setattr("deerflow.runtime.runs.worker.evaluate_goal_completion", evaluated)
     launched = await controller.dispatch(batch)

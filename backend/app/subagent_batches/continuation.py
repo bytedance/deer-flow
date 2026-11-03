@@ -16,7 +16,7 @@ class BatchContinuations:
         self.app = app
 
     async def prepare(self, request):
-        from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS
+        from app.gateway.services import _CONTEXT_CONFIGURABLE_KEYS, _MODEL_SELECTION_CONTEXT_KEYS
 
         host = self.app.state.agent_runs_host
         grant = host.capture_batch_authority(request.continuation_authority, user_id=request.user_id)
@@ -29,7 +29,7 @@ class BatchContinuations:
         captured = request.continuation_context or {}
         if (record.metadata or {}).get("deerflow_origin", {}).get("kind") == "subagent_batch" and (captured.get("goal") or {}).get("status") != "active":
             raise AgentRunError(409, "A batch follow-up cannot register another automatic follow-up")
-        context = {key: value for key, value in captured.get("context", {}).items() if key in _CONTEXT_CONFIGURABLE_KEYS and key not in ("agent_name", "is_bootstrap")}
+        context = {key: value for key, value in captured.get("context", {}).items() if key in _CONTEXT_CONFIGURABLE_KEYS | _MODEL_SELECTION_CONTEXT_KEYS and key not in ("agent_name", "is_bootstrap")}
         if isinstance(captured.get("context", {}).get("locale"), str):
             context["locale"] = captured["context"]["locale"]
         scope = request.execution_spec.get("knowledge_scope")
@@ -100,6 +100,7 @@ class BatchContinuations:
                 context=continuation.get("context"),
                 config=continuation.get("config"),
                 execution_fence=ExecutionFence(**batch["execution_fence"]),
+                checkpoint_id=state["checkpoint_id"],
                 goal_wakeup=goal_wakeup,
             )
             return {"status": "dispatched", "run_id": result.run_id}
@@ -110,7 +111,7 @@ class BatchContinuations:
                 return {"status": "suppressed"}
             raise
 
-    async def cancel(self, batch_id, user_id, run_id):
+    async def cancel(self, batch_id, user_id):
         run_id = await self.app.state.subagent_batch_repo.continuation_run_id(batch_id, user_id=user_id)
         if run_id is None:
             return
