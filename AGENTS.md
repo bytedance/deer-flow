@@ -67,7 +67,7 @@ deer-flow/
 │  # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │  # Integration credentials and enabled state remain per-user
 ├── contracts/  # Cross-component JSON contracts (e.g. subagent status, skill review)
-├── examples/  # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}
+├── examples/  # Extension examples: deerflow-extension-{example,bookmarks,agent-teams}; standalone helper: deerflow-storage-adapters
 ├── scripts/  # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/  # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/  # Cross-cutting docs, plans, and design notes
@@ -91,6 +91,8 @@ compaction, or authentication. If existing hooks cannot express the feature, add
 generic hook to the extension contract plus an extension that uses it — do not
 hard-code business logic into core. Working examples:
 `examples/deerflow-extension-{example,bookmarks,agent-teams}`.
+The [storage adapter example](examples/deerflow-storage-adapters/README.md) is an
+independently installable library for extension-owned data, not a Gateway plugin.
 [Workflow guide](examples/deerflow-extension-workflows/AGENTS.md): public
 AgentRuns; POSIX, one process/store; approval and session-authorized recovery; uncertain admissions need reconciliation;
 no multi-Gateway failover or hard currency budget.

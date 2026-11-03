@@ -30,6 +30,8 @@ class Database:
     No schema is created unless the caller provides an initializer. Each session has
     its own transaction. session() never commits implicitly; transaction() does.
     This synchronous API should run outside an async event loop's blocking path.
+    Initializers run under a non-reentrant lock: use only their passed Engine,
+    never re-enter this Database or wait for work using it during initialization.
     """
 
     def __init__(self, config: DatabaseConfig, *, registry: ProviderRegistry | None = None, initialize: Callable[[Engine], None] | None = None) -> None:

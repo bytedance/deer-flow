@@ -63,6 +63,12 @@ Socket timeouts bound individual socket operations, not an end-to-end query or r
 deadline. A timed-out write may have committed: callers must reconcile its idempotency
 key rather than blindly retrying the transaction. No write retry is performed here.
 
+The MySQL provider also sets `isolation_level="READ COMMITTED"` engine-wide, for every
+connection and session created by that engine. This overrides a server default such
+as REPEATABLE READ: successive statements in one transaction can observe newly
+committed data, rather than sharing a repeatable-read snapshot. Account for this
+visibility and locking policy when defining an extension's transaction semantics.
+
 SQLite connections enable foreign-key checks and WAL (in-memory mode remains memory),
 use FULL synchronous durability and a configurable busy wait (default 30 seconds).
 `sqlite_foreign_keys=False` or `sqlite_wal=False` explicitly opt out of enabling those
@@ -83,6 +89,12 @@ An initializer runs once on first engine/session use. If it fails, the engine is
 disposed and the next call may retry. Applications own model registration, schema
 migrations, DDL permissions and recovery. `create_all()` is only a minimal example,
 not a replacement for a migration tool. MySQL DDL may commit independently.
+
+The initializer runs while the instance's non-reentrant initialization lock is held.
+Use only the passed `Engine` for DDL or seeding (for example, `with engine.begin()`).
+Do not call back into the same `Database` through `engine`, `session()`, `transaction()`
+or `dispose()`, or wait for work that uses that instance: doing so deadlocks. Start
+normal `Database` work after initialization has returned.
 
 ## Provider contract
 

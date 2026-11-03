@@ -12,3 +12,8 @@ SQLite connections enable foreign keys/WAL and bounded busy waits.
 Run `python -m pytest tests -q` after installing `.[mysql,test]`. Live tests use only
 an explicitly configured disposable `STORAGE_TEST_MYSQL_URL`. Update README.md for
 public API changes; do not add internal deployment information or credentials.
+
+The MySQL provider forces READ COMMITTED engine-wide; document that policy alongside
+connection defaults. Initializers run under a non-reentrant instance lock: perform
+DDL/seeding through their passed Engine and never re-enter or wait for work using
+the same Database before initialization returns.
