@@ -8,6 +8,22 @@ Cache identity includes input order, filesystem-encoded basenames, per-file cont
 digests, and a namespace version. Directory relocation alone does not change a
 readable input's identity. Bump the namespace if table-mapping semantics change.
 
+Cache publication uses `open_analysis_cache()`: build in a private UUID directory
+under .data-analysis-cache/generations-v1/, close the DuckDB writer, reopen
+read-only, then atomically replace one manifest containing its generation and map.
+Never publish metadata while an import writer still owns the database. Validate
+the manifest, allocator invariants and physical main-schema tables before reuse;
+invalid entries rebuild. Flat legacy caches are ignored, not migrated or deleted.
+Failed private builds are removed. Complete generations are retained once
+publication may have happened, including interruption after replacement, because
+another process may already be reading them. Concurrent cold builders can repeat
+work but must never share a writable database. Stop analyses before manual cache
+cleanup; automatic garbage collection and power-loss durability are not provided.
+Keep real-DuckDB process-barrier and failure-cleanup regressions in
+tests/skills/test_data_analysis_cache_lifecycle.py. Those lifecycle tests replace
+the load-files dispatch with production CSV-loader calls to avoid optional spatial
+setup; they do not replace CSV parsing, storage, SQL or cache publication.
+
 Regressions live under the repository's root tests directory. They use
 real DuckDB. Excel and CLI integration additionally run with an already installed
 official spatial extension via `DEERFLOW_TEST_SPATIAL_DIRECTORY`; default tests
