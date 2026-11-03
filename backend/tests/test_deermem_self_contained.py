@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -36,6 +38,15 @@ def deermem_data_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("DEERMEM_DATA_DIR", str(d))
     yield d
+
+
+@pytest.fixture
+def capacity_clock(monkeypatch):
+    from deerflow.agents.memory.backends.deermem.deermem.core import updater
+
+    now = datetime(2026, 8, 13, tzinfo=UTC)
+    monkeypatch.setattr(updater, "select_facts_for_capacity", partial(updater.select_facts_for_capacity, now=now))
+    monkeypatch.setattr(updater, "utc_now_iso_z", lambda: now.isoformat().replace("+00:00", "Z"))
 
 
 class _FakeLLM:
@@ -732,7 +743,7 @@ def test_default_confidence_policy_does_not_collect_hybrid_usage(deermem_data_di
     assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
 
 
-def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir):
+def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir, capacity_clock):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -789,7 +800,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
     assert "stale_high" not in kept_ids
 
 
-def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
+def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir, capacity_clock):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -887,7 +898,7 @@ def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
     assert "Never repeat this corrected behavior" not in audit_path.read_text()
 
 
-def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir):
+def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir, capacity_clock):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
