@@ -48,6 +48,7 @@ class _ScopedShellSession:
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     session_id: str | None = None
+    releasing: bool = False
 
 
 @dataclass
@@ -607,6 +608,8 @@ class AioSandbox(Sandbox):
                     scope_id,
                     _ScopedShellSession(),
                 )
+                if scoped.releasing:
+                    raise RuntimeError("sandbox command scope is no longer active")
             with command_lock(scoped.lock, current_command_scope(self)):
                 # Registration and command execution are separated by the
                 # per-scope wait.  Revalidate identity after that wait so a
@@ -614,7 +617,7 @@ class AioSandbox(Sandbox):
                 # lifecycle fence: queued callers cannot resurrect a session
                 # on an orphaned registry entry.
                 with self._scope_registry_lock:
-                    if self._closed or self._scoped_shell_sessions.get(scope_id) is not scoped:
+                    if self._closed or scoped.releasing or self._scoped_shell_sessions.get(scope_id) is not scoped:
                         raise RuntimeError("sandbox command scope is no longer active")
                 client = self._client
                 if client is None:
@@ -704,19 +707,28 @@ class AioSandbox(Sandbox):
         """Release execution metadata and its explicit shell session."""
         self._command_scopes.release(scope_id)
         with self._scope_registry_lock:
-            scoped = self._scoped_shell_sessions.pop(scope_id, None)
+            scoped = self._scoped_shell_sessions.get(scope_id)
+            if scoped is not None:
+                # Keep draining entries visible to close(), while fencing new
+                # and already-queued commands before waiting on their lock.
+                scoped.releasing = True
         if scoped is None:
             return
-        with scoped.lock:
-            if scoped.session_id is None or self._client is None:
-                return
-            self._cleanup_session_best_effort(
-                self._client,
-                scoped.session_id,
-                context=f"execution scope {scope_id}",
-                request_options=self._bounded_cleanup_request_options(),
-            )
-            scoped.session_id = None
+        try:
+            with scoped.lock:
+                if scoped.session_id is None or self._client is None:
+                    return
+                self._cleanup_session_best_effort(
+                    self._client,
+                    scoped.session_id,
+                    context=f"execution scope {scope_id}",
+                    request_options=self._bounded_cleanup_request_options(),
+                )
+                scoped.session_id = None
+        finally:
+            with self._scope_registry_lock:
+                if self._scoped_shell_sessions.get(scope_id) is scoped:
+                    self._scoped_shell_sessions.pop(scope_id)
 
     @staticmethod
     def _format_timeout_duration(timeout: float) -> str:

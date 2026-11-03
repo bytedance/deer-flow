@@ -264,7 +264,7 @@ def paused_env_command(monkeypatch):
         with command_owner(sandbox, owner):
             return sandbox.execute_command_in_scope("ordinary-command", env={"REQUEST_VALUE": value}, scope_id=owner)
 
-    yield SimpleNamespace(sandbox=sandbox, entered=entered, resume=resume, client_closed=client_closed, requests=requests, executions=executions, controls=control_sessions, run=run)
+    yield SimpleNamespace(sandbox=sandbox, entered=entered, resume=resume, client_closed=client_closed, http_client=http_client, requests=requests, executions=executions, controls=control_sessions, run=run)
     resume.set()
     sandbox.close()
     http_client.close()
@@ -419,3 +419,70 @@ async def test_repeated_async_cancellation_drains_scoped_env_cleanup(paused_env_
     finally:
         case.resume.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("release_count", [1, 2])
+def test_releasing_env_scope_stays_visible_to_concurrent_close(paused_env_command, monkeypatch, release_count):
+    case = paused_env_command
+    first = _start_observed_thread(case.run, name="first-env")
+    queued = closing = other = None
+    releases = []
+    progress = {f"release-{index}": threading.Event() for index in range(release_count)}
+    progress["close"] = threading.Event()
+
+    class OverlapLock(_ObservedScopeLock):
+        def acquire(self, *args, **kwargs):
+            name = threading.current_thread().name
+            if name in progress:
+                progress[name].set()
+            return super().acquire(*args, **kwargs)
+
+    real_client_close = case.http_client.close
+
+    def client_close():
+        # On the unfixed path close skips the popped releasing scope, detaches
+        # _client, and reaches this callback instead of waiting on its lock.
+        progress["close"].set()
+        real_client_close()
+
+    monkeypatch.setattr(case.http_client, "close", client_close)
+    try:
+        assert case.entered.wait(5)
+        scoped = case.sandbox._scoped_shell_sessions["first"]
+        observed = OverlapLock(scoped.lock)
+        scoped.lock = observed
+        # A prior no-env call can leave a persistent shell in the same scope.
+        scoped.session_id = "retained-shell"
+        case.controls.add("retained-shell")
+        queued = _start_observed_thread(case.run, name="queued-env")
+        assert observed.queued.wait(5)
+        for index in range(release_count):
+            release = _start_observed_thread(lambda: case.sandbox.release_command_scope("first"), name=f"release-{index}")
+            releases.append(release)
+            assert progress[f"release-{index}"].wait(5)
+
+        assert case.run() == "Error: sandbox command scope is no longer active"
+        other = _start_observed_thread(lambda: case.run(owner="other", value="two"), name="other-env")
+        _join_observed_thread(other)
+        assert other.results == ["done"], "Releasing one scope must not serialize an independent scope"
+        closing = _start_observed_thread(case.sandbox.close, name="close")
+        assert progress["close"].wait(5)
+        assert case.sandbox._client is not None, "close detached the client while a releasing scope still had an admitted command"
+        assert not case.client_closed.is_set()
+        assert closing.thread.is_alive()
+
+        case.resume.set()
+        for worker in (first, queued, *releases, closing):
+            _join_observed_thread(worker)
+        assert first.results == ["done"]
+        assert queued.results == ["Error: sandbox command scope is no longer active"]
+        assert len(case.executions) == 2
+        assert sum(method == "DELETE" and path.endswith("/retained-shell") for method, path, _ in case.requests) == 1
+        assert sum(path.endswith("/close") for _, path, _ in case.requests) == 2
+        assert not case.sandbox._scoped_shell_sessions
+        assert case.client_closed.is_set()
+    finally:
+        case.resume.set()
+        for worker in (first, queued, other, *releases, closing):
+            if worker is not None:
+                _join_observed_thread(worker)
