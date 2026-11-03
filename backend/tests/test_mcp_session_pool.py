@@ -12,7 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-from mcp.shared.exceptions import McpError
+
+try:
+    from mcp.shared.exceptions import McpError
+except ImportError:
+    from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, current_session_pool, get_session_pool, reset_session_pool
@@ -3261,3 +3265,43 @@ async def test_disconnect_cleanup_timeout_preserves_owner_tracking():
                 await asyncio.gather(*list(pool._teardown_tasks), return_exceptions=True)
 
     assert not pool._teardown_tasks
+
+
+def test_is_mcp_transport_disconnect_v1_and_v2_compat():
+    """Verify _is_mcp_transport_disconnect recognizes both MCP 1.x and 2.x exception structures."""
+    from deerflow.mcp.session_pool import MCPError, McpError, _is_mcp_transport_disconnect
+
+    # 1. Closed stream errors (anyio)
+    assert _is_mcp_transport_disconnect(anyio.ClosedResourceError()) is True
+    assert _is_mcp_transport_disconnect(anyio.BrokenResourceError()) is True
+    assert _is_mcp_transport_disconnect(anyio.EndOfStream()) is True
+
+    # 2. Standard McpError (1.x pattern)
+    closed_err = McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+    assert _is_mcp_transport_disconnect(closed_err) is True
+
+    # 3. Non-disconnect McpError
+    other_err = McpError(ErrorData(code=408, message="request timed out"))
+    assert _is_mcp_transport_disconnect(other_err) is False
+
+    wrong_msg_err = McpError(ErrorData(code=CONNECTION_CLOSED, message="other failure"))
+    assert _is_mcp_transport_disconnect(wrong_msg_err) is False
+
+    # 4. Simulated MCP 2.x MCPError (inheriting from Exception, code & message attributes)
+    class FakeMCP2Error(Exception):
+        def __init__(self, code: int, message: str):
+            super().__init__(code, message)
+            self.error = ErrorData(code=code, message=message)
+            self.code = code
+            self.message = message
+
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeMCP2Error,)):
+        fake_closed = FakeMCP2Error(code=CONNECTION_CLOSED, message="Connection closed")
+        assert _is_mcp_transport_disconnect(fake_closed) is True
+
+        fake_timeout = FakeMCP2Error(code=408, message="timeout")
+        assert _is_mcp_transport_disconnect(fake_timeout) is False
+
+    # 5. Ensure McpError and MCPError are exported / available
+    assert issubclass(McpError, Exception)
+    assert issubclass(MCPError, Exception)

@@ -10,7 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-from mcp.shared.exceptions import McpError
+
+try:
+    from mcp.shared.exceptions import McpError
+except ImportError:
+    from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
