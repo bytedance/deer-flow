@@ -14,6 +14,13 @@ Async gate waiters own separate cross-loop futures. Cancel only their signal;
 notify outside the state lock. `_await_off_thread` drains started I/O across
 repeated cancellation.
 
+Read marks must identify the source snapshot that produced the displayed read.
+Each invocation owns a `read_snapshot` capture, reset on every exit. First-party
+range/truncated reads carry the complete source hash. Custom readers without
+capture grant evidence only for an exact full-file result matching inspection;
+partial or reformatted results cannot prove a full version. Keep shell writers
+outside the gate lock; concurrent changes must invalidate the captured version.
+
 Table synopses count nonblank CSV/TSV logical records, excluding the header.
 Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementally;
 on parsing or field-limit errors, report an undetermined count rather than a

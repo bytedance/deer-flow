@@ -11,6 +11,12 @@ Only `finally` closes write ends.
 
 On Linux/macOS, LocalSandbox non-append text writes use `_publish_file_revision` and the shared atomic byte publisher. Check write access without truncation; retain the source descriptor through metadata transfer. Preserve symlink mapping; publish only regular files. Pre-replace failures retain the old file and clean staging. Append/other platforms write in place. Replacement needs parent-directory write and metadata permissions; hard-link aliases retain the old inode. No concurrent-writer arbitration or power-loss recovery. Tests: `tests/test_local_sandbox_atomic_writes.py`.
 
+Read-before-write evidence comes from `sandbox/read_snapshot.py`: a per-call
+ContextVar holder carries the full source hash across `to_thread`. During capture,
+`read_file` reads the complete source once, then derives range/empty/truncated
+views from that same text. Preserve provider error strings without recording
+evidence. Without capture, direct ranged reads retain their provider I/O path.
+
 PowerShell command mapping escapes host-path whitespace/metacharacters for the caller's quote context in both user-data and provider mappings. Preserve wildcards; Bash/cmd mapping stays unchanged. Keep portable string assertions alongside native Windows smoke tests. The public bash tool's existing POSIX-quoted cwd prefix requires PowerShell 7 (`&&`) and workspace paths without apostrophes; mapping does not repair that prefix.
 
 Local `grep` skips non-regular entries before reading. File reads and directory scans propagate errors, except `ENOENT`/`ENOTDIR`/`ELOOP`/`EISDIR`/`ESTALE` races (`ESTALE` when available). Error filenames are reverse-resolved at the local sandbox boundary, including custom mounts; permission errors identify the virtual failing path.

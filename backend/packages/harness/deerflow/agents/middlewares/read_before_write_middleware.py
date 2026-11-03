@@ -55,6 +55,7 @@ from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normaliz
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.read_file_contract import READ_FILE_EMPTY, READ_FILE_NO_CONTENT_RESULTS, count_file_lines
+from deerflow.sandbox.read_snapshot import ReadSnapshotCapture, capture_read_snapshot
 from deerflow.sandbox.tools import (
     read_current_file_content,
     sandbox_authorization_scope,
@@ -251,9 +252,10 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             try:
                 with sandbox_authorization_scope(request.runtime):
                     with self._lock_for(request, path):
-                        result = handler(request)
-                        self._attach_read_mark(request, result)
-                        return result
+                        with capture_read_snapshot(path) as capture:
+                            result = handler(request)
+                            self._attach_read_mark(request, result, capture=capture)
+                            return result
             except SandboxAuthorizationError as exc:
                 return self._authorization_error_result(request, exc)
         return handler(request)
@@ -292,10 +294,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                     lock = self._lock_for(request, path)
                     await _acquire_gate_lock(lock)
                     try:
-                        result = await handler(request)
-                        mark_task = asyncio.create_task(asyncio.to_thread(self._attach_read_mark, request, result))
-                        await _await_off_thread(mark_task)
-                        return result
+                        with capture_read_snapshot(path) as capture:
+                            result = await handler(request)
+                            mark_task = asyncio.create_task(asyncio.to_thread(self._attach_read_mark, request, result, capture=capture))
+                            await _await_off_thread(mark_task)
+                            return result
                     finally:
                         lock.release()
             except SandboxAuthorizationError as exc:
@@ -454,7 +457,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
 
     # -- mark stamping ---------------------------------------------------
 
-    def _attach_read_mark(self, request: ToolCallRequest, result: ToolMessage | Command) -> None:
+    def _attach_read_mark(self, request: ToolCallRequest, result: ToolMessage | Command, *, capture: ReadSnapshotCapture | None = None) -> None:
         path = self._requested_path(request)
         if path is None:
             return
@@ -479,6 +482,11 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
                 path,
             )
             return
+        if capture is not None and capture.snapshot is not None:
+            snapshot = capture.snapshot
+            if snapshot.displayed_content == tool_content:
+                message.additional_kwargs[READ_MARK_KEY] = {"path": _normalize_mark_path(path), "hash": snapshot.content_hash}
+            return
         try:
             content = self._content_reader(request.runtime, path)
         except SandboxAuthorizationError:
@@ -488,6 +496,13 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return
         if content.startswith(_UNINSPECTABLE_CONTENT_PREFIX):
             logger.debug("read-before-write mark skipped for %r: error-string read channel", path)
+            return
+        # A custom tool without source evidence can prove a complete read by
+        # returning the exact complete content. A range/truncated view cannot
+        # prove whether an unseen part changed before this inspection.
+        args = request.tool_call.get("args") or {}
+        if args.get("start_line") is not None or args.get("end_line") is not None or (content or READ_FILE_EMPTY) != tool_content:
+            logger.debug("read-before-write mark skipped for %r: result does not match the inspected version", path)
             return
         message.additional_kwargs[READ_MARK_KEY] = {
             "path": _normalize_mark_path(path),

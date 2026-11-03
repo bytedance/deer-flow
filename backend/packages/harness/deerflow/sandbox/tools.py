@@ -52,7 +52,9 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_INVALID_START_LINE,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
+    split_file_lines,
 )
+from deerflow.sandbox.read_snapshot import read_snapshot_requested, record_read_snapshot
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -3255,6 +3257,34 @@ def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> b
     return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
 
 
+def _format_read_file_snapshot(content: str, *, start_line: int | None = None, end_line: int | None = None) -> str:
+    """Derive a normal read_file view from one complete source snapshot."""
+    effective_start = start_line or 1
+    use_line_range = start_line is not None or end_line is not None
+    if use_line_range:
+        lines = split_file_lines(content)
+        content = "\n".join(lines[effective_start - 1 : end_line])
+        if not content and effective_start > 1 and effective_start > len(lines):
+            return READ_FILE_START_LINE_EXCEEDS
+    if not content:
+        return READ_FILE_EMPTY
+    return _truncate_read_file_output(
+        content,
+        _read_file_output_max_chars(),
+        line_offset=effective_start - 1,
+        joined_lines=use_line_range,
+        ends_at_eof=end_line is None,
+    )
+
+
+def _read_file_output_max_chars() -> int:
+    try:
+        sandbox_cfg = get_app_config().sandbox
+        return sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+    except Exception:
+        return 50000
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -3285,6 +3315,17 @@ def read_file_tool(
             return READ_FILE_INVALID_RANGE
 
         requested_path = path
+        if read_snapshot_requested(path):
+            # The gate already needs a complete version hash. Read once and
+            # derive both that evidence and the ranged/truncated view from it.
+            source = read_current_file_content(runtime, path)
+            if source.startswith("Error:"):
+                # Some remote providers report read failures as text. Never
+                # turn that failure into a range view or version evidence.
+                return _truncate_read_file_output(source, _read_file_output_max_chars())
+            displayed = _format_read_file_snapshot(source, start_line=start_line, end_line=end_line)
+            record_read_snapshot(path, source, displayed)
+            return displayed
         use_line_range = start_line is not None or end_line is not None
         if use_line_range:
             content = _read_file_from_sandbox(runtime, path, start_line=start_line, end_line=end_line)
@@ -3299,15 +3340,8 @@ def read_file_tool(
                     return READ_FILE_EMPTY
                 return READ_FILE_START_LINE_EXCEEDS
             return READ_FILE_EMPTY
-        try:
-            from deerflow.config.app_config import get_app_config
-
-            sandbox_cfg = get_app_config().sandbox
-            max_chars = sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
-        except Exception:
-            max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
-        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        return _truncate_read_file_output(content, _read_file_output_max_chars(), line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
