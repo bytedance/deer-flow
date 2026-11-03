@@ -747,6 +747,8 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    followUpPending: string;
+    followUpStopped: string;
     workerUnavailable: string;
     empty: string;
     emptyHint: string;

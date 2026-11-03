@@ -923,11 +923,18 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if subagent_batches_config.enabled and batch_repo is None:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
+            from app.subagent_batches.continuation import BatchContinuations
+
+            continuations = BatchContinuations(app)
+            app.state.batch_continuations = continuations
             batch_service = SubagentBatchService(
                 repository=batch_repo,
                 config=subagent_batches_config,
                 runtime_config=subagent_runtime_config,
                 extensions=getattr(app.state, "extensions", None),
+                prepare_continuation=continuations.prepare,
+                dispatch_continuation=continuations.dispatch,
+                cancel_continuation=continuations.cancel,
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:

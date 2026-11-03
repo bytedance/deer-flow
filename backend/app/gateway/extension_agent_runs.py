@@ -73,15 +73,32 @@ class GatewayAgentRunsHost:
             return None
         return _BoundAgentRuns(self, str(user.id), user.token_version, source, frozenset(auth.permissions))
 
+    def capture_batch_authority(self, runs, *, user_id: str) -> dict:
+        """Capture only a native batch's existing host grant; never browser input."""
+        if not isinstance(runs, _BoundAgentRuns) or runs._host is not self or runs._user_id != user_id or not self.active:
+            raise AgentRunError(403, "Batch follow-up requires its originating Agent run authority")
+        return {"token_version": runs._token_version, "source": runs._source, "permissions": sorted(runs._permissions)}
+
+    async def restore_batch_authority(self, *, user_id: str, grant: dict):
+        """Restore a persisted native batch grant with its original permission ceiling."""
+        source, version, permissions = grant.get("source"), grant.get("token_version"), grant.get("permissions")
+        if source not in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED) or type(version) is not int or not isinstance(permissions, list) or any(not isinstance(value, str) for value in permissions):
+            raise AgentRunError(403, "Invalid batch follow-up authority")
+        user = get_auth_disabled_user() if source == AUTH_SOURCE_AUTH_DISABLED and is_auth_disabled() else await self.load_user(user_id) if source == AUTH_SOURCE_SESSION and self.load_user is not None else None
+        if user is None or str(user.id) != user_id or user.token_version != version or user.needs_setup or getattr(user, "disabled", False):
+            raise AgentRunError(403, "Batch follow-up authorization revoked")
+        return _BoundAgentRuns(self, user_id, version, source, frozenset(permissions), origin=make_origin("subagent_batch"))
+
 
 class _BoundAgentRuns:
-    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None):
+    def __init__(self, host, user_id: str, token_version: int, source: str, permissions: frozenset[str], plugin_namespace: str | None = None, origin: dict | None = None):
         self._host = host
         self._user_id = user_id
         self._token_version = token_version
         self._source = source
         self._permissions = permissions
         self._plugin_namespace = plugin_namespace
+        self._origin = origin
 
     def for_plugin(self, namespace: str):
         if not isinstance(namespace, str) or not namespace or len(namespace) > 96 or ":" in namespace:
@@ -113,7 +130,7 @@ class _BoundAgentRuns:
         request.state.auth = AuthContext(user, list(permissions))
         # Host-set, never HTTP input: threads and runs created through this
         # handle are marked as extension work (activity feed, unread state).
-        request.state.run_origin = make_origin("extension", namespace=self._plugin_namespace)
+        request.state.run_origin = self._origin or make_origin("extension", namespace=self._plugin_namespace)
         token = set_current_user(user)
         try:
             if thread_id is not None:
@@ -227,6 +244,28 @@ class _BoundAgentRuns:
 
     async def start(self, *, thread_id, input, context=None, idempotency_key=None, execution_fence=None) -> AgentRun:
         return await self._start(thread_id=thread_id, input=input, context=context, idempotency_key=idempotency_key, execution_fence=execution_fence)
+
+    async def start_batch_followup(self, *, thread_id, batch_id, input, context, config, execution_fence, goal_wakeup=None):
+        """Native single follow-up; the existing SQL admission fences cancellation."""
+        from app.gateway.run_models import RunCreateRequest
+        from app.gateway.services import resolve_thread_assistant_id, start_run
+        from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, batch_continuation_key
+
+        if self._origin != make_origin("subagent_batch") or execution_fence.namespace != BATCH_CONTINUATION_NAMESPACE or execution_fence.resource_id != batch_id:
+            raise AgentRunError(403, "Invalid native batch continuation")
+        async with self._request("runs:create", thread_id) as request:
+            request.state.extension_execution_fence = execution_fence
+            assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=True)
+            body = RunCreateRequest(
+                assistant_id=assistant_id,
+                input=_json_object(input),
+                context=_json_object(context),
+                config=_json_object(config),
+                metadata={"batch_goal_wakeup": _json_object(goal_wakeup)} if goal_wakeup is not None else None,
+                on_disconnect="continue",
+            )
+            record = await start_run(body, thread_id, request, idempotency_key=batch_continuation_key(batch_id), require_existing_thread=True)
+            return _view(record)
 
     async def resume(self, *, thread_id, resume, idempotency_key=None) -> AgentRun:
         if resume is None:
