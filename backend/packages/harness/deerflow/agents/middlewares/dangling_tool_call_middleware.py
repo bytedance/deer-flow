@@ -123,7 +123,13 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+
+    # A normal ToolMessage cannot carry None, so middleware replies use "" for
+    # calls whose provider ID was null. Both spellings mean the ID is absent.
+    def pairing_id(value: object) -> object:
+        return "" if value is None else value
+
+    candidates = [position for position, entry in enumerate(open_calls) if pairing_id(entry["original"]) == pairing_id(result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
     if not candidates or (len(candidates) > 1 and not positional):
         return None
     return open_calls.pop(candidates[0])["synthetic"]
