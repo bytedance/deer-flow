@@ -173,7 +173,7 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": _safe_public_url(r.get("url")),
             "content": r.get("description", ""),
         }
         for r in web_results

@@ -1,6 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
 import type { Translations } from "@/core/i18n/locales/types";
+import { modelControlDisplayText } from "@/core/messages/model-control";
 
 import type { AgentThread, AgentThreadContext } from "./types";
 
@@ -67,6 +68,8 @@ export function pathOfThread(
 }
 
 export function textOfMessage(message: Message) {
+  const selectedModelText = modelControlDisplayText(message);
+  if (selectedModelText !== null) return selectedModelText;
   if (typeof message.content === "string") {
     return message.content;
   } else if (Array.isArray(message.content)) {

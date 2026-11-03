@@ -1,4 +1,4 @@
-"""Migration 0047: the shared, encrypted ``mcp_oauth_tokens`` table, and the current migration-chain head."""
+"""Migration 0047: the shared, encrypted ``mcp_oauth_tokens`` table, following the Skill host schema."""
 
 from __future__ import annotations
 
@@ -43,10 +43,15 @@ NULLABLE = {"access_token_enc", "token_request_fingerprint", "token_type", "acce
 pytestmark = pytest.mark.asyncio
 
 
-async def test_0047_is_the_chain_head():
-    assert bootstrap._get_head_revision() == REVISION
+async def test_0047_remains_in_the_single_migration_chain():
+    assert bootstrap._get_head_revision() == "0051_merge_run_inputs_fencing"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == [REVISION]
+    assert script.get_heads() == ["0051_merge_run_inputs_fencing"]
+    assert set(script.get_revision("0051_merge_run_inputs_fencing").down_revision) == {"0049_run_inputs", "0050_history_seed_authority"}
+    assert script.get_revision("0050_history_seed_authority").down_revision == "0049_run_producer_fencing"
+    assert script.get_revision("0049_run_producer_fencing").down_revision == "0048_extension_execution_leases"
+    assert script.get_revision("0049_run_inputs").down_revision == "0048_extension_execution_leases"
+    assert script.get_revision("0048_extension_execution_leases").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     assert script.get_revision(PREVIOUS).down_revision == "0045_completed_run_evidence"
     # alembic_version.version_num is VARCHAR(32).
@@ -181,6 +186,6 @@ async def test_bootstrap_provisions_the_table_on_an_empty_database(tmp_path):
         await bootstrap.bootstrap_schema(engine, backend="sqlite")
         assert set((await _shape(engine))["columns"]) == COLUMNS
         async with engine.connect() as conn:
-            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == REVISION
+            assert (await conn.execute(sa.text("SELECT version_num FROM alembic_version"))).scalar_one() == bootstrap._get_head_revision()
     finally:
         await engine.dispose()

@@ -160,6 +160,13 @@ class _FakeWindowsHandle:
         return False
 
 
+def _force_windows_runtime_branch(monkeypatch) -> None:
+    """Expose an ``os.name == "nt"`` view only through lark_cli."""
+    members = {name: getattr(os, name) for name in dir(os) if not name.startswith("__")}
+    members["name"] = "nt"
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(**members))
+
+
 def _windows_os_stub() -> SimpleNamespace:
     """Minimal ``os`` stub that forces the Windows code path in unit tests.
 
@@ -289,6 +296,32 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
     assert "x86_64" in launcher and "aarch64" in launcher
 
 
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_managed_sandbox_runtime_download_accepts_filler_prefixed_binaries_on_windows(monkeypatch, tmp_path, filler, magic) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    archives = {
+        "lark-cli-1.0.65-linux-amd64.tar.gz": _make_lark_cli_binary_tar(filler + magic + b"-amd64-payload"),
+        "lark-cli-1.0.65-linux-arm64.tar.gz": _make_lark_cli_binary_tar(filler + magic + b"-arm64-payload"),
+    }
+    checksums = "".join(f"{hashlib.sha256(payload).hexdigest()}  {name}\n" for name, payload in archives.items()).encode()
+    assets = {"checksums.txt": checksums, **archives}
+    monkeypatch.setattr(lark_cli, "_download_lark_release_asset", lambda _version, name, **_kwargs: assets[name])
+    _force_windows_runtime_branch(monkeypatch)
+
+    runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == filler + magic + b"-amd64-payload"
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == filler + magic + b"-arm64-payload"
+
+
 def test_managed_sandbox_runtime_rejects_checksum_mismatch(monkeypatch, tmp_path) -> None:
     assert hasattr(lark_cli, "_ensure_managed_sandbox_lark_cli"), "managed sandbox runtime installer is missing"
     _patch_paths(monkeypatch, tmp_path / "home")
@@ -372,6 +405,36 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
         lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
+@pytest.mark.parametrize(
+    ("filler", "magic"),
+    [
+        (b"\n", b"\x7fELF"),
+        (b"\xef\xbb\xbf", b"\x7fELF"),
+        (b" " * 63, b"\xbf\xba\xfe\xca"),
+    ],
+    ids=["newline-elf", "bom-elf", "max-offset-macho-fat64-le"],
+)
+def test_managed_sandbox_runtime_accepts_filler_prefixed_binaries_on_windows(monkeypatch, tmp_path, filler, magic) -> None:
+    _patch_paths(monkeypatch, tmp_path / "home")
+    source = tmp_path / "pre-staged"
+    for arch in ("amd64", "arm64"):
+        binary = source / f"linux-{arch}" / "lark-cli"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(filler + magic + f"-{arch}-binary".encode())
+        binary.chmod(0o755)
+    launcher = source / "bin" / "lark-cli"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv(lark_cli.LARK_CLI_SANDBOX_RUNTIME_SOURCE_ENV, str(source))
+    _force_windows_runtime_branch(monkeypatch)
+
+    runtime = lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
+
+    assert (runtime / "linux-amd64" / "lark-cli").read_bytes().startswith(filler + magic)
+    assert (runtime / "linux-arm64" / "lark-cli").read_bytes().startswith(filler + magic)
 
 
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
@@ -1389,7 +1452,7 @@ def test_install_lark_integration_rejects_executable_binary_member(monkeypatch, 
     config = _config(tmp_path / "skills")
     archive = _make_lark_cli_source_zip(tmp_path)
     with zipfile.ZipFile(archive, "a") as zf:
-        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\x7fELFbinary")
+        zf.writestr("cli-1.0.65/skills/lark-doc/bin/tool", b"\n\x7fELFbinary")
 
     with pytest.raises(ValueError, match="executable binary member"):
         lark_cli.install_lark_integration("alice", config, source_archive=archive)

@@ -94,3 +94,20 @@ the restricted-key live test and the two-document isolation probes pass after it
 - Opt-in live test against this deployment: **1 passed**, including the real
   ToolNode, replay, forwarding and pruning checks above.
 - Ruff lint/format, extension wheel packaging and agent-guidance checks passed.
+
+## New Phase 1 follow-up — 2026-10-20
+
+The existing OrbStack deployment and bge-m3 model were restarted, retaining
+original documents; the original live document test passed again. A separate
+synthetic Wiki base and published page were created, with a dedicated
+`retrieve`-only key restricted to the test Wiki and document bases.
+
+`test_knowledge_phase1_live.py` verified real published-page search, selected
+base constraints, unbound-user denial, unsupported document-filter rejection,
+source replay, shared forwarding and pruning. GLM-5.3 then generated actual
+calls to the document and Wiki tools, producing three valid cited sources.
+A subsequent three-tool run also included a real LightRAG graph and passed.
+See the [combined validation record](../deerflow-extension-lightrag/VALIDATION.md)
+for versions, reproduction instructions, results and precise coverage limits.
+This follow-up does not claim a WeKnora entity-graph endpoint or browser-chat
+acceptance.

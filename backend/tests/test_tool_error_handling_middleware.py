@@ -214,6 +214,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 ReadBeforeWriteMiddleware + 1 LoopDetectionMiddleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SkillActivationMiddleware (allowed-tools is metadata, no policy wrapper)
+    # + 1 ModelLengthFinishReasonMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
@@ -814,6 +815,29 @@ def test_subagent_runtime_middlewares_inject_configured_extension_middlewares(mo
         if guard_idx is not None:
             assert guard_idx < extension_idx
     assert extension_idx < safety_idx
+
+
+def test_subagent_runtime_middlewares_attach_model_length_guard_before_safety_finish(monkeypatch):
+    """Subagents must carry the lead's output-length guard so a response cut
+    off at the model's output limit drops its (possibly truncated) tool calls
+    and the executor can report ``stop_reason=model_length_capped`` through
+    the duck-typed ``consume_stop_reason`` channel. Placement mirrors the lead
+    chain: after configured extensions, before SafetyFinishReasonMiddleware."""
+    from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+    from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
+
+    app_config = _make_app_config()
+    app_config.extensions = ExtensionsConfig(middlewares=[f"{__name__}:ConfiguredSubagentMiddleware"])
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    length_idx = [i for i, m in enumerate(middlewares) if isinstance(m, ModelLengthFinishReasonMiddleware)]
+    assert len(length_idx) == 1
+    extension_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ConfiguredSubagentMiddleware))
+    safety_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SafetyFinishReasonMiddleware))
+    assert extension_idx < length_idx[0] < safety_idx
+    assert middlewares[length_idx[0]] in [m for m in middlewares if hasattr(m, "consume_stop_reason")]
 
 
 def test_subagent_runtime_middlewares_place_mcp_routing_before_deferred_filter(monkeypatch):

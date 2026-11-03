@@ -6,7 +6,7 @@ import {
   Loader2Icon,
   MessageCircleQuestionMarkIcon,
 } from "lucide-react";
-import { useId, useState, type KeyboardEvent } from "react";
+import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
+import { createMarkdownLinkComponent } from "./markdown-link";
 
 export type HumanInputSubmitResult = boolean | void;
 
@@ -219,17 +220,23 @@ export function HumanInputCard({
   disabled = false,
   pending = false,
   answeredResponse = null,
+  threadId,
   onSubmit,
 }: {
   request: HumanInputRequest;
   disabled?: boolean;
   pending?: boolean;
   answeredResponse?: HumanInputResponse | null;
+  threadId?: string;
   onSubmit?: (
     response: HumanInputResponse,
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
 }) {
   const { t } = useI18n();
+  const markdownComponents = useMemo(
+    () => ({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
+  );
   const [text, setText] = useState("");
   const [error, setError] = useState("");
   const [isComposing, setIsComposing] = useState(false);
@@ -379,6 +386,7 @@ export function HumanInputCard({
                   <MarkdownContent
                     content={request.context}
                     isLoading={false}
+                    components={markdownComponents}
                   />
                 </div>
               ) : null}
@@ -405,7 +413,11 @@ export function HumanInputCard({
           </div>
 
           <div className="text-foreground text-sm leading-6">
-            <MarkdownContent content={request.question} isLoading={false} />
+            <MarkdownContent
+              content={request.question}
+              isLoading={false}
+              components={markdownComponents}
+            />
           </div>
 
           {isForm ? (

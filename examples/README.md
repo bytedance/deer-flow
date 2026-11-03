@@ -10,8 +10,9 @@ independent Python package using the public `deerflow-extension-api` contract.
 | [Agent teams](deerflow-extension-agent-teams/README.md)          | Full Agent orchestration. Use this after the basic contribution and lifecycle patterns are familiar.                           |
 
 Additional examples cover [text-list classification](deerflow-extension-jev-classify/README.md),
-[context pruning](deerflow-extension-jev-context/README.md), and
-[advisory screening of fetched content](deerflow-extension-jev-screening/README.md).
+[context pruning](deerflow-extension-jev-context/README.md),
+[advisory screening of fetched content](deerflow-extension-jev-screening/README.md), and
+[sectioned long-form report writing](deerflow-extension-report-sections/README.md).
 
 ## Edit, test, check, then install
 
@@ -19,7 +20,10 @@ Additional examples cover [text-list classification](deerflow-extension-jev-clas
    package, distribution and `deerflow.extensions` entry point. For a full-stack
    plugin, also choose its own namespace and browser module name.
 2. Follow the example's README to configure its dependencies and run its tests.
-   Keep package behavior tests alongside the extension.
+   Keep package behavior tests alongside the extension. For a bundled example
+   with a `tests/` directory, CI installs the package with its `dev` extra next
+   to this checkout's `deerflow-extension-api`, then runs `pytest`, `ruff check`
+   and `ruff format --check`.
 3. From the DeerFlow checkout root, prepare the backend environment with
    `make -C backend install`, then check the package:
 

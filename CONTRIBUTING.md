@@ -338,6 +338,10 @@ before review.
 ## Testing
 
 ```bash
+# Public skill scripts (from the repository root)
+python -m pip install -r tests/skills/requirements.txt
+python -m pytest tests/skills -q
+
 # Default backend tests (four parallel shards; excludes live and blocking-I/O tests)
 cd backend
 make test
@@ -360,6 +364,11 @@ make test
 cd frontend
 make test-e2e
 ```
+
+If a host-configured uv package mirror blocks dependencies while running the
+config upgrade tests, run `make test-config-version` from the repository root.
+That command uses public PyPI for this suite and its subprocesses without
+changing the host's uv settings or the normal config upgrade command.
 
 `make test-live` calls real external APIs and may incur API costs or create
 local sandboxes, artifacts, and files. It is never run by the default backend

@@ -20,6 +20,7 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         "use",
         "name",
         "display_name",
+        "aliases",
         "description",
         "supports_thinking",
         "supports_reasoning_effort",

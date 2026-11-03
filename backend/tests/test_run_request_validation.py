@@ -233,6 +233,40 @@ def test_run_request_rejects_unknown_sdk_options_with_exact_422(
     }
 
 
+@pytest.mark.parametrize("section", ["configurable", "context"])
+@pytest.mark.parametrize("value", [[1], [["k", "v"]], [], "ab", 1, True], ids=["list", "pairs", "empty-list", "string", "int", "bool"])
+def test_run_request_rejects_non_object_config_sections_with_exact_422(
+    client: TestClient,
+    section: str,
+    value: Any,
+) -> None:
+    config = {section: value}
+    response = client.post("/api/runs/stream", json={"config": config})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": [
+            {
+                "type": "invalid_run_config_section",
+                "loc": ["body", "config"],
+                "msg": f"config.{section} must be an object or null",
+                "input": config,
+                "ctx": {"section": section},
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize("section", ["configurable", "context"])
+@pytest.mark.parametrize("value", [None, {}, {"model_name": "m"}], ids=["null", "empty", "object"])
+def test_run_request_accepts_object_or_null_config_sections(section: str, value: Any) -> None:
+    from app.gateway.routers.thread_runs import RunCreateRequest
+
+    body = RunCreateRequest(config={section: value})
+
+    assert body.config == {section: value}
+
+
 def test_openapi_stream_mode_enum_matches_runtime_support() -> None:
     app = FastAPI()
     app.include_router(runs.router)

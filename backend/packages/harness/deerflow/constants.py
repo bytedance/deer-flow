@@ -2,6 +2,15 @@
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
+# Framework-owned placeholder the tool-output budget middleware substitutes for
+# an elided ``write_file`` payload in the model-bound request (issue #5328), and
+# which ``write_file`` refuses to write back out (issue #7319). The model
+# occasionally imitates its own elided history and submits the placeholder as
+# content, leaving a ~200-byte deliverable; a rejection the model can act on is
+# better than a silent empty file. Rendering and rejection both derive from this
+# one string so the wording cannot drift out of sync with the guard.
+WRITE_ELISION_PLACEHOLDER_TEMPLATE = "[content elided: {chars} chars; this write_file call succeeded and the file was read or modified again afterwards, so the on-disk file is the current version; call read_file on its path to see it]"
+
 # Host-only per-run capability. Keep this dependency-free: the runtime worker
 # must not initialize the tool/subagent packages while importing this key.
 CONVERSATION_READER_CONTEXT_KEY = "__conversation_reader"

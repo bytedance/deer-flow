@@ -67,6 +67,6 @@ database:
   因此这次改动在重启前一直被忽略。改 `checkpoint_delta.snapshot_frequency` 而不重启则更响——
   下一次 run 会失败，run 记录与 SSE `error` 帧里带着 `CheckpointModeReconfigurationError`。
   这两种改动都不会让任何请求返回 `503`；见
-  [故障排查](/docs/harness/checkpoints/troubleshooting#改完配置后-run-失败)。请通过重启所有共享
+  [故障排查](/docs/harness/checkpoints/troubleshooting#a-run-fails-after-a-config-edit)。请通过重启所有共享
   该检查点数据库的进程来发布改动。
 </Callout>

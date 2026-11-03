@@ -2,8 +2,8 @@
 #
 # start-daemon.sh — Start DeerFlow in daemon (background) mode
 #
-# Thin wrapper around serve.sh --daemon.
+# Thin wrapper around serve.sh --prod --daemon.
 # Kept for backward compatibility.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec bash "$REPO_ROOT/scripts/serve.sh" --dev --daemon "$@"
+exec bash "$REPO_ROOT/scripts/serve.sh" --prod --daemon "$@"

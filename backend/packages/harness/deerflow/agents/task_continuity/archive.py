@@ -199,6 +199,10 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     found = {}
     history = normalize_task_history(state.get("task_history"))
     status = "unavailable" if history.get("status") == "unavailable" else "available"
+    active_matches = []
+    for row in active:
+        if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
+            active_matches.append(row)
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
@@ -211,8 +215,8 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else [])]
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT 8", parameters)
+                    parameters = [match, *batches, *([role] if role is not None else []), 8]
+                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
                     found[row["id"]] = row
@@ -229,12 +233,17 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
             status = "unavailable"
     elif history.get("scope") is not None and history["scope"] != owner:
         status = "scope_unavailable"
-    for row in active:
-        if (source_id and row["id"] == source_id) or (query is not None and (role is None or row["role"] == role) and any(t in row["text"].casefold() for t in keywords)):
-            found[row["id"]] = row
-    results = list(found.values())[:8]
+    archived_matches = list(found.values())
+    archived_ids = {item["id"] for item in archived_matches}
+    active_by_id = {row["id"]: row for row in active}
+    archived_matches = [active_by_id.get(row["id"], row) for row in archived_matches]
+    active_only_by_id = {}
+    for row in active_matches:
+        if row["id"] not in archived_ids:
+            active_only_by_id.setdefault(row["id"], row)
+    active_only = list(active_only_by_id.values())
+    results = archived_matches[: max(0, 8 - len(active_only))] + active_only[:8]
     if excerpts and query is not None:
-        active_by_id = {row["id"]: row for row in active}
         excerpts_result = []
         for row in results:
             # Active text takes precedence when reading by ID, even if only archived FTS matched the source.

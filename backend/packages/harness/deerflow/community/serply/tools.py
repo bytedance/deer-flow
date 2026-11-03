@@ -17,6 +17,7 @@ import re
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,7 @@ def _normalize_row(vertical: str, row: dict) -> dict:
 
     News and Scholar rows carry a few extra fields worth surfacing to the model.
     """
-    result = {"title": row.get("title", ""), "url": row.get("link", "")}
+    result = {"title": row.get("title", ""), "url": safe_public_result_url(row.get("link"))}
     if vertical == "news":
         result["content"] = _clean_text(row.get("summary"))
         result["published"] = row.get("published", "")
@@ -178,7 +179,7 @@ def _normalize_row(vertical: str, row: dict) -> dict:
         citations = extras.get("citations") if isinstance(extras.get("citations"), dict) else {}
         result["cited_by"] = citations.get("count", 0)
         doc = row.get("doc") if isinstance(row.get("doc"), dict) else {}
-        result["pdf_url"] = doc.get("link", "")
+        result["pdf_url"] = safe_public_result_url(doc.get("link"))
     else:
         result["content"] = row.get("description", "")
     return result

@@ -179,9 +179,13 @@ def select_facts_for_capacity(
     usage = usage or {}
     indexed_facts = list(enumerate(facts))
     scores: dict[str, FactEvictionScore] = {}
+    # Per-position scores: the input list may repeat a fact_id, and the public
+    # ``scores`` dict keeps only the last write per id, so ranking and the
+    # evicted audit must read each record's own score, not the shared id's.
+    scored: list[FactEvictionScore] = []
     for index, fact in indexed_facts:
         fact_id = str(fact.get("id") or f"__missing_{index}")
-        scores[fact_id] = _score_fact(
+        score = _score_fact(
             fact,
             policy=policy,
             usage=usage.get(fact_id),
@@ -192,6 +196,8 @@ def select_facts_for_capacity(
             confirmation_half_life_days=confirmation_half_life_days,
             access_half_life_days=access_half_life_days,
         )
+        scores[fact_id] = score
+        scored.append(score)
 
     if len(indexed_facts) <= max_facts:
         return FactEvictionDecision(
@@ -203,7 +209,7 @@ def select_facts_for_capacity(
 
     ranked = sorted(
         indexed_facts,
-        key=lambda item: (-scores[str(item[1].get("id") or f"__missing_{item[0]}")].value, item[0]),
+        key=lambda item: (-scored[item[0]].value, item[0]),
     )
     reserved_count = 0
     selected_indexes: set[int] = set()
@@ -227,7 +233,7 @@ def select_facts_for_capacity(
         if index in selected_indexes:
             continue
         fact_id = str(fact.get("id") or f"__missing_{index}")
-        score = scores[fact_id]
+        score = scored[index]
         evicted.append(
             EvictedFact(
                 fact_id=fact_id,

@@ -401,20 +401,23 @@ async def test_abefore_agent_records_checkpointed_memory_on_timeout() -> None:
 
     with (
         mock.patch.object(mw, "_inject", blocking_inject),
+        mock.patch.object(mw, "_read_failures_are_fatal", return_value=False),
         mock.patch(
             "deerflow.agents.middlewares.dynamic_context_middleware._INJECT_TIMEOUT_SECONDS",
             0.01,
         ),
     ):
-        result = await mw.abefore_agent(state, runtime)
+        try:
+            result = await mw.abefore_agent(state, runtime)
+            assert result is None
+            # The first model call assembles with the frozen checkpoint block: the
+            # recorded identity is the checkpointed content, not the late replacement.
+            _drive_model_call(mw, state["messages"], runtime)
+            recorded_call = journal.record_memory_context.call_args
+        finally:
+            release.set()
+            assert await asyncio.to_thread(finished.wait, 1)
 
-    assert result is None
-    # The first model call assembles with the frozen checkpoint block: the
-    # recorded identity is the checkpointed content, not the late replacement.
-    _drive_model_call(mw, state["messages"], runtime)
-    recorded_call = journal.record_memory_context.call_args
-    release.set()
-    assert await asyncio.to_thread(finished.wait, 1)
     assert started.is_set()
     assert recorded_call == mock.call(
         content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),

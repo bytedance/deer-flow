@@ -1,6 +1,7 @@
 """Owner-only MCP configuration. Deployment MCP routes remain admin-only."""
 
 import asyncio
+import logging
 from typing import Literal
 from uuid import uuid4
 
@@ -14,6 +15,15 @@ from deerflow.capabilities.runtime import ambiguous_installation_ids
 from deerflow.config.extensions_config import ExtensionsConfig, atomic_write_extensions_config, extensions_config_file_lock, extensions_config_write_lock
 from deerflow.mcp.user_config import personal_server_name_variants, read_user_mcp_config, user_mcp_config_path
 from deerflow.utils.file_io import await_drained
+
+logger = logging.getLogger(__name__)
+
+_MUTATION_ERROR_DETAILS = {
+    "create": "Failed to add personal MCP servers",
+    "update": "Failed to update personal MCP server",
+    "delete": "Failed to delete personal MCP server",
+    "state": "Failed to update personal MCP server state",
+}
 
 router = APIRouter(prefix="/api/mcp/personal/config", tags=["mcp"])
 
@@ -40,7 +50,9 @@ def _validate_personal_server(server: mcp.McpServerConfigResponse, *, admin: boo
     if not admin:
         from deerflow.capabilities.business import is_bundled_connection
 
-        bundled = server.type == "stdio" and is_bundled_connection(server.command, server.args, server.env) and not server.cwd
+        # The response model does not declare `cwd`; a supplied one is an extra.
+        cwd = (server.model_extra or {}).get("cwd")
+        bundled = server.type == "stdio" and is_bundled_connection(server.command, server.args, server.env) and not cwd
         if (server.type not in {"http", "sse"} and not bundled) or server.oauth is not None:
             raise HTTPException(403, "Only an administrator may configure host commands or OAuth token endpoints")
         from deerflow.community.url_safety import validate_public_http_url
@@ -107,8 +119,15 @@ async def get_configuration(request: Request):
 async def _write(request: Request, operation: str, body):
     owner = await _owner(request)
     admin = await is_admin_user(request)
-    raw = await await_drained(asyncio.to_thread(_mutate, owner, operation, body, admin=admin))
-    return _response(raw)
+    try:
+        raw = await await_drained(asyncio.to_thread(_mutate, owner, operation, body, admin=admin))
+        return _response(raw)
+    except HTTPException:
+        raise
+    except Exception:
+        detail = _MUTATION_ERROR_DETAILS[operation]
+        logger.exception("%s", detail)
+        raise HTTPException(status_code=500, detail=detail) from None
 
 
 @router.post("/servers", response_model=mcp.McpConfigResponse)

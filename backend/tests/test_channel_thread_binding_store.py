@@ -44,6 +44,11 @@ from deerflow.persistence.postgres_schema import build_asyncpg_connect_args
 
 pytestmark = pytest.mark.asyncio
 
+CORRUPT_FILE_CONTENTS = (
+    pytest.param(b"not json", id="invalid-json"),
+    pytest.param(b'{"key":"\xff"}', id="invalid-utf8"),
+)
+
 
 async def _sqlite_engine(path: Path) -> AsyncEngine:
     engine = create_async_engine(f"sqlite+aiosqlite:///{path.as_posix()}")
@@ -211,13 +216,34 @@ async def test_entries_survive_a_new_store_instance_over_the_same_storage(tmp_pa
 # ── JSON-specific behaviour kept from the original store ────────────────────
 
 
-async def test_json_store_corrupt_file_starts_fresh(tmp_path, caplog):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+async def test_valid_utf8_bindings_are_read_and_imported(tmp_path, newline):
     path = tmp_path / "store.json"
-    path.write_text("not json", encoding="utf-8")
+    contents = json.dumps({"slack:C1": _legacy_entry("thread-你好", user_id="用户")}, ensure_ascii=False, indent=2).replace("\n", newline).encode("utf-8")
+    path.write_bytes(contents)
+    assert await JsonChannelStore(path).get_thread_id("slack", "C1") == "thread-你好"
+
+    engine = await _sqlite_engine(tmp_path / "bindings.db")
+    try:
+        store = _sql_store(engine, legacy_path=path)
+        assert await store.import_legacy_json() == 1
+        assert await store.get_thread_id("slack", "C1") == "thread-你好"
+        assert (await store.list_entries())[0]["user_id"] == "用户"
+        assert not path.exists()
+        assert path.with_name("store.json.migrated").read_bytes() == contents
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("contents", CORRUPT_FILE_CONTENTS)
+async def test_json_store_corrupt_file_starts_fresh(tmp_path, caplog, contents):
+    path = tmp_path / "store.json"
+    path.write_bytes(contents)
     store = JsonChannelStore(path)
     with caplog.at_level(logging.WARNING, logger="app.channels.store"):
         assert await store.get_thread_id("x", "y") is None
     assert "Corrupt channel store" in caplog.text
+    assert path.read_bytes() == contents
     await store.set_thread_id("x", "y", "t")
     assert json.loads(path.read_text(encoding="utf-8")) == {"x:y": {"thread_id": "t", "user_id": "", "created_at": pytest.approx(time.time(), abs=60), "updated_at": pytest.approx(time.time(), abs=60)}}
 
@@ -395,15 +421,18 @@ async def test_import_without_a_file_or_without_a_legacy_path_is_a_no_op(tmp_pat
         await engine.dispose()
 
 
-async def test_import_keeps_a_corrupt_or_malformed_file_and_skips_bad_entries(tmp_path, caplog):
+@pytest.mark.parametrize("contents", CORRUPT_FILE_CONTENTS)
+async def test_import_keeps_a_corrupt_or_malformed_file_and_skips_bad_entries(tmp_path, caplog, contents):
     engine = await _sqlite_engine(tmp_path / "bindings.db")
     try:
         corrupt = tmp_path / "corrupt" / "store.json"
         corrupt.parent.mkdir(parents=True)
-        corrupt.write_text("not json", encoding="utf-8")
+        corrupt.write_bytes(contents)
         with caplog.at_level(logging.WARNING, logger="app.channels.store"):
             assert await _sql_store(engine, legacy_path=corrupt).import_legacy_json() == 0
-        assert corrupt.exists()
+        assert corrupt.read_bytes() == contents
+        assert not corrupt.with_name("store.json.migrated").exists()
+        assert await _sql_store(engine).list_entries() == []
         # Import-path wording: nothing "starts fresh" here, the file is kept and the import skipped.
         assert "Corrupt legacy channel store at" in caplog.text and "skipping the import (file kept)" in caplog.text
         assert "starting fresh" not in caplog.text
@@ -547,6 +576,29 @@ async def test_resolve_channel_store_uses_the_process_engine_by_default(tmp_path
 
 
 # ── ChannelService wiring ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("contents", CORRUPT_FILE_CONTENTS)
+async def test_channel_service_start_skips_a_corrupt_legacy_file(tmp_path, caplog, contents):
+    from app.channels.service import ChannelService
+
+    path = tmp_path / "store.json"
+    path.write_bytes(contents)
+    engine = await _sqlite_engine(tmp_path / "bindings.db")
+    try:
+        service = ChannelService(channels_config={}, store=_sql_store(engine, legacy_path=path))
+        try:
+            with caplog.at_level(logging.WARNING, logger="app.channels.store"):
+                await service.start()
+            assert service._running is True
+            assert await service.store.list_entries() == []
+            assert path.read_bytes() == contents
+            assert not path.with_name("store.json.migrated").exists()
+            assert "Corrupt legacy channel store at" in caplog.text and "skipping the import (file kept)" in caplog.text
+        finally:
+            await service.stop()
+    finally:
+        await engine.dispose()
 
 
 async def test_channel_service_start_imports_the_legacy_file_once_for_the_sql_store(tmp_path):

@@ -59,7 +59,7 @@ Commands:
   up [--skip-install] [--no-nginx]  Start containers, render the config, start A, then B, then nginx
   down                              Stop everything; delete the containers and harness data (logs are kept)
   status                            Show containers, Gateways and nginx
-  logs [a|b|nginx|all] [-f]         Print the last 100 log lines (-f follows)
+  logs [a|b|nginx|all] [-f]         Print the last 100 log lines (default a and b; all adds nginx; -f follows)
   check [--with-llm]                Run the cross-instance checks against the running pair
   stop <a|b> [--kill]               Stop one Gateway (SIGTERM; --kill sends SIGKILL to simulate a crash)
   start <a|b>                       Start a stopped Gateway again
@@ -579,12 +579,13 @@ cmd_status() {
 }
 
 cmd_logs() {
-    local follow=false arg files=""
+    # nginx.log holds what the nginx command printed while starting.
+    local follow=false arg files="" nginx_logs="nginx.log nginx-error.log nginx-access.log"
     for arg in "$@"; do
         case "$arg" in
             a | b) files="$files gateway-$arg.log" ;;
-            nginx) files="$files nginx-error.log nginx-access.log" ;;
-            all) files="$files gateway-a.log gateway-b.log" ;;
+            nginx) files="$files $nginx_logs" ;;
+            all) files="$files gateway-a.log gateway-b.log $nginx_logs" ;;
             -f | --follow) follow=true ;;
             *) die "Unknown option for logs: $arg" ;;
         esac

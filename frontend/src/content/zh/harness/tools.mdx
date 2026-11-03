@@ -69,7 +69,7 @@ task(agent="general-purpose", task="...", context="...")
 
 ### invoke_acp_agent
 
-使用 [Agent Connect Protocol (ACP)](https://agentconnectprotocol.org/) 调用外部 Agent。需要在 `config.yaml` 中配置 `acp_agents:`。参见[子 Agent](/docs/harness/subagents)页面了解 ACP 配置。
+使用 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/) 调用外部 Agent。需要在 `config.yaml` 中配置 `acp_agents:`。参见[子 Agent](/docs/harness/subagents)页面了解 ACP 配置。
 
 ---
 
@@ -158,7 +158,7 @@ tools:
   - use: deerflow.community.exa.tools:web_search_tool
     api_key: $EXA_API_KEY
 ```
-带神经检索的语义搜索。需要 [Exa](https://exa.ai) API Key。
+带神经检索的语义搜索。需要 [Exa](https://exa.ai) API Key。设置 `base_url`（或 `EXA_BASE_URL`）可使用兼容 Exa 的端点。
 
 无需额外依赖。
 

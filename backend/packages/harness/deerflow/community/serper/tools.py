@@ -428,13 +428,13 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
     if include or exclude:
         organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
 
-    # Search result links are returned verbatim (not passed through
-    # _safe_public_url): they are surfaced as citations for the model to read,
-    # not fetched/downloaded by this tool, unlike image_search image URLs.
+    # Search result links go through _safe_public_url like image URLs, so a
+    # loopback or metadata-service address never reaches the model as a
+    # citation, even though this tool does not fetch it (#7036).
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("link", ""),
+            "url": _safe_public_url(r.get("link")),
             "content": r.get("snippet", ""),
         }
         for r in organic[:max_results]

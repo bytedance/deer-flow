@@ -577,3 +577,16 @@ def test_known_gaps_do_not_reclassify_current_events_as_missing():
 
     assert {"tool-call-intent", "terminal-run-status"}.issubset(gap_ids)
     assert all(gap.get("event_type") not in current_types for gap in contract["known_gaps"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", ["success", "error", "interrupted", "timeout"])
+async def test_authoritative_terminal_producer_matches_contract(status):
+    from deerflow.runtime.events.terminal import confirm_terminal_event
+
+    store = MemoryRunEventStore()
+    confirmation = await confirm_terminal_event(store, thread_id="thread", run_id="run", status=status, user_id=None, authorized=lambda: True)
+    assert confirmation.confirmed
+    records = await store.list_events("thread", "run")
+    assert len(records) == 1
+    _assert_fixed_event_valid(records[0], persisted=True)

@@ -8,8 +8,8 @@ stay in sync: a mismatch is silent, degrading placement rather than raising.
 
 Two normalizations matter:
 
-* a ``ToolMessage`` is identified by its ``tool_call_id``, not its own id —
-  that is the id both sides can always resolve;
+* a ``ToolMessage`` is identified by its own message id, assigned by the journal
+  before persistence; provider ``tool_call_id`` values can repeat across turns;
 * ``DynamicContextMiddleware`` re-keys the submitted user turn from ``X`` to
   ``X__user`` (giving ``X`` to the injected reminder), so the two human copies
   must collapse to one identity.
@@ -35,10 +35,6 @@ def message_identity(message: Mapping[str, Any]) -> str | None:
     *message* is a serialized message mapping (as stored in ``run_events``
     content or carried in a checkpoint ``values`` frame), not a ``BaseMessage``.
     """
-    tool_call_id = message.get("tool_call_id")
-    if isinstance(tool_call_id, str) and tool_call_id:
-        return f"tool:{tool_call_id}"
-
     message_id = message.get("id")
     if not isinstance(message_id, str) or not message_id:
         return None

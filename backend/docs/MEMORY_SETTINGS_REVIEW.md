@@ -46,11 +46,11 @@ uv run python ../scripts/load_memory_sample.py --all-users
 This command:
 
 - supports SQLite and PostgreSQL registered-user databases;
-- creates timestamped backups under `.deer-flow/memory-sample-backups/` before replacing memory;
+- creates a unique timestamped backup directory under `.deer-flow/memory-sample-backups/` before replacing memory, even when imports start in the same second;
 - imports through the configured memory storage provider; and
 - rejects `database.backend: memory`, which has no persistent user registry.
 
-Bulk loading replaces every registered user's memory. Do not run it against an environment containing memory you need to preserve. Pass `--no-backup` only when losing the existing memory is acceptable.
+Bulk loading replaces every registered user's memory. Do not run it against an environment containing memory you need to preserve. Backups accumulate until removed manually. On POSIX, each new backup directory is private to the creating OS user (mode 0700); restoring as another user may require adjusting permissions. Pass `--no-backup` only when losing the existing memory is acceptable.
 
 ## Minimal Manual Test
 
@@ -79,6 +79,6 @@ Bulk loading replaces every registered user's memory. Do not run it against an e
 
 - Sample fixture: `backend/docs/memory-settings-sample.json`
 - Per-user file-storage target: `backend/.deer-flow/users/{user_id}/memory.json`
-- Bulk backups: `backend/.deer-flow/memory-sample-backups/{timestamp}/{user_id}.json`
+- Bulk backups: `backend/.deer-flow/memory-sample-backups/{timestamp}-{unique-suffix}/{user_id}.json`
 
-For an explicit one-file copy, pass `--target PATH` to the loader. There is no implicit target because authenticated sessions use different per-user paths.
+For an explicit one-file copy, pass `--target PATH` to the loader. Its sidecar backup is `{target.name}.bak-{timestamp}-{unique-suffix}` beside the target; repeated imports never reuse a backup path. There is no implicit target because authenticated sessions use different per-user paths.

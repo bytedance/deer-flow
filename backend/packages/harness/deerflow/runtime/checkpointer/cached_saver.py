@@ -30,7 +30,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple, PendingWrite
 
-from deerflow.runtime.checkpoint_cache.base import make_history_key
+from deerflow.runtime.checkpoint_cache.base import make_history_key, valid_history_entry
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class CachedHistorySaver(BaseCheckpointSaver):
         missing: list[str] = []
         for ch in channels:
             entry = hits.get(keys[ch])
-            if entry is None:
+            if not valid_history_entry(entry, channel=ch):
                 missing.append(ch)
             else:
                 found[ch] = entry
@@ -178,7 +178,7 @@ class CachedHistorySaver(BaseCheckpointSaver):
         key = self._key(parent, channel)
         hits = await self._cache.aget_many([key])
         parent_history = hits.get(key)
-        if parent_history is None:
+        if not valid_history_entry(parent_history, channel=channel):
             if depth > 0:
                 parent_history = await self._aresolve(parent, channel, depth - 1)
             else:
@@ -222,7 +222,7 @@ class CachedHistorySaver(BaseCheckpointSaver):
         missing: list[str] = []
         for ch in channels:
             entry = hits.get(keys[ch])
-            if entry is None:
+            if not valid_history_entry(entry, channel=ch):
                 missing.append(ch)
             else:
                 found[ch] = entry
@@ -253,7 +253,7 @@ class CachedHistorySaver(BaseCheckpointSaver):
 
         key = self._key(parent, channel)
         parent_history = self._cache.get_many([key]).get(key)
-        if parent_history is None:
+        if not valid_history_entry(parent_history, channel=channel):
             if depth > 0:
                 parent_history = self._resolve_sync(parent, channel, depth - 1)
             else:

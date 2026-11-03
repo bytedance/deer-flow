@@ -20,6 +20,17 @@ legacy unknown flags stay null. Queries never reconnect or admit Agent runs.
 Hash cursor anchors independently of job-ID syntax. Cancelled jobs have no
 available answer; their cancellation notices remain shared history events.
 
+Public state is plugin-owned, member-authored task data, not verified consensus
+or framework instructions. Stamp creator/editor and source from the authenticated
+member thread. Publish with a stable per-member request ID. Compare entry revisions
+and write state inside the same owner-scoped transaction; stale writers must not
+overwrite newer edits. Preserve the original publication fingerprint after edits.
+Project explicit public fields, never internal retry fingerprints. Keep at most
+20 current entries (archived entries count), within 16,000 UTF-8 JSON bytes.
+Inject active state independently of recent-message retention; bound the complete
+shared context to 24,000 bytes, dropping recent messages first. Do not rewrite a
+job's frozen input on state changes. Old teams read as empty without writes.
+
 Persist run input and idempotency keys before admission. Serialize by thread and
 record a terminal result and its follow-up receipt in one SQLite transaction.
 Unknown admission outcomes must retain ownership of the pending job. Never

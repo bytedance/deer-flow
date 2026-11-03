@@ -1305,6 +1305,23 @@ async def test_create_invalid_assistant_id_is_rejected():
 
 
 @pytest.mark.asyncio
+async def test_create_unparsable_assistant_config_keeps_host_path_out_of_422(caplog):
+    config_file = "/srv/deer-flow/users/user-1/agents/broken-bot/config.yaml"
+    with patch(
+        "app.gateway.routers.scheduled_tasks.load_agent_config",
+        side_effect=ValueError(f"Failed to parse agent config {config_file}: mapping values are not allowed here"),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await _call_create(_create_request(assistant_id="broken-bot"))
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == {
+        "code": "invalid_assistant",
+        "message": "Agent config for assistant_id 'broken-bot' could not be loaded",
+    }
+    assert config_file in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_update_custom_assistant_id_is_persisted():
     repo = _Repo()
     task = await repo.create(
@@ -1728,6 +1745,37 @@ async def test_naive_end_at_is_wall_clock_time_in_the_task_timezone(http):
     assert datetime.fromisoformat(response.json()["end_at"]) == datetime(2030, 1, 1, 1, 0, tzinfo=UTC)
     patched = await http.client.patch(f"/api/scheduled-tasks/{response.json()['id']}", json={"end_at": "2030-06-01T18:30:00"})
     assert datetime.fromisoformat(patched.json()["end_at"]) == datetime(2030, 6, 1, 10, 30, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("operation", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
+async def test_http_rejects_nonexistent_local_time_without_writing(http, monkeypatch, operation, field):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+    wall_time = "2027-03-14T02:30:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
+    if operation == "create":
+        response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "timezone": "America/New_York", **fields})
+    else:
+        await _seed(http.repo, timezone="America/New_York", next_run_at=datetime(2026, 10, 23, tzinfo=UTC))
+        if operation == "resume":
+            await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+        before = await http.repo.get("task-l", user_id=OWNER)
+        if operation == "update":
+            response = await http.client.patch("/api/scheduled-tasks/task-l", json=fields)
+        else:
+            response = await http.client.post("/api/scheduled-tasks/task-l/resume", json=fields)
+    detail = coded(response, 422, "invalid_schedule" if field == "run_at" else "invalid_request")
+    assert "does not exist" in detail["message"]
+    if operation == "create":
+        assert await http.repo.list_by_user(OWNER) == []
+    else:
+        assert await http.repo.get("task-l", user_id=OWNER) == before
+    assert http.launches == []
 
 
 @pytest.mark.asyncio

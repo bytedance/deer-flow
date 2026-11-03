@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -41,6 +42,85 @@ def test_existing_meta_is_preserved():
     msg = _make_msg("hello", kwargs={TOOL_META_KEY: existing})
     result = normalize_tool_message(msg)
     assert result.additional_kwargs[TOOL_META_KEY] is existing
+
+
+@pytest.mark.parametrize("name", ["bash", "bash_tool"])
+@pytest.mark.parametrize("content", ["\nExit Code: 1", "12 passed, 1 error\nExit Code: 7", "Command exited with code 3", "partial output\nExit Code: -9", "Command timed out\nExit Code: 124"])
+def test_bash_nonzero_exit_marker_is_a_recoverable_error(name, content):
+    msg = ToolMessage(content=content, tool_call_id="bash-1", name=name)
+    normalize_tool_message(msg)
+    assert _meta(msg) == {
+        "status": "error",
+        "error_type": "unknown",
+        "recoverable_by_model": True,
+        "recommended_next_action": "try_alternative",
+        "source": "content_analysis",
+    }
+
+
+def test_bash_nonzero_exit_repairs_legacy_analysis_success_without_changing_producer_meta():
+    legacy = {"status": "success", "source": "content_analysis"}
+    msg = ToolMessage(content="\nExit Code: 1", tool_call_id="bash-1", name="bash", additional_kwargs={TOOL_META_KEY: legacy, "deerflow_tool_receipt": {"status": "success"}})
+    normalize_tool_message(msg)
+    assert _meta(msg)["status"] == "error"
+    assert legacy == {"status": "success", "source": "content_analysis"}
+    assert msg.additional_kwargs["deerflow_tool_receipt"]["status"] == "success"
+
+
+@pytest.mark.parametrize("source", ["tool_return", "exception", "progress_middleware", "custom"])
+def test_bash_nonzero_exit_preserves_explicit_producer_meta(source):
+    existing = {"status": "success", "source": source}
+    msg = ToolMessage(content="\nExit Code: 1", tool_call_id="bash-1", name="bash", additional_kwargs={TOOL_META_KEY: existing})
+    assert _meta(normalize_tool_message(msg)) is existing
+
+
+@pytest.mark.parametrize(
+    "name,content",
+    [
+        ("bash", "ok\nExit Code: 0"),
+        ("bash", "Command exited with code 0"),
+        ("bash", "Exit Code: 1\nordinary final output"),
+        ("bash", "validating error path: Command exited with code 3\n5 passed"),
+        ("bash", "A document says Exit Code: 1"),
+        ("read_file", "\nExit Code: 1"),
+        ("web_fetch", "Command exited with code 3"),
+    ],
+)
+def test_bash_exit_marker_does_not_classify_other_tool_content_or_prose(name, content):
+    msg = ToolMessage(content=content, tool_call_id="call-1", name=name)
+    assert _meta(normalize_tool_message(msg))["status"] == "success"
+
+
+def test_bash_exit_status_does_not_classify_arbitrary_stdout_as_an_auth_error():
+    msg = ToolMessage(content="Processed row 403\nExit Code: 1", tool_call_id="bash-1", name="bash")
+    assert _meta(normalize_tool_message(msg))["error_type"] == "unknown"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX inert shell command")
+@pytest.mark.parametrize(
+    "command,output,status",
+    [
+        (": attempt-0; exit 1", "\nExit Code: 1", "error"),
+        ("printf 'x\\n' | grep z", "\nExit Code: 1", "error"),
+        ("printf 'x\\n' | grep z || true", "(no output)", "success"),
+    ],
+)
+def test_native_bash_exit_is_stamped_before_receipt(monkeypatch, command, output, status):
+    from types import SimpleNamespace
+
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.sandbox.local import local_sandbox
+
+    monkeypatch.setattr(local_sandbox, "build_sandbox_env", lambda _injected: {"PATH": os.defpath})
+    actual = local_sandbox.LocalSandbox("exit-status-probe").execute_command(command, timeout=5)
+    assert actual == output
+    request = SimpleNamespace(tool_call={"id": "bash-1", "name": "bash", "args": {"command": command}})
+    errors = ToolErrorHandlingMiddleware()
+    result = ToolReceiptMiddleware().wrap_tool_call(request, lambda req: errors.wrap_tool_call(req, lambda _: ToolMessage(content=actual, tool_call_id="bash-1", name="bash")))
+    assert _meta(result)["status"] == status
+    assert _meta(result)["recoverable_by_model"] is True
+    assert result.additional_kwargs["deerflow_tool_receipt"]["status"] == status
 
 
 # ---------------------------------------------------------------------------

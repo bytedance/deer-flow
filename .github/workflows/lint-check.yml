@@ -38,6 +38,19 @@ jobs:
           --after "${{ github.sha }}"
           --github-annotations
 
+  label-declarations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check every label applied by triage.yml is declared in labels.yml
+        run: python scripts/check_label_declarations.py
+
   lint-backend:
     runs-on: ubuntu-latest
     steps:

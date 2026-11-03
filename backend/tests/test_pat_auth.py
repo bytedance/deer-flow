@@ -540,7 +540,15 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
         under_runs = route.path.startswith("/api/threads/{thread_id}/runs")
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             admitted = is_pat_allowed_route(method, path)
-            if under_runs:
+            if route.path in {
+                "/api/threads/{thread_id}/runs/{run_id}/inputs",
+                "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}",
+                "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}/retry",
+            }:
+                # Interactive controls remain session-only, without widening
+                # existing PAT scopes or their explicit route allowlist.
+                assert not admitted, f"{method} {path} must stay PAT-denied"
+            elif under_runs:
                 assert admitted, f"{method} {path} is implemented but PAT-denied"
             else:
                 # /messages, /messages/page, /token-usage sit outside the runs

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -51,7 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     enable = commands.add_parser("enable", help="enable an installed extension")
     enable.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     enable.add_argument("name", help="extension name, distribution, or module:install entry point")
-    commands.add_parser("list", help="list configured extensions")
+    list_command = commands.add_parser("list", help="list configured extensions")
+    list_command.add_argument("--json", action="store_true", help="output configured extension inventory as JSON")
     remove = commands.add_parser("remove", help="uninstall an extension and remove its config entry")
     remove.add_argument("--name-env", action="store_true", help=argparse.SUPPRESS)
     remove.add_argument("name", help="extension name, distribution, or module:install entry point")
@@ -104,6 +106,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "list":
             configured = manager.list_configured()
+            if args.json:
+                inventory = [
+                    {
+                        "name": extension.name,
+                        "package": extension.distribution,
+                        "entry_point": extension.use,
+                        "enabled": extension.enabled,
+                        "required": extension.required,
+                    }
+                    for extension in configured
+                ]
+                print(json.dumps(inventory, indent=2))
+                return 0
             print("NAME\tSTATE\tPACKAGE\tENTRY POINT")
             for extension in configured:
                 state = "enabled" if extension.enabled else "disabled"

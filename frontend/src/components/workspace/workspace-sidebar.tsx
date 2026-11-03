@@ -1,7 +1,7 @@
 "use client";
 
 import {
-  Sidebar,
+  type Sidebar,
   SidebarHeader,
   SidebarContent,
   SidebarFooter,
@@ -18,37 +18,50 @@ import { ThreadDeleteDialogProvider } from "./thread-delete-dialog";
 import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
 import { WorkspaceNavMenu } from "./workspace-nav-menu";
+import {
+  WorkspaceSidebarFrame,
+  useWorkspaceSidebarExpanded,
+} from "./workspace-sidebar-frame";
 
 export function WorkspaceSidebar({
   ...props
 }: React.ComponentProps<typeof Sidebar>) {
-  const { open: isSidebarOpen } = useSidebar();
   // One activity poll per workspace (off unless the Gateway offers it): new
   // and changed server-created threads reach the thread lists without a
   // reload, and a read on another device clears their dots here.
   useThreadActivity();
   return (
     <ThreadDeleteDialogProvider>
-      <Sidebar variant="sidebar" collapsible="icon" {...props}>
-        <SidebarHeader className="py-0">
-          <WorkspaceHeader />
-        </SidebarHeader>
-        <SidebarContent>
-          <WorkspaceNavChatList />
-          <PluginNavigation />
-          <WorkspaceChannelsList />
-          {isSidebarOpen && (
-            <>
-              <ProjectsSection />
-              <RecentChatList />
-            </>
-          )}
-        </SidebarContent>
-        <SidebarFooter>
-          <WorkspaceNavMenu />
-        </SidebarFooter>
-        <SidebarRail />
-      </Sidebar>
+      <WorkspaceSidebarFrame variant="sidebar" collapsible="icon" {...props}>
+        <WorkspaceSidebarContents />
+      </WorkspaceSidebarFrame>
     </ThreadDeleteDialogProvider>
+  );
+}
+
+function WorkspaceSidebarContents() {
+  const isSidebarOpen = useWorkspaceSidebarExpanded();
+  const { isMobile } = useSidebar();
+  return (
+    <>
+      <SidebarHeader className="py-0">
+        <WorkspaceHeader />
+      </SidebarHeader>
+      <SidebarContent>
+        <WorkspaceNavChatList />
+        <PluginNavigation />
+        <WorkspaceChannelsList />
+        {isSidebarOpen && (
+          <>
+            <ProjectsSection />
+            <RecentChatList />
+          </>
+        )}
+      </SidebarContent>
+      <SidebarFooter>
+        <WorkspaceNavMenu />
+      </SidebarFooter>
+      {!isMobile && <SidebarRail />}
+    </>
   );
 }

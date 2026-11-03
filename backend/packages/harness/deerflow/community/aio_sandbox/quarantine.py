@@ -41,6 +41,28 @@ class SandboxQuarantine:
             return False
         return True
 
+    @staticmethod
+    def _records(directory: Path) -> list[Path]:
+        """List the fences a teardown pass is about to drop.
+
+        The teardown exclusion is a TTL lease, not a lock, so a peer's retire()
+        can finish between the caller's existence check and this listing. Its
+        records are then gone, which is the state both callers were asked to
+        produce; ``contains()`` reports the same interleaving as "no fence".
+        """
+        try:
+            return list(directory.iterdir())
+        except FileNotFoundError:
+            return []
+
+    @staticmethod
+    def _drop(record: Path) -> None:
+        """Unlink one fence, tolerating a peer that unlinked it first."""
+        try:
+            record.unlink()
+        except FileNotFoundError:
+            pass
+
     def mark(self, info: SandboxInfo) -> None:
         directory = self._directory(info)
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -84,10 +106,10 @@ class SandboxQuarantine:
         if not self._exists(directory):
             return
         keep = self._key(current.container_id) if current.container_id else None
-        for record in directory.iterdir():
+        for record in self._records(directory):
             if record.name == "unknown" or (keep is not None and record.name == keep):
                 continue
-            record.unlink()
+            self._drop(record)
         try:
             directory.rmdir()
         except OSError:
@@ -117,18 +139,20 @@ class SandboxQuarantine:
 
         This is best-effort, not full fence preservation: it closes the listing
         → ``rmdir`` window only. A peer record landing before the listing is
-        still unlinked along with the rest, and the unlink loop has unguarded
-        sibling windows of its own — a concurrent ``retire()`` can remove the
-        directory between the existence check and the listing
-        (``FileNotFoundError``), and on Windows a peer's ``mark()`` still
-        holding the fresh record open for its ``fsync`` raises
-        ``PermissionError``.
+        still unlinked along with the rest. Both the listing and each unlink
+        tolerate a peer that removed the directory or the record first, matching
+        the ``FileNotFoundError`` handling in :meth:`contains`, so a teardown
+        that finds its work already done returns instead of raising out of
+        ``_retire_absent_quarantine``. What stays unclosed on purpose: on Windows
+        a peer's ``mark()`` still holding the fresh record open for its
+        ``fsync`` raises ``PermissionError``, which is a real storage failure
+        rather than an absent fence.
         """
         directory = self._directory(info)
         if not self._exists(directory):
             return
-        for record in directory.iterdir():
-            record.unlink()
+        for record in self._records(directory):
+            self._drop(record)
         try:
             directory.rmdir()
         except OSError:

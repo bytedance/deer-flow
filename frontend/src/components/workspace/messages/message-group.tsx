@@ -35,6 +35,8 @@ import {
   resolveArtifactURL,
 } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
+import { isErrorToolMessage } from "@/core/messages/tool-error";
+import { indexToolResults } from "@/core/messages/tool-result";
 import { formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import {
@@ -53,7 +55,11 @@ import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
 import { MarkdownContent } from "./markdown-content";
-import { isSafeHref, UnsafeLink } from "./markdown-link";
+import {
+  createMarkdownLinkComponent,
+  isSafeHref,
+  UnsafeLink,
+} from "./markdown-link";
 import { MessageReasoning } from "./message-reasoning";
 import { ToolCallDetails } from "./tool-call-details";
 
@@ -81,6 +87,10 @@ function MessageGroupComponent({
   toolArtifacts,
 }: MessageGroupProps) {
   const { t } = useI18n();
+  const markdownComponents = useMemo(
+    () => ({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
+  );
   const [showAbove, setShowAbove] = useState(
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
@@ -285,7 +295,7 @@ function MessageGroupComponent({
 
     return (
       <ToolCall
-        key={step.id}
+        key={step.occurrenceId}
         {...step}
         threadId={threadId}
         isLast={options?.isLast}
@@ -303,7 +313,13 @@ function MessageGroupComponent({
     <ChainOfThoughtStep
       key={step.id}
       icon={MessageSquareTextIcon}
-      label={<MarkdownContent content={step.content} isLoading={isLoading} />}
+      label={
+        <MarkdownContent
+          content={step.content}
+          isLoading={isLoading}
+          components={markdownComponents}
+        />
+      }
     ></ChainOfThoughtStep>
   );
 
@@ -324,6 +340,7 @@ function MessageGroupComponent({
             <MarkdownContent
               content={step.reasoning ?? ""}
               isLoading={isLoading}
+              components={markdownComponents}
             />
           }
         ></ChainOfThoughtStep>,
@@ -398,7 +415,7 @@ function MessageGroupComponent({
                 lastToolCallStep.messageId,
                 stepIndexByStep.get(lastToolCallStep) ?? -1,
               )}
-              <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
+              <FlipDisplay uniqueKey={lastToolCallStep.occurrenceId}>
                 {renderToolCall(lastToolCallStep, { isLast: true })}
               </FlipDisplay>
               {afterLastToolCallAssistantTextSteps
@@ -479,6 +496,7 @@ function MessageGroupComponent({
                       <MarkdownContent
                         content={lastReasoningStep.reasoning ?? ""}
                         isLoading={isLoading}
+                        components={markdownComponents}
                       />
                     }
                   ></ChainOfThoughtStep>
@@ -501,7 +519,11 @@ function MessageGroupComponent({
       {processingPanel}
       {clarificationTextSteps.map((step) => (
         <div key={step.id} className="w-full">
-          <MarkdownContent content={step.content} isLoading={isLoading} />
+          <MarkdownContent
+            content={step.content}
+            isLoading={isLoading}
+            components={markdownComponents}
+          />
         </div>
       ))}
     </>
@@ -656,17 +678,24 @@ export function scheduleToolLabel(
   args: Record<string, unknown> | null | undefined,
   result: string | Record<string, unknown> | undefined,
   t: ReturnType<typeof useI18n>["t"],
+  failed = false,
 ): string | null {
   if (name !== "schedule_task" && name !== "stop_scheduled_task") {
     return null;
   }
-  // Both tools always return a JSON object, so text that does not parse is a
-  // tool-level failure (for example rejected arguments), never a success.
+  if (failed) return t.toolCalls.scheduleTaskFailed;
+  if (result == null || (typeof result === "string" && !result.trim())) {
+    return name === "stop_scheduled_task"
+      ? t.toolCalls.stopScheduledTaskPending
+      : t.toolCalls.scheduleTaskPending;
+  }
+  // Both tools return an object; a missing or invalid response cannot confirm
+  // that the requested operation succeeded.
   if (
-    (typeof result === "string" && result.trim() !== "") ||
-    (typeof result === "object" &&
-      result !== null &&
-      ("error" in result || "code" in result))
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    "error" in result ||
+    "code" in result
   ) {
     return t.toolCalls.scheduleTaskFailed;
   }
@@ -745,12 +774,25 @@ function ToolCall({
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
-  const resolveLabel = (fallback: React.ReactNode) =>
-    tokenDebugStep ? (
+  const failed = resultMessage ? isErrorToolMessage(resultMessage) : false;
+  const schedulerTool =
+    kind === "schedule_task" || kind === "stop_scheduled_task";
+  const resolveLabel = (fallback: React.ReactNode) => {
+    const label = tokenDebugStep ? (
       <DebugStepLabel label={tokenDebugStep.label} token={tokenLabel} />
     ) : (
       fallback
     );
+    if (!failed || (schedulerTool && !tokenDebugStep)) return label;
+    return (
+      <>
+        {label}
+        <span className="text-destructive ml-2 text-xs" role="status">
+          {t.toolCalls.failed}
+        </span>
+      </>
+    );
+  };
   const writeFilePath =
     (kind === "write_file" || kind === "str_replace") &&
     typeof args.path === "string"
@@ -1094,7 +1136,7 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={resolveLabel(scheduleToolLabel(name, args, result, t))}
+        label={resolveLabel(scheduleToolLabel(name, args, result, t, failed))}
         icon={stop ? CalendarX2Icon : CalendarClockIcon}
         className={stop ? "text-sky-700 dark:text-sky-400" : undefined}
         data-testid={stop ? "scheduled-stop-step" : undefined}
@@ -1169,6 +1211,7 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
 }
 
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
+  occurrenceId: string;
   name: string;
   args: Record<string, unknown>;
   result?: string;
@@ -1194,31 +1237,32 @@ function indexToolCallData(messages: Message[]) {
   const toolCallResults = new Map<string, string>();
   const browserViews = new Map<string, BrowserViewMeta>();
   const resultMessages = new Map<string, Extract<Message, { type: "tool" }>>();
-
-  for (const message of messages) {
-    if (message.type !== "tool" || !message.tool_call_id) {
-      continue;
-    }
-
-    const toolCallId = message.tool_call_id;
-    if (!resultMessages.has(toolCallId))
-      resultMessages.set(toolCallId, message);
-    if (!toolCallResults.has(toolCallId)) {
-      const result = extractTextFromMessage(message);
-      if (result) {
-        toolCallResults.set(toolCallId, result);
-        resultMessages.set(toolCallId, message);
+  for (const [ownerIndex, results] of indexToolResults(messages)) {
+    for (const message of results) {
+      if (message.type !== "tool" || !message.tool_call_id) {
+        continue;
       }
-    }
 
-    if (!browserViews.has(toolCallId)) {
-      const browserView = (
-        message.additional_kwargs as
-          | { browser_view?: BrowserViewMeta }
-          | undefined
-      )?.browser_view;
-      if (browserView && typeof browserView.screenshot === "string") {
-        browserViews.set(toolCallId, browserView);
+      const toolCallId = `${ownerIndex}:${message.tool_call_id}`;
+      if (!resultMessages.has(toolCallId))
+        resultMessages.set(toolCallId, message);
+      if (!toolCallResults.has(toolCallId)) {
+        const result = extractTextFromMessage(message);
+        if (result) {
+          toolCallResults.set(toolCallId, result);
+          resultMessages.set(toolCallId, message);
+        }
+      }
+
+      if (!browserViews.has(toolCallId)) {
+        const browserView = (
+          message.additional_kwargs as
+            | { browser_view?: BrowserViewMeta }
+            | undefined
+        )?.browser_view;
+        if (browserView && typeof browserView.screenshot === "string") {
+          browserViews.set(toolCallId, browserView);
+        }
       }
     }
   }
@@ -1275,6 +1319,10 @@ function convertToSteps(
         }
         const step: CoTToolCallStep = {
           id: tool_call.id,
+          occurrenceId: JSON.stringify([
+            message.id ?? `ai-${messageIndex}`,
+            tool_call.id,
+          ]),
           messageId: message.id,
           type: "toolCall",
           name: tool_call.name,
@@ -1284,8 +1332,9 @@ function convertToSteps(
         };
         const toolCallId = tool_call.id;
         if (toolCallId) {
-          const toolCallResult = toolCallResults.get(toolCallId);
-          step.resultMessage = resultMessages.get(toolCallId);
+          const occurrence = `${messageIndex}:${toolCallId}`;
+          const toolCallResult = toolCallResults.get(occurrence);
+          step.resultMessage = resultMessages.get(occurrence);
           // Generic details preserve received text; specialized tools retain their parsing.
           if (toolCallResult && getToolCallKind(tool_call.name) !== "generic") {
             try {
@@ -1295,7 +1344,7 @@ function convertToSteps(
               step.result = toolCallResult;
             }
           }
-          step.browserView = browserViews.get(toolCallId);
+          step.browserView = browserViews.get(occurrence);
           const artifacts = artifactsByToolCallId.get(toolCallId);
           if (artifacts) {
             step.artifacts = artifacts;

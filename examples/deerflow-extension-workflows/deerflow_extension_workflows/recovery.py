@@ -1,7 +1,7 @@
 """Versioned bridge journal replay; authority is reacquired from a live session.
 
-Phase 3 retains the exclusive store owner. Conditional revisions and durable
-bridge intents are the foundation for a future leased, fenced cluster owner.
+SQLite retains its exclusive store owner. PostgreSQL uses a shared execution
+lease and fenced admission; both replay the same committed bridge journal.
 """
 
 import asyncio
@@ -43,6 +43,9 @@ class Recovery:
                 raise ValueError("Active workflow limit")
             entry = self.new_entry(owner, record, context.agent_runs)
             await self.check_configuration(entry)
+            if self.clustered:
+                record = await asyncio.to_thread(self.store.claim, owner, run_id)
+                entry = self.new_entry(owner, record, context.agent_runs)
             # A committed admission intent with no receipt is never dispatched
             # again. An operator must reconcile its external effects first.
             uncertain = [s for s in record["steps"] if s["status"] not in ("queued", "completed", "running") or (s["status"] == "running" and not s.get("run_id"))]

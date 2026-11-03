@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import deerflow.runtime.events.terminal as terminal_module
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
@@ -15,6 +16,8 @@ from deerflow.persistence.scheduled_task_runs.finalization import AGENT_STOP_LAS
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskRepository
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.runtime.events.store.db import DbRunEventStore
+from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 
 
 @pytest.mark.asyncio
@@ -1439,5 +1442,220 @@ async def test_pausing_a_finished_task_reports_finished(tmp_path, terminal):
         before = await tasks.update("task-1", user_id="user-1", updates={"status": terminal})
         assert await tasks.pause_with_queue_cancellation("task-1", user_id="user-1", error="pause", now=datetime.now(UTC)) == "finished"
         assert await tasks.get("task-1", user_id="user-1") == before
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_path", ["once", "active"])
+async def test_scheduler_recovery_claim_backfills_error_terminal(tmp_path, recovery_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        event_store = DbRunEventStore(sf)
+        run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
+        task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
+        task_run_repo = ScheduledTaskRunRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
+        now = datetime.now(UTC)
+        run_id, thread_id = f"run-{recovery_path}", f"thread-{recovery_path}"
+
+        if recovery_path == "once":
+            await task_repo.create(
+                task_id="task-once-terminal",
+                user_id="user-1",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title="once terminal",
+                prompt="p",
+                schedule_type="once",
+                schedule_spec={"run_at": now.isoformat()},
+                timezone="UTC",
+                next_run_at=None,
+            )
+            await task_repo.update("task-once-terminal", user_id="user-1", updates={"status": "running", "last_run_id": run_id})
+            await run_repo.put(
+                run_id,
+                thread_id=thread_id,
+                user_id="user-1",
+                status="running",
+                owner_worker_id="dead-owner",
+                lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+            )
+            reconciled = await task_repo.reconcile_stuck_once_tasks(error="restart", now=now)
+        else:
+            await task_repo.create(
+                task_id="task-active-terminal",
+                user_id="user-1",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title="active terminal",
+                prompt="p",
+                schedule_type="cron",
+                schedule_spec={"cron": "* * * * *"},
+                timezone="UTC",
+                next_run_at=None,
+            )
+            await task_run_repo.create(
+                run_record_id="task-run-active-terminal",
+                task_id="task-active-terminal",
+                thread_id=thread_id,
+                scheduled_for=now,
+                trigger="scheduled",
+                status="running",
+            )
+            await task_run_repo.update_status("task-run-active-terminal", status="running", run_id=run_id)
+            await run_repo.put(
+                run_id,
+                thread_id=thread_id,
+                user_id="user-1",
+                status="running",
+                metadata={"scheduled_task_id": "task-active-terminal", "scheduled_task_run_id": "task-run-active-terminal"},
+                owner_worker_id="dead-owner",
+                lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+            )
+            reconciled = await task_run_repo.reconcile_active_runs(error="restart", now=now)
+
+        assert reconciled == 1
+        row = await run_repo.get(run_id, user_id="user-1")
+        assert row is not None
+        assert row["status"] == "error"
+        assert row["evidence_seal_state"] == "partial"
+        delivery = await event_store.list_events(thread_id, run_id, event_types=["run.delivery"], user_id=None)
+        terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
+        assert len(delivery) == 1
+        assert len(terminal) == 1
+        assert delivery[0]["seq"] < terminal[0]["seq"]
+        assert terminal[0]["content"] == {"status": "error"}
+        assert terminal[0]["metadata"]["protocol_version"] == 1
+        assert terminal[0]["metadata"]["recovered"] is True
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publisher_failure", [False, True])
+async def test_scheduler_outer_transaction_failure_still_publishes_committed_claim(tmp_path, monkeypatch, publisher_failure):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        event_store = DbRunEventStore(sf)
+        run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
+        task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
+        now = datetime.now(UTC)
+        run_id, thread_id = "run-outer-rollback", "thread-outer-rollback"
+        await task_repo.create(
+            task_id="task-outer-rollback",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="outer rollback",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update("task-outer-rollback", user_id="user-1", updates={"status": "running", "last_run_id": run_id})
+        task = await task_repo.get("task-outer-rollback", user_id="user-1")
+        assert task is not None and task["status"] == "running"
+        await run_repo.put(
+            run_id,
+            thread_id=thread_id,
+            user_id="user-1",
+            status="running",
+            owner_worker_id="dead-owner",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+
+        def fail_after_claim(*args, **kwargs):
+            raise RuntimeError("scheduler outer transaction failed")
+
+        if publisher_failure:
+
+            async def fail_confirmation(*args, **kwargs):
+                raise RuntimeError("unexpected confirmation failure")
+
+            monkeypatch.setattr(terminal_module, "confirm_terminal_event", fail_confirmation)
+        monkeypatch.setattr(ScheduledTaskRepository, "_finalise_once_task_from_run", fail_after_claim)
+        with pytest.raises(RuntimeError, match="scheduler outer transaction failed"):
+            await asyncio.wait_for(task_repo.reconcile_stuck_once_tasks(error="restart", now=now), timeout=5)
+
+        row = await run_repo.get(run_id, user_id="user-1")
+        assert row is not None
+        assert row["status"] == "error"
+        task = await task_repo.get("task-outer-rollback", user_id="user-1")
+        assert task is not None and task["status"] == "running"
+        terminal = await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None)
+        if publisher_failure:
+            assert terminal == []
+        else:
+            assert len(terminal) == 1
+            assert terminal[0]["metadata"]["recovered"] is True
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovery_event_failure_preserves_committed_state(tmp_path, monkeypatch):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        event_store = DbRunEventStore(sf)
+        run_repo = RunRepository(sf)
+        publisher = RecoveryTerminalPublisher(event_store, run_repo)
+        task_repo = ScheduledTaskRepository(sf, run_repository=run_repo, recovery_terminal_publisher=publisher)
+        now = datetime.now(UTC)
+        run_id, thread_id = "run-event-failure", "thread-event-failure"
+        await task_repo.create(
+            task_id="task-event-failure",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="event failure",
+            prompt="p",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update("task-event-failure", user_id="user-1", updates={"status": "running", "last_run_id": run_id})
+        task = await task_repo.get("task-event-failure", user_id="user-1")
+        assert task is not None and task["status"] == "running"
+        await run_repo.put(
+            run_id,
+            thread_id=thread_id,
+            user_id="user-1",
+            status="running",
+            owner_worker_id="dead-owner",
+            lease_expires_at=(now - timedelta(seconds=60)).isoformat(),
+        )
+        original = event_store.put_if_absent
+        attempts = []
+
+        async def fail_terminal(**kwargs):
+            if kwargs["event_type"] == "run.terminal":
+                attempts.append(kwargs)
+                raise OSError("terminal event unavailable")
+            return await original(**kwargs)
+
+        monkeypatch.setattr(event_store, "put_if_absent", fail_terminal)
+
+        assert await task_repo.reconcile_stuck_once_tasks(error="restart", now=now) == 1
+
+        assert len(attempts) == 2
+        row = await run_repo.get(run_id, user_id="user-1")
+        assert row is not None and row["status"] == "error"
+        task = await task_repo.get("task-event-failure", user_id="user-1")
+        assert task is not None and task["status"] == "cancelled"
+        assert await event_store.list_events(thread_id, run_id, event_types=["run.terminal"], user_id=None) == []
     finally:
         await close_engine()

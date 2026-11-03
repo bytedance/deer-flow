@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -487,6 +489,93 @@ def test_find_glob_matches_raises_not_a_directory(tmp_path) -> None:
         assert False, "Expected NotADirectoryError"
     except NotADirectoryError:
         pass
+
+
+_NON_ROOT_POSIX = pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="requires non-root POSIX directory permissions",
+)
+
+
+@_NON_ROOT_POSIX
+def test_local_list_dir_propagates_permission_error(tmp_path) -> None:
+    """Permission-denied roots must not look like an empty successful listing."""
+    from deerflow.sandbox.local.list_dir import list_dir
+
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as caught:
+            list_dir(str(locked))
+        assert caught.value.filename is not None
+        assert Path(os.fsdecode(caught.value.filename)).resolve() == locked.resolve()
+    finally:
+        locked.chmod(0o700)
+
+
+@_NON_ROOT_POSIX
+def test_find_glob_matches_propagates_permission_error(tmp_path) -> None:
+    """Inaccessible subtrees must surface instead of being skipped as no matches."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("x = 1\n", encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as caught:
+            find_glob_matches(workspace, "**/*.py")
+        assert caught.value.filename is not None
+        assert Path(os.fsdecode(caught.value.filename)).resolve() == locked.resolve()
+    finally:
+        locked.chmod(0o700)
+
+
+@_NON_ROOT_POSIX
+def test_ls_tool_permission_error_names_denied_entry(tmp_path, monkeypatch) -> None:
+    """ls must name the denied entry, not only the requested root."""
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.txt").write_text("hidden\n", encoding="utf-8")
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: LocalSandbox(id="local"))
+    locked.chmod(0o000)
+    try:
+        result = ls_tool.func(runtime=runtime, description="list locked", path="/mnt/user-data/workspace/locked")
+    finally:
+        locked.chmod(0o700)
+    assert result.startswith("Error: Permission denied:"), result
+    assert "/mnt/user-data/workspace/locked" in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
+
+
+@_NON_ROOT_POSIX
+def test_glob_tool_permission_error_names_denied_subdirectory(tmp_path, monkeypatch) -> None:
+    """glob must name the denied subdirectory, not only the search root."""
+    runtime = _make_runtime(tmp_path)
+    workspace = tmp_path / "workspace"
+    locked = workspace / "locked"
+    locked.mkdir()
+    (locked / "secret.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _: LocalSandbox(id="local"))
+    locked.chmod(0o000)
+    try:
+        result = glob_tool.func(
+            runtime=runtime,
+            description="search locked",
+            path="/mnt/user-data/workspace",
+            pattern="**/*.py",
+        )
+    finally:
+        locked.chmod(0o700)
+    assert result.startswith("Error: Permission denied:"), result
+    assert "/mnt/user-data/workspace/locked" in result
+    assert str(workspace) not in result
+    assert str(tmp_path) not in result
 
 
 def test_find_grep_matches_accepts_single_file(tmp_path) -> None:

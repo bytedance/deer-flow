@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -218,7 +219,7 @@ def _parse_results(response: dict[str, Any], *, max_results: int) -> list[dict[s
         content = page_data.get("content") or page_data.get("passage") or ""
         result = {
             "title": title if isinstance(title, str) else "",
-            "url": url if isinstance(url, str) else "",
+            "url": safe_public_result_url(url),
             "snippet": content if isinstance(content, str) else "",
         }
         for field in ("date", "site", "score"):

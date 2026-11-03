@@ -1327,6 +1327,34 @@ class TestLlmCallbacks:
         assert messages[0]["content"]["content"] == "Answer"
 
     @pytest.mark.anyio
+    async def test_interrupted_partial_response_is_idempotent(self, journal_setup):
+        j, store = journal_setup
+        partial = AIMessage(id="partial-ai", content="Visible so far")
+
+        assert j.record_interrupted_ai_responses([partial]) == 1
+        assert j.record_interrupted_ai_responses([partial]) == 0
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Visible so far"
+        assert messages[0]["metadata"]["partial"] is True
+
+    @pytest.mark.anyio
+    async def test_completed_response_wins_interruption_race(self, journal_setup):
+        j, store = journal_setup
+        completed = AIMessage(id="shared-ai", content="Complete answer")
+        response = LLMResult(generations=[[ChatGeneration(message=completed)]])
+
+        j.on_llm_end(response, run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        assert j.record_interrupted_ai_responses([AIMessage(id="shared-ai", content="Complete ans")]) == 0
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        assert len(messages) == 1
+        assert messages[0]["content"]["content"] == "Complete answer"
+
+    @pytest.mark.anyio
     async def test_on_llm_end_with_tool_calls_produces_ai_tool_call(self, journal_setup):
         """LLM response with pending tool_calls emits llm.ai.response with tool_calls in content."""
         j, store = journal_setup

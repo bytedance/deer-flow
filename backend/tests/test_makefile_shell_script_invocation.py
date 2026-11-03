@@ -74,6 +74,28 @@ _SCRIPT_REFERENCE = re.compile(r"\S*[\w.-]+\.sh\b")
 
 # A script name inside a usage string or hint is prose, not an invocation.
 _MESSAGE_COMMAND = re.compile(r"\b(echo|printf|cat)\b")
+_SERVE_MODE_FLAG = re.compile(r"--(?:dev|prod|daemon)\b")
+
+
+def test_start_daemon_wrapper_uses_production_mode() -> None:
+    """The compatibility wrapper must agree with the Makefile target."""
+    makefile_text = MAKEFILE.read_text(encoding="utf-8")
+    target = re.search(r"^start-daemon:\s*\n(?P<recipe>(?:\t.*\n)+)", makefile_text, re.MULTILINE)
+    assert target is not None, "expected a start-daemon target in the Makefile"
+
+    makefile_invocations = [line for line in target.group("recipe").splitlines() if "./scripts/serve.sh" in line]
+    assert len(makefile_invocations) == 1, f"expected one serve.sh invocation in start-daemon, got {makefile_invocations}"
+
+    wrapper_text = (SCRIPTS_DIR / "start-daemon.sh").read_text(encoding="utf-8")
+    wrapper_invocations = [line for line in wrapper_text.splitlines() if not line.lstrip().startswith("#") and "scripts/serve.sh" in line]
+    assert len(wrapper_invocations) == 1, f"expected one serve.sh invocation in start-daemon.sh, got {wrapper_invocations}"
+
+    makefile_flags = _SERVE_MODE_FLAG.findall(makefile_invocations[0])
+    wrapper_flags = _SERVE_MODE_FLAG.findall(wrapper_invocations[0])
+
+    assert makefile_flags == ["--prod", "--daemon"], f"start-daemon must select production daemon mode, got {makefile_flags}"
+    assert wrapper_flags == makefile_flags, f"start-daemon.sh mode {wrapper_flags} differs from the Makefile target {makefile_flags}"
+    assert '"$@"' in wrapper_invocations[0], "the compatibility wrapper must pass optional arguments through to serve.sh"
 
 
 def _sibling_script_invocations() -> list[tuple[str, int, str]]:

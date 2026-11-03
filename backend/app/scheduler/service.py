@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.channels.capabilities import supports_proactive_group_notifications, supports_proactive_notifications
@@ -30,7 +29,7 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at
+from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -455,6 +454,15 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
+            try:
+                finalized = await self._task_repo.reconcile_terminal_runs(now=now)
+                if finalized:
+                    logger.info("Finalized %d scheduled occurrence(s) from terminal durable runs", finalized)
+            except Exception:
+                # The pass already isolates per-occurrence failures; a remaining
+                # failure (e.g. the candidate query) must not skip admission or
+                # queue draining for this poll.
+                logger.exception("Failed to reconcile terminal scheduled runs")
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
@@ -473,7 +481,19 @@ class ScheduledTaskService:
     def _is_overlap_conflict(exc: Exception) -> bool:
         if isinstance(exc, ConflictError):
             return True
-        return isinstance(exc, HTTPException) and exc.status_code == 409
+        # ``start_run`` converts a run-manager admission conflict into this
+        # typed HTTP 409. Other 409s (idempotency-key mismatch, thread or
+        # assistant drift) are permanent launch failures; retrying them would
+        # keep the occurrence queued until the queue timeout.
+        #
+        # Keep the import local to avoid changing the scheduler module's
+        # load-time import graph. The scheduler is wired by the Gateway, where
+        # ``app.gateway.services`` is already loaded, so this lookup is
+        # guaranteed; do not make it optional without moving the
+        # classification to a dependency that is always importable here.
+        from app.gateway.services import BusyThreadConflict
+
+        return isinstance(exc, BusyThreadConflict)
 
     @staticmethod
     def _task_status_for_failure(task: dict[str, Any], *, trigger: str) -> str:
@@ -504,6 +524,28 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
+    @staticmethod
+    def _next_run_at_after_launch(
+        task: dict[str, Any],
+        *,
+        trigger: str,
+        now: datetime,
+    ) -> datetime | str | None:
+        """Keep a recurring task's cadence when a manual trial launches.
+
+        A manual run is an extra trial and must not consume the task's next
+        scheduled occurrence. One-time tasks retain their existing boundary
+        semantics, so only recurring manual launches keep the stored value.
+        """
+        if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
+            return task.get("next_run_at")
+        return next_run_at(
+            task["schedule_type"],
+            task["schedule_spec"],
+            task["timezone"],
+            now=now,
+        )
+
     async def dispatch_task(
         self,
         task: dict[str, Any],
@@ -532,12 +574,7 @@ class ScheduledTaskService:
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                ),
+                next_run_at=self._next_run_at_after_launch(task, trigger=trigger, now=now),
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
@@ -608,6 +645,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -695,12 +736,7 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
             task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
             await self._record_launched_run(
                 task_run_id=task_run_id,
@@ -738,12 +774,7 @@ class ScheduledTaskService:
                 )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
-            next_at = next_run_at(
-                task["schedule_type"],
-                task["schedule_spec"],
-                task["timezone"],
-                now=now,
-            )
+            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
 
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
@@ -836,8 +867,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):

@@ -168,21 +168,13 @@ def validate_path_traversal(path: Path, base: Path) -> None:
 
 
 def _replacement_destination_is_hardlinked(st: os.stat_result) -> bool:
-    """Whether a *replacement* destination shows an untrusted extra hard link.
+    """Preserve the pre-existing hardlink guard where link counts are reliable.
 
-    Only used on the non-exclusive replacement path, where the module is about to
-    overwrite a file it published itself. On POSIX ``st_nlink`` is authoritative,
-    so ``st_nlink > 1`` means a second name — possibly outside the uploads tree —
-    aliases the destination and overwriting it would mutate that other file.
-
-    Windows cannot answer that question with ``st_nlink``: NTFS leaves the count at
-    2 once one of the two names of a published upload is unlinked, and unlinking a
-    hard link does not decrement it either. The count there is therefore *always*
-    at least 2 for a file this module just published, which made the guard reject
-    every legitimate replacement upload (``copy_upload_file_no_symlink``) and made
-    the alias-reclaiming sweep unable to clear it. Treat the count as unreliable on
-    Windows; the symlink and regular-file guards on the same destination, and the
-    ``exclusive`` (first-claim) path used by every untrusted caller, are unchanged.
+    Default destination validation rejects POSIX entries with another alias.
+    Windows can retain a stale count of two after a staging alias is removed,
+    so that count cannot reject an otherwise ordinary published upload there.
+    Collision writes never open the old entry, and both O_EXCL creation modes
+    require a newly opened file to have exactly one link.
     """
     return os.name != "nt" and st.st_nlink > 1
 
@@ -319,6 +311,15 @@ def cleanup_stale_upload_staging_files(base_dir: Path | str | None = None, *, mi
     return removed
 
 
+def _existing_dir_names(base_dir: Path) -> set[str]:
+    """Snapshot the names currently in *base_dir* (empty set when it cannot be scanned)."""
+    try:
+        with os.scandir(base_dir) as entries:
+            return {entry.name for entry in entries}
+    except OSError:
+        return set()
+
+
 def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: bool = False) -> tuple[Path, object]:
     """Open an upload destination for safe streaming writes.
 
@@ -326,14 +327,22 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
     therefore leave a symlink at a future upload filename. Normal ``Path.write_bytes``
     follows that link and can overwrite files outside the uploads directory with
     gateway privileges. This helper rejects symlink destinations using ``O_NOFOLLOW``
-    on POSIX. On Windows (which lacks ``O_NOFOLLOW``), it uses dual ``lstat`` checks
-    and ``fstat`` validation after ``open()`` to reduce the TOCTOU window; this does
-    not eliminate all races but makes exploitation significantly harder. Path-traversal
-    validation prevents escapes from *base_dir* in both cases.
+    on POSIX. On Windows (which lacks ``O_NOFOLLOW``), dual ``lstat`` checks
+    and ``O_EXCL`` refuse occupied destination names, with ``fstat`` validation
+    after ``open()``. Path-traversal validation applies in both cases.
 
-    ``exclusive=True`` atomically claims a new filename. An existing regular
-    file raises ``FileExistsError`` without truncation so the caller can retry
-    under another name. The default retains replacement semantics.
+    Same-name collisions never destroy the existing file: the destination is opened
+    with ``O_EXCL`` (so a pre-existing file can never be opened and truncated), and
+    on :class:`FileExistsError` the next free ``_N`` suffix is claimed against the
+    directory's current contents via :func:`claim_unique_filename` — the same helper
+    the Gateway ingestion pipeline and the channel ingress paths use — and the open
+    is retried. Two concurrent uploads of one name therefore land as ``name.ext``
+    and ``name_1.ext`` with both byte streams intact, instead of racing on one inode
+    (issue #3750). The returned path is the name the bytes actually landed under;
+    callers must report it (not the requested name) back to users.
+
+    ``exclusive=True`` instead raises ``FileExistsError`` on a collision, so
+    callers that own their filename retry policy retain an exact-name claim.
     """
     safe_name = normalize_filename(filename)
     dest = validate_upload_destination(base_dir, safe_name, exclusive=exclusive)
@@ -346,24 +355,37 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
 
     if has_nofollow:
         # POSIX: O_NOFOLLOW makes open() fail with ELOOP if dest is a symlink.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW
-        if exclusive:
-            flags |= os.O_EXCL
+        # O_EXCL makes open() fail with EEXIST if dest already exists, so an
+        # upload can never open and truncate an earlier file of the same name.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_EXCL
         if hasattr(os, "O_NONBLOCK"):
             flags |= os.O_NONBLOCK
 
-        try:
-            fd = os.open(dest, flags, 0o600)
-        except OSError as exc:
-            if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
-                raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
-            raise
+        seen: set[str] | None = None
+        while True:
+            try:
+                fd = os.open(dest, flags, 0o600)
+                break
+            except FileExistsError:
+                if exclusive:
+                    raise
+                # Regular-file collision: claim the next free ``_N`` suffix
+                # against the directory's current contents and retry. The
+                # existing file is never opened, so its bytes survive intact,
+                # and the O_EXCL retry keeps concurrent uploads off one inode.
+                if seen is None:
+                    seen = _existing_dir_names(base_dir)
+                seen.add(dest.name)
+                dest = base_dir / claim_unique_filename(safe_name, seen)
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+                    raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
+                raise
 
         try:
             opened_stat = os.fstat(fd)
             if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
                 raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
-            os.ftruncate(fd, 0)
             fh = os.fdopen(fd, "wb")
             fd = -1
         finally:
@@ -371,17 +393,12 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
                 os.close(fd)
         return dest, fh
 
-    # Windows: no O_NOFOLLOW available. Uses a second lstat immediately before open()
-    # to narrow the TOCTOU window, then fstat after open() as a further defence.
-    # Note: a narrow race window remains between the pre-open lstat and open(); the
-    # path-traversal check mitigates escapes from base_dir but cannot prevent an
-    # attacker who can atomically replace dest with a symlink after the check.
+    # Windows: retain pre-open validation and reject an occupied destination
+    # atomically with O_EXCL, then validate the newly claimed descriptor.
     if not exclusive and st is not None and _replacement_destination_is_hardlinked(st):
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
-    flags = os.O_WRONLY | os.O_CREAT
-    if exclusive:
-        flags |= os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
 
@@ -395,21 +412,31 @@ def open_upload_file_no_symlink(base_dir: Path, filename: str, *, exclusive: boo
     if not exclusive and pre_open_st is not None and _replacement_destination_is_hardlinked(pre_open_st):
         raise UnsafeUploadPathError(f"Upload destination has multiple links: {safe_name}")
 
-    try:
-        fd = os.open(dest, flags, 0o600)
-    except OSError as exc:
-        if exc.errno in {errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
-            raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
-        raise
+    seen: set[str] | None = None
+    while True:
+        try:
+            fd = os.open(dest, flags, 0o600)
+            break
+        except FileExistsError:
+            if exclusive:
+                raise
+            # Regular-file collision: same contract as the POSIX branch —
+            # claim the next free ``_N`` suffix and retry under O_EXCL so an
+            # existing file is never opened and truncated (issue #3750).
+            if seen is None:
+                seen = _existing_dir_names(base_dir)
+            seen.add(dest.name)
+            dest = base_dir / claim_unique_filename(safe_name, seen)
+        except OSError as exc:
+            if exc.errno in {errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}:
+                raise UnsafeUploadPathError(f"Unsafe upload destination: {safe_name}") from exc
+            raise
 
     try:
         opened_stat = os.fstat(fd)
-        # The exclusive path keeps the strict post-open single-link check on every
-        # platform (a just-exclusively-created file must have exactly one link);
-        # only the non-exclusive replacement path defers to the Windows-aware guard.
-        if not stat.S_ISREG(opened_stat.st_mode) or (exclusive and opened_stat.st_nlink != 1) or (not exclusive and _replacement_destination_is_hardlinked(opened_stat)):
+        # Both modes create new files under O_EXCL and require one link.
+        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_nlink != 1:
             raise UnsafeUploadPathError(f"Upload destination is not an exclusive regular file: {safe_name}")
-        os.ftruncate(fd, 0)
         fh = os.fdopen(fd, "wb")
         fd = -1
     finally:
@@ -465,32 +492,37 @@ def copy_upload_file_no_symlink(base_dir: Path, filename: str, src: Path, *, sna
     """Copy *src* into an upload destination without following a destination symlink.
 
     Matches ``shutil.copy2`` for content, permission bits and timestamps, but
-    opens the destination through :func:`open_upload_file_no_symlink` and
-    applies the metadata to that descriptor, never to the name. The source is
-    opened first, so a missing source leaves an existing destination intact.
+    publishes a complete staged copy without replacing an existing file.
+    Metadata is applied to the staged descriptor, never to a re-resolved name.
+    The source is opened first, so a missing source leaves an existing destination intact.
     Where descriptor-based ``chmod``/``utime`` are unavailable (Windows), the
     destination keeps its default mode and the copy time.
 
     Copying a file onto itself raises :class:`shutil.SameFileError` as
-    ``copy2`` does, and does so before the destination is opened: opening it
-    truncates, which would otherwise leave the caller copying an emptied file
-    over itself. Re-uploading a file that already sits in the uploads
-    directory takes exactly that path.
+    ``copy2`` does, before capturing or publishing any destination bytes. Re-uploading
+    a file that already sits in the uploads directory takes exactly that path. A same-name collision with a different
+    file never destroys the earlier copy: the copy lands under the next free
+    ``_N`` suffix claimed by :func:`claim_unique_filename`, and the
+    returned path is the name the bytes actually landed under (issue #3750).
 
     With ``snapshot_path``, first capture the opened source there and publish
     those captured bytes. The caller owns this path in a private directory
     outside the sandbox tree and can convert it without reopening ``src``.
     """
-    with _open_upload_copy_source(base_dir, filename, src, snapshot_path=snapshot_path) as (captured, src_stat):
-        dest, fh = open_upload_file_no_symlink(base_dir, filename)
-        with fh:
-            shutil.copyfileobj(captured, fh)
-            fh.flush()
-            if os.chmod in os.supports_fd:
-                os.chmod(fh.fileno(), stat.S_IMODE(src_stat.st_mode))
-            if os.utime in os.supports_fd:
-                os.utime(fh.fileno(), ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns))
-    return dest
+    safe_name = normalize_filename(filename)
+    with _open_upload_copy_source(base_dir, safe_name, src, snapshot_path=snapshot_path) as (captured, src_stat):
+        validate_upload_destination(base_dir, safe_name)
+        # Skip known collisions before staging; the atomic link still decides
+        # whether this candidate is free when concurrent writers publish.
+        seen = _existing_dir_names(base_dir)
+        candidate = claim_unique_filename(safe_name, seen)
+        while True:
+            try:
+                captured.seek(0)
+                return _publish_upload_copy_source(base_dir, candidate, captured, src_stat)
+            except FileExistsError:
+                seen.update(_existing_dir_names(base_dir))
+                candidate = claim_unique_filename(safe_name, seen)
 
 
 def _validate_upload_copy_identity(path: Path, expected: os.stat_result) -> None:

@@ -23,12 +23,12 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { useI18n } from "@/core/i18n/hooks";
 
 import { GithubIcon } from "./github-icon";
 import { useSettingsDialog } from "./settings";
+import { useWorkspaceSidebarExpanded } from "./workspace-sidebar-frame";
 
 function NavMenuButtonContent({
   isSidebarOpen,
@@ -53,7 +53,7 @@ function NavMenuButtonContent({
 export function WorkspaceNavMenu() {
   const { openSettings } = useSettingsDialog();
   const [mounted, setMounted] = useState(false);
-  const { open: isSidebarOpen } = useSidebar();
+  const isSidebarOpen = useWorkspaceSidebarExpanded();
   const { t } = useI18n();
 
   useEffect(() => {

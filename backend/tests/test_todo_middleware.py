@@ -762,6 +762,45 @@ class TestTodoMiddlewareAgentGraphIntegration:
         assert [len(_todo_completion_reminders(messages)) for messages in model.seen_messages] == [0, 0, 1, 1, 1]
         assert result["messages"][-1].content == "premature final 3"
 
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        "content,response_metadata,additional_kwargs",
+        [
+            ("partial answer", {"finish_reason": "length"}, {}),
+            ("partial answer", {"stop_reason": "max_tokens"}, {}),
+            ([{"type": "text", "text": "partial answer"}], {"finish_reason": "MAX_TOKENS"}, {}),
+            ("partial answer", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, {}),
+            ("partial answer", {}, {"finish_reason": "length"}),
+        ],
+        ids=["openai", "anthropic", "gemini-blocks", "responses", "additional-kwargs"],
+    )
+    def test_text_only_length_cap_does_not_reengage_todos(self, invoke_async, content, response_metadata, additional_kwargs):
+        todo_mw = TodoMiddleware()
+        capped_message = AIMessage(content=content, response_metadata=response_metadata, additional_kwargs=additional_kwargs)
+        model = _CapturingFakeMessagesListChatModel(responses=[capped_message])
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[todo_mw, ModelLengthFinishReasonMiddleware()],
+            state_schema=ThreadState,
+        )
+        todos = [{"content": "Finish the report", "status": "in_progress"}]
+        state = {"messages": [("user", "write the report")], "todos": todos}
+        context = {"thread_id": "text-cap-thread", "run_id": "text-cap-run"}
+
+        result = asyncio.run(graph.ainvoke(state, context=context)) if invoke_async else graph.invoke(state, context=context)
+
+        assert len(model.seen_messages) == 1
+        final_ai = result["messages"][-1]
+        assert final_ai.content == content
+        assert final_ai.response_metadata == response_metadata
+        assert final_ai.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+        assert all(final_ai.additional_kwargs[key] == value for key, value in additional_kwargs.items())
+        assert "model_length_termination" not in capped_message.additional_kwargs
+        assert result["todos"] == todos
+        assert todo_mw._pending_completion_reminders == {}
+        assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
+
     def test_length_capped_write_file_does_not_reengage_todos(self):
         """Reproduces the incident (thread b1723286): model emits a write_file
         call with finish_reason=length, ModelLength suppresses it, and

@@ -19,7 +19,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 | Document | Description |
 |----------|-------------|
 | [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
-| [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream contract: envelope, producers, consumers, and known gaps |
+| [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream: contract, terminal authority, evidence ordering, and known gaps |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
 | [SANDBOX_MEMORY_PROFILING.md](SANDBOX_MEMORY_PROFILING.md) | Sandbox memory baseline and runtime comparison guide |

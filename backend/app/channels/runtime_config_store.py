@@ -36,14 +36,24 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
+from deerflow.utils.file_lock import retry_until_locked
 
 if TYPE_CHECKING:
     from deerflow.config.credentials_key import CredentialsCipher
     from deerflow.persistence.channel_runtime_configs import SqlChannelRuntimeConfigRepository, StoredChannelRuntimeConfig
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
+
 logger = logging.getLogger(__name__)
 
 RUNTIME_CHANNEL_DISABLED_FLAG = "_runtime_disabled"
+
+# About ten seconds at the shared helper's 0.2-second retry cadence.
+_LOCK_WAIT_WARNING_ATTEMPTS = 50
 
 
 class ChannelRuntimeConfigEncryptionUnavailable(RuntimeError):
@@ -83,28 +93,40 @@ def _runtime_config_file_lock(path: Path) -> Iterator[None]:
     target_path = path.resolve(strict=False) if path.is_symlink() else path.absolute()
     lock_path = target_path.parent / f".{target_path.name}.lock"
     with open(lock_path, "a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows fallback
             lock_file.seek(0, os.SEEK_END)
             if lock_file.tell() == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
+            # LK_LOCK gives up after roughly ten seconds. Share the
+            # contention-only retry policy, retaining an indefinite wait.
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
+            retries = 0
 
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            def wait_for_lock(delay: float) -> None:
+                nonlocal retries
+                retries += 1
+                if retries == _LOCK_WAIT_WARNING_ATTEMPTS:
+                    # Diagnostics must not abort acquisition or flood the log.
+                    with suppress(Exception):
+                        logger.warning("Still waiting for channel runtime config lock %s after %d contention retries", lock_path, retries)
+                time.sleep(delay)
+
+            retry_until_locked(
+                lambda: msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1),
+                sleep=wait_for_lock,
+            )
 
         try:
             yield
         finally:
-            if os.name == "nt":
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows fallback
                 lock_file.seek(0)
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class ChannelRuntimeConfigStore:
@@ -130,7 +152,7 @@ class ChannelRuntimeConfigStore:
         if self._path.exists():
             try:
                 raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
                 if fallback is not None:
                     logger.warning("Corrupt channel runtime config store at %s, rewriting it from this process's copy", self._path)
                     return {name: dict(config) for name, config in fallback.items()}
@@ -368,6 +390,9 @@ def _read_legacy_file(path: Path) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
+        return None
+    except UnicodeDecodeError:
+        logger.warning("Corrupt channel runtime config %s; skipping the import (file kept)", path)
         return None
     except OSError:
         logger.warning("Cannot read channel runtime config %s; skipping the import (file kept)", path, exc_info=True)

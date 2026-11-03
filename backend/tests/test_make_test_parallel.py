@@ -63,14 +63,16 @@ def run_make(project: Path, *args: str, fail_group: str = "", parallel: bool = T
         "EXPECT_PARALLEL": "1" if parallel else "0",
         "FAIL_GROUP": fail_group,
     }
-    env.pop("MAKEFLAGS", None)
-    env.pop("MFLAGS", None)
-    env.pop("MAKELEVEL", None)
+    # Make exports command-line variables to pytest. This copied project must
+    # exercise its own defaults, not the outer test runner's shard/job settings.
+    for name in ("MAKEFLAGS", "MFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "TEST_JOBS", "SPLITS", "GROUP", "DURATIONS_FILE"):
+        env.pop(name, None)
     return subprocess.run([MAKE, *args], cwd=project, env=env, capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
 
 
 @pytest.mark.parametrize("fail_group", ["", "1"])
-def test_make_test_runs_all_four_shards_and_reports_any_failure(test_project: Path, fail_group: str) -> None:
+def test_make_test_runs_all_four_shards_and_reports_any_failure(test_project: Path, fail_group: str, monkeypatch) -> None:
+    monkeypatch.setenv("TEST_JOBS", "2")
     result = run_make(test_project, "test", fail_group=fail_group)
 
     assert (result.returncode == 0) == (not fail_group), result.stdout + result.stderr

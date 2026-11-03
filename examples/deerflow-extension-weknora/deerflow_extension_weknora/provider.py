@@ -21,6 +21,7 @@ from deerflow.knowledge_scope import execution_scope
 from .config import Settings, Space, native_id
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_DOCUMENT_CONCURRENCY = 4
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class _Dataset:
     binding: _Binding
     native_id: str
     name: str
+    wiki_enabled: bool = False
 
     @property
     def id(self) -> str:
@@ -65,7 +67,7 @@ def _pagination(page: int, page_size: int) -> None:
 
 
 class WeKnoraProvider:
-    capabilities = KnowledgeCapabilities(operations={"search", "sources", "catalog", "documents", "dataset_filter", "document_filter"})
+    capabilities = KnowledgeCapabilities(operations={"search", "sources", "catalog", "documents", "dataset_filter", "document_filter", "entries_search", "entries_dataset_filter"})
 
     def __init__(self, config: dict[str, Any], *, transport: httpx.AsyncBaseTransport | None = None):
         self.settings = Settings.model_validate(config)
@@ -84,7 +86,7 @@ class WeKnoraProvider:
             raise PermissionError("No WeKnora space is bound to this user and executing agent")
         return bindings
 
-    async def _request(self, binding: _Binding, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    async def _request(self, binding: _Binding, method: str, path: str, *, envelope: bool = True, **kwargs: Any) -> dict[str, Any]:
         # Client per request prevents tenant/credential mutation across users and
         # event loops. SSL trust loading runs off-loop. Never follow redirects
         # carrying privileged credentials.
@@ -113,7 +115,11 @@ class WeKnoraProvider:
         except (httpx.HTTPError, ValueError):
             # No raw body, URL, request headers or credential-bearing cause.
             raise RuntimeError("WeKnora request failed or returned invalid JSON") from None
-        if not isinstance(payload, dict) or payload.get("success") is not True or "data" not in payload:
+        if not isinstance(payload, dict):
+            raise RuntimeError("Invalid WeKnora response")
+        if not envelope:
+            return payload
+        if payload.get("success") is not True or "data" not in payload:
             raise RuntimeError("WeKnora returned an unsuccessful response")
         return payload
 
@@ -130,7 +136,9 @@ class WeKnoraProvider:
                 base_id = native_id(base.get("id"))
                 if allowed is not None and base_id not in allowed:
                     continue
-                dataset = _Dataset(binding, base_id, binding.text(base.get("name"), 500) or "Unnamed knowledge base")
+                base_capabilities = base.get("capabilities")
+                wiki_enabled = isinstance(base_capabilities, dict) and base_capabilities.get("wiki") is True
+                dataset = _Dataset(binding, base_id, binding.text(base.get("name"), 500) or "Unnamed knowledge base", wiki_enabled)
                 if dataset.id in result:
                     raise RuntimeError("Duplicate WeKnora knowledge base")
                 result[dataset.id] = dataset
@@ -174,6 +182,23 @@ class WeKnoraProvider:
     async def search(self, query: str) -> RetrievalResult:
         raise PermissionError("WeKnora retrieval requires a trusted KnowledgeRequestContext")
 
+    async def _load_documents(self, ds: _Dataset, ids: list[str], documents: dict[tuple[str, str], dict[str, Any]]) -> None:
+        # Cache only within this search, keyed by authorized dataset and native ID.
+        missing = list(dict.fromkeys(document_id for document_id in ids if (ds.id, document_id) not in documents))
+        for start in range(0, len(missing), _DOCUMENT_CONCURRENCY):
+            batch = missing[start : start + _DOCUMENT_CONCURRENCY]
+            tasks = [asyncio.create_task(self._document(ds, document_id)) for document_id in batch]
+            try:
+                values = await asyncio.gather(*tasks)
+            except BaseException:
+                # gather alone leaves siblings running after an ordinary error.
+                # Drain them on failure/cancellation, preserving the original error.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            documents.update(((ds.id, document_id), value) for document_id, value in zip(batch, values, strict=True))
+
     async def search_scoped(self, query: str, *, context: KnowledgeRequestContext) -> RetrievalResult:
         scope = execution_scope(context.scope) if context.scope is not None else {"mode": "all"}
         if scope["mode"] == "disabled":
@@ -192,8 +217,7 @@ class WeKnoraProvider:
         # Validate every constrained resource before any search; no partial
         # success and no unfiltered retry if any selection fails.
         for dataset_id, ids in filters.items():
-            for document_id in ids:
-                documents[dataset_id, document_id] = await self._document(datasets[dataset_id], document_id)
+            await self._load_documents(datasets[dataset_id], ids, documents)
         hits = []
         for dataset_id in selected:
             if len(hits) >= 100:
@@ -210,20 +234,25 @@ class WeKnoraProvider:
             results = _items(payload["data"])
             if len(results) > 100:
                 raise RuntimeError("WeKnora response exceeds the supported result limit")
+            candidates = []
+            remaining = 100 - len(hits)
             for item in results:
-                if len(hits) >= 100:
+                if remaining == 0:
                     break
                 document_id = native_id(item.get("knowledge_id"))
                 if dataset_id in filters and document_id not in filters[dataset_id]:
                     raise PermissionError("WeKnora returned evidence outside the selected documents")
-                cache_key = (dataset_id, document_id)
-                if cache_key not in documents:
-                    documents[cache_key] = await self._document(ds, document_id)
+                text = ds.binding.text(item.get("content"), 100_000)
+                candidates.append((item, document_id, text))
+                if text:
+                    remaining -= 1
+            await self._load_documents(ds, [document_id for _, document_id, _ in candidates], documents)
+            for item, document_id, text in candidates:
                 # SearchResult has no knowledge_base_id; the authoritative detail
                 # endpoint above verifies membership even for unfiltered search.
-                text = ds.binding.text(item.get("content"), 100_000)
                 if not text:
                     continue
+                cache_key = (dataset_id, document_id)
                 title = ds.binding.text(item.get("knowledge_title") or item.get("knowledge_filename") or documents[cache_key].get("title") or documents[cache_key].get("file_name"), 500)
                 source = KnowledgeSource(provider="weknora", title=title, excerpt=text, dataset_name=ds.name) if title else None
                 # v0.8.3 gives offsets/chunk indexes, not a verified page or public
@@ -232,3 +261,56 @@ class WeKnoraProvider:
                 score = score if type(score) in {float, int} and math.isfinite(score) else None
                 hits.append(RetrievalHit(content=text, source=source, score=score))
         return RetrievalResult(hits=hits)
+
+    async def entries_search(self, query: str, *, context: KnowledgeRequestContext) -> RetrievalResult:
+        """Published Wiki search, using the upstream KB-bound read endpoint.
+
+        Wiki pages can combine several source documents; v0.8.3's search API
+        cannot enforce document filters. Reject them before contacting upstream.
+        """
+        scope = execution_scope(context.scope) if context.scope is not None else {"mode": "all"}
+        if scope["mode"] == "disabled" or not query.strip():
+            raise ValueError("Knowledge search is disabled or query is empty")
+        if scope.get("document_filters"):
+            raise ValueError("Wiki retrieval does not support document filters")
+        datasets = await self._datasets(context)
+        selected = scope["dataset_ids"] if scope["mode"] == "selected" else list(datasets)
+        if not set(selected) <= datasets.keys():
+            raise PermissionError("Selected WeKnora knowledge base is unavailable")
+        hits = []
+        for dataset_id in selected:
+            ds = datasets[dataset_id]
+            if not ds.wiki_enabled:
+                continue
+            # Wiki search is lexical, unlike document hybrid search. A model's
+            # space-separated keyword combination can miss a matching title.
+            # Retry only an empty successful response, within the same bound KB.
+            queries = [query.strip()]
+            seen = set()
+            for keyword in queries:
+                payload = await self._request(ds.binding, "GET", f"/api/v1/knowledgebase/{ds.native_id}/wiki/search", envelope=False, params={"q": keyword, "limit": self.settings.match_count})
+                if "pages" not in payload:
+                    raise RuntimeError("Invalid WeKnora Wiki response")
+                pages = _items(payload["pages"])
+                if len(pages) > 100:
+                    raise RuntimeError("WeKnora response exceeds the supported result limit")
+                if keyword == queries[0] and not pages:
+                    terms = list(dict.fromkeys(term for term in query.split() if len(term) >= 2 and term != keyword))
+                    queries.extend(terms[:4])
+                for page in pages:
+                    if page.get("knowledge_base_id") != ds.native_id:
+                        raise PermissionError("WeKnora returned an entry outside the selected base")
+                    if page.get("status") != "published":
+                        continue
+                    title = ds.binding.text(page.get("title"), 500)
+                    content = ds.binding.text(page.get("summary") or page.get("content"), 100_000)
+                    identity = (title, content)
+                    if content and identity not in seen:
+                        seen.add(identity)
+                        source = KnowledgeSource(provider="weknora", title=title, excerpt=content, dataset_name=ds.name) if title else None
+                        hits.append(RetrievalHit(content=content, source=source))
+                if len(hits) >= 100:
+                    break
+            if len(hits) >= 100:
+                break
+        return RetrievalResult(hits=hits[:100])

@@ -26,11 +26,13 @@ def adapter(monkeypatch):
         if state.get("status"):
             return httpx.Response(state["status"], text="synthetic-secret upstream body")
         if request.url.path == "/api/v1/knowledge-bases":
-            data = state.get("bases", [{"id": "kb-1", "name": "Synthetic base"}])
+            data = state.get("bases", [{"id": "kb-1", "name": "Synthetic base", "capabilities": {"wiki": True}}])
         elif request.url.path == "/api/v1/knowledge-bases/kb-1/knowledge":
             return httpx.Response(200, json={"success": True, "data": [state["document"]], **state.get("pagination", {"total": 1})})
         elif request.url.path == "/api/v1/knowledge/doc-1":
             data = state["document"]
+        elif request.url.path == "/api/v1/knowledgebase/kb-1/wiki/search":
+            return httpx.Response(200, json={"pages": state.get("pages", [])})
         elif request.url.path == "/api/v1/knowledge-search":
             return httpx.Response(403, json={"success": False, "error": "KB-restricted keys reject global knowledge_ids"})
         elif request.url.path == "/api/v1/knowledge-bases/kb-1/hybrid-search":
@@ -398,3 +400,105 @@ async def test_retrieval_response_size_limit_without_retry(adapter):
         await provider.search_scoped("Cedar", context=ctx)
     assert len(posts) == 1
     assert not any("/knowledge/" in r.url.path for r in calls)
+
+
+@pytest.mark.asyncio
+async def test_published_entries_use_real_wiki_evidence(adapter):
+    provider, calls, state, *_ = adapter
+    ctx = await selection(provider, docs=False)
+    state["pages"] = [{"knowledge_base_id": "kb-1", "slug": "cedar", "title": "Cedar entry", "status": "published", "summary": "Cedar entry evidence."}]
+    result = await provider.entries_search("Cedar", context=ctx)
+    assert result.hits[0].source.title == "Cedar entry"
+    assert result.hits[0].source.excerpt == "Cedar entry evidence."
+    assert calls[-1].url.params["q"] == "Cedar"
+    content, artifact = format_result(result)
+    assert len(sources_from_messages([{"type": "tool", "name": "knowledge_entries_search", "content": content, "artifact": artifact}])) == 1
+    state["pages"][0]["status"] = "draft"
+    assert not (await provider.entries_search("Cedar", context=ctx)).hits
+    state["pages"][0]["knowledge_base_id"] = "foreign"
+    with pytest.raises(PermissionError):
+        await provider.entries_search("Cedar", context=ctx)
+
+
+@pytest.mark.asyncio
+async def test_entries_reject_document_filter_before_network(adapter):
+    provider, calls, *_ = adapter
+    ctx = await selection(provider)
+    calls.clear()
+    with pytest.raises(ValueError, match="document"):
+        await provider.entries_search("Cedar", context=ctx)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_entries_skip_non_wiki_bases_and_reject_unbound_identity(adapter):
+    provider, calls, state, *_ = adapter
+    state["bases"] = [{"id": "kb-1", "name": "Document only", "capabilities": {"wiki": False}}]
+    assert not (await provider.entries_search("q", context=KnowledgeRequestContext("alice", "lead_agent"))).hits
+    assert not any("/wiki/" in str(request.url) for request in calls)
+    calls.clear()
+    with pytest.raises(PermissionError):
+        await provider.entries_search("q", context=KnowledgeRequestContext("mallory", "lead_agent"))
+    assert not calls
+
+
+@pytest.mark.asyncio
+async def test_wiki_empty_phrase_falls_back_to_bounded_keywords_with_same_scope(adapter):
+    provider, calls, state, _, transport = adapter
+    ctx = await selection(provider, docs=False)
+    seen = []
+    page = {"knowledge_base_id": "kb-1", "slug": "cedar", "title": "青杉", "status": "published", "summary": "林岚负责青杉计划"}
+
+    async def handler(request):
+        if request.url.path.endswith("/wiki/search"):
+            seen.append(request)
+            return httpx.Response(200, json={"pages": [page] if request.url.params["q"] in {"青杉", "林岚"} else []})
+        return await transport.handle_async_request(request)
+
+    provider._transport = httpx.MockTransport(handler)
+    result = await provider.entries_search("青杉 计划 负责人 林岚 星河实验室 青杉", context=ctx)
+    assert [r.url.params["q"] for r in seen] == ["青杉 计划 负责人 林岚 星河实验室 青杉", "青杉", "计划", "负责人", "林岚"]
+    assert all(r.url.path == "/api/v1/knowledgebase/kb-1/wiki/search" for r in seen)
+    assert all(r.headers["X-API-Key"] == "synthetic-secret" for r in seen)
+    assert len(result.hits) == 1
+    assert result.hits[0].source.excerpt == "林岚负责青杉计划"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["foreign", "malformed", "http"])
+async def test_wiki_keyword_fallback_preserves_fail_closed_errors(adapter, failure):
+    provider, _, _, _, transport = adapter
+    seen = []
+
+    async def handler(request):
+        if not request.url.path.endswith("/wiki/search"):
+            return await transport.handle_async_request(request)
+        seen.append(request.url.params["q"])
+        if len(seen) == 1:
+            return httpx.Response(200, json={"pages": []})
+        if failure == "http":
+            return httpx.Response(403)
+        if failure == "malformed":
+            return httpx.Response(200, json={"pages": "bad"})
+        return httpx.Response(200, json={"pages": [{"knowledge_base_id": "foreign", "status": "published"}]})
+
+    provider._transport = httpx.MockTransport(handler)
+    with pytest.raises((PermissionError, RuntimeError)):
+        await provider.entries_search("青杉 林岚", context=KnowledgeRequestContext("alice", "lead_agent"))
+    assert seen == ["青杉 林岚", "青杉"]
+
+
+@pytest.mark.asyncio
+async def test_wiki_nonempty_phrase_does_not_fan_out(adapter):
+    provider, calls, state, *_ = adapter
+    state["pages"] = [{"knowledge_base_id": "kb-1", "status": "published", "title": "青杉", "summary": "evidence"}]
+    assert (await provider.entries_search("青杉 林岚", context=KnowledgeRequestContext("alice", "lead_agent"))).hits
+    assert len([r for r in calls if r.url.path.endswith("/wiki/search")]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("query", "expected"), [("青杉", ["青杉"]), ("a b", ["a b"]), ("青杉 青杉 林岚", ["青杉 青杉 林岚", "青杉", "林岚"])])
+async def test_wiki_empty_fallback_never_repeats_queries_or_sends_short_terms(adapter, query, expected):
+    provider, calls, *_ = adapter
+    assert not (await provider.entries_search(query, context=KnowledgeRequestContext("alice", "lead_agent"))).hits
+    assert [r.url.params["q"] for r in calls if r.url.path.endswith("/wiki/search")] == expected

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import dataclasses
 import logging
+import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any
@@ -204,14 +206,17 @@ _notify_loop: asyncio.AbstractEventLoop | None = None
 _pending_dispatches: set[concurrent.futures.Future[None]] = set()
 _warned_no_loop = False
 _system_observations_enabled = True
+# Serializes detached-dispatch admission with shutdown suspension and snapshots.
+_dispatch_state_lock = threading.Lock()
 
 
 def set_extension_notify_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     """Bind extension notifications to the loop that owns extension resources."""
     global _notify_loop, _system_observations_enabled, _warned_no_loop
-    _notify_loop = loop
-    _system_observations_enabled = True
-    _warned_no_loop = False
+    with _dispatch_state_lock:
+        _notify_loop = loop
+        _system_observations_enabled = True
+        _warned_no_loop = False
 
 
 async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
@@ -222,7 +227,10 @@ async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
     extension observer from holding Gateway teardown forever.
     """
     suspend_extension_system_observations()
-    pending = tuple(_pending_dispatches)
+    # Once suspension owns the same lock as dispatch admission, no new future
+    # can be registered; completed futures may still be removed by callbacks.
+    with _dispatch_state_lock:
+        pending = tuple(_pending_dispatches)
     if not pending:
         return
 
@@ -246,17 +254,19 @@ async def drain_extension_notify_dispatches(*, timeout: float = 5.0) -> None:
 def reset_extension_notify_loop() -> None:
     """Remove the process-wide loop binding during host shutdown or tests."""
     global _notify_loop, _system_observations_enabled, _warned_no_loop
-    _notify_loop = None
-    _system_observations_enabled = True
-    _warned_no_loop = False
-    _pending_dispatches.clear()
+    with _dispatch_state_lock:
+        _notify_loop = None
+        _system_observations_enabled = True
+        _warned_no_loop = False
+        _pending_dispatches.clear()
 
 
 def suspend_extension_system_observations() -> None:
     """Drop new fire-and-forget observations while awaited hooks still drain."""
     global _system_observations_enabled
-    if _notify_loop is not None:
-        _system_observations_enabled = False
+    with _dispatch_state_lock:
+        if _notify_loop is not None:
+            _system_observations_enabled = False
 
 
 async def _notify_each_on_extension_loop(
@@ -472,6 +482,11 @@ async def observe_system_model_call(
     return response
 
 
+def _discard_pending_dispatch(future: concurrent.futures.Future[None]) -> None:
+    with _dispatch_state_lock:
+        _pending_dispatches.discard(future)
+
+
 def dispatch_system_model_observation(
     coro: Coroutine[Any, Any, None],
     what: str,
@@ -479,38 +494,47 @@ def dispatch_system_model_observation(
     """Submit a synchronous call site's observation to the registered loop."""
     global _warned_no_loop
 
-    loop = _notify_loop
     submitted = False
     try:
-        if not _system_observations_enabled:
-            return False
-        if loop is None or not loop.is_running():
-            if not _warned_no_loop:
-                _warned_no_loop = True
-                logger.warning(
-                    "No running loop registered for extension observations; %s and later ones are dropped",
+        with _dispatch_state_lock:
+            if not _system_observations_enabled:
+                return False
+            loop = _notify_loop
+            if loop is None or not loop.is_running():
+                if not _warned_no_loop:
+                    _warned_no_loop = True
+                    logger.warning(
+                        "No running loop registered for extension observations; %s and later ones are dropped",
+                        what,
+                    )
+                return False
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+            except Exception:
+                logger.debug(
+                    "Could not dispatch %s to the extension notify loop",
                     what,
+                    exc_info=True,
                 )
-            return False
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-        except Exception:
-            logger.debug(
-                "Could not dispatch %s to the extension notify loop",
-                what,
-                exc_info=True,
-            )
-            return False
-        _pending_dispatches.add(future)
-        future.add_done_callback(_pending_dispatches.discard)
-        submitted = True
+                return False
+            # Registration is part of admission: shutdown cannot suspend and
+            # snapshot between the enabled check and this insertion.
+            _pending_dispatches.add(future)
+            submitted = True
+        # Register outside the lock because add_done_callback may run inline for
+        # an already-completed Future; the callback acquires the same lock.
+        future.add_done_callback(_discard_pending_dispatch)
         return True
     finally:
         if not submitted:
             coro.close()
 
 
-def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtensions | None = None) -> None:
+def notify_context_compacted(
+    event: CompactionEvent,
+    extensions: LoadedExtensions | None = None,
+    task_store: ExtensionData | None = None,
+) -> None:
     """Fan a completed compaction out to observers, fire-and-forget.
 
     The compaction seam sits in the summarization middleware's ``before_model`` /
@@ -520,10 +544,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     loop the same non-blocking way a synchronous system-model-call cancellation does,
     reusing the same fail-open cancellation containment inside ``_notify_each``.
 
-    There is no live task for this hook to attach observers to (unlike lifecycle or
-    system-model-call notification, which run from an awaited call site holding the
-    real task store), so observers receive a detached store — the same fallback
-    ``notify_system_model_call`` uses when its caller has none.
+    Inside a lead run or subagent the caller passes the live task store it recovered
+    from the runtime context — the same store the summary system call is observed
+    with. Observers receive it, and the event's ``task_id``/``run_id``/``thread_id``
+    are filled from the ``TaskInfo`` the host seeded into it. A compaction outside any
+    task (manual ``/compact``) passes none, so observers receive a detached store —
+    the same fallback ``notify_system_model_call`` uses — and the ids stay ``None``.
     """
     resolved = extensions
     if resolved is None:
@@ -534,7 +560,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     if not observers:
         return
     app_store = resolved.app_store
-    task_store = ExtensionData("detached")
+    if task_store is None:
+        task_store = ExtensionData("detached")
+    else:
+        info = task_store.get(TaskInfo)
+        if info is not None:
+            event = dataclasses.replace(event, task_id=info.task_id, run_id=info.run_id, thread_id=info.thread_id)
     what = f"compaction ({event.transform_kind})"
     dispatch_system_model_observation(
         _notify_each(

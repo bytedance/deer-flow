@@ -10,6 +10,44 @@ const settings = {
 } as unknown as LocalSettings["context"];
 
 describe("buildRunContext", () => {
+  it("uses the current UI locale instead of stale saved or caller context", () => {
+    const stale = { ...settings, locale: "en-US" };
+    const context = buildRunContext({
+      settings: stale,
+      threadId: "t-1",
+      locale: "zh-CN",
+      extraContext: { locale: "en-US" },
+    });
+    expect(context.locale).toBe("zh-CN");
+    expect(stale.locale).toBe("en-US");
+    expect(
+      buildRunContext({ settings: stale, threadId: "t-1", locale: "en-US" })
+        .locale,
+    ).toBe("en-US");
+  });
+
+  it("applies a one-turn model without mutating saved context", () => {
+    const before = { ...settings };
+    const current = buildRunContext({
+      settings,
+      threadId: "t-1",
+      extraContext: { model_name: "child-choice" },
+    });
+    expect(current.model_name).toBe("child-choice");
+    expect(settings).toEqual(before);
+    expect(buildRunContext({ settings, threadId: "t-1" }).model_name).toBe(
+      "gemma4",
+    );
+  });
+  it("passes child-only selection separately from the parent model", () => {
+    const context = buildRunContext({
+      settings,
+      threadId: "t-1",
+      extraContext: { subagent_model_name: "child-choice" },
+    });
+    expect(context.model_name).toBe("gemma4");
+    expect(context.subagent_model_name).toBe("child-choice");
+  });
   it("sends attached references as a plain string[] under context.conversation_references", () => {
     const context = buildRunContext({
       settings,

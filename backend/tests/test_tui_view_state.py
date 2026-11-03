@@ -4,6 +4,8 @@ The reducer is the testable heart of the TUI: a pure function mapping
 (state, action) -> state, with no Textual / rendering dependency.
 """
 
+import pytest
+
 from deerflow.tui.view_state import (
     AssistantDelta,
     AssistantError,
@@ -15,7 +17,6 @@ from deerflow.tui.view_state import (
     ToolResult,
     ToolStarted,
     UserSubmitted,
-    _merge_stream_text,
     initial_state,
     reduce,
 )
@@ -96,27 +97,28 @@ def test_tool_result_without_call_id_is_ignored():
     assert state.rows == ()
 
 
-# --- streaming robustness: the client can re-emit the same id (values
-# re-synthesis) and stream partial tool-call chunks. The reducer must not
-# duplicate text or tool cards. ---
+# --- streaming: DeerFlowClient.stream emits only incremental text per id
+# (no re-sends, replayed turns or cumulative snapshots), and partial
+# tool-call chunks. The reducer appends text and de-duplicates tool cards. ---
 
 
-def test_assistant_delta_skips_full_resend_of_same_id():
+def test_assistant_delta_repeating_the_accumulated_text_appends():
     state = initial_state()
-    state = reduce(state, AssistantDelta(id="m1", text="Hey there!\nWhat's up?"))
-    state = reduce(state, AssistantDelta(id="m1", text="Hey there!\nWhat's up?"))
+    state = reduce(state, AssistantDelta(id="m1", text="ha"))
+    state = reduce(state, AssistantDelta(id="m1", text="ha"))
     assert [r.kind for r in state.rows] == ["assistant"]
-    assert state.rows[0].text == "Hey there!\nWhat's up?"
+    assert state.rows[0].text == "haha"
 
 
-def test_assistant_delta_treats_cumulative_snapshot_as_replace():
+def test_assistant_delta_extending_the_accumulated_text_appends():
     state = initial_state()
-    state = reduce(state, AssistantDelta(id="m1", text="Hel"))
-    state = reduce(state, AssistantDelta(id="m1", text="Hel lo world"))
-    assert state.rows[0].text == "Hel lo world"
+    state = reduce(state, AssistantDelta(id="m1", text="1"))
+    state = reduce(state, AssistantDelta(id="m1", text="10"))
+    state = reduce(state, AssistantDelta(id="m1", text=" apples"))
+    assert state.rows[0].text == "110 apples"
 
 
-def test_streaming_id_tracks_active_message_not_reemitted_history():
+def test_streaming_id_tracks_the_message_receiving_deltas_this_turn():
     state = initial_state()
     state = reduce(state, AssistantDelta(id="m1", text="answer one"))
     state = reduce(state, RunEnded())
@@ -124,28 +126,22 @@ def test_streaming_id_tracks_active_message_not_reemitted_history():
 
     state = reduce(state, RunStarted())
     assert state.streaming_id is None  # new turn: nothing actively streaming yet
-    state = reduce(state, AssistantDelta(id="m1", text="answer one"))  # re-emit (no-op)
-    assert state.streaming_id is None  # re-emit of history must not mark active
-    state = reduce(state, AssistantDelta(id="m2", text="new content"))  # real new content
+    state = reduce(state, AssistantDelta(id="m2", text="new content"))
     assert state.streaming_id == "m2"
 
     state = reduce(state, RunEnded())
     assert state.streaming_id is None
 
 
-def test_assistant_resend_of_older_message_updates_in_place_not_duplicated():
-    # On a thread with history, the client re-emits every prior message on each
-    # new turn. A values snapshot can re-emit an OLDER message's full text AFTER
-    # a newer message has already started — the reducer must update the old row
-    # by id, not append a verbatim duplicate at the end.
+def test_assistant_delta_for_an_older_id_updates_that_row_in_place():
     state = initial_state()
     state = reduce(state, AssistantDelta(id="m1", text="First answer."))
     state = reduce(state, UserSubmitted("second question"))
     state = reduce(state, AssistantDelta(id="m2", text="Second answer."))
-    state = reduce(state, AssistantDelta(id="m1", text="First answer."))  # re-emit of old m1
+    state = reduce(state, AssistantDelta(id="m1", text=" (stopped)"))
 
     assistants = [r for r in state.rows if r.kind == "assistant"]
-    assert [a.text for a in assistants] == ["First answer.", "Second answer."]
+    assert [a.text for a in assistants] == ["First answer. (stopped)", "Second answer."]
 
 
 def test_tool_started_dedupes_by_call_id():
@@ -216,46 +212,36 @@ def test_reduce_is_pure_does_not_mutate_input_state():
 
 
 # ---------------------------------------------------------------------------
-# _merge_stream_text regression: CJK reduplication and repeated-token deltas
+# Deltas are appended verbatim on both the id-keyed and anonymous paths, even
+# when one repeats, extends or prefixes the accumulated text.
 # ---------------------------------------------------------------------------
 
 
-def test_merge_stream_text_cjk_reduplication_not_dropped():
-    """Two identical CJK tokens must both accumulate, not collapse to one."""
-    assert _merge_stream_text("谢", "谢") == "谢谢"
+@pytest.mark.parametrize("message_id", ["m1", ""], ids=["id", "anonymous"])
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        pytest.param(["谢", "谢"], id="cjk-reduplication"),
+        pytest.param(["go", "go"], id="repeated-token"),
+        pytest.param(["ha", "ha", "!"], id="repeated-multichar-token"),
+        pytest.param(["hel", "l", "o"], id="suffix-matching-tail"),
+        pytest.param(["1", "10", " apples"], id="extends-accumulated"),
+        pytest.param(["\n", "\n"], id="newline-split"),
+        pytest.param(["Hello ", "world"], id="plain-append"),
+        pytest.param(["**", "Note", "**", ": done"], id="markdown-bold-close"),
+        pytest.param(["-", " a", "\n", "-", " b"], id="markdown-list-bullet"),
+        pytest.param(["```", "py", "\nx = 1\n", "```"], id="markdown-fence-close"),
+        pytest.param(["|", " a ", "|", " b ", "|"], id="markdown-table-pipe"),
+    ],
+)
+def test_assistant_deltas_accumulate_verbatim(message_id, chunks):
+    state = reduce(initial_state(), RunStarted())
+    for chunk in chunks:
+        state = reduce(state, AssistantDelta(id=message_id, text=chunk))
+    state = reduce(state, RunEnded())
 
-
-def test_merge_stream_text_repeated_token_not_dropped():
-    """Repeated tokens (e.g. 'go' + 'go') must accumulate."""
-    assert _merge_stream_text("go", "go") == "gogo"
-
-
-def test_merge_stream_text_suffix_matching_tail_not_dropped():
-    """A delta equal to the buffer suffix must append, not be dropped."""
-    assert _merge_stream_text("hel", "l") == "hell"
-
-
-def test_merge_stream_text_cumulative_longer_snapshot_still_works():
-    """A strictly longer chunk starting with existing is a cumulative re-delivery."""
-    assert _merge_stream_text("Hel", "Hel lo world") == "Hel lo world"
-
-
-def test_merge_stream_text_empty_existing_returns_incoming():
-    assert _merge_stream_text("", "Hello") == "Hello"
-
-
-def test_merge_stream_text_empty_incoming_returns_existing():
-    assert _merge_stream_text("Hello", "") == "Hello"
-
-
-def test_merge_stream_text_newline_split_across_chunks():
-    """'\\n\\n' split into two '\\n' deltas must accumulate."""
-    assert _merge_stream_text("\n", "\n") == "\n\n"
-
-
-def test_merge_stream_text_genuine_delta_append():
-    """Normal deltas that don't overlap still append."""
-    assert _merge_stream_text("Hello ", "world") == "Hello world"
+    assistants = [r for r in state.rows if r.kind == "assistant"]
+    assert [a.text for a in assistants] == ["".join(chunks)]
 
 
 # ---------------------------------------------------------------------------
@@ -363,17 +349,6 @@ def test_assistant_delta_empty_id_does_not_disturb_legitimate_id_sequence():
 
     assistants = [r for r in state.rows if r.kind == "assistant"]
     assert [a.text for a in assistants] == ["anonymous turn", "Hello"]
-
-
-def test_assistant_delta_empty_id_resend_within_turn_is_noop():
-    """Same multi-char no-op re-send semantics apply to the anonymous path."""
-    state = initial_state()
-    state = reduce(state, RunStarted())
-    state = reduce(state, AssistantDelta(id="", text="Hey there!"))
-    state = reduce(state, AssistantDelta(id="", text="Hey there!"))
-    assistants = [r for r in state.rows if r.kind == "assistant"]
-    assert len(assistants) == 1
-    assert assistants[0].text == "Hey there!"
 
 
 def test_clear_rows_resets_anonymous_streaming_index():

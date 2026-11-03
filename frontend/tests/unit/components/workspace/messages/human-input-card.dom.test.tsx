@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
+import { MessageArtifactPathsContext } from "@/components/workspace/messages/markdown-link";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type { HumanInputRequest } from "@/core/messages/human-input";
@@ -35,6 +36,33 @@ afterEach(() => {
 });
 
 describe("HumanInputCard form validation (DOM)", () => {
+  it("resolves relative artifact links in its context and question", () => {
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <MessageArtifactPathsContext.Provider
+          value={["/mnt/user-data/outputs/report.md"]}
+        >
+          <HumanInputCard
+            request={{
+              ...formRequest,
+              context: "Review the [draft](report.md).",
+              question: "Approve the [report](./report.md)?",
+            }}
+            threadId="thread-1"
+          />
+        </MessageArtifactPathsContext.Provider>
+      </I18nContext.Provider>,
+    );
+
+    for (const name of ["draft", "report"]) {
+      expect(screen.getByRole("link", { name }).getAttribute("href")).toBe(
+        "/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.md",
+      );
+    }
+  });
+
   it("keeps the error node mounted while another field is still invalid", () => {
     renderCard();
 

@@ -14,8 +14,6 @@ Supports:
 import json
 import logging
 import time
-from datetime import UTC
-from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -25,7 +23,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
-from deerflow.utils.retry_after import bounded_retry_after_ms
+from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +53,8 @@ def _retry_after_ms(error: Exception) -> int | None:
         except (TypeError, ValueError, OverflowError):
             if "ms" in header.lower():
                 continue
-            try:
-                target = parsedate_to_datetime(str(raw))
-                # The obsolete asctime HTTP-date form has no timezone; it is UTC.
-                if target.tzinfo is None:
-                    target = target.replace(tzinfo=UTC)
-                milliseconds = (target.timestamp() - time.time()) * 1000
-            except (TypeError, ValueError, OverflowError):
+            milliseconds = parse_retry_after_date_ms(str(raw), now=time.time())
+            if milliseconds is None:
                 continue
         bounded = bounded_retry_after_ms(milliseconds)
         if bounded is not None:

@@ -134,9 +134,12 @@ def test_assembly_keeps_ordinary_and_unaffected_plugin_tools_on_collision(instal
     monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.build_invoke_acp_agent_tool", lambda agents: ordinary)
 
     result = assembly.get_available_tools(app_config=config, extensions=registry.build(), include_mcp=source == "mcp", include_upload_tool=False)
-    assert [tool.name for tool in result] == [name, plugin_tool_name(healthy.namespace, "search")]
-    assert result[0] is ordinary
-    assert result[0].invoke("hello") == "ordinary result"
+    # Model-bound built-ins are assembled independently of BUILTIN_TOOLS.
+    expected_ordinary = [name, "inspect_run_status"] if source in {"config", "builtin"} else ["inspect_run_status", name]
+    assert [tool.name for tool in result] == [*expected_ordinary, plugin_tool_name(healthy.namespace, "search")]
+    retained = next(tool for tool in result if tool.name == name)
+    assert retained is ordinary
+    assert retained.invoke("hello") == "ordinary result"
     assert "Duplicate tool name" in caplog.text
 
     # A host collision must not weaken the strict plugin-vs-plugin check.

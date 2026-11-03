@@ -59,6 +59,26 @@ def _as_datetime(value: datetime | str | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _resolve_local_datetime(value: datetime, timezone: str) -> datetime:
+    """Resolve a submitted wall time without silently moving it across a clock gap."""
+    if value.tzinfo is not None:
+        return value.astimezone(UTC)
+    zone = ZoneInfo(timezone)
+    resolved = value.replace(tzinfo=zone).astimezone(UTC)
+    if resolved.astimezone(zone).replace(tzinfo=None) != value:
+        raise ValueError(f"Local time {value.isoformat()} does not exist in timezone {timezone}; choose a valid local time or an explicit instant with a UTC offset")
+    return resolved
+
+
+def _validate_once_wall_time(schedule_spec: dict[str, Any], timezone: str) -> None:
+    run_at = schedule_spec.get("run_at")
+    if isinstance(run_at, str):
+        try:
+            _resolve_local_datetime(datetime.fromisoformat(run_at), timezone)
+        except ValueError as exc:
+            raise ValueError(f"run_at: {exc}") from exc
+
+
 def resolve_end_at(value: datetime | str | None, timezone: str) -> datetime | None:
     """Return ``end_at`` as aware UTC; a naive value is wall-clock time in the task's timezone.
 
@@ -73,9 +93,10 @@ def resolve_end_at(value: datetime | str | None, timezone: str) -> datetime | No
             raise scheduler_error(422, "invalid_request", "end_at must be an ISO 8601 date-time") from exc
     if not isinstance(value, datetime):
         raise scheduler_error(422, "invalid_request", "end_at must be an ISO 8601 date-time")
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=ZoneInfo(timezone))
-    return value.astimezone(UTC)
+    try:
+        return _resolve_local_datetime(value, timezone)
+    except ValueError as exc:
+        raise scheduler_error(422, "invalid_request", f"end_at: {exc}") from exc
 
 
 def validate_task_bounds(
@@ -156,6 +177,8 @@ def _validate_schedule(schedule_type: str, schedule_spec: dict[str, Any], timezo
     except ValueError as exc:
         raise scheduler_error(422, "invalid_timezone", str(exc)) from exc
     try:
+        if schedule_type == "once":
+            _validate_once_wall_time(schedule_spec, timezone)
         if schedule_type == "cron":
             raw_cron = schedule_spec.get("cron")
             if not isinstance(raw_cron, str):
@@ -237,6 +260,18 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
     schedule_spec = dict(updates["schedule_spec"]) if isinstance(updates.get("schedule_spec"), dict) else dict(existing["schedule_spec"])
     timezone = str(updates.get("timezone", existing["timezone"]))
     try:
+        if schedule_type == "once":
+            # Preserve already admitted legacy wall times on no-op edits. New
+            # definitions and terminal reactivation must pass today's validation.
+            unchanged_definition = (
+                existing["schedule_type"] == "once"
+                and schedule_spec.get("run_at") == existing["schedule_spec"].get("run_at")
+                and timezone == existing["timezone"]
+                and existing["status"] not in TERMINAL_TASK_STATUSES
+                and existing.get("next_run_at") is not None
+            )
+            if not unchanged_definition:
+                _validate_once_wall_time(schedule_spec, timezone)
         if schedule_type == "cron":
             raw_cron = schedule_spec.get("cron")
             if not isinstance(raw_cron, str):

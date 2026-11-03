@@ -39,8 +39,12 @@ skill bodies and manifest together, keeping earlier writes private. A write
 failure leaves the previous pack unchanged and discards staging; replacement
 moves the old target to a backup first and restores it on an ordinary
 publication error. Atomic writes fsync only their temporary files, so
-whole-tree durability after power loss is not guaranteed. Callers own final
-file modes: runtime artifacts executable, skill bodies and manifests read-only.
+whole-tree durability after power loss is not guaranteed.
+`_publish_bytes_atomically` removes a failed temporary through
+`cleanup_failed_atomic_write`, so an unlink or warning-log failure cannot
+replace the original publication error, including interruptions. Callers own
+final file modes: runtime artifacts executable, skill bodies and manifests
+read-only. Coverage: `tests/test_lark_cli_atomic_publish.py`.
 
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before `lark-cli config init`:
@@ -49,15 +53,14 @@ data directory, so clearing afterward would leave `config.json` with a dangling
 keychain reference. The snapshot still supplies the previous OAuth data for
 logout and restores the complete old tree on any switch failure.
 
-### Browser Progress Screenshots (`community/browser_automation/`)
+### DDG image search
 
-Hidden per-action browser progress frames use JPEG at quality 80 to keep their
-storage and transfer cost bounded relative to lossless PNG. The explicit
-`browser_screenshot` tool remains PNG because it creates a user-requested
-artifact. New automatic capture entry points must reuse the shared progress
-encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
-onto the first free `-N` name.
+Offload config/DDGS together. Only returned empties mean `No images found`;
+the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
+
+### Browser Automation
+
+Screenshot and session rules: [browser guidance](community/browser_automation/AGENTS.md).
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
@@ -132,3 +135,7 @@ continue, and consume/log its outcome in a completion callback. Prepare-stage
 cancellation retains its handoff/reclaim path. Regressions in
 `tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
 metadata cancellation and text-cache drain/cleanup.
+
+### Project Summary Worker Shutdown (`projects/summaries.py`)
+
+`stop()` closes admission synchronously and shares one shielded `_stop_task`; `start()` reopens admission only after it completes and is cleared. Preserve queue-drop/sentinel/grace semantics. Regressions: `test_stop_drains_workers_before_propagating_repeated_cancellation` and `test_start_after_stop_restarts_worker_pool` in `backend/tests/test_project_summaries.py`.

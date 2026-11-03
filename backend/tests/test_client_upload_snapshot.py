@@ -178,7 +178,10 @@ def test_real_xlsx_conversion_uses_captured_version(upload_case, monkeypatch, tm
     response = call_upload(client, source, in_loop)
     assert response["success"]
     assert saves == [source]
-    saved = uploads / "report.xlsx"
+    saved = uploads / response["files"][0]["filename"]
+    if existing:
+        assert saved.name == "report_1.xlsx"
+        assert (uploads / "report.xlsx").read_bytes() == b"OLD UPLOAD"
     saved_workbook = load_workbook(saved)
     try:
         assert saved_workbook.active["A1"].value == "VERSION A"
@@ -341,3 +344,27 @@ def test_collision_retries_keep_one_capture(upload_case, monkeypatch, tmp_path, 
     assert not captures[0].is_relative_to(uploads)
     assert not captures[0].parent.exists()
     assert not list(uploads.glob(".upload-*.part"))
+
+
+def test_colliding_original_is_published_only_after_copy_completes(upload_case, monkeypatch, tmp_path):
+    import deerflow.uploads.manager as manager
+
+    client, uploads = upload_case
+    source = tmp_path / "notes.txt"
+    source.write_bytes(b"NEW UPLOAD")
+    (uploads / source.name).write_bytes(b"OLD UPLOAD")
+    observed = []
+    real_copy = manager.shutil.copyfileobj
+
+    def inspect_copy(src, dst, *args, **kwargs):
+        real_copy(src, dst, *args, **kwargs)
+        observed.append({item["filename"] for item in manager.list_files_in_dir(uploads)["files"]})
+
+    monkeypatch.setattr(manager.shutil, "copyfileobj", inspect_copy)
+    response = client.upload_files("snapshot-thread", [source])
+
+    assert observed
+    assert all(names == {"notes.txt"} for names in observed)
+    assert response["files"][0]["filename"] == "notes_1.txt"
+    assert (uploads / "notes.txt").read_bytes() == b"OLD UPLOAD"
+    assert (uploads / "notes_1.txt").read_bytes() == b"NEW UPLOAD"

@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from fastapi import HTTPException
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.runtime import ConflictError, RunStatus
@@ -46,6 +47,9 @@ class DummyTaskRepo:
 
     async def update_after_launch(self, *args, **kwargs):
         self.updated = (args, kwargs)
+
+    async def reconcile_terminal_runs(self, **_kwargs):
+        return 0
 
     async def complete_run(self, task_id, **kwargs):
         self.completions.append((task_id, kwargs))
@@ -349,6 +353,85 @@ async def test_manual_overlap_conflict_is_kept_in_queue():
     assert result["outcome"] == "queued"
     assert run_repo.updated[-1][1]["status"] == "queued"
     assert task_repo.release_calls == []
+
+
+@pytest.mark.asyncio
+async def test_plain_409_from_launch_is_a_permanent_failure():
+    async def fake_launch(**_kwargs):
+        raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-permanent-409",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "failed"
+    assert run_repo.updated[-1][1]["status"] == "failed"
+    assert "Idempotency-Key already used" in run_repo.updated[-1][1]["error"]
+
+
+@pytest.mark.asyncio
+async def test_busy_thread_http_conflict_is_kept_in_queue():
+    from app.gateway.services import BusyThreadConflict
+
+    async def fake_launch(**_kwargs):
+        raise BusyThreadConflict("Thread thread-1 already has an active run")
+
+    task_repo = DummyTaskRepo(
+        [
+            {
+                "id": "task-busy-thread",
+                "user_id": "user-1",
+                "thread_id": "thread-1",
+                "context_mode": "reuse_thread",
+                "assistant_id": "lead_agent",
+                "prompt": "Summarize thread",
+                "schedule_type": "cron",
+                "schedule_spec": {"cron": "0 9 * * *"},
+                "timezone": "UTC",
+                "status": "enabled",
+                "overlap_policy": "enqueue",
+            }
+        ]
+    )
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(task_repo.rows[0], now=datetime.now(UTC), trigger="scheduled")
+
+    assert result["outcome"] == "queued"
+    assert run_repo.updated[-1][1]["status"] == "queued"
 
 
 @pytest.mark.asyncio
@@ -822,6 +905,7 @@ class _StatefulRunRepo:
             "task_id": kwargs["task_id"],
             "thread_id": kwargs["thread_id"],
             "trigger": kwargs["trigger"],
+            "scheduled_for": kwargs["scheduled_for"],
             "status": kwargs["status"],
             "run_id": None,
         }
@@ -1772,6 +1856,85 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
     assert launch["prompt"].startswith(origin["instructions"])
     assert "stop_scheduled_task" in launch["prompt"] and "<standing_notes>" in launch["prompt"]
     assert launch["title"] == "检查发布清单 · 10-07 09:00"
+
+
+@pytest.mark.asyncio
+async def test_manual_launch_origin_is_stable_across_retries():
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+    admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
+    queued = {
+        "id": "task-run-prov",
+        "task_id": "task-prov",
+        "thread_id": "thread-prov",
+        "trigger": "manual",
+        "scheduled_for": admitted,
+    }
+
+    first, _ = await service._launch_provenance(task_repo.rows[0], queued, now=admitted + timedelta(hours=1))
+    second, _ = await service._launch_provenance(task_repo.rows[0], queued, now=admitted + timedelta(hours=2))
+
+    assert first["scheduled_for"] == admitted.isoformat()
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_manual_trial_retry_reuses_the_admitted_origin():
+    launches: list[dict] = []
+
+    async def fake_launch(**kwargs):
+        launches.append(kwargs)
+        if len(launches) == 1:
+            raise ConflictError("Thread busy")
+        return {"run_id": "run-retried", "thread_id": kwargs["thread_id"]}
+
+    class DrainableRunRepo(_StatefulRunRepo):
+        async def list_queued_runs(self, *, limit: int, **_kwargs) -> list[dict]:
+            return [dict(row) for row in self.rows.values() if row["status"] == "queued"][:limit]
+
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = DrainableRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        own_stop_available=True,
+    )
+    attempted: list[dict] = []
+    original_attempt = service._attempt_queued_run
+
+    async def capture_attempt(task, queued, *, now):
+        attempted.append(dict(queued))
+        return await original_attempt(task, queued, now=now)
+
+    service._attempt_queued_run = capture_attempt
+    admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)
+
+    first = await service.dispatch_task(task_repo.rows[0], now=admitted, trigger="manual")
+    assert first["outcome"] == "queued"
+
+    # The immediate launch was busy, so the occurrence was requeued with the
+    # admitted scheduled_for. Draining it at a later clock must reproduce the
+    # first request's origin rather than embedding the retry time.
+    await service._drain_queue(now=admitted + timedelta(hours=2))
+
+    assert len(launches) == 2, launches
+    assert attempted[0]["scheduled_for"] == admitted
+    assert attempted[1]["scheduled_for"] == admitted
+    assert launches[0]["origin"]["scheduled_for"] == admitted.isoformat()
+    assert launches[1]["origin"]["scheduled_for"] == admitted.isoformat()
+    assert launches[0]["origin"] == launches[1]["origin"]
 
 
 @pytest.mark.asyncio

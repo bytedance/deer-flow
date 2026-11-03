@@ -11,6 +11,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ def _normalize(payload: object, count: int) -> list[dict]:
             }
             if any(not isinstance(value, str) for value in result.values()):
                 raise ValueError("Invalid article fields")
+            result["url"] = safe_public_result_url(result["url"])
         except ValueError:
             logger.warning("Skipping malformed Webz result at index %d", index)
             continue

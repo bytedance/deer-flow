@@ -28,8 +28,10 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.models import create_chat_model
+from deerflow.runtime.goal_progress import previous_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import MAX_GOAL_OBJECTIVE_CHARS as MAX_GOAL_OBJECTIVE_CHARS
 from deerflow.utils.goal_objective import normalize_goal_objective as normalize_goal_objective
@@ -73,6 +75,10 @@ _goal_locks = AsyncKeyedLockTable[str]()
 
 class GoalWriteConflict(RuntimeError):
     """Raised when a goal write is based on a stale checkpoint."""
+
+
+class GoalEvaluationFormatError(ValueError):
+    """A normally completed evaluator response did not contain a valid verdict."""
 
 
 def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
@@ -305,7 +311,8 @@ def _cap_evidence(lines: list[str]) -> str:
     that work answers, and so is the latest Human Input Card answer left out. Each is shortened
     only when it and the lines after it do not fit whole. If the next assistant message back
     does not fit whole, its end fills the room left. A marker says how many lines were left
-    out. No line starts midway without a label.
+    out. Spare room then restores shortened user input without displacing the selected
+    recent work. No line starts midway without a label.
     """
     conversation = "\n\n".join(lines)
     if len(conversation) <= MAX_GOAL_CONVERSATION_CHARS:
@@ -344,6 +351,13 @@ def _cap_evidence(lines: list[str]) -> str:
         start = boundary
     omitted = start - len(head)
     marker = [f"[{omitted} earlier evidence lines omitted]"] if omitted else []
+    spare = MAX_GOAL_CONVERSATION_CHARS - len("\n\n".join([*head, *marker, *kept]))
+    for offset, index in enumerate(picks if head else []):
+        if spare <= 0:
+            break
+        expanded = _truncate(lines[index], MAX_GOAL_REQUEST_CHARS + spare)
+        spare += len(head[offset]) - len(expanded)
+        head[offset] = expanded
     return "\n\n".join([*head, *marker, *kept])
 
 
@@ -417,6 +431,9 @@ def create_goal_evaluator_model(
     call to inherit tracing from. It must attach its own model-level tracing
     callbacks, same as the other standalone, non-graph callers
     (``oneshot_llm.run_oneshot_llm``, ``MemoryUpdater``).
+
+    Provider construction can read local credentials, so async callers build
+    the evaluator through ``run_assembly`` instead of on the event loop.
     """
     return create_chat_model(
         name=model_name,
@@ -496,7 +513,7 @@ async def evaluate_goal_completion(
     user_content = f"Active goal:\n{goal['objective']}\n\nVisible conversation evidence:\n{conversation}\n\nIs the active goal fully satisfied?"
 
     if model is None:
-        model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
+        model = await run_assembly(create_goal_evaluator_model, model_name=model_name, app_config=app_config)
     invoke_config: dict[str, Any] = {"run_name": "goal_evaluator"}
     if usage_callback is not None:
         # This critic must not inherit graph callbacks: its usage crosses the
@@ -546,7 +563,20 @@ async def evaluate_goal_completion(
             invoke=invoke_with_usage,
             task_store=task_store,
         )
-    return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    try:
+        return parse_goal_evaluation_response(_extract_response_text(response.content), require_assumption_attribution=interaction_policy is not None and not interaction_policy.allows_clarification)
+    except ValueError as exc:
+        metadata = getattr(response, "response_metadata", None)
+        reasons = [metadata[key] for key in ("finish_reason", "stop_reason") if key in metadata] if isinstance(metadata, Mapping) else []
+        blocks = response.content if isinstance(response.content, list) else []
+        refusal = _additional_kwargs(response).get("refusal") or any(
+            isinstance(block, Mapping) and (block.get("type") == "refusal" or (block.get("type") == "non_standard" and isinstance(block.get("value"), Mapping) and block["value"].get("refusal"))) for block in blocks
+        )
+        # Explicit refusal wins even when an adapter also reports normal stop.
+        # Length/safety stops and unknown outcomes retain their failure behavior.
+        if not refusal and reasons and all(isinstance(reason, str) and reason.casefold() in {"stop", "end_turn"} for reason in reasons):
+            raise GoalEvaluationFormatError("The completed goal evaluator response was malformed.") from exc
+        raise
 
 
 def _goal_evaluator_usage_record(response: Any, *, source_id: str, model_name: str | None, model: Any) -> dict[str, int | str | None]:
@@ -644,15 +674,21 @@ def compute_goal_progress_key(evaluation: GoalEvaluation, *, evidence_signature:
     )
 
 
-def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, evidence_signature: str = "") -> int:
-    """Increment repeated-progress count when visible evidence has not advanced."""
+def compute_no_progress_count(goal: GoalState, evaluation: GoalEvaluation, *, evidence_signature: str = "", operation_progress: dict[str, Any] | None = None) -> int:
+    """Count repeated tool work, preserving the original pure-text behavior."""
     if evaluation["satisfied"]:
         return 0
     progress_key = compute_goal_progress_key(evaluation, evidence_signature=evidence_signature)
     previous = goal.get("last_evaluation", {})
-    if isinstance(previous, dict) and previous.get("progress_key") == progress_key:
-        return int(goal.get("no_progress_count", 0)) + 1
-    return 0
+    old_count = int(goal.get("no_progress_count", 0))
+    text_count = old_count + 1 if isinstance(previous, dict) and previous.get("progress_key") == progress_key else 0
+    if operation_progress is None or previous_goal_operations(goal) is None:
+        # The existing text progress key is unchanged. Preserve its exact count
+        # on the first observation, rather than inventing a migration stop rule.
+        return text_count
+    if operation_progress.get("has_tool_activity"):
+        return 0 if operation_progress.get("new_keys") else old_count + 1
+    return text_count
 
 
 def make_goal_continuation_message(goal: GoalState, evaluation: GoalEvaluation, *, pii_redaction: PiiRedactionConfig | None = None) -> HumanMessage:
@@ -846,6 +882,7 @@ def attach_goal_evaluation(
     no_progress_count: int | None = None,
     stand_down_reason: str | None = None,
     evidence_signature: str = "",
+    operation_progress: dict[str, Any] | None = None,
 ) -> GoalState:
     """Return a goal copy with the latest evaluator result attached."""
     next_goal = copy.deepcopy(goal)
@@ -864,6 +901,12 @@ def attach_goal_evaluation(
         "evaluated_at": next_goal["updated_at"],
         "progress_key": compute_goal_progress_key(evaluation, evidence_signature=evidence_signature),
     }
+    if operation_progress is not None:
+        current_operations = previous_goal_operations(goal)
+        next_goal["last_evaluation"]["operation_progress"] = {
+            "version": operation_progress["version"],
+            "seen_keys": sorted(set(operation_progress["seen_keys"]) | set(current_operations["seen_keys"] if current_operations is not None else [])),
+        }
     if stand_down_reason:
         next_goal["last_evaluation"]["stand_down_reason"] = stand_down_reason
     return next_goal

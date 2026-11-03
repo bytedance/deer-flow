@@ -102,6 +102,36 @@ class _RecordingProvider:
 # ── list_models tests ──────────────────────────────────────────────────
 
 
+@pytest.mark.parametrize("names,denied,status", [(["family-a", "family-b"], {"family-b"}, "resolved"), (["family-a", "family-b"], {"family-a", "family-b"}, "unavailable"), (["family-a", "family-b", "family-c"], {"family-c"}, "ambiguous")])
+@pytest.mark.parametrize("fail_closed", [False, True])
+def test_model_control_candidates_require_use_permission(monkeypatch, names, denied, status, fail_closed):
+    class VisibleProvider(_RecordingProvider):
+        def filter_resources(self, principal, resource_type, candidates):
+            return list(candidates)
+
+    provider = VisibleProvider(denied=denied)
+    _enable_authorization(monkeypatch, provider, fail_closed=fail_closed)
+    config = _make_app_config(names)
+    config.authorization = AuthorizationConfig(enabled=True, fail_closed=fail_closed)
+    monkeypatch.setattr(models_router, "get_optional_user_from_request", AsyncMock(return_value=_user()))
+    monkeypatch.setattr(models_router, "_resolve_bound_owner_for_model_list", AsyncMock(return_value=None))
+    with TestClient(_make_models_app(config)) as client:
+        # Visibility remains distinct from use permission.
+        assert len(client.get("/api/models").json()["models"]) == len(names)
+        response = client.post("/api/models/resolve", json={"text": "Use family for this turn: calculate 2 + 2"})
+        assert response.status_code == 200
+        result = response.json()
+        assert {item["name"] for item in result["candidates"]} == set(names) - denied
+        assert result["status"] == status
+        if status == "resolved":
+            assert result["model_name"] == "family-a"
+        else:
+            assert result["model_name"] is None
+        assert {request.target for request in provider.authorize_requests if request.resource == "model" and request.action == "use"} == set(names)
+        # A stale/manual selection still fails authorization rather than falling back.
+        assert client.post("/api/models/resolve", json={"text": "Use family for this turn: calculate 2 + 2", "model_name": sorted(denied)[0]}).status_code == 403
+
+
 def test_list_models_disabled_returns_all(monkeypatch):
     """When authorization is disabled, all models are visible."""
     config = AuthorizationConfig(enabled=False)

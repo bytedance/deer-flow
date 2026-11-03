@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import logging
@@ -12,7 +13,7 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any, Protocol, override, runtime_checkable
 
-from deerflow_extension_api import CompactionEvent, canonical_hash
+from deerflow_extension_api import CompactionEvent, ExtensionData, canonical_hash, task_store_from_runtime
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
@@ -85,7 +86,11 @@ class ContextCompactionResult:
 
 @runtime_checkable
 class BeforeSummarizationHook(Protocol):
-    """Hook invoked before summarization removes messages from state."""
+    """Hook invoked before summarization removes messages from state.
+
+    Hooks are synchronous and may block. The async compaction path runs them
+    in a worker thread, so a hook must not assume it runs on the event loop.
+    """
 
     def __call__(self, event: SummarizationEvent) -> None: ...
 
@@ -798,6 +803,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         summary: str,
         compacted_message_count: int,
         kept_message_count: int,
+        task_store: ExtensionData | None,
     ) -> None:
         event = CompactionEvent(
             transform_kind=_COMPACTION_TRANSFORM_KIND,
@@ -807,7 +813,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             compacted_message_count=compacted_message_count,
             kept_message_count=kept_message_count,
         )
-        notify_context_compacted(event, extensions=self._extensions)
+        notify_context_compacted(event, extensions=self._extensions, task_store=task_store)
 
     def _record_summary_telemetry(self, runtime: Runtime, previous_summary: str | None, summary: str, summarized_count: int, *, llm_call_skipped: bool = False) -> None:
         """Count successful summary results, unchanged results, and no-op cache reuse.
@@ -889,6 +895,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             summary=summary,
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
+            task_store=task_store_from_runtime(runtime),
         )
         task_history = None
         if self._task_continuity_config is not None:
@@ -916,13 +923,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        from deerflow_extension_api import task_store_from_runtime
-
+        task_store = task_store_from_runtime(runtime)
         source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = await self._asummarize_with(
             messages_to_summarize,
             previous_summary=previous_summary,
-            task_store=task_store_from_runtime(runtime),
+            task_store=task_store,
             runtime=runtime,
         )
         if summary is None:
@@ -933,12 +939,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         summary = str(summary)
         self._record_summary_telemetry(runtime, previous_summary, summary, len(messages_to_summarize), llm_call_skipped=llm_call_skipped)
         # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        await self._afire_hooks(messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
             compacted_message_count=len(messages_to_summarize),
             kept_message_count=len(preserved_messages),
+            task_store=task_store,
         )
         task_history = None
         if self._task_continuity_config is not None:
@@ -1037,6 +1044,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             except Exception:
                 hook_name = getattr(hook, "__name__", None) or type(hook).__name__
                 logger.exception("before_summarization hook %s failed", hook_name)
+
+    async def _afire_hooks(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        preserved_messages: list[AnyMessage],
+        runtime: Runtime,
+    ) -> None:
+        """Async counterpart of :meth:`_fire_hooks`, run in a worker thread.
+
+        ``memory_flush_hook`` hands the messages to the memory backend, and
+        the mem0, Honcho and OpenViking backends write over sync HTTP, so
+        running the hooks inline would stall the event loop for the whole
+        request. ``asyncio.to_thread`` copies the context, so hooks still see
+        the run's LangGraph config and user context.
+        """
+        if not self._before_summarization_hooks:
+            return
+        await asyncio.to_thread(self._fire_hooks, messages_to_summarize, preserved_messages, runtime)
 
 
 def _summary_model_thinking_enabled(name: str | None, app_config: Any) -> bool:

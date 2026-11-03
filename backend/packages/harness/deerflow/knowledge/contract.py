@@ -16,7 +16,11 @@ class KnowledgeCapabilities(BaseModel):
     Search-only providers need no catalog, scope, or management implementation.
     """
 
-    operations: frozenset[Literal["search", "sources", "catalog", "documents", "dataset_filter", "document_filter"]] = frozenset({"search"})
+    operations: frozenset[
+        Literal[
+            "search", "sources", "catalog", "documents", "dataset_filter", "document_filter", "entries_search", "entries_dataset_filter", "entries_document_filter", "relations_search", "relations_dataset_filter", "relations_document_filter"
+        ]
+    ] = frozenset({"search"})
 
     model_config = ConfigDict(frozen=True)
 
@@ -121,3 +125,15 @@ class RetrievalCatalogProvider(Protocol):
 
 class RetrievalDocumentsProvider(Protocol):
     async def documents(self, dataset_id: str, *, context: KnowledgeRequestContext, page: int, page_size: int, search: str) -> RetrievalCatalogPage: ...
+
+
+class KnowledgeEntriesProvider(Protocol):
+    """Optional entry retrieval; filters are advertised independently of search."""
+
+    async def entries_search(self, query: str, *, context: KnowledgeRequestContext) -> RetrievalResult: ...
+
+
+class EntityRelationsProvider(Protocol):
+    """Return only upstream entities/edges/path evidence, never inferred edges."""
+
+    async def relations_search(self, query: str, *, context: KnowledgeRequestContext) -> RetrievalResult: ...

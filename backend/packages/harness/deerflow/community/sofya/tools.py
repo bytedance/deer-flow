@@ -14,6 +14,7 @@ import httpx
 from langchain.tools import tool
 
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ def web_search_tool(query: str, max_results: int | None = None, time_range: Sear
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": safe_public_result_url(r.get("url")),
             # Page content when the result was read, the search snippet otherwise.
             # Capped so a normal search stays inline rather than being written to disk.
             "content": _clip(r.get("content") or r.get("description") or "", content_limit),

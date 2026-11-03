@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { extensionCatalog } from "../../src/core/extensions/catalog";
+
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 let gateway: ChildProcess;
@@ -448,7 +450,25 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(10);
+    await expect(page.getByRole("article")).toHaveCount(
+      extensionCatalog.length,
+    );
+    const management = page.getByRole("article").filter({
+      hasText: zh ? "知识入库与处理" : "Knowledge ingestion and processing",
+    });
+    await expect(management).toHaveCount(1);
+    await expect(management).toContainText(
+      zh
+        ? "需要安装和配置，不包含管理页面。"
+        : "Requires installation and configuration; no management page is included.",
+    );
+    const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
+    await expect(lightrag).toHaveCount(1);
+    await expect(lightrag).toContainText(
+      zh
+        ? "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。"
+        : "Retrieve documents and entity relations from LightRAG with shared source citations.",
+    );
     const weknoraTitle = zh
       ? "WeKnora 知识检索"
       : "WeKnora knowledge retrieval";
@@ -665,10 +685,10 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(10);
+  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(10);
+  ).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Script workflows" }),
   ).toHaveCount(1);

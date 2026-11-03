@@ -267,13 +267,16 @@ def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
     """Expand simple shell references in one pass, without executing shell syntax."""
 
     def replace(match: re.Match[str]) -> str:
-        if match[0].startswith("\\"):
-            return match[0][1:]
+        if match[0] == "\\$":
+            return "$"
+        if match[0] == "$$":
+            # One token, as in the shell: its second `$` never starts a reference.
+            return "$$"
         name = match[1] or match[3]
         resolved = environment.get(name, "")
         return match[2] if match[2] is not None and not resolved else resolved
 
-    return re.sub(r"\\?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
+    return re.sub(r"\\\$|\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
 
 
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
@@ -899,6 +902,10 @@ def create_support_bundle(
     config_path = (config_path or project_root / "config.yaml").resolve()
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
+    # `--out` names the zip, so a directory there would only fail inside
+    # zipfile with a raw PermissionError/IsADirectoryError.
+    if out_path.is_dir():
+        raise ValueError(f"--out must be a file path, not a directory: {out_path}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
         _validate_thread_id(thread_id)
@@ -964,7 +971,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
     parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
-    parser.add_argument("--out", type=Path, default=None, help="Output zip path")
+    parser.add_argument("--out", type=Path, default=None, help="Output zip file path")
     parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
     return parser.parse_args(argv)
 

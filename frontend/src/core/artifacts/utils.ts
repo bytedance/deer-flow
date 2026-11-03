@@ -1,8 +1,21 @@
+import type { Message } from "@langchain/langgraph-sdk";
+
 import { getBackendBaseURL } from "../config";
+import { extractPresentFilesFromMessage } from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
+
+export function areStringArraysEqual(
+  previous: readonly string[],
+  next: readonly string[],
+) {
+  return (
+    previous.length === next.length &&
+    previous.every((value, index) => value === next[index])
+  );
+}
 
 function decodePathSegment(segment: string) {
   try {
@@ -91,6 +104,30 @@ export function extractArtifactsFromThread(thread: {
   return thread.values.artifacts ?? EMPTY_ARTIFACT_PATHS;
 }
 
+/**
+ * Adds the `/mnt/` paths passed to `present_files` in `messages` to the
+ * thread's artifact list. A reopened thread rebuilds its values from the
+ * Gateway's POST /history head, which carries messages but not `artifacts`;
+ * the backend fills `artifacts` from those same `present_files` calls, so the
+ * messages are enough to recover the list. Returns `stateArtifacts` itself
+ * when no message presents files.
+ */
+export function collectThreadArtifactPaths(
+  stateArtifacts: readonly string[],
+  messages: readonly Message[],
+): readonly string[] {
+  const presented = messages
+    .flatMap((message) => extractPresentFilesFromMessage(message))
+    .filter(
+      (path): path is string =>
+        typeof path === "string" && path.startsWith("/mnt/"),
+    );
+  if (presented.length === 0) {
+    return stateArtifacts;
+  }
+  return [...new Set([...stateArtifacts, ...presented])];
+}
+
 export function resolveArtifactURL(absolutePath: string, threadId: string) {
   if (isStaticWebsiteOnly()) {
     return staticDemoArtifactURL({ filepath: absolutePath, threadId });
@@ -153,6 +190,73 @@ export function resolveArtifactImageURL(
   }
 }
 
+function parseRelativeArtifactReference(src: string) {
+  const { path: relativePath, suffix } = splitPathSuffix(src);
+  const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
+  const decodedPath = decodeRelativeArtifactPath(normalizedPath);
+  if (
+    !normalizedPath ||
+    normalizedPath.startsWith("/") ||
+    /^[a-z][a-z\d+.-]*:/i.test(normalizedPath) ||
+    normalizedPath.startsWith("//") ||
+    normalizedPath.split("/").includes("..") ||
+    decodedPath.split("/").includes("..")
+  ) {
+    return null;
+  }
+  return { decodedPath, suffix };
+}
+
+/**
+ * True for a scheme-less relative path, including invalid artifact paths such
+ * as `../report.md`. Message links in this category must either resolve to a
+ * known artifact or render inert instead of navigating relative to the chat
+ * route.
+ */
+export function isPotentialRelativeArtifactReference(src: string) {
+  const { path } = splitPathSuffix(src);
+  return (
+    Boolean(path) &&
+    !path.startsWith("/") &&
+    !path.startsWith("//") &&
+    !/^[a-z][a-z\d+.-]*:/i.test(path)
+  );
+}
+
+/**
+ * True for a scheme-less relative reference (`report.md`, `./out/a.png`)
+ * that could name a thread artifact: no scheme, no leading `/`, no `..`
+ * segment, and a non-empty path (so `#anchor` and `?query` are excluded).
+ */
+export function isRelativeArtifactReference(src: string) {
+  return parseRelativeArtifactReference(src) !== null;
+}
+
+/**
+ * Resolves a relative reference to this thread's artifact URL when it
+ * suffix-matches exactly one artifact path. Returns `null` when `src` is not
+ * a relative reference or when zero or several artifacts match.
+ */
+export function resolveRelativeArtifactURL(
+  src: string,
+  threadId: string,
+  artifactPaths: readonly string[],
+) {
+  const reference = parseRelativeArtifactReference(src);
+  if (!reference) {
+    return null;
+  }
+
+  const matches = artifactPaths.filter((path) =>
+    path.endsWith(`/${reference.decodedPath}`),
+  );
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  return `${resolveArtifactURL(matches[0]!, threadId)}${reference.suffix}`;
+}
+
 export function resolveMessageImageURL(
   src: string,
   threadId: string,
@@ -162,27 +266,7 @@ export function resolveMessageImageURL(
     return resolveMarkdownArtifactURL(src, threadId);
   }
 
-  const { path: relativePath, suffix } = splitPathSuffix(src);
-  const normalizedPath = relativePath.replace(/^(?:\.\/)+/, "");
-  const decodedNormalizedPath = decodeRelativeArtifactPath(normalizedPath);
-  if (
-    !normalizedPath ||
-    normalizedPath.startsWith("/") ||
-    /^[a-z][a-z\d+.-]*:/i.test(normalizedPath) ||
-    normalizedPath.startsWith("//") ||
-    normalizedPath.split("/").includes("..")
-  ) {
-    return src;
-  }
-
-  const matches = artifactPaths.filter((path) =>
-    path.endsWith(`/${decodedNormalizedPath}`),
-  );
-  if (matches.length !== 1) {
-    return src;
-  }
-
-  return `${resolveArtifactURL(matches[0]!, threadId)}${suffix}`;
+  return resolveRelativeArtifactURL(src, threadId, artifactPaths) ?? src;
 }
 
 function staticDemoArtifactURL({

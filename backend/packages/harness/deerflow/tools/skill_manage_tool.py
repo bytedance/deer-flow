@@ -19,6 +19,7 @@ from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import SkillCacheResetPublishError, publish_skills_cache_reset, refresh_user_skills_system_prompt_cache_async
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.skills.package_files import is_code_file
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
     StaticFinding,
@@ -164,7 +165,9 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             for relative_path, content in updates.items():
                 target = skill_dir / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                # Match the bytes skill storage publishes, including on Windows.
+                # Default text mode would rewrite LF before the scanner reads it.
+                target.write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=name)
 
     try:
@@ -307,7 +310,15 @@ async def _skill_manage_impl(
             from deerflow.skills.mutations.guard import read_optional_text
 
             prev_content = await _to_thread(read_optional_text, skill_storage, target)
-            executable = "scripts/" in path or path.startswith("scripts/")
+            # Executable content is whatever the shared package-file rule classifies
+            # as code: a file under the top-level ``scripts/`` directory, a code-suffix
+            # file anywhere in the package, or an extensionless file that starts with
+            # a shebang. Classify with that shared rule instead of re-deriving it; a
+            # substring test here also caught static support files such as
+            # references/scripts/overview.md and templates/my-scripts/setup.md, while
+            # the ``scripts/``-member rule alone would downgrade runnable files such as
+            # references/scripts/helper.py or assets/my-scripts/tool.js to static.
+            executable = is_code_file(path, content[:8].encode("utf-8", "surrogatepass"))
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)
             scan["static_findings"] = static_findings

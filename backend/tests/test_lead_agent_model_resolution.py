@@ -49,6 +49,68 @@ def _make_model(name: str, *, supports_thinking: bool) -> ModelConfig:
     )
 
 
+@pytest.fixture
+def model_control_assembly(monkeypatch):
+    import deerflow.models.selection as selection
+    import deerflow.tools as tools
+
+    app_config = _make_app_config([_make_model(name, supports_thinking=False) for name in ("default", "chosen")])
+    strict = MagicMock()
+    fallback = MagicMock(side_effect=lambda name, **kwargs: name)
+    model_factory = MagicMock(return_value=object())
+    monkeypatch.setattr(selection, "authorize_selected_model", strict)
+    monkeypatch.setattr(lead_agent_module, "_authorize_model_name", fallback)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "system prompt")
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", model_factory)
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(tools, "get_available_tools", lambda **kwargs: [])
+    return app_config, strict, fallback, model_factory
+
+
+@pytest.mark.parametrize("requested,selected,reason", [("default", "chosen", "same model_name"), (None, "default", "same model_name"), ("missing", "missing", "not configured")])
+def test_assembly_rejects_invalid_explicit_model_selection(model_control_assembly, requested, selected, reason):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    with pytest.raises(ValueError, match=reason):
+        lead_agent_module._make_lead_agent({"context": {"model_name": requested, "model_selection_requested": selected}}, app_config=app_config)
+    strict.assert_not_called()
+    fallback.assert_not_called()
+    model_factory.assert_not_called()
+
+
+@pytest.mark.parametrize("denied", [False, True])
+def test_assembly_explicit_model_never_uses_default_fallback(model_control_assembly, denied):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    if denied:
+        strict.side_effect = ValueError("Model use denied")
+        with pytest.raises(ValueError, match="Model use denied"):
+            lead_agent_module._make_lead_agent({"context": {"model_name": "chosen", "model_selection_requested": "chosen"}}, app_config=app_config)
+        model_factory.assert_not_called()
+    else:
+        lead_agent_module._make_lead_agent({"context": {"model_name": "chosen", "model_selection_requested": "chosen"}}, app_config=app_config)
+        assert model_factory.call_args.kwargs["name"] == "chosen"
+    assert strict.call_args.args == ("chosen",)
+    fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_assembly_child_selection_requires_enabled_subagents(model_control_assembly, enabled):
+    app_config, strict, fallback, model_factory = model_control_assembly
+    config = {"context": {"subagent_enabled": enabled, "subagent_model_name": "chosen"}}
+    if enabled:
+        lead_agent_module._make_lead_agent(config, app_config=app_config)
+        assert strict.call_args.args == ("chosen",)
+        assert model_factory.call_args.kwargs["name"] == "default"
+    else:
+        with pytest.raises(ValueError, match="requires enabled subagents"):
+            lead_agent_module._make_lead_agent(config, app_config=app_config)
+        strict.assert_not_called()
+    assert fallback.call_args.args == ("default",)
+
+
 class ConfiguredGuardMiddleware(AgentMiddleware):
     pass
 

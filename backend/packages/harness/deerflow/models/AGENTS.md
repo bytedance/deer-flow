@@ -24,6 +24,8 @@ nested underflow into zero. Regression coverage is in `tests/test_mindie_provide
 
 ### Model Factory (`packages/harness/deerflow/models/factory.py`)
 
+`selection.py` resolves direct user model controls against the visible catalog without model calls. `aliases` is presentation metadata, stripped from provider kwargs and assembly parameters. Gateway copies `subagent_model_name`/`model_selection_requested` into runtime context only. Explicit choices use `model:use` with no deny-to-default substitution; provider errors retain deployment policy. Bind selected child names through cloned task schemas; never mutate shared tools or agent configs.
+
 Request-admission waits follow the next scheduled admission and configured
 interval, capped at 50 ms; the cap must not become a minimum poll interval that
 limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
@@ -153,9 +155,11 @@ in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
 ### Claude Retry Delays (`claude_provider.py`)
 
 `_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
-provider hints. Invalid or over-24-hour values retain local exponential backoff;
-finite negative values clamp to zero. Sync/async 429/500 regressions live in
-`tests/test_claude_provider_retry_after.py` and use offline provider doubles.
+provider hints and HTTP-date hints (including obsolete forms interpreted in UTC).
+Invalid or over-24-hour values retain local exponential backoff; finite negative
+values and past dates clamp to zero. Sync/async 429/500 regressions live in
+`tests/test_claude_provider_retry_after.py`; `tests/test_claude_retry_after_dates.py`
+exercises public invocation through real SDK clients with offline HTTP transports.
 
 ### Provider Retry Admission (`claude_provider.py`, `openai_codex_provider.py`)
 
@@ -198,6 +202,11 @@ the shared simulated chunker. Preserve terminal usage exactly once, XML/native
 tool calls, invalid calls, and the original messages. Offline SDK boundary tests:
 `tests/test_mindie_provider.py::test_public_stream_compatibility_through_sdk`.
 
+Whole-response and streaming newline decoding protect both triple-backtick and
+triple-tilde fences. The earliest opener wins, only the same delimiter closes it,
+and an unclosed fence keeps the remainder verbatim. Boundary and mixed-delimiter
+regressions live in `tests/test_mindie_newline_fences.py`.
+
 `_fix_messages` converts tool results to the XML text format expected by MindIE.
 Only tool-message `type=json` payloads join the text channel; other non-text
 blocks remain omitted. Keep the `<tool_response>` escaping boundary and the
@@ -233,6 +242,15 @@ Preset drafts cannot supply endpoints or adapter paths. Legacy custom
 never infer that adapter from a model-name substring. Reads do not migrate the
 catalog. New names are allocated under the existing catalog lock with bounded
 ASCII slugs and random suffixes; edits preserve names and references.
+
+Moonshot's two exact K3.1 Pro IDs use required thinking, `dialect=none`, preserved
+history and native `low/high/max` effort (default `max`, no aliases). The shared
+DeepSeek adapter gates final request normalization on the official Moonshot
+endpoint and effective request model, including an `extra_body.model` override.
+Omit the unsupported `thinking` switch and fixed sampling keys at both payload
+levels without mutating caller mappings; the SDK merges `extra_body` last.
+Keep K2.5, unknown IDs and other endpoints unchanged. Offline SDK coverage:
+`tests/test_managed_moonshot.py`; live acceptance is a separate validation.
 
 The admin-only `/api/managed-models/providers` exposes form metadata, not routing.
 Full updates require the current revision. Omitted keys are retained only for

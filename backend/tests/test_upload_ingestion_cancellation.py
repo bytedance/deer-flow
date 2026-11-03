@@ -14,6 +14,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.gateway import upload_ingestion
 from app.gateway.routers import uploads
+from deerflow.uploads import companions
 from deerflow.utils.file_io import run_file_io
 
 
@@ -427,6 +428,9 @@ def test_rejected_request_preserves_outcome_when_cleanup_fails(local_uploads, mo
     monkeypatch.setattr(Path, "unlink", unlink_record)
     monkeypatch.setattr(uploads.logger, "warning", warn)
     monkeypatch.setattr(upload_ingestion.logger, "warning", warn)
+    # The ownership record belongs to the companion module, so a failed removal
+    # is reported there rather than through the upload handler.
+    monkeypatch.setattr(companions.logger, "warning", warn)
     error_log = MagicMock()
     monkeypatch.setattr(uploads.logger, "error", error_log)
 

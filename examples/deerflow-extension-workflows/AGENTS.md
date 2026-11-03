@@ -25,7 +25,7 @@ separately. Hash the Agent allowlist in canonical sorted order. Owner scope appl
 to every public read and mutation.
 Own persistence through supervisor publication even if the launching caller cancels.
 Serialize launch admission and shutdown. After artifact IO, validate call limits
-and step uniqueness together with await-free reservation. Hold the process lock across service life;
+and step uniqueness together with await-free reservation. In SQLite mode hold the process lock across service life;
 do not recover live records while another Gateway owns the file.
 
 Anchor results on the visible human input, including canonical __user rewrites;
@@ -56,7 +56,16 @@ before host effects and responses before worker delivery. Include worker/supervi
 source and engine version in compatibility checks; Date/random are unavailable.
 Preserve original wait expiry and remaining execution budget. Read captured files
 by stored step/version after crashes, never overwrite them from mutable sources.
-Phase 4 leases/fenced dispatch remain unimplemented: retain the exclusive flock.
+PostgreSQL mode uses postgres.py/cluster.py: the host and extension must share
+one database/schema. Database-clock leases use monotonically increasing epochs.
+Every supervisor write, file capture, child admission and child cancellation is
+fenced. Host admission/cancel lock the lease row in their transaction; never replace
+this with a preflight check. Durable controls are immutable and consumed by the
+owner. Lease loss kills only the local JS worker; never clean up successor children.
+Unknown child reservations retain cluster capacity. Takeover requires a fresh
+session and matching runtime/config; there is no unattended authority reattachment.
+Keep the SQLite flock default. Cluster tests use DEERFLOW_TEST_WORKFLOW_POSTGRES
+and disposable schemas, including real process kill and a host row-lock race.
 Recovery tests: backend/tests/test_workflow_recovery.py, including real process kill.
 
 AgentRuns.configuration_revision(durable=True) uses a purpose-separated HMAC
@@ -64,3 +73,28 @@ under the persisted host signing secret for restart comparison. Default revision
 remain process-local. Rotation invalidates comparisons; no raw config or secret is
 returned. Recovery callers must bind a fresh authenticated session capability;
 never serialize handles or reconstruct authority from a stored user ID alone.
+
+Deployed acceptance: `backend/tests/test_workflow_gateway_acceptance.py` opts in
+with DEERFLOW_WORKFLOW_ACCEPTANCE=1 and disposable Docker PostgreSQL/Redis/nginx.
+The support/workflow_gateway.py entrypoint is test-only: deterministic model and
+barriers around real operations, never a deployed auth/admission bypass. Use real
+SIGKILL/SIGSTOP, login/CSRF, host runs and persisted assertions. Preserve uncertain
+reservations; there is no supported reconciliation attestation/release API yet.
+
+Keep the plugin registration and execution-lease namespace in constants.py as a
+single declaration. Include that module in the recovery runtime signature.
+
+Project expired cancelling as recoverable for cancel cleanup; never permit replay
+of stored cancelling. Cancel claims persist cancelling and bypass admission caps.
+Inspection/list reads use read-only, lock-free transactions and a single joined
+record/lease snapshot. Keep write serialization and fencing intact; pooling remains
+future work. Cover killed cancellation takeover and saturated cancellation cleanup.
+
+Keep the supervisor outcome private until child tasks and fenced cleanup finish.
+Child saves share the workflow record; publishing terminal status early retires
+the PostgreSQL lease before reservation release. Pin cancellation ordering with
+a barrier-based cluster regression.
+
+Proven pre-admission rejection releases child capacity before retiring the lease;
+unknown admission errors retain it. Share the slot-release predicate across cleanup paths.
+Acceptance routing counts final Gateway ports, not nginx retry-history strings.

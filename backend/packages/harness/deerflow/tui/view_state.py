@@ -171,8 +171,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return _append(state, UserRow(text=action.text))
 
     if isinstance(action, RunStarted):
-        # New turn: no message is actively streaming yet (the client re-emits
-        # prior messages first; those must not be treated as the active one).
+        # New turn: no message is actively streaming until its first delta.
         return replace(state, streaming=True, streaming_id=None, streaming_anonymous_row_index=None)
 
     if isinstance(action, RunEnded):
@@ -212,10 +211,8 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
     """Update the assistant row for this delta, or start a new one.
 
     A genuine (non-empty) id is matched anywhere in the transcript, not just
-    the most recent assistant row: on a thread with history, the client
-    re-emits every prior message on each new turn (its dedup is per-turn), and
-    a re-emitted *older* message can arrive after a newer one has started — so
-    matching only the tail row would duplicate prior answers.
+    the most recent assistant row: every delta for one message belongs to that
+    message's row, even after other rows have been appended behind it.
 
     An empty id ("" — some providers/paths never stamp per-chunk ids, see
     ``runtime._as_str``) is NOT a reliable key for that same scan: unlike a
@@ -226,12 +223,11 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
     deltas are therefore routed to `_apply_assistant_delta_anonymous`, which
     tracks "this turn's" row by position instead of by id.
 
-    Updates also merge by content rather than blindly concatenating, to absorb
-    full re-sends / cumulative snapshots vs. genuine incremental deltas:
-
-    * new text == accumulated, or starts with it  -> cumulative/re-send: replace
-    * accumulated starts with new text            -> stale/shorter re-send: keep
-    * otherwise                                   -> a real delta: append
+    Every update is appended verbatim. ``DeerFlowClient.stream`` emits only
+    incremental text per message id: it never re-sends delivered text,
+    replays prior turns, or sends a cumulative snapshot. A delta that repeats
+    or extends the accumulated text is therefore still new text (``"ha"`` +
+    ``"ha"``, or a closing ``"**"`` after an opening one), never a re-send.
     """
     if not action.id:
         return _apply_assistant_delta_anonymous(state, action)
@@ -242,14 +238,7 @@ def _apply_assistant_delta(state: ViewState, action: AssistantDelta) -> ViewStat
         # match here anyway — the guard is belt-and-suspenders to keep an error
         # row from being merged into if a future change ever gives it an id.
         if isinstance(row, AssistantRow) and row.id == action.id and not row.error:
-            # Exact re-send of the same full text (e.g. a values snapshot
-            # re-emitting history after reconnection): no-op.  Only multi-char
-            # matches are treated as re-sends so single-char deltas that happen
-            # to equal the buffer (CJK reduplication) are NOT mistaken for no-ops.
-            if row.text == action.text and len(action.text) > 1:
-                return state
-            merged = _merge_stream_text(row.text, action.text)
-            rows[i] = replace(row, text=merged)
+            rows[i] = replace(row, text=row.text + action.text)
             return _mark_streaming(replace(state, rows=tuple(rows)), action.id)
     return _mark_streaming(_append(state, AssistantRow(text=action.text, id=action.id)), action.id)
 
@@ -282,12 +271,9 @@ def _apply_assistant_delta_anonymous(state: ViewState, action: AssistantDelta) -
     if index is not None and index == len(state.rows) - 1:
         row = state.rows[index]
         if isinstance(row, AssistantRow) and not row.error:
-            # Same no-op / merge semantics as the id-keyed path above.
-            if row.text == action.text and len(action.text) > 1:
-                return state
+            # Same append-only semantics as the id-keyed path above.
             rows = list(state.rows)
-            merged = _merge_stream_text(row.text, action.text)
-            rows[index] = replace(row, text=merged)
+            rows[index] = replace(row, text=row.text + action.text)
             return _mark_streaming_anonymous(replace(state, rows=tuple(rows)), index)
 
     new_state = _append(state, AssistantRow(text=action.text, id=action.id))
@@ -317,20 +303,6 @@ def _mark_streaming_anonymous(state: ViewState, index: int) -> ViewState:
     if state.streaming:
         return replace(state, streaming_id=None, streaming_anonymous_row_index=index)
     return state
-
-
-def _merge_stream_text(existing: str, incoming: str) -> str:
-    if not existing:
-        return incoming
-    # Cumulative re-delivery: incoming strictly extends existing.
-    if len(incoming) > len(existing) and incoming.startswith(existing):
-        return incoming
-    # Stale/shorter re-send: existing already contains incoming as a prefix
-    # (e.g. a values snapshot re-emitting history that has already been
-    # accumulated from deltas). Only treat as stale when strictly shorter.
-    if len(existing) > len(incoming) and existing.startswith(incoming):
-        return existing
-    return existing + incoming  # genuine incremental delta
 
 
 def _apply_tool_started(state: ViewState, action: ToolStarted) -> ViewState:

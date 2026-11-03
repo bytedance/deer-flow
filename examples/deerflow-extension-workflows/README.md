@@ -1,4 +1,4 @@
-# Script workflows (Phase 3)
+# Script workflows (Phase 4)
 
 An opt-in packaged extension that runs inspectable JavaScript orchestration in the
 background. Scripts call full DeerFlow Agents through the public `AgentRuns`
@@ -9,14 +9,14 @@ progress, child conversation/run identities, and final result.
 Versioned definitions, retained output snapshots, explicit same-process pause/resume,
 and authenticated human checkpoints support staged inspection reports. Agent success,
 script verdicts, tool permission approval and human output approval remain separate facts.
-Compatible workflows can be recovered explicitly after a single Gateway restart.
+Compatible workflows can be recovered after restart or, in PostgreSQL mode, on another Gateway after lease expiry.
 No arbitrary JavaScript continuation serialization or hard monetary budget is provided.
 
 ## Install and enable
 
-Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.8,
-and a **single Gateway process per storage file**. Windows execution is unsupported.
-The package holds an exclusive process lock; another process using that same file
+Requires a POSIX Gateway (Linux/macOS), Python 3.12+, the public extension API 0.2.9,
+and a **single Gateway process per SQLite storage file**, or the shared PostgreSQL
+mode described below. Windows execution is unsupported. SQLite holds an exclusive process lock; another process using that same file
 fails service startup rather than recovering another worker's live workflows.
 Use only a trusted operator-installed package.
 
@@ -261,7 +261,7 @@ reservation/enforcement contract before advertising that guarantee.
 
 | State | Meaning |
 | --- | --- |
-| queued / running | Supervised execution in this Gateway process |
+| queued / running | Supervised execution on the current execution owner |
 | completed | Script and awaited child calls returned; output is unapproved task data |
 | failed | Script, resource limit (including wall deadline), attribution, child execution or observation failed |
 | cancelled | Stop requested and known active children interrupted or already terminal |
@@ -398,7 +398,121 @@ and is distinct from this configuration preflight check.
 
 Phase 3 and Phase 4 share the design: stable step/attempt and idempotency identities,
 conditional record revisions, a durable intent/result journal, and fresh authority
-are the foundations for later leases and fenced dispatch. **Phase 3 still requires
-one Gateway process per workflow store.** It does not implement replica routing,
-leases, automatic takeover or cluster-wide quotas; these belong to Phase 4. Keep
-the exclusive process lock until those guarantees exist.
+support the leases and fenced dispatch in Phase 4 below. SQLite retains the Phase 3
+single-owner contract and exclusive process lock. Both modes require explicit
+session authorization for recovery; neither reconstructs credentials from records.
+
+
+## Phase 4: shared PostgreSQL deployment
+
+Install the extension with its `postgres` extra. Configure every Gateway with the
+same `storage_url` (a psycopg PostgreSQL DSN), `lease_seconds` (5–60, default 15),
+Agent allowlist and limits. Keep `storage_path` configured for the default SQLite
+mode; `storage_url` opts into PostgreSQL and disables the file lock. Existing
+SQLite histories are not automatically migrated or merged.
+
+The DSN must resolve to the **same database and schema as the Gateway**. The host
+migration installs `extension_execution_leases`; the extension creates its own
+workflow, artifact, definition, control and quota tables. Startup checks database
+identity and rejects differing cluster quota configurations. Use the normal
+multi-instance Gateway prerequisites: `deployment.multi_instance: true`, shared
+PostgreSQL and signing secret, Redis stream bridge, run ownership heartbeats,
+DB run events, and consistent shared user/config/artifact storage. Credentials
+stay in operator configuration; records contain only opaque configuration hashes.
+
+A launch through A can be inspected, approved, resumed or cancelled through B
+without sticky sessions. Controls are committed durably and normally observed
+within one second; a successful action acknowledges persistence, not completed
+child cleanup. Exact attempt/artifact checks and immutable decision keys prevent
+conflicting approvals. The owner revalidates configuration and permissions before
+continuing. No model tool can approve output.
+
+Each execution has a database-clock lease and increasing epoch. Writes, captured
+files, child admissions and child cancellation are fenced. Admission validates
+the lease in the **same transaction** that creates the Agent run. A lease check
+before a network call is not sufficient. Lease loss stops the local JS worker;
+previously admitted Agents may have external effects and are reconciled rather
+than blindly retried. An unreachable database stops progress instead of granting
+local ownership. Temporary DB failure can therefore require explicit recovery.
+
+After expiry, any compatible Gateway exposes the workflow as recoverable. A user
+signs in and chooses **Recover workflow** to supply a fresh capability. This is
+session-authorized failover, not unattended failover: no raw credential or durable
+user impersonation grant is stored. The same Phase 3 replay checks apply. Unknown
+admissions require reconciliation; completed results and exact file versions are
+reused. A pending cancellation prevents recovery from dispatching new work; cancel
+the expired workflow to finish observing known children instead.
+
+Workflow and per-owner limits are shared; active child reservations enforce the
+cluster Agent concurrency limit. An unknown child outcome keeps its reservation,
+even after lease expiry. Operators must inspect the recorded thread/run before
+releasing that reservation; the extension does not automatically reclaim capacity
+from potentially running external effects. Reconciliation is manual in this release.
+Cluster limit changes require a coordinated stop and update of the stored cluster
+policy; rolling replicas cannot silently enforce different quotas.
+
+Rolling upgrades may continue live runs on their existing owner. Takeover requires
+the exact runtime signature and matching operator/Agent configuration. An
+incompatible replica rejects recovery; retain a compatible replica to drain or
+cancel old workflows. This does not support arbitrary continuation conversion.
+
+Validation uses `DEERFLOW_TEST_WORKFLOW_POSTGRES` with a dedicated PostgreSQL
+instance: `test_workflow_cluster.py` exercises independent services and process
+kill, while `test_extension_execution_fence.py` checks a real PostgreSQL lock-wait
+race at host admission. Agent responses are synthetic; tests make no guarantee
+about undoing arbitrary business side effects.
+
+### Deployed acceptance and delivery boundary
+
+Run the opt-in HTTP/fault suite from the repository root with the backend dev
+and PostgreSQL dependencies and this example's `quickjs` dependency installed:
+
+```sh
+DEERFLOW_WORKFLOW_ACCEPTANCE=1 backend/.venv/bin/python -m pytest \
+  backend/tests/test_workflow_gateway_acceptance.py -v --tb=short
+```
+
+Docker must be running (OrbStack works); set `DEERFLOW_TEST_DOCKER` when the CLI
+is not on PATH. The suite creates disposable PostgreSQL 17, Redis 7 and nginx
+containers, two real Gateway processes and a shared temporary home. It uses
+normal login cookies/CSRF, actual host AgentRuns/RunManager/checkpoints and a
+round-robin proxy without affinity. Only the model answers and fault barriers
+are test fixtures. No paid model is called. Logs remain in pytest's temporary
+directory; teardown kills only the suite's processes and removes only its named
+containers/volumes. This is an opt-in deployment test, not part of offline CI.
+
+Coverage includes concurrent duplicate launch/approval, peer controls, shared
+workflow/child limits, revoked sessions, changed configuration, SIGKILL around
+admission/result/approval persistence, SIGSTOP/lease takeover/stale dispatch and
+artifact writes, and immutable-file approval/consumption after source mutation
+and owner death. The rolling test runs two distinct runtime source trees, with
+a changed worker IPC limit, verifies live old-owner draining and rejects
+incompatible takeover. It is a compatibility-guard test, not certification of
+all historical releases or Kubernetes/network-partition topologies.
+
+**Delivered authority boundary:** lease expiry exposes recovery but never grants
+permission to execute as a user. Recovery requires a fresh valid browser-session
+capability and current permission/config/runtime checks. Automatic unattended
+takeover requires a separately designed durable authorization/delegation contract.
+
+**Manual reconciliation boundary:** the current product retains stable child
+identities, uncertain status and occupied child capacity. Operators must compare
+the recorded conversation/run and external system effects before deciding what
+happened. There is currently **no supported reconciliation API/UI to attest an
+outcome, audit that decision, and release the reservation atomically**. Do not
+treat direct database edits, deleting a workflow, or retrying it under a new ID
+as that missing closure. This follow-up remains open. Cancellation requests do
+not roll back effects; if the host consumes a cancellation after the extension's
+bounded observation window, the workflow may retain `needs_reconciliation` even
+when the child subsequently becomes interrupted.
+
+An expired owner in the middle of cancellation is exposed as recoverable for
+**Cancel workflow** cleanup. Recovery rejects a persisted cancellation even if no
+control-inbox row remains. Cancellation takeover bypasses workflow admission caps,
+but retains lease fencing and permission/config checks; uncertain child effects
+still retain reservations. A completed cancellation can be deleted normally.
+
+PostgreSQL workflow inspection/listing uses read-only transactions without the
+cluster budget lock; listing reads records and lease visibility in one query.
+Mutations still take the conservative global advisory lock, and connections are
+not pooled. Those remain throughput limits of this bounded deployment mode.

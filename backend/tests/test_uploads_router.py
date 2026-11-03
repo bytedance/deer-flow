@@ -493,7 +493,7 @@ def test_upload_files_removes_the_staged_part_when_the_platform_blocks_an_open_u
 
 @pytest.mark.parametrize("filename", ["notes.txt", "report.pdf"])
 @pytest.mark.parametrize("simulate_sharing_violation", [False, True])
-def test_upload_files_preserves_link_error_and_cleans_staging_after_closing_conversion_fd(tmp_path, monkeypatch, filename, simulate_sharing_violation):
+def test_upload_files_preserves_link_error_and_cleans_staging_after_closing_conversion_fd(tmp_path, monkeypatch, caplog, filename, simulate_sharing_violation):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir()
     conversion_fds: set[int] = set()
@@ -536,7 +536,9 @@ def test_upload_files_preserves_link_error_and_cleans_staging_after_closing_conv
             asyncio.run(call_unwrapped(uploads.upload_files, "thread-link-error", request=MagicMock(), files=[file], config=SimpleNamespace()))
 
     assert exc_info.value.status_code == 500
-    assert "original link failure" in exc_info.value.detail
+    assert exc_info.value.detail == f"Failed to upload {filename}."
+    # The logged cause is the link failure, not a later cleanup error.
+    assert "original link failure" in caplog.text
     assert not blocked_unlinks
     assert not conversion_fds
     assert len(duplicated_fds) == (1 if filename == "report.pdf" else 0)
@@ -1258,8 +1260,12 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
             result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
-            assert result.success is True
+            # Nothing was stored, so the batch must not report success: the
+            # #7122 frontend gate keys on it, and a silent success let a chat
+            # send proceed without the attachment (#7160).
+            assert result.success is False
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
+            assert result.skipped_files == [bad_name]
 
         # Path-traversal prefixes are stripped to the basename and accepted safely
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))
@@ -1559,6 +1565,27 @@ def test_upload_files_closes_conversion_descriptor_when_private_dir_fails(tmp_pa
     assert duplicated[0] in closed
 
 
+def test_upload_files_keeps_os_error_text_out_of_500(tmp_path, caplog):
+    """A staging OSError names its host path, so it stays in the server log."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    staged_path = thread_uploads_dir / ".upload-abc123.part"
+    disk_full = OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(staged_path))
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_prepare_upload_destination", side_effect=disk_full),
+    ):
+        file = ChunkedUpload("report.txt", [b"bytes"])
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to upload report.txt."
+    assert str(staged_path) in caplog.text
+
+
 def test_upload_files_closes_conversion_descriptor_when_ingestion_is_cancelled(tmp_path):
     """Cancelling mid-duplication must not strand the descriptor the worker still produces."""
     thread_uploads_dir = tmp_path / "uploads"
@@ -1789,6 +1816,25 @@ def test_delete_uploaded_file_rejects_symlink_to_sibling_upload(tmp_path):
     assert victim.read_bytes() == b"pdf-bytes"
     assert (thread_uploads_dir / "victim.md").exists()
     assert (thread_uploads_dir / "alias.pdf").is_symlink()
+
+
+def test_delete_uploaded_file_keeps_os_error_text_out_of_500(tmp_path, caplog):
+    """An unlink OSError names its host path, so it stays in the server log."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    file_path = thread_uploads_dir / "report.pdf"
+    denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(file_path))
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "delete_file_safe", side_effect=denied),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.delete_uploaded_file, "thread-local", "report.pdf", request=MagicMock()))
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Failed to delete report.pdf."
+    assert str(file_path) in caplog.text
 
 
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():

@@ -46,7 +46,7 @@ LangGraph Server 的入口必须是模块级的具体函数，harness 提供 `ma
 `contracts/subagent_status_contract.json` 是前后端共享的固定文件（版本 2）：
 
 - 合法 `subagent_status`：`completed`、`failed`、`cancelled`、`timed_out`、`polling_timed_out`。
-- 合法 `subagent_stop_reason`：`token_capped`、`turn_capped`、`loop_capped`。
+- 合法 `subagent_stop_reason`：`token_capped`、`turn_capped`、`loop_capped`、`model_length_capped`。
 - 工具结果正文只是展示内容，不属于契约。
 
 后端用 `make_subagent_additional_kwargs` 写元数据、`read_subagent_result_metadata` 读取；写入时非法状态值会抛 `ValueError`，读取时遇到未知状态返回 `None`，并把旧的 `max_turns_reached` 映射为 `turn_capped`。前端的 `parseSubtaskResult` 先读结构化字段，只有完全没有结构化元数据时才回退到文本前缀。附加字段（模型名、token 用量、回执、验收）是加法式的，新增字段不需要升级契约版本。

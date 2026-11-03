@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -37,6 +38,8 @@ from deerflow.scheduler.schedules import (
     validate_timezone,
 )
 from deerflow.utils.thread_id import ThreadId
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
@@ -79,7 +82,9 @@ async def resolve_scheduled_task_assistant_id(raw: str | None, *, user_id: str) 
     except FileNotFoundError as exc:
         raise scheduler_error(422, "unknown_assistant", f"Unknown assistant_id {raw!r}") from exc
     except ValueError as exc:
-        raise scheduler_error(422, "invalid_assistant", str(exc)) from exc
+        # The store's parse error names the config file's host path.
+        logger.warning("Failed to load agent config for assistant_id %r: %s", raw, exc)
+        raise scheduler_error(422, "invalid_assistant", f"Agent config for assistant_id {raw!r} could not be loaded") from exc
     if config is None:
         raise scheduler_error(422, "unknown_assistant", f"Unknown assistant_id {raw!r}")
     return normalized

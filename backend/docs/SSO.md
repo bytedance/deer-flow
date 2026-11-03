@@ -271,6 +271,17 @@ The backend also rejects password change requests for OAuth users:
 | `GET /api/v1/auth/oauth/{provider}` | Initiates SSO login, redirects to the OIDC provider |
 | `GET /api/v1/auth/callback/{provider}` | OIDC callback — exchanges code, creates session, redirects to frontend |
 
+### Provider failures
+
+An unreachable provider, an HTTP error, and a response body that is not the
+expected JSON object (for example a `200` maintenance page) all fail the same
+way. `GET /api/v1/auth/oauth/{provider}` answers `502`, and the callback
+redirects to `/login?error=sso_failed`. A discovery document without a usable
+authorization, token or JWKS endpoint counts as failed unless the provider
+config overrides that endpoint, and it is not cached. A malformed UserInfo body
+is skipped like a failed UserInfo request: the login continues with the ID
+token claims. The cause stays in the Gateway log.
+
 ## Frontend Callback Flow
 
 The frontend handles the post-SSO flow at `/auth/callback`:

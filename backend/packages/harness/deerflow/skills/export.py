@@ -306,17 +306,29 @@ def _manifest(name, entries, blockers, warnings, snapshot, budget):
                 secrets = metadata.get("required-secrets")
                 if secrets is not None:
                     requirements["required_secrets"] = []
-                    seen = set()
+                    positions = {}
                     for secret in secrets:
                         if isinstance(secret, str):
                             secret = {"name": secret, "optional": False}
                         if isinstance(secret, dict):
                             raw_name = secret.get("name")
                             secret_name = raw_name.strip() if isinstance(raw_name, str) else ""
-                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name) and secret_name not in seen:
-                                seen.add(secret_name)
-                                requirements["required_secrets"].append({"name": secret_name, "optional": bool(secret.get("optional", False))})
-                            elif not secret_name or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
+                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
+                                # Only a literal boolean ``true`` is optional: the same
+                                # fail-closed read as parse_required_secrets (#5738).
+                                # validate_skill_frontmatter_text rejects the package
+                                # above, so a malformed value never reaches this line.
+                                optional = secret.get("optional") is True
+                                position = positions.get(secret_name)
+                                if position is not None:
+                                    # First occurrence keeps its slot; a required
+                                    # duplicate still wins, mirroring parse_required_secrets.
+                                    if not optional:
+                                        requirements["required_secrets"][position]["optional"] = False
+                                    continue
+                                positions[secret_name] = len(requirements["required_secrets"])
+                                requirements["required_secrets"].append({"name": secret_name, "optional": optional})
+                            else:
                                 warnings.append(_issue("skill_export_invalid_declaration", "A malformed required-secrets declaration was omitted; inspect SKILL.md.", "SKILL.md"))
                         else:
                             warnings.append(_issue("skill_export_invalid_declaration", "A malformed required-secrets declaration was omitted; inspect SKILL.md.", "SKILL.md"))

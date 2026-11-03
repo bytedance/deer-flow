@@ -8,6 +8,11 @@ from croniter import croniter
 MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
 
 
+def should_advance_schedule_cursor(schedule_type: str, *, trigger: str) -> bool:
+    """Recurring manual trials keep the scheduled cursor, even when overdue."""
+    return trigger != "manual" or schedule_type == "once"
+
+
 def validate_timezone(timezone_name: str) -> str:
     try:
         ZoneInfo(timezone_name)

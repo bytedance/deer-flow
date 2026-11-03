@@ -30,7 +30,9 @@ explicitly carries forward the existing owner's display name when re-bootstrappi
 the Gateway explicitly overrides it when supplied, including null to clear.
 Both stores use `parse_agent_config` to ignore only an invalid stored
 `display_name` on read, logging the agent identifier without the invalid value
-and without rewriting storage. Other config errors still
+and without rewriting storage. It also reads a stored null `description`
+(a bare YAML key, or what `PUT /api/agents/{name}` used to write) as `""`; that
+route now stores an explicit null as `""`. Other config errors still
 raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
@@ -60,6 +62,17 @@ fallback budget still truncates oversized output. Regression tests exercise
 YAML loading and both middleware tool-call paths in `test_tool_output_config_limits.py`.
 
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect). The cached `extensions` snapshot follows the process extensions singleton: `get_app_config()` also reloads when `get_extensions_config()` returns a new instance (see **Extensions Config Caching** below), and the loader takes that instance before reading `config.yaml`, so it can only be older than the YAML it merges with, never newer.
+
+AppConfig singleton reads, reloads, resets and injections share `_app_config_lock`;
+publish the parsed revision, signature, extensions snapshot and explicit source pin
+within that critical section. An explicit reload pins an absolute path, so later
+working-directory changes cannot redirect it. Failed explicit loads preserve the
+prior pin; reset, injection and argument-less reload clear it. Ambient reads never
+pin a path. Runtime-scoped overrides bypass the singleton lock;
+`peek_loaded_app_config()` also returns the existing snapshot without locking.
+Each read stats and hashes `config.yaml` and `extensions_config.json`, so async
+request paths call it through `asyncio.to_thread` (Gateway route and plugin
+authorization in `app/gateway/authz.py`).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
@@ -112,8 +125,10 @@ can become stale or inaccessible when a host editor replaces a file on save.
 Configuration priority:
 1. Explicit `config_path` argument
 2. `DEER_FLOW_EXTENSIONS_CONFIG_PATH` environment variable
-3. `extensions_config.json` in current directory (backend/)
-4. `extensions_config.json` in parent directory (project root - **recommended location**)
+3. `extensions_config.json`, then legacy `mcp_config.json`, in the project root (`DEER_FLOW_PROJECT_ROOT`, else the current directory) - **recommended location**
+4. Legacy `backend/` and repository-root copies, located from the harness source tree
+
+When the search finds nothing, the Gateway skill toggle and MCP writers create the file at `ExtensionsConfig.default_config_path()` (the project root, step 3), so the next resolution reads back what they wrote; `DeerFlowClient` raises instead of creating one.
 
 Extensions are optional only in the fallback *search* mode (priority 3-4 above): `ExtensionsConfig.resolve_config_path()` returns `None` when neither an explicit `config_path` nor `DEER_FLOW_EXTENSIONS_CONFIG_PATH` is given and the search locations find nothing. An explicit `config_path` argument or a set `DEER_FLOW_EXTENSIONS_CONFIG_PATH` (priority 1-2) is an operator assertion that one particular file must be used, so a missing file in either of those modes raises `FileNotFoundError` instead — including when the file existed earlier and has since been deleted. The MCP tools cache's staleness check (`deerflow.mcp.cache._resolve_config_path`) is a narrow, deliberate exception to that rule: it catches that `FileNotFoundError` locally and treats it as "unconfigured" so a previously-valid config disappearing mid-run degrades the cache to serving its last-known-good tools instead of raising out of a per-request hot path (see the MCP System section below).
 
@@ -178,7 +193,7 @@ Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
 - `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority — it only raises visibility for tools already admitted to the agent's catalog, while assembly and execution authorization still apply independently.
 - `skills` - Map of skill name → state (enabled)
-- `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
+- `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs, apply_to}` objects. Optional `apply_to` is `both` (default), `lead`, or `subagent`; strings always apply to both chains. Validate all entries before building agents; excluded entries are not imported or constructed. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
