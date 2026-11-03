@@ -1126,6 +1126,9 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+Startup-recovered BoxLite VMs use the same private async loop as newly created
+VMs for health checks, commands, and shutdown. Recovery skips boxes removed
+after discovery without creating replacement VMs.
 
 Successful `read_file` calls treat a JSON document's `error` field as file data,
 not a failure of the read tool. This keeps receipts accurate when inspecting
