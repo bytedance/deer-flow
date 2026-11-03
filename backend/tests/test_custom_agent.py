@@ -1177,6 +1177,10 @@ class TestAgentsAPIErrorDetail:
     def _user_dir(self, tmp_path: Path) -> Path:
         return tmp_path / "users" / "test-user-autouse"
 
+    def _assert_os_error_logged(self, caplog, path: Path) -> None:
+        # OSError renders filenames with repr(), which escapes Windows separators.
+        assert any(record.exc_info and isinstance(record.exc_info[1], OSError) and record.exc_info[1].filename == str(path) for record in caplog.records)
+
     def _break_agent_config(self, agent_client, tmp_path: Path) -> Path:
         assert agent_client.post("/api/agents", json={"name": "broken", "soul": "x"}).status_code == 201
         config_file = self._user_dir(tmp_path) / "agents" / "broken" / "config.yaml"
@@ -1210,18 +1214,23 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to list agents"}
-        assert str(agents_root) in caplog.text
+        self._assert_os_error_logged(caplog, agents_root)
 
     def test_create_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
-        agents_root = self._user_dir(tmp_path) / "agents"
-        agents_root.parent.mkdir(parents=True)
-        agents_root.write_text("not a directory", encoding="utf-8")
+        from deerflow.persistence.agents.file import FileAgentStore
 
-        response = agent_client.post("/api/agents", json={"name": "fresh", "soul": "x"})
+        agents_root = self._user_dir(tmp_path) / "agents"
+        denied = PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(agents_root))
+
+        # A file used as the parent directory raises FileExistsError on Windows,
+        # which takes the store's conflict path instead of exercising this 500 path.
+        with patch.object(FileAgentStore, "create", side_effect=denied) as create:
+            response = agent_client.post("/api/agents", json={"name": "fresh", "soul": "x"})
+        create.assert_called_once()
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to create agent"}
-        assert str(agents_root) in caplog.text
+        self._assert_os_error_logged(caplog, agents_root)
 
     def test_delete_agent_os_error_returns_fixed_500(self, agent_client, tmp_path, caplog):
         from deerflow.persistence.agents.file import FileAgentStore
@@ -1235,7 +1244,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": "Failed to delete agent"}
-        assert str(agent_dir) in caplog.text
+        self._assert_os_error_logged(caplog, agent_dir)
 
     @pytest.mark.parametrize(
         ("method", "kwargs", "detail"),
@@ -1252,7 +1261,7 @@ class TestAgentsAPIErrorDetail:
 
         assert response.status_code == 500
         assert response.json() == {"detail": detail}
-        assert str(user_md) in caplog.text
+        self._assert_os_error_logged(caplog, user_md)
 
 
 class TestAgentsApiDisabled:
