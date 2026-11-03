@@ -36,6 +36,7 @@ import {
 } from "@/core/models/management";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { ModelCatalogDialog } from "./model-catalog-dialog";
 import { SettingsSection } from "./settings-section";
 
 function modelManagementError(
@@ -77,6 +78,8 @@ export function ModelSettingsPage() {
   });
   const [editing, setEditing] = useState<ManagedModel | "new" | null>(null);
   const [pending, setPending] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [search, setSearch] = useState("");
   async function refresh() {
     await Promise.all([
       client.invalidateQueries({ queryKey: ["managed-models"] }),
@@ -103,7 +106,13 @@ export function ModelSettingsPage() {
         <p>{text.adminOnly}</p>
       ) : (
         <div className="space-y-4">
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={pending || !providers.data}
+              onClick={() => setImporting(true)}
+            >
+              {text.importTitle}
+            </Button>
             <Button
               disabled={pending || !providers.data}
               onClick={() => setEditing("new")}
@@ -130,57 +139,87 @@ export function ModelSettingsPage() {
             </div>
           )}
           {catalog.data?.models.length === 0 && <p>{text.empty}</p>}
-          {catalog.data?.models.map((model) => (
-            <div
-              key={`${model.source}:${model.name}`}
-              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
-            >
-              <div>
-                <p className="font-medium">
-                  {model.display_name || model.name}
-                </p>
-                <p className="text-muted-foreground text-sm">
-                  {model.source === "managed" && (
-                    <>
-                      {model.provider === "openai-compatible"
-                        ? text.customProvider
-                        : (providers.data?.providers.find(
-                            (p) => p.id === model.provider,
-                          )?.display_name ?? model.provider)}{" "}
-                      ·{" "}
-                    </>
+          <Input
+            aria-label={text.searchModels}
+            placeholder={text.searchModels}
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          {catalog.data?.models
+            .filter((model) =>
+              [
+                model.model,
+                model.name,
+                model.display_name,
+                model.source === "managed" ? model.provider : "",
+              ].some((value) =>
+                value
+                  ?.toLocaleLowerCase()
+                  .includes(search.trim().toLocaleLowerCase()),
+              ),
+            )
+            .map((model) => (
+              <div
+                key={`${model.source}:${model.name}`}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4"
+              >
+                <div>
+                  <p className="font-medium">
+                    {model.display_name || model.name}
+                  </p>
+                  <p className="text-muted-foreground text-sm">
+                    {model.source === "managed" && (
+                      <>
+                        {model.provider === "openai-compatible"
+                          ? text.customProvider
+                          : (providers.data?.providers.find(
+                              (p) => p.id === model.provider,
+                            )?.display_name ?? model.provider)}{" "}
+                        ·{" "}
+                      </>
+                    )}
+                    {model.model} ·{" "}
+                    {model.source === "config"
+                      ? text.yaml
+                      : model.enabled
+                        ? text.enabled
+                        : text.disabled}
+                  </p>
+                  {model.source === "managed" && model.conflict && (
+                    <p role="alert">{text.conflict}</p>
                   )}
-                  {model.model} ·{" "}
-                  {model.source === "config"
-                    ? text.yaml
-                    : model.enabled
-                      ? text.enabled
-                      : text.disabled}
-                </p>
-                {model.source === "managed" && model.conflict && (
-                  <p role="alert">{text.conflict}</p>
+                </div>
+                {model.source === "managed" && (
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      disabled={pending || model.conflict}
+                      onClick={() => setEditing(model)}
+                    >
+                      {text.edit}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={pending || model.conflict}
+                      onClick={() => void toggle(model)}
+                    >
+                      {model.enabled ? text.disable : text.enable}
+                    </Button>
+                  </div>
                 )}
               </div>
-              {model.source === "managed" && (
-                <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    disabled={pending || model.conflict}
-                    onClick={() => setEditing(model)}
-                  >
-                    {text.edit}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    disabled={pending || model.conflict}
-                    onClick={() => void toggle(model)}
-                  >
-                    {model.enabled ? text.disable : text.enable}
-                  </Button>
-                </div>
+            ))}
+          {importing && (
+            <ModelCatalogDialog
+              key={user?.id}
+              models={(catalog.data?.models ?? []).filter(
+                (model): model is ManagedModel => model.source === "managed",
               )}
-            </div>
-          ))}
+              providers={providers.data?.providers ?? []}
+              close={() => setImporting(false)}
+              saved={refresh}
+            />
+          )}
           {editing && (
             <ModelEditor
               key={`${user?.id}:${editing === "new" ? "new" : editing.name}`}

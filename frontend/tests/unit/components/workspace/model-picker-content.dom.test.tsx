@@ -33,6 +33,11 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       modelPicker: {
         title: "Choose a model",
+        search: "Search models",
+        provider: "Provider",
+        allProviders: "All providers",
+        noResults: "No matching models",
+        recent: "Recently used",
         favorites: "Favorites",
         otherModels: "Other models",
         noModels: "No models available",
@@ -162,6 +167,7 @@ function favoriteButton(model: Model) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   authUser = { id: "alice" };
   authLoading = false;
   favoriteNames = [MODELS[1]!.name];
@@ -443,4 +449,33 @@ describe("ModelPickerContent popover lifecycle", () => {
       screen.getByRole("button", { name: "Current model" }),
     );
   });
+});
+
+it("searches model IDs and intersects provider filtering without changing selection", async () => {
+  const onSelect = rs.fn();
+  render(
+    <StatefulPicker
+      models={MODELS.map((model, i) => ({
+        ...model,
+        provider: i === 0 ? "First" : "Second",
+      }))}
+      onModelSelect={onSelect}
+    />,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models" }), {
+    target: { value: "BETA-API" },
+  });
+  expect(modelButtons().length).toBe(1);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "First" },
+  });
+  expect(screen.getByText("No matching models")).not.toBeNull();
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "" },
+  });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Search models" }), {
+    key: "ArrowDown",
+  });
+  expect(document.activeElement).toBe(modelButtons()[0]);
 });

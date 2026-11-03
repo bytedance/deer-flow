@@ -1,0 +1,141 @@
+import { afterEach, beforeEach, expect, it, rs } from "@rstest/core";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+
+import { ModelCatalogDialog } from "@/components/workspace/settings/model-catalog-dialog";
+import { enUS } from "@/core/i18n/locales/en-US";
+import { discoverModels, importCatalogModel } from "@/core/models/management";
+
+rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
+rs.mock("@/core/models/management", () => ({
+  discoverModels: rs.fn(),
+  importCatalogModel: rs.fn(),
+}));
+const discover = rs.mocked(discoverModels),
+  add = rs.mocked(importCatalogModel);
+const saved = rs.fn().mockResolvedValue(undefined);
+const props = {
+  models: [],
+  providers: [
+    {
+      id: "openai",
+      display_name: "OpenAI",
+      requires_api_key: true,
+      custom_endpoint: false,
+    },
+  ],
+  close: rs.fn(),
+  saved,
+};
+beforeEach(() => {
+  rs.clearAllMocks();
+  discover.mockResolvedValue({
+    models: [
+      { id: "good", configured: false },
+      { id: "bad", configured: false },
+      { id: "old", configured: true },
+    ],
+    truncated: false,
+  });
+});
+afterEach(cleanup);
+async function load() {
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "only-in-draft" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
+  await screen.findByText("good");
+}
+it("fetches without saving, filters selection, keeps partial failures retryable", async () => {
+  add.mockImplementation(async (_connection, id) =>
+    id === "bad"
+      ? { status: "failed", message: "tool_call_missing" }
+      : { status: "saved", model: { name: "saved" } as never },
+  );
+  render(<ModelCatalogDialog {...props} />);
+  await load();
+  expect(add).not.toHaveBeenCalled();
+  expect(screen.queryByLabelText("API Key")?.closest("details")?.open).toBe(
+    false,
+  );
+  expect(screen.getByRole("checkbox", { name: /old/ })).toHaveProperty(
+    "disabled",
+    true,
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models…" }), {
+    target: { value: "good" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Select visible" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models…" }), {
+    target: { value: "" },
+  });
+  fireEvent.click(screen.getByRole("checkbox", { name: "bad" }));
+  fireEvent.click(screen.getByRole("button", { name: "Test and add (2)" }));
+  await waitFor(() => expect(saved).toHaveBeenCalled());
+  expect(add.mock.calls.map((call) => call[1])).toEqual(["good", "bad"]);
+  expect(
+    screen.getByText(enUS.settings.models.tool_call_missing),
+  ).toBeDefined();
+  expect(
+    screen.getByRole("button", { name: "Test and add (1)" }),
+  ).toHaveProperty("disabled", false);
+});
+it("clears catalog and selected models after a credential edit", async () => {
+  render(<ModelCatalogDialog {...props} />);
+  await load();
+  fireEvent.click(screen.getByRole("button", { name: "Select visible" }));
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "other-key" },
+  });
+  expect(screen.queryByText("good")).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Test and add (0)" }),
+  ).toHaveProperty("disabled", true);
+});
+it("aborts an unmounted discovery and ignores its late response", async () => {
+  let finish!: (value: Awaited<ReturnType<typeof discoverModels>>) => void;
+  discover.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const view = render(<ModelCatalogDialog {...props} />);
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "test" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
+  const signal = discover.mock.calls[0]![1]!;
+  view.unmount();
+  expect(signal.aborted).toBe(true);
+  finish({ models: [{ id: "late", configured: false }], truncated: false });
+  expect(add).not.toHaveBeenCalled();
+});
+
+it("stopping an import refreshes committed results and leaves the uncertain item retryable", async () => {
+  add.mockImplementation(
+    (_connection, _id, signal) =>
+      new Promise((_resolve, reject) => {
+        signal!.addEventListener("abort", () =>
+          reject(new DOMException("Cancelled", "AbortError")),
+        );
+      }),
+  );
+  render(<ModelCatalogDialog {...props} />);
+  await load();
+  fireEvent.click(screen.getByRole("checkbox", { name: "good" }));
+  fireEvent.click(screen.getByRole("button", { name: "Test and add (1)" }));
+  await waitFor(() => expect(add).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+  await screen.findByText(enUS.settings.models.importStopped);
+  expect(screen.getByText(enUS.settings.models.importUncertain)).not.toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Test and add (1)" }),
+  ).toHaveProperty("disabled", false);
+  expect(saved).toHaveBeenCalledTimes(1);
+});
