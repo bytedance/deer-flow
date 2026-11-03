@@ -7,7 +7,7 @@ import { Callout } from "nextra/components";
 
 # Reference
 
-This page lists every name in `deerflow_extension_api.__all__` for contract version **0.2.4**. Import them from the package root:
+This page documents every name in `deerflow_extension_api.__all__` as of contract version **0.2.4**, plus the `CompactionEvent` identity fields added in 0.2.10. The other names added since 0.2.4 are listed under [Version history](#version-history) but are not described on this page yet. Import any name from the package root:
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -143,7 +143,7 @@ class TaskLifecycleContributor(Protocol):
 
 ### `TaskInfo`
 
-Frozen dataclass.
+Frozen dataclass. The host also stores it in every task store it allocates (for a subagent, only when it has a parent run), so `task_store.get(TaskInfo)` names the task from any hook that receives the store.
 
 | Field            | Type                          | Default |
 | ---------------- | ----------------------------- | ------- |
@@ -260,8 +260,11 @@ Frozen dataclass, captured while both sides of the transform still exist.
 | `output_content_hash`     | `str`             |
 | `compacted_message_count` | `int`             |
 | `kept_message_count`      | `int`             |
+| `task_id`                 | `str \| None = None` |
+| `run_id`                  | `str \| None = None` |
+| `thread_id`               | `str \| None = None` |
 
-Hashes are `canonical_hash(message.content)` of the content passed directly, never a stringified copy. To match a message to an event, hash its `content` the same way.
+The three ids come from the `TaskInfo` in the task store the observer receives. They are `None` when there is no task identity: a manual `/compact`, or a subagent without a parent run. Hashes are `canonical_hash(message.content)` of the content passed directly, never a stringified copy. To match a message to an event, hash its `content` the same way.
 
 ## Services
 
@@ -502,7 +505,7 @@ Frozen dataclass describing one non-secret deployment setting.
 
 ### `API_VERSION`
 
-The host's contract version as a dotted string, `"0.2.4"` for the contract this page describes. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
+The host's contract version as a dotted string, such as `"0.2.10"`. Always equal to the package version in `backend/packages/extension-api/pyproject.toml`.
 
 ## Compatibility rules
 
@@ -528,5 +531,11 @@ The host's contract version as a dotted string, `"0.2.4"` for the contract this 
 | 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | Experimental `registry.plugin()` with `PluginContribution`, `BrowserModule`, `BackendAction`, `ModelTool`, `ActionContext`, `ToolContext`, `SettingsField` |
 | 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727), [#5685](https://github.com/bytedance/deer-flow/pull/5685) | Request-scoped run evidence: `resolve_run_evidence_reader`, `require_run_evidence_reader`, `RUN_EVIDENCE_READER_RESOLVER_KEY` (#5727). Packaged browser resources: `BrowserAssets`, and `PluginContribution.frontend` also accepts it (#5685) |
 | 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | Plugin resource authorization: `require_plugin_management`, `arequire_plugin_management`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`, `EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
+| 0.2.5 | [#5796](https://github.com/bytedance/deer-flow/pull/5796), [#6190](https://github.com/bytedance/deer-flow/pull/6190) | Bounded host model calls: `ExtensionRuntimeDeps.model_invoker` with `ModelInvoker`, `ModelMessage`, `ModelInvocationRequest`, `ModelInvocationResult`, `ModelUsage`, and the errors `ModelInvocationError`, `ModelInvocationUnavailable`, `ModelInvocationUnauthorized`, `ModelInvocationFailed`, `ModelOutputValidationError` (#5796). Host-bound Agent run control: `AgentRuns`, `AgentRun`, `AgentRunError`, `resolve_agent_runs`, `require_agent_runs`, `AGENT_RUNS_RESOLVER_KEY`, `AGENT_RUNS_CONTEXT_KEY`, `ActionContext.agent_runs` (#6190) |
+| 0.2.6 | [#6861](https://github.com/bytedance/deer-flow/pull/6861) | `PluginToolResult` and `ModelTool.response_format`, so a plugin tool can return a JSON artifact with its text |
+| 0.2.7 | [#6904](https://github.com/bytedance/deer-flow/pull/6904) | `ExtensionRegistry.knowledge_provider()` for read-only knowledge retrieval providers |
+| 0.2.8 | [#6920](https://github.com/bytedance/deer-flow/pull/6920), [#5645](https://github.com/bytedance/deer-flow/pull/5645), [#7075](https://github.com/bytedance/deer-flow/pull/7075) | `AgentRuns.configuration_evidence()`, `read_artifact()`, `configuration_revision()`, and `ActionContext.interaction` (#6920). Completed-run evidence and host-owned updates of existing custom skills: `ExtensionRuntimeDeps.completed_run_evidence` and `skill_mutations`, with `CompletedRunEvidenceReader`, `CompletedRunSnapshot`, `CompletedRunEvent`, `CompletedRunEventPage`, `EvidenceLimits`, `SkillMutationService`, `MutationCapabilities`, `Proposal`, `ProposalBundle`, `BundleFile`, `Operation`, `AssessmentRef`, `AssetRevision`, `HostCheckResult`, `SkillRevisionView`, and the shared `HostCapabilityError` (#5645). The `durable` argument of `configuration_revision()` (#7075) |
+| 0.2.9 | [#7138](https://github.com/bytedance/deer-flow/pull/7138) | `ExecutionFence`, and the `execution_fence` argument of `AgentRuns.start()` and `cancel()` |
+| 0.2.10 | [#7729](https://github.com/bytedance/deer-flow/pull/7729), [#7831](https://github.com/bytedance/deer-flow/pull/7831) | `AgentRuns.send_input()`, `list_inputs()`, `authorize_control()`, `dispatch_input()` (#7729). `CompactionEvent.task_id`, `run_id`, `thread_id`; compaction observers receive the live task store, and every task store carries its `TaskInfo` (#7831) |
 
 No release has removed a public name.
