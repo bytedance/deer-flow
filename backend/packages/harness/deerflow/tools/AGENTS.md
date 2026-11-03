@@ -18,7 +18,11 @@ and tabs; bound delimiter searches to the same line so later refs survive.
 Preserve bare-token boundaries and structured refs. Tests: `tests/test_artifact_registry.py`.
 
 `artifact_registry.py` checks remote file suffixes against the complete parsed
-URL path without case sensitivity. Free-text URL and sandbox-path extraction
+URL path without case sensitivity. Matching ASCII/curly/corner quote pairs,
+backticks and backslash-escaped wrappers delimit literal remote URLs too:
+preserve punctuation inside, exclude the wrapper and outside prose. Quoted URLs
+retain the bare URL character boundaries and size limit; skip unterminated or
+whitespace-containing spans rather than capturing a prefix. Bare extraction
 strips common trailing ASCII/CJK prose punctuation while preserving ASCII
 `()`, `[]`, `{}` and CJK closers paired with openers inside the detected
 reference (including literal glob directory names). Structured references remain

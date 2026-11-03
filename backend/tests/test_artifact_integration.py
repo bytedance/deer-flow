@@ -131,25 +131,28 @@ def test_handle_projected_into_model_context():
 
 
 @pytest.mark.parametrize(
-    ("url", "closing_punctuation"),
+    ("url", "opening_punctuation", "closing_punctuation"),
     [
-        ("https://files.example/report.pdf?token=part.csvX", "]"),
-        ("https://files.example/report.pdf?token=abc&download=copy.csvX#page=2", "]"),
-        ("https://files.example/report.pdf?token=abc", "]"),
-        pytest.param("https://files.example/report.pdf?token=part.csvX#page=2", "\u3002\u201d\uff09", id="cjk-punctuation"),
-        pytest.param("https://files.example/report.PdF?token=part.csvX#page=2", "]", id="mixed-case-extension"),
-        pytest.param("https://files.example/report.pdf?label=(old)", "]", id="ascii-query-parentheses"),
-        pytest.param("https://files.example/report.pdf#section[1]", "]", id="ascii-fragment-brackets"),
+        ("https://files.example/report.pdf?token=part.csvX", "[", "]"),
+        ("https://files.example/report.pdf?token=abc&download=copy.csvX#page=2", "[", "]"),
+        ("https://files.example/report.pdf?token=abc", "[", "]"),
+        pytest.param("https://files.example/report.pdf?token=part.csvX#page=2", "[", "\u3002\u201d\uff09", id="cjk-punctuation"),
+        pytest.param("https://files.example/report.PdF?token=part.csvX#page=2", "[", "]", id="mixed-case-extension"),
+        pytest.param("https://files.example/report.pdf?label=(old)", "[", "]", id="ascii-query-parentheses"),
+        pytest.param("https://files.example/report.pdf#section[1]", "[", "]", id="ascii-fragment-brackets"),
+        pytest.param("https://files.example/report.pdf?token=literal.", '"', '".', id="quoted-query-period"),
+        pytest.param("https://files.example/report.pdf?token=literal;", "「", "」。", id="corner-quoted-query-semicolon"),
+        pytest.param("https://files.example/report.pdf?token=literal.", '\\"', '\\".', id="escaped-quoted-query-period"),
     ],
 )
-def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, closing_punctuation):
+def test_remote_url_survives_capture_checkpoint_and_resolved_download(url, opening_punctuation, closing_punctuation):
     """Exercise the real agent graph with a fake model and offline HTTP transport."""
     downloaded = []
 
     @tool("make_file")
     def remote_report(name: str) -> str:
         """Create a remotely hosted report."""
-        return f"Download [{url}{closing_punctuation}"
+        return f"Download {opening_punctuation}{url}{closing_punctuation}"
 
     def serve_report(request: httpx.Request) -> httpx.Response:
         downloaded.append(request.url)
