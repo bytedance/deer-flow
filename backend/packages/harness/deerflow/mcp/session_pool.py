@@ -55,7 +55,35 @@ from typing import Any, Literal
 
 import anyio
 from mcp import ClientSession
-from mcp.shared.exceptions import McpError
+
+try:
+    from mcp.shared.exceptions import McpError
+
+    _MCP_ERROR_TYPES: tuple[type[Exception], ...] = (McpError,)
+except ImportError:  # pragma: no cover - mcp >= 2.0 uses MCPError
+    from mcp.shared.exceptions import MCPError as _MCPError  # type: ignore[attr-defined]
+
+    class McpError(_MCPError):  # type: ignore[misc]
+        """Compatibility wrapper for MCP 2.x MCPError."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            if len(args) == 1 and hasattr(args[0], "code") and hasattr(args[0], "message") and not kwargs:
+                err_data = args[0]
+                super().__init__(
+                    code=err_data.code,
+                    message=err_data.message,
+                    data=getattr(err_data, "data", None),
+                )
+            else:
+                super().__init__(*args, **kwargs)
+
+    _MCP_ERROR_TYPES = (_MCPError,)
+
+try:
+    from mcp.shared.exceptions import MCPError  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - mcp 1.x
+    MCPError = McpError  # type: ignore[misc,assignment]
+
 from mcp.types import CONNECTION_CLOSED
 
 from deerflow.mcp_scope import mcp_scope_belongs_to_thread
@@ -121,7 +149,12 @@ _MCP_CLOSED_STREAM_ERRORS = (
 def _is_mcp_transport_disconnect(error: Exception) -> bool:
     if isinstance(error, _MCP_CLOSED_STREAM_ERRORS):
         return True
-    return isinstance(error, McpError) and error.error.code == CONNECTION_CLOSED and error.error.message == "Connection closed"
+    if not isinstance(error, _MCP_ERROR_TYPES):
+        return False
+    error_data = getattr(error, "error", None)
+    code = getattr(error_data, "code", getattr(error, "code", None))
+    message = getattr(error_data, "message", getattr(error, "message", None))
+    return code == CONNECTION_CLOSED and message == "Connection closed"
 
 
 async def _finish_session_cleanup(cleanup: asyncio.Task[Any], server_name: str) -> bool:
