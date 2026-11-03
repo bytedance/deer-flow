@@ -60,6 +60,7 @@ describe("static website API requests", () => {
       browser_control: { enabled: false },
       mcp_tasks: { enabled: false },
       subagent_batches: { repository_available: false, worker_running: false },
+      image_generation_management: { enabled: false },
     });
     await expect(listChannelProviders()).resolves.toEqual({
       enabled: false,

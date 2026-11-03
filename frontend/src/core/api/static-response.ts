@@ -76,6 +76,7 @@ export async function staticApiResponse(
           max_running: 0,
         },
         conversation_references: { enabled: false, max_references: 0 },
+        image_generation_management: { enabled: false },
       } satisfies FeaturesResponse;
       break;
     case "channels/providers":

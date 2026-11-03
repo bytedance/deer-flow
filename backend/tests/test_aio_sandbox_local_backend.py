@@ -493,6 +493,30 @@ def test_restricted_sandbox_has_no_published_port_and_forces_proxy_env(monkeypat
     assert proxy_values[-1] == "HTTP_PROXY=http://deer-flow-netproxy-test:3128"
 
 
+def test_extra_environment_replaces_configured_secret_without_duplicate_env_arg(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={"IMAGE_GENERATION_API_KEY": "synthetic-server-key", "NORMAL": "retained"},
+    )
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container("sandbox-test", 18080, extra_environment={"IMAGE_GENERATION_API_KEY": ""})
+
+    env_args = [captured_cmd[index + 1] for index, value in enumerate(captured_cmd) if value == "-e"]
+    assert env_args.count("IMAGE_GENERATION_API_KEY=") == 1
+    assert "IMAGE_GENERATION_API_KEY=synthetic-server-key" not in env_args
+    assert "NORMAL=retained" in env_args
+
+
 def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",

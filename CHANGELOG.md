@@ -12,6 +12,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **images:** Administrators can configure and test image models in Settings or
+  use a typed server configuration. When both a server model and a web profile
+  are available, interactive runs ask which to use; unattended runs use the
+  server model. PPT generation can resume verified slides after a model change.
+  ([#7827])
+
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
@@ -19,13 +25,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **skills:** PPT composition now saves and validates a temporary deck before
+  replacing the requested output. A failed save leaves an existing PPTX intact
+  and removes the incomplete temporary file. ([#7827])
+
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
   or during a DingTalk outage. dingtalk-stream logs a failed card request and
   returns as if it succeeded, so neither the text running reply nor the
   `sampleMarkdown` fallback for the final answer ever ran. The channel now
   sends card requests itself and falls back when one fails. ([#7781])
-  
+
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -46,7 +56,7 @@ This section accumulates work toward the **2.3.0** milestone
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
   earlier turns remain running. ([#7772])
-  
+
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named
