@@ -265,7 +265,8 @@ def test_warned_to_blocked_after_escalation():
 # Scenario 4: Blocked tool is front-gate intercepted (handler NOT called)
 
 
-def test_blocked_tool_is_intercepted_without_calling_handler():
+@pytest.mark.parametrize(("call_id", "result_id"), [("tc-web_search", "tc-web_search"), (None, "")])
+def test_blocked_tool_is_intercepted_without_calling_handler(call_id, result_id):
     mw = _make_mw(stagnation_threshold=2, warn_escalation_count=1)
     rt = _make_runtime()
     req = _make_tool_request(runtime=rt)
@@ -284,11 +285,13 @@ def test_blocked_tool_is_intercepted_without_calling_handler():
     assert mw._phase_states["t1"]["web_search"].phase == "blocked"
     call_count_before = call_count[0]
 
+    req.tool_call["id"] = call_id
     # Next call should be intercepted
     result = mw.wrap_tool_call(req, handler)
 
     assert call_count[0] == call_count_before
     assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == result_id
     assert "[TOOL_BLOCKED]" in result.content
 
 

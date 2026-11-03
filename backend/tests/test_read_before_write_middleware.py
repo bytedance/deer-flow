@@ -126,15 +126,16 @@ class TestWriteGate:
         handler.assert_called_once()
         assert result.status != "error"
 
-    def test_overwrite_existing_without_read_blocked(self):
+    @pytest.mark.parametrize(("call_id", "result_id"), [("call-1", "call-1"), (None, "")])
+    def test_overwrite_existing_without_read_blocked(self, call_id, result_id):
         mw = _middleware({self.PATH: "v1"})
-        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"})
+        request = _make_request("write_file", {"description": "d", "path": self.PATH, "content": "v2"}, tool_call_id=call_id)
         handler = MagicMock()
         result = mw.wrap_tool_call(request, handler)
         handler.assert_not_called()
         assert isinstance(result, ToolMessage)
         assert result.status == "error"
-        assert result.tool_call_id == "call-1"
+        assert result.tool_call_id == result_id
         assert "read" in result.content.lower()
 
     def test_append_without_read_blocked(self):

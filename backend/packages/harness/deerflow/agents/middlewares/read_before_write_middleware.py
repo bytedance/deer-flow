@@ -380,7 +380,7 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             read_hint = f"Call read_file on it first (e.g. start_line={start}, end_line={line_count}), check what is already there, then retry."
         blocked = ToolMessage(
             content=_BLOCK_MESSAGE.format(tool_name=tool_name, path=path, line_desc=line_desc, read_hint=read_hint),
-            tool_call_id=str(tool_call.get("id", "")),
+            tool_call_id=str(tool_call.get("id") or ""),
             name=tool_name,
             status="error",
             additional_kwargs={
