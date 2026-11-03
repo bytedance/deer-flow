@@ -519,6 +519,94 @@ async def test_steer_settles_finished_and_pending_siblings_once_each():
         await control.close()
 
 
+class ScriptedStepModel(InputModel):
+    steps: list
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.observed.append(messages)
+        step = len(self.observed)
+        calls = self.steps[step - 1] if step <= len(self.steps) else []
+        message = AIMessage(content=f"Step {step}", tool_calls=calls, usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pre_existing", [frozenset(), frozenset({"earlier"})], ids=["first-run", "existing-thread"])
+async def test_compaction_after_a_steer_keeps_capturing_the_runs_tasks(pre_existing):
+    from _agent_e2e_helpers import FakeToolCallingModel
+
+    from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
+
+    inputs, saver, control = await _run_controller()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @tool
+    async def task(description: str, subagent_type: str, tool_call_id: Annotated[str, InjectedToolCallId]):
+        """A child dispatched after compaction removed the run's opening message."""
+        return _finished_task(tool_call_id, 100)
+
+    @tool
+    async def slow() -> str:
+        """Keep the first step open while the steer arrives."""
+        entered.set()
+        await release.wait()
+        return "Done"
+
+    @tool
+    async def check() -> str:
+        """Grow the history past the compaction trigger."""
+        return "Done"
+
+    summarizer = DeerFlowSummarizationMiddleware(model=FakeToolCallingModel(responses=[AIMessage(content="Started, then steered")] * 3), trigger=("messages", 5), keep=("messages", 1), token_counter=len)
+    model = ScriptedStepModel(observed=[], steps=[[{"name": "slow", "args": {}, "id": "slow"}], [{"name": "check", "args": {}, "id": "check"}], [_delegated("later")]])
+    graph = _settled_graph(model, [task, slow, check], saver, summarizer)
+    context = {INPUT_CONTEXT_KEY: control, "run_id": "run", CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: pre_existing}
+    opening = HumanMessage(content="Original task", id="opening", additional_kwargs={"run_id": "run"})
+    run = asyncio.create_task(graph.ainvoke({"messages": [opening]}, {"configurable": {"thread_id": "thread"}}, context=context))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await inputs.submit("update", "Handle this too", "steer")
+        release.set()
+        result = await asyncio.wait_for(run, 10)
+        assert result["summary_text"]
+        assert "opening" not in {x.id for x in result["messages"]}
+        assert [(entry["id"], entry["status"]) for entry in result["delegations"]] == [("later", "completed")]
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(run, return_exceptions=True), 5)
+        await control.close()
+
+
+@pytest.mark.asyncio
+async def test_resumed_run_is_not_charged_for_an_earlier_runs_steered_step():
+    followed = []
+
+    @tool
+    async def follow_up() -> str:
+        """Lead work of the resumed run."""
+        followed.append(True)
+        return "Done"
+
+    budget = TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True, max_tokens=1000))
+    model = ScriptedStepModel(observed=[], steps=[[{"name": "follow_up", "args": {}, "id": "follow"}]])
+    graph = create_agent(model, tools=[follow_up], middleware=[budget, CompletedSubagentUsageMiddleware()], state_schema=ThreadState, context_schema=dict, checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "thread"}}
+    # The earlier run was cancelled after its steer was checkpointed and before
+    # the next model response could attribute the finished child's usage.
+    earlier = [
+        HumanMessage(content="Original task", id="opening", additional_kwargs={"run_id": "earlier"}),
+        AIMessage(content="", tool_calls=[_delegated("done")], id="dispatch"),
+        _finished_task("done", 1_000_000).update["messages"][0],
+        HumanMessage(content="Handle this too", id="steer", additional_kwargs={"run_id": "earlier", "run_input_id": "input"}),
+    ]
+    await graph.aupdate_state(config, {"messages": earlier}, as_node="tools")
+    context = {"run_id": "resumed"}
+    await graph.ainvoke(None, config, context=context)
+
+    assert followed
+    assert context.get("stop_reason") is None
+
+
 def test_steer_does_not_open_a_resumed_runs_delegation_window():
     from deerflow.agents.middlewares.durable_context_middleware import _run_opening_human_index
 

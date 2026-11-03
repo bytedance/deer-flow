@@ -245,7 +245,31 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
         return messages
     if opening_index is not None:
         return messages[opening_index + 1 :]
+    if _run_outlived_its_opening(messages, run_id, pre_existing_message_ids):
+        return messages
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
+
+
+def _run_outlived_its_opening(messages: list[AnyMessage], run_id: str, pre_existing_message_ids: frozenset[str]) -> bool:
+    """Whether compaction removed this run's opening HumanMessage but kept its steer.
+
+    Compaction keeps the latest user message, which after a steer is the steer,
+    and removes the oldest history first. When this run's steer remains and no
+    message from before the run does, everything left was written by this run.
+    The steer still opens nothing, so earlier runs' delegations stay open.
+    """
+    steered = False
+    for message in messages:
+        if _message_id(message) in pre_existing_message_ids:
+            return False
+        if not isinstance(message, HumanMessage):
+            continue
+        message_run_id = message.additional_kwargs.get("run_id")
+        if message_run_id == run_id and is_mid_run_input(message):
+            steered = True
+        elif message_run_id is not None:
+            return False
+    return steered
 
 
 def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str, opening_index: int) -> list[dict]:

@@ -308,7 +308,13 @@ def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[
     return [updates[idx] for idx in sorted(updates)]
 
 
-def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMessage | ToolMessage]:
+def _runtime_run_id(runtime: Runtime | None) -> str | None:
+    ctx = getattr(runtime, "context", None)
+    run_id = ctx.get("run_id") if isinstance(ctx, dict) else None
+    return str(run_id) if run_id else None
+
+
+def _attribute_completed_subagent_usage(messages: list[Any], run_id: str | None = None) -> dict[int, AIMessage | ToolMessage]:
     """Return copied dispatch/terminal message updates without current-step attribution."""
     # Annotate subagent token usage onto the AIMessage that dispatched it.
     # Terminal usage travels with the current run's ToolMessage, so provider
@@ -316,14 +322,16 @@ def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMess
     # Walk backward through consecutive ToolMessages before the new AIMessage
     # so that multiple concurrent task tool calls all get their subagent tokens
     # written back to the same dispatch message (merging into one update).
-    # A steer or receipt delivered before that AIMessage sits after those
-    # ToolMessages without ending the step, so the walk passes over it.
+    # A steer or receipt this run delivered before that AIMessage sits after
+    # those ToolMessages without ending the step, so the walk passes over it.
+    # An earlier run's input still ends the walk: a resumed run must not
+    # charge itself for a step that run left unattributed.
     state_updates: dict[int, AIMessage | ToolMessage] = {}
     if len(messages) >= 2:
         idx = len(messages) - 2
         while idx >= 0:
             tool_msg = messages[idx]
-            if is_mid_run_input(tool_msg):
+            if run_id is not None and is_mid_run_input(tool_msg) and tool_msg.additional_kwargs.get("run_id") == run_id:
                 idx -= 1
                 continue
             if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
@@ -356,12 +364,12 @@ def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMess
 class TokenUsageMiddleware(AgentMiddleware):
     """Logs token usage from model responses and annotates the AI step."""
 
-    def _apply(self, state: AgentState) -> dict | None:
+    def _apply(self, state: AgentState, run_id: str | None = None) -> dict | None:
         messages = state.get("messages", [])
         if not messages:
             return None
 
-        state_updates = _attribute_completed_subagent_usage(messages)
+        state_updates = _attribute_completed_subagent_usage(messages, run_id)
 
         last = messages[-1]
         if not isinstance(last, AIMessage):
@@ -401,24 +409,24 @@ class TokenUsageMiddleware(AgentMiddleware):
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, _runtime_run_id(runtime))
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, _runtime_run_id(runtime))
 
 
 class CompletedSubagentUsageMiddleware(AgentMiddleware):
     """Backfill completed subagent usage before the lead budget checks it."""
 
-    def _apply(self, state: AgentState) -> dict | None:
-        state_updates = _attribute_completed_subagent_usage(state.get("messages", []))
+    def _apply(self, state: AgentState, run_id: str | None = None) -> dict | None:
+        state_updates = _attribute_completed_subagent_usage(state.get("messages", []), run_id)
         return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
     @override
     def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, _runtime_run_id(runtime))
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._apply(state)
+        return self._apply(state, _runtime_run_id(runtime))
