@@ -1238,23 +1238,26 @@ async def run_agent(
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
-            task_store = ExtensionData(task_id)
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
+            identity = TaskInfo(
                 task_id=task_id,
                 run_id=run_id,
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
             )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
+            task_store = ExtensionData(task_id)
+            # Seed the identity for every hook handed this store, not only
+            # lifecycle contributors: compaction events are named from it.
+            task_store.set(identity)
+            # A lifecycle contributor always implies a task store.
+            if extensions.has_task_lifecycle:
+                task_info = identity
+                await notify_task_start(
+                    extensions,
+                    task_store,
+                    task_info,
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
 
         if not record.ownership_lost and thread_store is not None:
             try:
