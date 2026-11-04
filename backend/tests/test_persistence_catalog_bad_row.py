@@ -111,6 +111,18 @@ def test_reading_one_damaged_row_by_name_still_reports_it(subagent_store):
     assert store.delete("legacy-worker") is True
 
 
+def test_reading_one_damaged_agent_row_by_name_still_reports_it(agent_store):
+    store, url = agent_store
+    store.create("good-agent", {"name": "good-agent"}, "You answer.", user_id="u1")
+    _insert_agent_row(url, user_id="u1", name="future-agent", config={"name": "future-agent", "reasoning_effort": "extreme"})
+
+    # Same contract as the managed-subagent store: the skip belongs to the listing, so
+    # asking for that name still surfaces the damage instead of answering None.
+    with pytest.raises(ValidationError):
+        store.get("future-agent", user_id="u1")
+    assert store.delete("future-agent", user_id="u1") == "deleted"
+
+
 def test_a_readable_row_with_unknown_legacy_keys_is_still_listed(agent_store):
     store, url = agent_store
     # ``parse_agent_config`` drops keys the model does not know (the legacy
