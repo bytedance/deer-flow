@@ -386,9 +386,7 @@ async def test_cancel_batch_tool_requires_runs_cancel_for_followups(batch_host, 
             {},
         )
     )
-    assert await tool_module.cancel_batch.coroutine(runtime=tool_runtime(no_cancel_runs), batch_id=ordinary["id"]) == (
-        f"Batch {ordinary['id']} cancellation requested."
-    )
+    assert await tool_module.cancel_batch.coroutine(runtime=tool_runtime(no_cancel_runs), batch_id=ordinary["id"]) == (f"Batch {ordinary['id']} cancellation requested.")
 
     for authority in (no_cancel_runs, None):
         with pytest.raises(AgentRunError) as exc_info:
@@ -423,4 +421,3 @@ async def test_cancel_batch_tool_requires_runs_cancel_for_followups(batch_host, 
         assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "cancelled"
     finally:
         release.set()
-
