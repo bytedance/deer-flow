@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import threading
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -300,20 +301,30 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
         ]
     )
 
-    result = updater._apply_updates(
-        current_memory,
-        {
-            "newFacts": [
-                {
-                    "content": "new useful context",
-                    "category": "context",
-                    "confidence": 0.8,
-                    **_DURABLE_USER_FACT,
-                }
-            ]
-        },
-        agent_name="default",
-    )
+    # Keep fixture freshness and new fact timestamps on the same evaluation clock.
+    evaluated_at = datetime(2026, 8, 13, tzinfo=UTC)
+    with (
+        patch("deerflow.agents.memory.backends.deermem.deermem.core.eviction.datetime", wraps=datetime) as eviction_clock,
+        patch(
+            "deerflow.agents.memory.backends.deermem.deermem.core.updater.utc_now_iso_z",
+            return_value=evaluated_at.isoformat().replace("+00:00", "Z"),
+        ),
+    ):
+        eviction_clock.now.return_value = evaluated_at
+        result = updater._apply_updates(
+            current_memory,
+            {
+                "newFacts": [
+                    {
+                        "content": "new useful context",
+                        "category": "context",
+                        "confidence": 0.8,
+                        **_DURABLE_USER_FACT,
+                    }
+                ]
+            },
+            agent_name="default",
+        )
 
     kept_ids = {fact["id"] for fact in result["facts"]}
     assert "confirmed_recently" in kept_ids
