@@ -6,3 +6,8 @@ queries after partial/cancelled imports. Never retry writes automatically. Custo
 and arrow-key navigation share one group order; catalog refresh clears absent
 provider filters. The
 server deduplicates by connection, credential and model under the catalog lock.
+
+`settings/model-connection-fields.tsx` owns provider, endpoint and key fields for
+single-model editing and catalog imports. Destination edits drop draft keys and
+saved-source references; blank keys retain, explicit removal sends an empty key.
+Parents own their model capabilities, revisions and independent draft lifetimes.

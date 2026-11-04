@@ -98,6 +98,33 @@ for (const mobile of [false, true]) {
       path: testInfo.outputPath("entry.png"),
       animations: "disabled",
     });
+    await page.getByRole("button", { name: "Add model", exact: true }).click();
+    const editor = page.getByRole("dialog", { name: "Add model", exact: true });
+    await editor
+      .getByRole("combobox", { name: "Provider", exact: true })
+      .selectOption("openai-compatible");
+    await editor
+      .getByLabel("Base URL", { exact: true })
+      .fill("https://custom.example/v1");
+    await editor
+      .getByLabel("API Key", { exact: true })
+      .fill("single-model-draft-key");
+    await editor.getByLabel("Model ID", { exact: true }).fill("manual-model");
+    await expect(editor).toHaveCSS("opacity", "1");
+    const singleEndpointBox = (await editor
+      .getByLabel("Base URL", { exact: true })
+      .boundingBox())!;
+    const singleKeyBox = (await editor
+      .getByLabel("API Key", { exact: true })
+      .boundingBox())!;
+    expect(singleEndpointBox.y + singleEndpointBox.height).toBeLessThanOrEqual(
+      singleKeyBox.y,
+    );
+    await editor.screenshot({
+      path: testInfo.outputPath("shared-editor.png"),
+      animations: "disabled",
+    });
+    await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await page
       .getByRole("button", { name: "Fetch and add models", exact: true })
       .click();
@@ -110,6 +137,7 @@ for (const mobile of [false, true]) {
       exact: true,
     });
     const apiKey = dialog.getByLabel("API Key", { exact: true });
+    await expect(apiKey).toHaveValue("");
     await expect(dialog).toHaveCSS("opacity", "1");
     const providerBox = (await provider.boundingBox())!;
     const keyBox = (await apiKey.boundingBox())!;

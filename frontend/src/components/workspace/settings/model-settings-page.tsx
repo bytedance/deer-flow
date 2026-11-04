@@ -33,10 +33,12 @@ import {
   testManagedModel,
   type ManagedModel,
   type ManagedModelProvider,
+  type ModelConnection,
 } from "@/core/models/management";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { ModelCatalogDialog } from "./model-catalog-dialog";
+import { ModelConnectionFields } from "./model-connection-fields";
 import { SettingsSection } from "./settings-section";
 
 function modelManagementError(
@@ -249,8 +251,8 @@ function ModelEditor({
   const { t } = useI18n();
   const text = t.settings.models;
   const [draft, setDraft] = useState(() => modelDraft(model));
-  const [key, setKey] = useState("");
-  const [clearKey, setClearKey] = useState(false);
+  const key = draft.api_key ?? "";
+  const clearKey = draft.api_key === "";
   const [pending, setPending] = useState(false);
   const [result, setResult] = useState("");
   const active = useRef(true);
@@ -271,29 +273,28 @@ function ModelEditor({
   const requiresKey =
     provider?.requires_api_key ?? draft.provider !== "openai-compatible";
   const missingKey = requiresKey && ((!key.trim() && !canKeepKey) || clearKey);
-  function changeProvider(value: string) {
+  function changeConnection(next: ModelConnection) {
     const rest = { ...draft };
     delete rest.base_url;
-    delete rest.reasoning;
+    delete rest.api_key;
+    if (next.provider !== draft.provider) {
+      delete rest.reasoning;
+      rest.supports_vision = null;
+      rest.context_window = null;
+      rest.max_tokens = null;
+    }
     setDraft({
       ...rest,
-      provider: value,
-      supports_vision: null,
-      context_window: null,
-      max_tokens: null,
-      ...(value === "openai-compatible" ? { base_url: "" } : {}),
+      provider: next.provider,
+      ...(next.base_url !== undefined ? { base_url: next.base_url } : {}),
+      ...(next.api_key !== undefined ? { api_key: next.api_key } : {}),
     });
-    setKey("");
-    setClearKey(false);
     setResult("");
     abort.current?.abort();
   }
   function body() {
     return {
-      config: {
-        ...draft,
-        ...(clearKey ? { api_key: "" } : key ? { api_key: key } : {}),
-      },
+      config: draft,
       expected_revision: model?.revision ?? null,
     };
   }
@@ -344,46 +345,18 @@ function ModelEditor({
         >
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">
             <fieldset disabled={pending} className="space-y-3">
-              <div className="space-y-1">
-                <label id="model-provider-label">{text.provider}</label>
-                <Select
-                  value={draft.provider}
-                  onValueChange={changeProvider}
-                  disabled={pending || providers.length === 0}
-                >
-                  <SelectTrigger
-                    aria-labelledby="model-provider-label"
-                    className="w-full"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providers.map((item) => (
-                      <SelectItem key={item.id} value={item.id}>
-                        {item.custom_endpoint
-                          ? text.customProvider
-                          : item.display_name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {provider?.custom_endpoint && (
-                <label className="block space-y-1">
-                  <span>{text.endpoint}</span>
-                  <Input
-                    type="url"
-                    required
-                    value={draft.base_url ?? ""}
-                    onChange={(e) => {
-                      setDraft({ ...draft, base_url: e.target.value });
-                      setKey("");
-                      setClearKey(false);
-                      setResult("");
-                    }}
-                  />
-                </label>
-              )}
+              <ModelConnectionFields
+                value={{
+                  provider: draft.provider,
+                  base_url: draft.base_url ?? undefined,
+                  api_key: draft.api_key,
+                }}
+                providers={providers}
+                canKeepKey={canKeepKey}
+                allowClearKey
+                requireKey={draft.enabled}
+                onChange={changeConnection}
+              />
               {model && !sameConnection && (
                 <p role="status">{text.providerChanged}</p>
               )}
@@ -399,43 +372,6 @@ function ModelEditor({
                   }}
                 />
               </label>
-              <label className="block space-y-1">
-                <span>{text.apiKey}</span>
-                <Input
-                  type="password"
-                  autoComplete="new-password"
-                  disabled={clearKey}
-                  required={
-                    requiresKey && draft.enabled && !canKeepKey && !clearKey
-                  }
-                  value={key}
-                  placeholder={
-                    canKeepKey
-                      ? text.keepKey
-                      : requiresKey
-                        ? text.requiredKey
-                        : text.optionalKey
-                  }
-                  onChange={(e) => {
-                    setKey(e.target.value);
-                    setResult("");
-                  }}
-                />
-              </label>
-              {canKeepKey && (
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={clearKey}
-                    onChange={(e) => {
-                      setClearKey(e.target.checked);
-                      setKey("");
-                      setResult("");
-                    }}
-                  />
-                  {text.clearKey}
-                </label>
-              )}
               <details>
                 <summary className="cursor-pointer">{text.advanced}</summary>
                 <div className="space-y-3 pt-3">

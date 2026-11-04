@@ -9,7 +9,11 @@ import {
 
 import { ModelCatalogDialog } from "@/components/workspace/settings/model-catalog-dialog";
 import { enUS } from "@/core/i18n/locales/en-US";
-import { discoverModels, importCatalogModel } from "@/core/models/management";
+import {
+  discoverModels,
+  importCatalogModel,
+  type ManagedModel,
+} from "@/core/models/management";
 
 rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
 rs.mock("@/core/models/management", () => ({
@@ -177,4 +181,68 @@ it("fills a custom connection in display order without losing the key", async ()
   });
   fireEvent.change(endpoint, { target: { value: "https://other.example/v1" } });
   expect((key as HTMLInputElement).value).toBe("");
+});
+
+it("reuses a saved connection only until its destination changes", async () => {
+  const model: ManagedModel = {
+    name: "saved-custom",
+    display_name: "Saved custom",
+    model: "old",
+    provider: "openai-compatible",
+    base_url: "https://saved.example/v1",
+    enabled: true,
+    supports_vision: null,
+    context_window: null,
+    max_tokens: null,
+    revision: "rev-1",
+    source: "managed",
+    has_api_key: true,
+  };
+  render(
+    <ModelCatalogDialog
+      {...props}
+      models={[model]}
+      providers={[
+        ...props.providers,
+        {
+          id: "openai-compatible",
+          display_name: "Custom",
+          requires_api_key: false,
+          custom_endpoint: true,
+        },
+      ]}
+    />,
+  );
+  fireEvent.change(
+    screen.getByLabelText(enUS.settings.models.savedConnection),
+    { target: { value: model.name } },
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
+  await screen.findByText("good");
+  expect(discover.mock.calls[0]![0]).toEqual({
+    provider: model.provider,
+    base_url: model.base_url,
+    saved_model_name: model.name,
+    expected_revision: model.revision,
+  });
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "replacement-key" },
+  });
+  fireEvent.change(screen.getByLabelText(enUS.settings.models.endpoint), {
+    target: { value: "https://new.example/v1" },
+  });
+  expect(screen.getByLabelText("API Key")).toHaveProperty("value", "");
+  expect(
+    screen.getByLabelText(enUS.settings.models.savedConnection),
+  ).toHaveProperty("value", "");
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "new-destination-key" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
+  await waitFor(() => expect(discover).toHaveBeenCalledTimes(2));
+  expect(discover.mock.calls[1]![0]).toEqual({
+    provider: model.provider,
+    base_url: "https://new.example/v1",
+    api_key: "new-destination-key",
+  });
 });

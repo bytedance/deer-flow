@@ -22,6 +22,8 @@ import {
   type ModelConnection,
 } from "@/core/models/management";
 
+import { ModelConnectionFields } from "./model-connection-fields";
+
 export function ModelCatalogDialog({
   models,
   providers,
@@ -35,11 +37,11 @@ export function ModelCatalogDialog({
 }) {
   const { t } = useI18n();
   const text = t.settings.models;
-  const [source, setSource] = useState("");
   const [connectionOpen, setConnectionOpen] = useState(true);
   const [connection, setConnection] = useState<ModelConnection>({
     provider: "openai",
   });
+  const source = connection.saved_model_name ?? "";
   const [catalog, setCatalog] = useState<CatalogModel[] | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [query, setQuery] = useState("");
@@ -71,9 +73,8 @@ export function ModelCatalogDialog({
   const pendingIds = selected.filter(
     (id) => !catalog?.find((item) => item.id === id)?.configured,
   );
-  function change(next: ModelConnection, nextSource = source) {
+  function change(next: ModelConnection) {
     setConnection(next);
-    setSource(nextSource);
     setCatalog(null);
     setSelected([]);
     setResults({});
@@ -228,7 +229,6 @@ export function ModelCatalogDialog({
                             expected_revision: model.revision,
                           }
                         : { provider: "openai" },
-                      model?.name ?? "",
                     );
                   }}
                 >
@@ -247,61 +247,14 @@ export function ModelCatalogDialog({
                 </select>
               </label>
             )}
-            <div className="grid min-w-0 gap-3 sm:grid-cols-2">
-              <label className="grid min-w-0 gap-1 text-sm">
-                {text.provider}
-                <select
-                  className="bg-background h-9 w-full max-w-full min-w-0 rounded border px-2"
-                  value={connection.provider}
-                  onChange={(event) =>
-                    change({ provider: event.target.value }, "")
-                  }
-                >
-                  {providers.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.custom_endpoint
-                        ? text.customProvider
-                        : item.display_name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {provider?.custom_endpoint && (
-                <label className="grid min-w-0 gap-1 text-sm">
-                  {text.endpoint}
-                  <Input
-                    type="url"
-                    value={connection.base_url ?? ""}
-                    onChange={(event) =>
-                      change(
-                        {
-                          provider: connection.provider,
-                          base_url: event.target.value,
-                        },
-                        "",
-                      )
-                    }
-                  />
-                </label>
-              )}
-              <label
-                className={`grid min-w-0 gap-1 text-sm ${provider?.custom_endpoint ? "sm:col-span-2" : ""}`}
-              >
-                {text.apiKey}
-                <Input
-                  type="password"
-                  autoComplete="new-password"
-                  value={connection.api_key ?? ""}
-                  placeholder={source ? text.keepKey : text.apiKey}
-                  onChange={(event) =>
-                    change({
-                      ...connection,
-                      api_key: event.target.value || undefined,
-                    })
-                  }
-                />
-              </label>
-            </div>
+            <ModelConnectionFields
+              value={connection}
+              providers={providers}
+              canKeepKey={
+                !!models.find((model) => model.name === source)?.has_api_key
+              }
+              onChange={change}
+            />
             <Button
               variant="outline"
               disabled={!valid || busy}
