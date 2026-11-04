@@ -3200,3 +3200,21 @@ def test_every_text_mode_subprocess_call_pins_utf8():
         for name, expected in (("encoding", "utf-8"), ("errors", "replace")):
             value = keywords.get(name)
             assert isinstance(value, ast.Constant) and value.value == expected, f"line {call.lineno}: text-mode subprocess.run must pass {name}={expected!r}"
+
+
+def test_create_releases_the_port_when_the_runtime_cli_cannot_be_spawned(monkeypatch):
+    """A spawn failure before any container exists must not leak a port reservation."""
+    backend = _backend_for_inspect_tests()
+    released: list[int] = []
+
+    def fail_spawn(*_args, **_kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(backend, "_start_container", fail_spawn)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.release_port", released.append)
+
+    with pytest.raises(FileNotFoundError):
+        backend.create(thread_id="thread", sandbox_id="spawn-failure")
+
+    assert released == [18080]
