@@ -1748,17 +1748,22 @@ class SubagentExecutor:
         task_info: TaskInfo | None = None
         if loaded_extensions.needs_task_store:
             task_store = ExtensionData(result.external_task_id or result.task_id)
-        if loaded_extensions.has_task_lifecycle and self.run_id:
-            task_info = TaskInfo(
-                task_id=result.task_id,
-                run_id=self.run_id,
-                thread_id=self.thread_id or "",
-                kind="subagent",
-                parent_task_id=lead_task_id(self.run_id),
-                agent_name=self.config.name,
-            )
-            assert task_store is not None
-        elif loaded_extensions.has_task_lifecycle:
+            if self.run_id:
+                identity = TaskInfo(
+                    task_id=result.task_id,
+                    run_id=self.run_id,
+                    thread_id=self.thread_id or "",
+                    kind="subagent",
+                    parent_task_id=lead_task_id(self.run_id),
+                    agent_name=self.config.name,
+                )
+                # Seed the identity for every hook handed this store, not only
+                # lifecycle contributors: compaction events are named from it.
+                task_store.set(identity)
+                # A lifecycle contributor always implies a task store.
+                if loaded_extensions.has_task_lifecycle:
+                    task_info = identity
+        if loaded_extensions.has_task_lifecycle and not self.run_id:
             logger.debug(
                 "[trace=%s] Subagent %s has no run_id; skipping extension task lifecycle",
                 self.trace_id,
