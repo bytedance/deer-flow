@@ -44,9 +44,12 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_0047_remains_in_the_single_migration_chain():
-    assert bootstrap._get_head_revision() == "0049_run_inputs"
+    assert bootstrap._get_head_revision() == "0051_merge_run_inputs_fencing"
     script = ScriptDirectory(str(bootstrap._MIGRATIONS_DIR))
-    assert script.get_heads() == ["0049_run_inputs"]
+    assert script.get_heads() == ["0051_merge_run_inputs_fencing"]
+    assert set(script.get_revision("0051_merge_run_inputs_fencing").down_revision) == {"0049_run_inputs", "0050_history_seed_authority"}
+    assert script.get_revision("0050_history_seed_authority").down_revision == "0049_run_producer_fencing"
+    assert script.get_revision("0049_run_producer_fencing").down_revision == "0048_extension_execution_leases"
     assert script.get_revision("0049_run_inputs").down_revision == "0048_extension_execution_leases"
     assert script.get_revision("0048_extension_execution_leases").down_revision == REVISION
     assert script.get_revision(REVISION).down_revision == PREVIOUS

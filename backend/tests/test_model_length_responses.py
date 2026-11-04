@@ -277,7 +277,12 @@ def test_native_length_cap_preserves_content_metadata_and_earlier_stop_reason(co
     update = middleware.after_model({"messages": [message]}, SimpleNamespace(context=context))
     assert context["stop_reason"] == "token_capped"
     if isinstance(content, str):
-        assert update is None
+        assert update is not None
+        replacement = update["messages"][0]
+        assert replacement.content == content
+        assert replacement.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+        assert getattr(replacement, container)["incomplete_details"] == metadata["incomplete_details"]
+        assert middleware.after_model({"messages": [replacement]}, SimpleNamespace(context=context)) is None
     else:
         assert update is not None
         replacement = update["messages"][0]
