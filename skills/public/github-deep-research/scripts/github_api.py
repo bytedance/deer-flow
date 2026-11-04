@@ -252,7 +252,12 @@ class GitHubAPI:
                 else:
                     lines.append(f"{indent}{name}")
 
-        return "\n".join(lines[:100])  # Limit output
+        output = lines[:100]
+        if len(lines) > 100:
+            output.append("[Tree output limit: additional entries omitted]")
+        if tree_data.get("truncated"):
+            output.append("[GitHub truncated the tree; additional entries may be missing]")
+        return "\n".join(output)
 
     def summarize_repo(self, owner: str, repo: str) -> Dict:
         """
