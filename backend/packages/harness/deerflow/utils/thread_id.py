@@ -42,9 +42,7 @@ def validate_thread_id(thread_id: str) -> str:
     if not isinstance(thread_id, str) or _THREAD_ID_RE.fullmatch(thread_id) is None:
         raise ValueError("Invalid thread_id: expected 1-64 ASCII letters, digits, hyphens, or underscores")
     if _is_windows_reserved_name(thread_id):
-        raise ValueError(
-            f"Invalid thread_id {thread_id!r}: reserved Windows device names are not allowed"
-        )
+        raise ValueError(f"Invalid thread_id {thread_id!r}: reserved Windows device names are not allowed")
     return thread_id
 
 
