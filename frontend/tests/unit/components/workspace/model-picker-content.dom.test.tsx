@@ -513,3 +513,57 @@ it("navigates in rendered provider order, including wrapping and filtered result
   fireEvent.keyDown(filtered[0]!, { key: "ArrowDown" });
   expect(document.activeElement).toBe(filtered[1]);
 });
+
+it.each([0, 1, 2])(
+  "clears a removed provider filter with %i providers remaining",
+  async (remaining) => {
+    favoriteNames = [];
+    const models = [
+      { ...MODELS[0]!, name: "a1", provider: "A" },
+      { ...MODELS[1]!, name: "b1", provider: "B" },
+      { ...MODELS[2]!, name: "c1", provider: "C" },
+    ];
+    const view = render(<ControlledPicker open models={models} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+      target: { value: "A" },
+    });
+    expect(modelButtons()).toHaveLength(1);
+    view.rerender(
+      <ControlledPicker open models={models.slice(1, remaining + 1)} />,
+    );
+    await waitFor(() => expect(modelButtons()).toHaveLength(remaining));
+    if (remaining > 0)
+      expect(modelButtons()[0]!.getAttribute("aria-label")).toBe(
+        "Shared label (b1)",
+      );
+    if (remaining < 2)
+      expect(screen.queryByRole("combobox", { name: "Provider" })).toBeNull();
+    else
+      expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+        "value",
+        "",
+      );
+    view.rerender(<ControlledPicker open models={models} />);
+    expect(modelButtons()).toHaveLength(3);
+  },
+);
+
+it("keeps a provider filter while that provider still has a model", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "a2", provider: "A" },
+  ];
+  const view = render(<ControlledPicker open models={models} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  view.rerender(<ControlledPicker open models={models.slice(1)} />);
+  await waitFor(() => expect(modelButtons()).toHaveLength(1));
+  expect(modelButtons()[0]!.getAttribute("aria-label")).toBe("Gamma (a2)");
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+    "value",
+    "A",
+  );
+});

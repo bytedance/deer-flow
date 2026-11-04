@@ -5,6 +5,7 @@ import { CheckIcon, StarIcon } from "lucide-react";
 import {
   type KeyboardEvent,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -60,6 +61,11 @@ export function ModelPickerContent({
   const recentNames = useRecentModels(user?.id ?? null);
   const [query, setQuery] = useState("");
   const [provider, setProvider] = useState("");
+  useEffect(() => {
+    if (provider && !models.some((model) => model.provider === provider)) {
+      setProvider("");
+    }
+  }, [models, provider]);
   const filteredModels = useMemo(
     () => filterModels(models, query, provider),
     [models, query, provider],
