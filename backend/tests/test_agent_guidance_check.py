@@ -58,6 +58,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend/src/AGENTS.md",
     "frontend/src/components/workspace/browser-view/AGENTS.md",
     "frontend/src/core/auth/AGENTS.md",
+    "frontend/src/core/background-tasks/AGENTS.md",
     "frontend/src/core/memory/AGENTS.md",
     "frontend/tests/e2e/AGENTS.md",
     "scripts/AGENTS.md",
