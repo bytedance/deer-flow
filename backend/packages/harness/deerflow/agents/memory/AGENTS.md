@@ -169,9 +169,8 @@ quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorrupti
 and preserve the file; `save()` returns false until access recovers.
 Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
 Fact BOM regressions use public save/reload and preserve content and scope.
-Canonical fact parsing splits physical LF lines after universal-newline decoding,
-preserving embedded U+0085, U+2028, and U+2029 in the body. Public save/load/reload
-regressions live in `tests/test_memory_storage_markdown.py`.
+Fact Markdown splits on LF to preserve Unicode separators; test public
+save/load/reload in `tests/test_memory_storage_markdown.py`.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
