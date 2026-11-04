@@ -121,6 +121,16 @@ class ManagedModel(BaseModel):
                 settings.pop("when_thinking_enabled", None)
             if self.reasoning.thinking == "required":
                 settings.pop("when_thinking_disabled", None)
+            # Preset effort defaults must also obey the explicit contract.
+            # Keep compatible defaults and non-effort protocol parameters.
+            effort = self.reasoning.effort
+            for field in ("when_thinking_enabled", "when_thinking_disabled"):
+                template = settings.get(field)
+                if template and "reasoning_effort" in template:
+                    if effort is None or effort.path != "reasoning_effort" or template["reasoning_effort"] not in effort.values:
+                        template.pop("reasoning_effort")
+                        if not template:
+                            settings.pop(field)
             settings["reasoning"] = self.reasoning
         if self.supports_vision is not None:
             settings["supports_vision"] = self.supports_vision

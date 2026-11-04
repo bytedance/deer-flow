@@ -232,6 +232,8 @@ their preset supplies `base_url`, which intentionally bypasses the factory's
 fallback routing. Astra and 6.1 Sol require thinking; Terra, Sol and Luna can
 disable it with `none`. For optional presets, the enable template defaults to
 `medium` and the disabled template's `none` takes precedence over request effort.
+Explicit reasoning overrides discard incompatible preset effort values while
+preserving non-effort templates and provider-owned Responses routing.
 Keep custom endpoints and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
 `tests/test_managed_openai_gpt6.py`.
 

@@ -128,7 +128,35 @@ def test_unrelated_routes_are_unchanged(provider, model_id):
     assert config.output_version is None
 
 
-def test_capability_override_keeps_official_responses_route():
-    config = ManagedModel(provider="openai", model="gpt-6.1-sol", api_key="test-key", reasoning={"thinking": "unsupported", "dialect": "none"}).runtime_config()
+@pytest.mark.parametrize("model_id", MODELS)
+def test_capability_override_keeps_official_responses_route(model_id):
+    config = ManagedModel(provider="openai", model=model_id, api_key="test-key", reasoning={"thinking": "unsupported", "dialect": "none"}).runtime_config()
     assert config.use_responses_api is True
     assert not config.supports_thinking
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", MODELS)
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"thinking": "unsupported", "dialect": "none"},
+        {"thinking": "optional", "dialect": "none"},
+        {"thinking": "required", "dialect": "none"},
+        {"thinking": "optional", "dialect": "none", "effort": {"values": ["high"], "default": "high"}},
+        {"thinking": "optional", "dialect": "none", "effort": {"values": ["high"], "path": "extra_body.reasoning_effort"}},
+    ],
+)
+async def test_explicit_contract_can_be_probed_saved_and_reloaded(wire, model_id, reasoning):
+    profile = ManagedModel(provider="openai", model=model_id, api_key="test-key", reasoning=reasoning)
+    assert await router.test_model(ADMIN, router.SaveModelRequest(config=profile)) == {"ok": True, "message": "success"}
+    saved = ManagedModelStore().save(profile, expected_revision=None)
+    loaded = merge_managed_models(AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    runtime = next(model for model in loaded.models if model.name == saved.name)
+    assert runtime.reasoning == profile.reasoning
+    assert runtime.use_responses_api is True
+    assert runtime.output_version == "responses/v1"
+    if reasoning.get("effort", {}).get("default") == "high":
+        assert wire[0][1]["reasoning"]["effort"] == "high"
+    else:
+        assert "reasoning" not in wire[0][1]
