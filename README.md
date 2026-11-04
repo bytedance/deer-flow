@@ -224,8 +224,10 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
 For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
-Tool-result recovery treats null and empty call IDs alike, preserving middleware
-guidance when a result can be uniquely paired; ambiguous partial results remain rejected.
+Tool-result recovery treats null and empty call IDs alike — including the
+`"None"` and `"missing_tool_call_id"` spellings middleware producers use when a
+provider call had no ID — preserving middleware guidance when a result can be
+uniquely paired; ambiguous partial results remain rejected.
 Both synchronous and asynchronous streams retain this compatibility: tool-enabled
 streams simulate chunks from a non-streaming response, while no-tool streams stay native.
 Newline compatibility preserves literal escapes inside backtick and tilde code

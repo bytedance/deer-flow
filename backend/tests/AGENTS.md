@@ -1,6 +1,6 @@
 # Backend Tests
 
-`test_null_tool_result_pairing.py` pins null/empty ID equivalence, provider-wire
+`test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.
 
 `test_lark_broker_image.py` stages Python files from the broker Dockerfile's
