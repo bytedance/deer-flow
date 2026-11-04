@@ -122,7 +122,7 @@ async def retry_batch_item(thread_id: ThreadId, batch_id: str, item_id: str, req
     repo, user_id, _batch = await _owned_batch(request, thread_id, batch_id)
     item = await repo.retry_item(batch_id, item_id, user_id=user_id)
     if item is None:
-        raise HTTPException(status_code=409, detail="Only failed items can be retried")
+        raise HTTPException(status_code=409, detail="Only failed items of a batch that is not cancelled can be retried")
     return item
 
 
