@@ -27,6 +27,18 @@ def test_validate_thread_id_accepts_canonical_ids(thread_id: str) -> None:
         "has space",
         "line\nbreak",
         "线程",
+        # Windows reserved device names break workspace creation on Windows
+        # hosts (e.g. Paths.ensure_thread_dirs raising FileNotFoundError for
+        # "NUL"), so they are rejected at the shared validation boundary.
+        "NUL",
+        "nul",
+        "Nul",
+        "CON",
+        "PRN",
+        "AUX",
+        "COM1",
+        "LPT9",
+        "NUL.txt",
     ],
 )
 def test_validate_thread_id_rejects_noncanonical_ids(thread_id: str) -> None:
