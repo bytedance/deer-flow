@@ -19,6 +19,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **extensions:** Context-compaction observers now learn which task a
+  compaction happened in. Inside a lead run or subagent they receive that
+  task's store instead of a detached one, and `CompactionEvent` gains
+  `task_id`, `run_id` and `thread_id` (default `None`), copied from the
+  `TaskInfo` the host now seeds into every task store even when no lifecycle
+  contributor is registered. A manual `/compact` still gets a detached store
+  and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
+  extensions keep working. ([#7831])
+
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
   or during a DingTalk outage. dingtalk-stream logs a failed card request and
@@ -61,6 +70,9 @@ This section accumulates work toward the **2.3.0** milestone
   path but walked the unresolved tree, so no document matched and every
   original older than 24 hours was removed as an orphan, at Gateway startup
   and from `GET /api/trash/documents`. ([#7732])
+
+- **chat:** Cancelling a queued input after dispatch starts no longer
+  prevents subsequent queued inputs from executing. ([#7746])
 
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
   as well as both Gateway logs; it printed only the Gateway logs, the same as
@@ -15994,7 +16006,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
