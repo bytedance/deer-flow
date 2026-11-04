@@ -33,6 +33,7 @@ from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -258,18 +259,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             deduped.append(name)
         return deduped
 
-    def _model_for(self, name: str | None) -> Any | None:
-        """The nostream summary model for ``name``, built lazily and guarded.
+    def _build_model(self, name: str | None) -> Any | None:
+        """Construct and tag the nostream summary model; ``None`` on failure.
 
-        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
-        constructs and caches. A construction failure is caught and cached as ``None``
-        so a broken candidate config never escapes the fail-open boundary, is never
-        retried this turn, and still lets the next candidate run.
+        A construction failure must not escape the fail-open boundary: the
+        caller caches the failure for this turn so the next candidate can run.
         """
-        if name == self._anchor_model_name:
-            return self._summary_model
-        if name in self._model_cache:
-            return self._model_cache[name]
         try:
             model = create_chat_model(
                 name=name,
@@ -277,10 +272,40 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 app_config=self._app_config,
                 attach_tracing=False,
             )
-            built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
+            return self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
         except Exception:
             logger.exception("Failed to build summary model %r; trying the next candidate", name)
-            built = None
+            return None
+
+    def _model_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name`` on the synchronous path.
+
+        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
+        constructs and caches. A construction failure is cached as ``None`` so a
+        broken candidate config never escapes the fail-open boundary, is never
+        retried this turn, and still lets the next candidate run.
+        """
+        if name == self._anchor_model_name:
+            return self._summary_model
+        if name in self._model_cache:
+            return self._model_cache[name]
+        built = self._build_model(name)
+        self._model_cache[name] = built
+        return built
+
+    async def _amodel_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name``, built off the event loop.
+
+        ``abefore_model``/``aafter_model`` run on the Gateway loop, and provider
+        construction can read local CLI credentials (Codex auth.json, Claude Code
+        credential files), so the build runs on the assembly pool. Anchor and
+        cache semantics stay identical to :meth:`_model_for`.
+        """
+        if name == self._anchor_model_name:
+            return self._summary_model
+        if name in self._model_cache:
+            return self._model_cache[name]
+        built = await run_assembly(self._build_model, name)
         self._model_cache[name] = built
         return built
 
@@ -392,7 +417,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return reused
         for index, name in enumerate(names):
             text = await self._ainvoke_summary(
-                self._model_for(name),
+                await self._amodel_for(name),
                 prompt,
                 last=index == len(names) - 1,
                 model_name=name,
