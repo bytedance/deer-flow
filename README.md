@@ -337,6 +337,12 @@ fences, including unclosed fences, in complete and streamed replies.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
 
+   Use **Fetch and add models** to reuse a saved connection or enter a new one,
+   search its catalog, and test selected models before adding them. Existing
+   entries are retained on retries; individual failures remain available to retry.
+   Chat pickers support name/ID search, provider filtering, favorites and the
+   eight most recently selected models, scoped to your account in this browser.
+
    The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
    `kimi-k3.1-pro-highspeed` with required thinking, image input and native
    `low` / `high` / `max` reasoning effort (default `max`). Thinking stays on
