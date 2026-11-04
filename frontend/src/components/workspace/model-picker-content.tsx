@@ -334,7 +334,7 @@ export function ModelPickerContent({
               }
             }}
           />
-          {providerNames.length > 1 && (
+          {(providerNames.length > 1 || provider !== "") && (
             <select
               aria-label={t.modelPicker.provider}
               className="bg-background w-full rounded border px-2 py-1 text-xs"

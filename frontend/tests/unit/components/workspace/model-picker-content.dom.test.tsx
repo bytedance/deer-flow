@@ -567,3 +567,33 @@ it("keeps a provider filter while that provider still has a model", async () => 
     "A",
   );
 });
+
+it("keeps an active provider filter clearable when YAML models remain", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "yaml-model", model: "yaml-model" },
+  ];
+  const view = render(<ControlledPicker open models={models} />);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  view.rerender(<ControlledPicker open models={[models[0]!, models[2]!]} />);
+  expect(modelButtons()).toHaveLength(1);
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+    "value",
+    "A",
+  );
+  fireEvent.change(screen.getByRole("textbox", { name: "Search models" }), {
+    target: { value: "yaml-model" },
+  });
+  expect(modelButtons()).toHaveLength(0);
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "" },
+  });
+  await waitFor(() => expect(modelButtons()).toHaveLength(1));
+  expect(modelButtons()[0]!.getAttribute("aria-label")).toBe(
+    "Gamma (yaml-model)",
+  );
+});
