@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -732,7 +733,13 @@ def test_default_confidence_policy_does_not_collect_hybrid_usage(deermem_data_di
     assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
 
 
-def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir):
+@pytest.fixture
+def recent_fact_timestamp():
+    """Keep recent facts fresh regardless of when the eviction tests run."""
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -752,7 +759,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
                         "content": f"high {index}",
                         "category": "preference",
                         "confidence": 0.99,
-                        "createdAt": "2026-08-12T00:00:00Z",
+                        "createdAt": recent_fact_timestamp,
                     }
                     for index in range(8)
                 ],
@@ -769,7 +776,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
                     "category": "preference",
                     "confidence": 0.7,
                     "createdAt": "2025-01-01T00:00:00Z",
-                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                    "lastConfirmedAt": recent_fact_timestamp,
                 },
             ],
         },
@@ -789,7 +796,7 @@ def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem
     assert "stale_high" not in kept_ids
 
 
-def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
+def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -809,7 +816,7 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
                         "content": f"high {index}",
                         "category": "preference",
                         "confidence": 0.99,
-                        "createdAt": "2026-08-12T00:00:00Z",
+                        "createdAt": recent_fact_timestamp,
                     }
                     for index in range(8)
                 ],
@@ -826,14 +833,14 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
                     "category": "preference",
                     "confidence": 0.7,
                     "createdAt": "2025-01-01T00:00:00Z",
-                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                    "lastConfirmedAt": recent_fact_timestamp,
                 },
                 {
                     "id": "new_context",
                     "content": "new useful context",
                     "category": "context",
                     "confidence": 0.8,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent_fact_timestamp,
                 },
             ],
         },
@@ -841,11 +848,12 @@ def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
     )
 
     kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert len(kept_ids) == 10
     assert "confirmed_recently" in kept_ids
     assert "stale_high" not in kept_ids
 
 
-def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
+def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -864,7 +872,7 @@ def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
                     "content": f"preference {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent_fact_timestamp,
                 }
                 for index in range(10)
             ],
@@ -887,7 +895,7 @@ def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
     assert "Never repeat this corrected behavior" not in audit_path.read_text()
 
 
-def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir):
+def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir, recent_fact_timestamp):
     dm = DeerMem(
         backend_config={
             "storage_path": str(deermem_data_dir),
@@ -903,7 +911,7 @@ def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_
                 "content": f"high {index}",
                 "category": "preference",
                 "confidence": 0.99,
-                "createdAt": "2026-08-12T00:00:00Z",
+                "createdAt": recent_fact_timestamp,
             }
             for index in range(8)
         ],
@@ -920,7 +928,7 @@ def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_
             "category": "preference",
             "confidence": 0.7,
             "createdAt": "2025-01-01T00:00:00Z",
-            "lastConfirmedAt": "2026-08-12T00:00:00Z",
+            "lastConfirmedAt": recent_fact_timestamp,
         },
     ]
     dm.import_memory({"user": {}, "history": {}, "facts": facts}, user_id="u1")
