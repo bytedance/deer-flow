@@ -233,7 +233,11 @@ fallback routing. Astra and 6.1 Sol require thinking; Terra, Sol and Luna can
 disable it with `none`. For optional presets, the enable template defaults to
 `medium` and the disabled template's `none` takes precedence over request effort.
 Explicit reasoning overrides discard incompatible preset effort values while
-preserving non-effort templates and provider-owned Responses routing.
+preserving non-effort templates and provider-owned Responses routing. Translate
+saved effort paths to ChatOpenAI's `reasoning_effort` on a runtime copy, leaving
+encrypted records unchanged. After resolving effort and caller overrides, omit
+temperature, top_p and top_logprobs for these official presets unless effort is
+`none`; preserve sampling for that disabled mode and other providers.
 Keep custom endpoints and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
 `tests/test_managed_openai_gpt6.py`.
 

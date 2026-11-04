@@ -153,10 +153,60 @@ async def test_explicit_contract_can_be_probed_saved_and_reloaded(wire, model_id
     saved = ManagedModelStore().save(profile, expected_revision=None)
     loaded = merge_managed_models(AppConfig.model_validate({"sandbox": {"use": "test"}}))
     runtime = next(model for model in loaded.models if model.name == saved.name)
-    assert runtime.reasoning == profile.reasoning
+    expected = profile.reasoning.model_copy(deep=True)
+    if expected.effort is not None:
+        expected.effort.path = "reasoning_effort"
+    assert runtime.reasoning == expected
     assert runtime.use_responses_api is True
     assert runtime.output_version == "responses/v1"
     if reasoning.get("effort", {}).get("default") == "high":
         assert wire[0][1]["reasoning"]["effort"] == "high"
     else:
         assert "reasoning" not in wire[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", MODELS)
+@pytest.mark.parametrize("effort", ["none", "high"])
+@pytest.mark.parametrize("path", ["extra_body.reasoning_effort", "output_config.effort", "effort"])
+async def test_saved_legacy_effort_path_uses_responses_wire_format(wire, model_id, effort, path):
+    profile = ManagedModel(
+        provider="openai",
+        model=model_id,
+        api_key="test-key",
+        reasoning={"thinking": "optional", "dialect": "none", "effort": {"values": ["none", "high"], "default": effort, "path": path}},
+    )
+    assert await router.test_model(ADMIN, router.SaveModelRequest(config=profile)) == {"ok": True, "message": "success"}
+    saved = ManagedModelStore().save(profile, expected_revision=None)
+    config = merge_managed_models(AppConfig.model_validate({"sandbox": {"use": "test"}}))
+    model = create_chat_model(saved.name, app_config=config, attach_tracing=False)
+    await collect(model.bind_tools([TOOL]), [HumanMessage(content="Call connection_check.")])
+    for request, body in wire:
+        assert request.url.path == "/v1/responses"
+        assert body["reasoning"]["effort"] == effort
+        assert "reasoning_effort" not in body
+    # Runtime translation must not migrate the encrypted record or input object.
+    assert ManagedModelStore().list()[0].reasoning == profile.reasoning
+    assert profile.reasoning.effort.path == path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_id", MODELS)
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("source", ["agent", "kwargs"])
+async def test_sampling_follows_effective_reasoning_effort(wire, model_id, enabled, source):
+    profile = ManagedModel(provider="openai", model=model_id, api_key="test-key")
+    config = AppConfig.model_validate({"models": [profile.runtime_config()], "sandbox": {"use": "test"}})
+    sampling = {"temperature": 0.4, "top_p": 0.8, "top_logprobs": 2}
+    options = {"model_overrides": sampling} if source == "agent" else sampling
+    model = create_chat_model("connection-check", app_config=config, thinking_enabled=enabled, reasoning_effort="high", attach_tracing=False, **options)
+    await collect(model.bind_tools([TOOL]), [HumanMessage(content="Call connection_check.")])
+    body = wire[0][1]
+    expected_effort = "high" if enabled or model_id in REQUIRED else "none"
+    assert body["reasoning"]["effort"] == expected_effort
+    for key, value in sampling.items():
+        if expected_effort == "none":
+            assert body[key] == value
+        else:
+            assert key not in body
+    assert sampling == {"temperature": 0.4, "top_p": 0.8, "top_logprobs": 2}

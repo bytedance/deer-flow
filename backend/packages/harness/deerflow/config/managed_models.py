@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, fi
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.file_signature import get_config_signature
-from deerflow.config.managed_model_providers import get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
+from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
 from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.secret_file import read_or_create_secret_file
@@ -131,7 +131,12 @@ class ManagedModel(BaseModel):
                         template.pop("reasoning_effort")
                         if not template:
                             settings.pop(field)
-            settings["reasoning"] = self.reasoning
+            reasoning = self.reasoning
+            if self.provider == "openai" and self.model in OPENAI_GPT6_MODELS and effort is not None:
+                # The preset owns Responses routing. Translate stored wire paths
+                # on a runtime copy; ChatOpenAI serializes this as reasoning.effort.
+                reasoning = reasoning.model_copy(update={"effort": effort.model_copy(update={"path": "reasoning_effort"})})
+            settings["reasoning"] = reasoning
         if self.supports_vision is not None:
             settings["supports_vision"] = self.supports_vision
         if self.max_tokens is not None:
