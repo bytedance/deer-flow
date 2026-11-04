@@ -1683,6 +1683,107 @@ def test_poll_loop_updates_server_timeout(monkeypatch):
     _run(go())
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        10**400,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        "1e400",
+        "Infinity",
+        "-Infinity",
+        "NaN",
+        -1.0,
+        0.0,
+    ],
+)
+def test_update_longpoll_timeout_ignores_invalid_server_value(value):
+    """Server-provided timeouts follow the same positive-finite contract as
+    configured ones: an overflow, infinity, NaN, zero or negative value must
+    not replace the previous valid timeout."""
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "bot-token"})
+    channel._server_longpoll_timeout_seconds = 42.0
+
+    channel._update_longpoll_timeout({"longpolling_timeout_ms": value})
+
+    assert channel._server_longpoll_timeout_seconds == 42.0
+
+
+def test_poll_loop_survives_overflowing_server_timeout(monkeypatch):
+    """An overflowing server timeout must not abort the batch loop.
+
+    A huge integer in ``longpolling_timeout_ms`` used to raise OverflowError
+    before the per-message loop and the cursor write, so every re-poll dropped
+    the same batch and never advanced ``get_updates_buf``.
+    """
+    from app.channels.wechat import WechatChannel
+
+    async def go():
+        post_calls: list[dict[str, Any]] = []
+        handled: list[dict[str, Any]] = []
+
+        def _client_factory(*args, **kwargs):
+            return _MockAsyncClient(
+                post_calls=post_calls,
+                post_responses=[
+                    {
+                        "ret": 0,
+                        "msgs": [],
+                        "get_updates_buf": "cursor-1",
+                        "longpolling_timeout_ms": 42000,
+                    },
+                    {
+                        "ret": 0,
+                        "msgs": [
+                            {
+                                "message_type": 1,
+                                "message_id": "msg-1",
+                                "from_user_id": "wx-user-1",
+                                "context_token": "ctx-1",
+                                "item_list": [{"type": 1, "text_item": {"text": "hello"}}],
+                            }
+                        ],
+                        "get_updates_buf": "cursor-2",
+                        "longpolling_timeout_ms": 10**400,
+                    },
+                ],
+                **kwargs,
+            )
+
+        monkeypatch.setattr("app.channels.wechat.httpx.AsyncClient", _client_factory)
+
+        channel = WechatChannel(bus=MessageBus(), config={"bot_token": "bot-token"})
+        channel._running = True
+
+        async def _fake_handle_update(raw):
+            handled.append(raw)
+            channel._running = False
+
+        channel._handle_update = _fake_handle_update  # type: ignore[method-assign]
+
+        async def _stop_watchdog():
+            await asyncio.sleep(0.5)
+            channel._running = False
+
+        watchdog = asyncio.create_task(_stop_watchdog())
+        try:
+            await asyncio.wait_for(channel._poll_loop(), 3.0)
+        finally:
+            watchdog.cancel()
+            await asyncio.gather(watchdog, return_exceptions=True)
+
+        assert [message["message_id"] for message in handled] == ["msg-1"]
+        assert channel._get_updates_buf == "cursor-2"
+        assert channel._server_longpoll_timeout_seconds == 42.0
+        assert len(post_calls) == 2
+        assert post_calls[1]["timeout"] == 47.0
+
+    _run(go())
+
+
 def test_poll_loop_one_bad_message_does_not_permanently_lose_its_siblings(monkeypatch, tmp_path: Path, caplog):
     """A single message that fails to process must not sink the rest of its batch.
 

@@ -1089,9 +1089,9 @@ class WechatChannel(Channel):
             return
         try:
             timeout_ms = float(raw_timeout)
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             return
-        if timeout_ms <= 0:
+        if not math.isfinite(timeout_ms) or timeout_ms <= 0:
             return
         self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
 
