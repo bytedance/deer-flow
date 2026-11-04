@@ -144,6 +144,69 @@ Run outcome or prevent stream completion. Recovery with built-in SQL Run and Eve
 sharing an engine uses one pooled connection for each guarded event write, so it
 can publish with only one pool slot available. See [Run Event Stream](backend/docs/RUN_EVENT_STREAM.md#authoritative-run-outcome).
 
+PostgreSQL async ORM connections and the offline command accept `postgres://`
+and `postgresql://` URLs, including `?sslmode=disable` or `?sslmode=verify-full`.
+SSL modes are preserved; conflicting `ssl`/`sslmode` settings are rejected.
+Explicit `channel_binding` options are rejected because asyncpg cannot enforce
+them. Synchronous psycopg and LangGraph DSNs retain their libpq options.
+
+With a fencing-capable SQL RunStore and `DbRunEventStore`, host-authorized
+producer writes validate the persisted Run incarnation, producer epoch and state
+even with `run_events.producer_fencing: "off"`. Stale Journal flushes after
+takeover or deletion may therefore be rejected in the default configuration.
+On PostgreSQL, these writes hold the Thread Fence and RunRow lock through commit.
+Checkpoint and branch history imports use a separate host grant bound to a
+durable thread-operation reservation and the captured thread identity. Strict
+mode permits these imports without treating synthetic turn IDs as admitted Runs;
+deletion, reservation revocation or lease expiry invalidates their grant.
+Messages preceding the first human input retain their existing synthetic turn 0.
+
+On PostgreSQL, `run_events.producer_fencing: "strict"` additionally enables
+database-level authorization checks against raw SQL and unaware legacy writers
+after an offline cutover. The `"off"` setting keeps application-level producer
+validation active. Before activation, the database INSERT trigger skips its
+Thread/RunRow locks and retains a shared cutover lock until each INSERT
+transaction ends. This does not remove the application locks above. Off-mode
+event INSERTs require `READ COMMITTED` (also accepting PostgreSQL's `READ UNCOMMITTED`);
+`REPEATABLE READ` and `SERIALIZABLE` are rejected to prevent stale policy snapshots
+from bypassing activation. A write that loses a race with activation rolls back
+with SQLSTATE `40001`; retry the entire transaction with strict producer authority.
+Activation requires stopping every Gateway and using the offline cutover command;
+all restarted Gateways must use the same cutover ID. This does not recover missing
+terminal events. To activate:
+
+1. Deploy this version everywhere with `run_events.producer_fencing: "off"`.
+   Complete migrations 0049 and 0050 and recover previously active Runs, then
+   drain admissions and completion hooks. A terminal Run status alone does not
+   prove its producer has drained.
+2. Stop every Gateway, Worker and other database client, including checkpointer
+   pools and monitoring clients, and keep them stopped during activation.
+3. From the repository root, using the installed backend environment, run:
+
+   ```bash
+   uv run --no-sync --project backend python backend/scripts/run_producer_fencing.py \
+     --config config.yaml --cutover-id deployment-2026-10-27 --all-gateways-stopped
+   ```
+
+   The command refuses activation if other database sessions or pending/running
+   Runs remain. Use a deployment ID that every Gateway will share.
+4. Set `database.backend: postgres`, `run_events.backend: db`,
+   `run_events.producer_fencing: strict` and
+   `run_events.producer_cutover_id: deployment-2026-10-27` everywhere, then restart.
+   Verify a new Run persists its initial event, Journal/Hook, delivery and terminal
+   events and closes normally; unaware old writers must receive a database rejection.
+
+Activation is durable: missing or mismatched cutover IDs and downgrades to `"off"`
+or unsupported stores fail startup. This release requires controlled downtime;
+it does not support a mixed-version rolling cutover. A crashed producer may stay
+open until explicitly closed or revoked by authorized takeover/deletion; no
+producer-expiry or terminal-reconciliation job is introduced.
+
+Scheduled-task orphan recovery carries the captured Run incarnation and retention
+revision when publishing delivery and terminal evidence, including in strict mode.
+Unconfirmed publication is logged separately from the committed takeover; it does
+not undo the recovered Run or queue a new publication attempt.
+
 Operators can extend lead-agent, subagent, and DeerMem extraction prompts with
 literal prepend/append configuration without editing source templates. See
 [prompt overlays](backend/docs/CONFIGURATION.md#prompt-overlays).
@@ -1115,6 +1178,9 @@ keeps the Goal, while explicitly replacing the work can clear it. Unapplied
 messages survive database-backed Gateway restarts and require **Send again**;
 interrupted child side effects are not replayed automatically. Existing execution
 limits still apply. Busy input currently accepts text only.
+If a run rejects an update because it has finished, retrying the retained draft
+during the next run targets that run. Uncertain network failures retain the
+original submission identity so retries can reconcile the same accepted input.
 
 Markdown and JSON conversation exports from the chat header or sidebar read all
 persisted history pages, including earlier turns outside the loaded view or
@@ -1633,6 +1699,26 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+### Token usage dashboard
+
+Open **Token usage** in the workspace sidebar (`/workspace/usage`) to review
+your recorded tokens over the last 7 or 30 days, daily input/output totals,
+cache-hit input tokens by model, and paginated run history with failure filters.
+Run history covers all dates independently of the selected chart period.
+Conversation links use each run's recorded assistant to open the default or
+matching custom-agent chat.
+Periods with no recorded runs show an empty message without a date axis or
+zero-filled daily details; runs with zero reported tokens still show details.
+
+Reporting requires `runs:read` permission and a SQLite or PostgreSQL database;
+it is unavailable in the static demo. Counts reflect persisted provider usage,
+may be incomplete during active runs or when providers omit usage, and are not
+a provider bill. Cache hits are included in input tokens. Daily buckets use the
+browser's current UTC offset and attribute a run to its creation date.
+The page reuses the existing `/api/console` APIs; their optional cost and currency
+fields and server-side pricing configuration remain supported.
+See [dashboard behavior and design](frontend/docs/token-usage-dashboard.md).
+
 ### Workspace
 
 The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
@@ -1827,6 +1913,7 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+They indicate when GitHub or the local output limit truncates the listing.
 The `issues` command excludes pull requests and follows additional pages to fill
 its requested issue limit; the `prs` command remains available for pull requests.
 The summary reports `100+` contributors when its first page is full, rather than
@@ -2489,9 +2576,9 @@ Backend response cleanup preserves unrelated tag names such as `<think-tank>` an
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
 Input polishing, follow-up suggestions, background project-file summaries, the
-LLM skill scanner, and the `/goal` evaluator construct their model providers off
-the Gateway event loop, so local credential reads do not stall unrelated
-requests.
+LLM skill scanner, thread title generation, and the `/goal` evaluator construct
+their model providers off the Gateway event loop, so local credential reads do
+not stall unrelated requests.
 
 When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input. Accompanying answer text stays outside the execution steps panel, and answering the request keeps previously completed text in the conversation while the agent continues.
 
