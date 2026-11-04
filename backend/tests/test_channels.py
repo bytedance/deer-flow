@@ -14425,3 +14425,69 @@ class TestHumanInputResponseTranslation:
         message = _human_input_message_with_channel_response("hello", metadata={})
         assert message["content"] == "hello"
         assert "additional_kwargs" not in message
+
+
+@pytest.mark.parametrize(
+    ("gateway_url", "expected_trust_env"),
+    [
+        ("http://localhost:8001", False),
+        ("http://127.0.0.1:8001", False),
+        ("http://gateway.example.com", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_gateway_clients_do_not_proxy_local_gateway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gateway_url: str,
+    expected_trust_env: bool,
+) -> None:
+    """Gateway calls are control-plane traffic and must bypass ``HTTP_PROXY``.
+
+    The Gateway runs next to the channel manager (``http://localhost:8001`` by
+    default). Inheriting the environment proxy for that hop produces a
+    proxy-generated error even though the Gateway is healthy -- the same
+    failure ``sandbox_http_trust_env`` already guards against for sandbox
+    control-plane calls.
+    """
+    from app.channels import manager as manager_module
+    from app.channels.manager import ChannelManager
+
+    seen_kwargs: list[dict[str, object]] = []
+
+    class _JsonResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"ok": True}
+
+    class RecordingClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            seen_kwargs.append(kwargs)
+
+        async def __aenter__(self) -> RecordingClient:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def get(self, url: str, **kwargs: object) -> _JsonResponse:
+            return _JsonResponse()
+
+        async def put(self, url: str, **kwargs: object) -> _JsonResponse:
+            return _JsonResponse()
+
+    monkeypatch.setattr(manager_module.httpx, "AsyncClient", RecordingClient)
+
+    manager = ChannelManager(
+        bus=MessageBus(),
+        store=JsonChannelStore(path=tmp_path / "store.json"),
+        gateway_url=gateway_url,
+    )
+
+    await manager._fetch_gateway_json("/api/models")
+    await manager._goal_request("put", "thread-1", headers={}, json={"objective": "x"})
+
+    assert len(seen_kwargs) == 2, "both Gateway call sites should build a client"
+    assert all(kwargs.get("trust_env") is expected_trust_env for kwargs in seen_kwargs)

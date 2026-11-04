@@ -56,6 +56,7 @@ from app.gateway.github import run_policy as _github_run_policy  # noqa: F401
 from app.gateway.internal_auth import create_internal_auth_headers
 from app.gateway.path_utils import resolve_outputs_confined_path
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.community.aio_sandbox.backend import sandbox_http_trust_env
 from deerflow.config.agents_config import list_custom_agents, load_agent_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
@@ -4056,7 +4057,7 @@ class ChannelManager:
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
+        async with httpx.AsyncClient(trust_env=sandbox_http_trust_env(self._gateway_url)) as http:
             request = getattr(http, method.lower())
             kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
@@ -4152,7 +4153,7 @@ class ChannelManager:
         replies should catch and degrade (see ``_fetch_gateway``).
         """
         headers = _owner_headers(msg) if msg is not None else None
-        async with httpx.AsyncClient() as http:
+        async with httpx.AsyncClient(trust_env=sandbox_http_trust_env(self._gateway_url)) as http:
             resp = await http.get(
                 f"{self._gateway_url}{path}",
                 timeout=10,
