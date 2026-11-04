@@ -10,16 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-
-try:
-    from mcp.shared.exceptions import McpError
-except ImportError:
-    from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
 from deerflow.config.paths import Paths
-from deerflow.mcp.session_pool import MCPSessionPool
+from deerflow.mcp.session_pool import McpError, MCPSessionPool
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot
