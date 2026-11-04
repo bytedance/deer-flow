@@ -1913,6 +1913,7 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+They indicate when GitHub or the local output limit truncates the listing.
 The `issues` command excludes pull requests and follows additional pages to fill
 its requested issue limit; the `prs` command remains available for pull requests.
 
