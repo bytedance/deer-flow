@@ -88,3 +88,31 @@ def test_tui_resume_literal_ref_validated() -> None:
     assert session.resolve_ref("valid-id_1") == "valid-id_1"
     with pytest.raises(ValueError, match="not a valid thread id"):
         session.resolve_ref("bad.thread.id")
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    [
+        "NUL",
+        "nul",
+        "Nul",
+        "CON",
+        "PRN",
+        "AUX",
+        "COM1",
+        "LPT9",
+    ],
+)
+def test_validate_thread_id_rejects_windows_device_names(thread_id: str) -> None:
+    """The pattern alone accepts these, but Windows cannot create their directory."""
+    from deerflow.utils.thread_id import validate_thread_id
+
+    with pytest.raises(ValueError, match="Invalid thread_id: reserved Windows device name"):
+        validate_thread_id(thread_id)
+
+
+@pytest.mark.parametrize("thread_id", ["null", "com0", "console", "auxiliary"])
+def test_validate_thread_id_accepts_names_that_merely_resemble_devices(thread_id: str) -> None:
+    from deerflow.utils.thread_id import validate_thread_id
+
+    assert validate_thread_id(thread_id) == thread_id
