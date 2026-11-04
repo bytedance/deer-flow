@@ -103,25 +103,28 @@ class TestGetApiKey:
             patcher.stop()
 
 
-class TestCoerceMaxResults:
+class TestCountForRequest:
     def test_returns_value_when_valid(self):
-        from deerflow.community.serply.tools import _coerce_max_results
+        from deerflow.community.serply.tools import _count_for_request
 
-        assert _coerce_max_results(3) == 3
-        assert _coerce_max_results("7") == 7
+        assert _count_for_request(3) == 3
+        assert _count_for_request("7") == 7
 
     def test_caps_at_serply_maximum(self):
-        from deerflow.community.serply.tools import _coerce_max_results
+        from deerflow.community.serply.tools import _count_for_request
 
-        assert _coerce_max_results(999) == 100
+        assert _count_for_request(999) == 100
 
     def test_invalid_values_fall_back_to_default(self):
-        from deerflow.community.serply.tools import _coerce_max_results
+        from deerflow.community.serply.tools import _count_for_request
 
-        assert _coerce_max_results("oops") == 5
-        assert _coerce_max_results(None) == 5
-        assert _coerce_max_results(0) == 5
-        assert _coerce_max_results(-3) == 5
+        assert _count_for_request("oops") == 5
+        assert _count_for_request(None) == 5
+        assert _count_for_request(0) == 5
+        assert _count_for_request(-3) == 5
+        assert _count_for_request(True) == 5
+        assert _count_for_request(False) == 5
+        assert _count_for_request(3.5) == 5
 
 
 class TestCoerceVertical:
@@ -378,8 +381,13 @@ class TestWebSearchTool:
         assert mock_get.call_args.kwargs["headers"]["X-Api-Key"] == "env-key"
 
 
-def test_coerce_max_results_inf_falls_back_to_default():
-    """A YAML `.inf` max_results must fall back to the default, not crash."""
+@pytest.mark.parametrize(
+    "raw",
+    [float("inf"), True, 3.5],
+    ids=["yaml-inf", "bool", "non-integral-float"],
+)
+def test_invalid_max_results_shapes_fall_back_to_default(raw):
+    """A YAML `.inf`, bool, or fractional max_results must fall back to default."""
     import deerflow.community.serply.tools as serply_mod
 
-    assert serply_mod._coerce_max_results(float("inf")) == serply_mod._DEFAULT_MAX_RESULTS
+    assert serply_mod._count_for_request(raw) == serply_mod._DEFAULT_MAX_RESULTS
