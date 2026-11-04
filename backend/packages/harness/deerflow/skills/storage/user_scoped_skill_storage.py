@@ -217,7 +217,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # extensions_config (handled by ``super().load_skills`` above). Re-read
         # from disk here too so another worker's update cannot be masked by
         # this process's singleton cache while rebuilding a user projection.
-        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
         try:
             extensions_config = ExtensionsConfig.from_file()
@@ -233,8 +233,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
             # so the per-user AND cannot be evaluated. Raising here would take
             # the whole user-scoped listing down over an unrelated defect in the
             # file, so fail closed instead — every skill is listed, none is
-            # enabled.
-            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled: %s", e)
+            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
+            # validation, so only the failure shape is safe to log (see
+            # ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
             skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:

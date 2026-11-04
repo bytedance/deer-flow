@@ -372,7 +372,7 @@ class SkillStorage(ABC):
         # to enabled when no explicit config entry exists (so newly
         # installed skills appear active without requiring a manual toggle).
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
             extensions_config = ExtensionsConfig.from_file()
             skills = [dataclasses.replace(s, enabled=extensions_config.is_skill_enabled(s.name, s.category)) for s in skills]
@@ -386,7 +386,9 @@ class SkillStorage(ABC):
             # config is readable again. The sandbox projection already fails
             # closed on the same error (``projection._rebuild_public_locked``);
             # this keeps the runtime half of the gate consistent with it.
-            logger.warning("Failed to load extensions config; treating every skill as disabled: %s", e)
+            # ``from_file`` resolves ``$VAR`` placeholders before validation, so
+            # only the failure shape is safe to log (see ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every skill as disabled (%s)", _describe_load_failure(e))
             skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
