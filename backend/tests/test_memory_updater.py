@@ -3,7 +3,7 @@ import copy
 import json
 import logging
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -271,6 +271,9 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
             fact_confidence_threshold=0.7,
         )
     )
+    now = datetime.now(UTC)
+    recent_timestamp = now.isoformat().replace("+00:00", "Z")
+    stale_timestamp = (now - timedelta(days=365)).isoformat().replace("+00:00", "Z")
     current_memory = _make_memory(
         facts=[
             *[
@@ -279,7 +282,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                     "content": f"high {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent_timestamp,
                 }
                 for index in range(8)
             ],
@@ -288,43 +291,33 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                 "content": "stale high confidence",
                 "category": "preference",
                 "confidence": 0.9,
-                "createdAt": "2025-01-01T00:00:00Z",
+                "createdAt": stale_timestamp,
             },
             {
                 "id": "confirmed_recently",
                 "content": "recently confirmed preference",
                 "category": "preference",
                 "confidence": 0.7,
-                "createdAt": "2025-01-01T00:00:00Z",
-                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                "createdAt": stale_timestamp,
+                "lastConfirmedAt": recent_timestamp,
             },
         ]
     )
 
-    # Keep fixture freshness and new fact timestamps on the same evaluation clock.
-    evaluated_at = datetime(2026, 8, 13, tzinfo=UTC)
-    with (
-        patch("deerflow.agents.memory.backends.deermem.deermem.core.eviction.datetime", wraps=datetime) as eviction_clock,
-        patch(
-            "deerflow.agents.memory.backends.deermem.deermem.core.updater.utc_now_iso_z",
-            return_value=evaluated_at.isoformat().replace("+00:00", "Z"),
-        ),
-    ):
-        eviction_clock.now.return_value = evaluated_at
-        result = updater._apply_updates(
-            current_memory,
-            {
-                "newFacts": [
-                    {
-                        "content": "new useful context",
-                        "category": "context",
-                        "confidence": 0.8,
-                        **_DURABLE_USER_FACT,
-                    }
-                ]
-            },
-            agent_name="default",
-        )
+    result = updater._apply_updates(
+        current_memory,
+        {
+            "newFacts": [
+                {
+                    "content": "new useful context",
+                    "category": "context",
+                    "confidence": 0.8,
+                    **_DURABLE_USER_FACT,
+                }
+            ]
+        },
+        agent_name="default",
+    )
 
     kept_ids = {fact["id"] for fact in result["facts"]}
     assert "confirmed_recently" in kept_ids
