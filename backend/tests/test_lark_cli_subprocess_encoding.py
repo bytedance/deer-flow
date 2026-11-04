@@ -201,7 +201,7 @@ def test_windows_sid_resolution_tolerates_non_utf8_account_name(
     subprocess's reader thread and ``stdout`` comes back as ``None``.
     ``ensure_lark_cli_credential_tree`` then fails with ``AttributeError`` before
     it can harden any credential directory. The SID itself is ASCII, so replacing
-    the undecodeable account name is enough to keep the CSV parse intact.
+    the undecodable account name is enough to keep the CSV parse intact.
     """
     raw = b'"DESKTOP-ABC\\\xb5\xca\xd7\xd3","S-1-5-21-1-2-3-1001"\r\n'
     expected_sid = "S-1-5-21-1-2-3-1001"
