@@ -994,6 +994,7 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         labels=self._sandbox_labels(sandbox_id),
+                        release_port_on_spawn_failure=True,
                     )
                 else:
                     relay_token = secrets.token_urlsafe(32)
@@ -1921,6 +1922,7 @@ class LocalContainerBackend(SandboxBackend):
         publish_port: bool = True,
         extra_environment: dict[str, str] | None = None,
         labels: dict[str, str] | None = None,
+        release_port_on_spawn_failure: bool = False,
     ) -> str:
         """Start a new container.
 
@@ -1930,6 +1932,9 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts: Additional volume mounts.
             config_mount_exclusion_root: Config-level mounts at or below this
                 container root are omitted for this container only.
+            release_port_on_spawn_failure: Return the reservation when the CLI
+                is missing or cannot execute. Only open-mode creation opts in;
+                a restricted sandbox's proxy may already own the port.
 
         Returns:
             The container ID.
@@ -2148,12 +2153,17 @@ class LocalContainerBackend(SandboxBackend):
                 errors="replace",
                 check=True,
             )
-            container_id = result.stdout.strip()
-            logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
-            return container_id
+        except (FileNotFoundError, PermissionError):
+            if release_port_on_spawn_failure:
+                release_port(port)
+            raise
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to start container using {self._runtime}: {e.stderr}")
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
+
+        container_id = result.stdout.strip()
+        logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
+        return container_id
 
     def _stop_container(self, container_id: str) -> None:
         """Stop a container (--rm ensures automatic removal).
