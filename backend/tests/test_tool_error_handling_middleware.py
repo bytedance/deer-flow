@@ -234,7 +234,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 23
+    assert len(middlewares) == 24
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], KnowledgeScopeMiddleware)
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
