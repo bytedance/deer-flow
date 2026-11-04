@@ -182,10 +182,6 @@ def test_upload_files_deduplicates_case_variants_across_requests(tmp_path):
     assert claims == [("Report.txt", set()), ("report.txt", {"Report.txt"})]
 
 
-@pytest.mark.skipif(
-    os.name == "nt",
-    reason="a 255-byte filename exceeds the Windows MAX_PATH budget once the OS temp prefix is included",
-)
 def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
     # A 255-byte filename is the longest normalize_filename accepts. Before
     # the byte-budget truncation in claim_unique_filename, deduplicating a
@@ -199,35 +195,77 @@ def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batc
     provider.uses_thread_data_mounts = True
 
     max_length_name = "a" * 251 + ".txt"
+    user = User(email="upload-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    full_path_length = upload_ingestion._windows_path_length(thread_uploads_dir / max_length_name)
+    rejects_overlong_windows_path = upload_ingestion._IS_WINDOWS and full_path_length >= upload_ingestion._WINDOWS_MAX_PATH
+    files = (
+        [("files", (max_length_name, b"first"))]
+        if rejects_overlong_windows_path
+        else [
+            ("files", ("innocent.txt", b"kept")),
+            ("files", (max_length_name, b"first")),
+            ("files", (max_length_name, b"second")),
+        ]
+    )
 
     with (
         patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
         patch.object(uploads, "get_sandbox_provider", return_value=provider),
+        TestClient(app) as client,
     ):
-        result = asyncio.run(
-            call_unwrapped(
-                uploads.upload_files,
-                "thread-local",
-                request=MagicMock(),
-                files=[
-                    UploadFile(filename="innocent.txt", file=BytesIO(b"kept")),
-                    UploadFile(filename=max_length_name, file=BytesIO(b"first")),
-                    UploadFile(filename=max_length_name, file=BytesIO(b"second")),
-                ],
-                config=SimpleNamespace(),
-            )
+        response = client.post(
+            "/api/threads/thread-local/uploads",
+            files=files,
         )
 
-    assert result.success is True
-    assert len(result.files) == 3
-    deduped_name = result.files[2].filename
+    if rejects_overlong_windows_path:
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Upload destination exceeds the Windows MAX_PATH limit"
+        assert list(thread_uploads_dir.iterdir()) == []
+        return
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["success"] is True
+    assert len(result["files"]) == 3
+    deduped_name = result["files"][2]["filename"]
     assert deduped_name != max_length_name
     assert deduped_name.endswith("_1.txt")
     assert len(deduped_name.encode("utf-8")) <= 255
     assert (thread_uploads_dir / "innocent.txt").read_bytes() == b"kept"
     assert (thread_uploads_dir / max_length_name).read_bytes() == b"first"
     assert (thread_uploads_dir / deduped_name).read_bytes() == b"second"
+
+
+def test_upload_files_returns_400_for_windows_destination_path_over_limit(tmp_path, monkeypatch):
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    filename = "a" * 251 + ".txt"
+    monkeypatch.setattr(upload_ingestion, "_IS_WINDOWS", True)
+    assert upload_ingestion._windows_path_length(thread_uploads_dir / filename) >= upload_ingestion._WINDOWS_MAX_PATH
+
+    user = User(email="upload-test@example.com")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.include_router(uploads.router)
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        TestClient(app) as client,
+    ):
+        response = client.post(
+            "/api/threads/thread-local/uploads",
+            files={"files": (filename, b"content")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Upload destination exceeds the Windows MAX_PATH limit"
+    assert list(thread_uploads_dir.iterdir()) == []
 
 
 def test_upload_files_skips_acquire_when_thread_data_is_mounted(tmp_path):

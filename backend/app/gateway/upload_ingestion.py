@@ -52,6 +52,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_WINDOWS_MAX_PATH = 260
+_IS_WINDOWS = os.name == "nt"
+
+
+def _windows_path_length(path: os.PathLike[str] | str) -> int:
+    """Return the number of UTF-16 code units in a Windows path."""
+    return len(os.fspath(path).encode("utf-16-le")) // 2
+
+
+def _validate_windows_upload_path(uploads_dir: Path, filename: str) -> None:
+    """Reject upload destinations that exceed the legacy Windows path limit."""
+    if not _IS_WINDOWS:
+        return
+
+    destination = uploads_dir / filename
+    # MAX_PATH includes the terminating NUL, leaving at most 259 path units.
+    if _windows_path_length(destination) >= _WINDOWS_MAX_PATH:
+        raise HTTPException(status_code=400, detail="Upload destination exceeds the Windows MAX_PATH limit")
+
 
 def _close_fd(fd: int | None) -> None:
     """Close a conversion-source descriptor, tolerating an already-closed one."""
@@ -223,6 +242,11 @@ class ThreadUploadIngestionService:
         name = claimed_name
         while True:
             try:
+                _validate_windows_upload_path(self._uploads_dir, name)
+            except HTTPException:
+                await run_file_io(uploads._remove_staged_file, staged_path)
+                raise
+            try:
                 return name, await run_file_io(uploads._link_staged_no_overwrite, staged_path, self._uploads_dir, name)
             except FileExistsError:
                 name = uploads.claim_unique_filename(name, self._seen_filenames)
@@ -247,6 +271,7 @@ class ThreadUploadIngestionService:
         except ValueError as exc:
             raise UnsafeFilenameError(str(exc)) from exc
         safe_filename = uploads.claim_unique_filename(original_filename, self._seen_filenames)
+        _validate_windows_upload_path(self._uploads_dir, safe_filename)
 
         file_size = 0
         upload_temp = None
@@ -290,6 +315,7 @@ class ThreadUploadIngestionService:
                     break
                 except FileExistsError:
                     safe_filename = uploads.claim_unique_filename(safe_filename, self._seen_filenames)
+                    _validate_windows_upload_path(self._uploads_dir, safe_filename)
             if convert_source_fd is not None:
                 deferred_staged_path = upload_temp.temp_path
             upload_temp = None

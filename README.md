@@ -2268,6 +2268,8 @@ reserved for temporary staging files. Rename such a file before uploading it.
 The restriction includes Windows aliases with trailing dots or spaces and
 case variants, such as `.upload-notes.part.`, `.upload-notes.part `, and
 `.UPLOAD-NOTES.PART`, on every host.
+On Windows, an upload whose full destination path exceeds the legacy `MAX_PATH`
+limit returns HTTP 400 before writing the file.
 The HTTP check recognizes both `/` and `\` as path separators, including on
 Linux, when extracting the basename. The endpoint returns `400` with a rename
 hint before publishing any file in a batch containing a reserved name, so the
