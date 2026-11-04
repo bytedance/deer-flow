@@ -250,6 +250,8 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
+   You.com, GroundRoute and Webz initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
+
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
    DuckDuckGo web search distinguishes execution failures from empty results: rate limits, timeouts, blocked requests, client-setup failures, SDK errors, and a missing `ddgs` dependency return a structured `DuckDuckGo search failed: ...` error instead of "No results found", while a genuinely empty result set keeps the existing "No results found" response. The structured error text lets the harness classify an outage as transient or a configuration problem instead of a query that matched nothing.
