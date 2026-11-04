@@ -82,8 +82,12 @@ loopback-only; never use it as a deployed Gateway.
 
 Artifact declarations belong to the authenticated member's executing team job.
 Use host-stamped run identity and validate its execution key/status before new
-registrations; frozen queue input is not execution proof. Retried registrations
-remain readable after completion. Capture checks the previously inspected
+registrations; frozen queue input is not execution proof. Persist the active
+execution key with the Run, including after resume
+acknowledgement clears its pending response. Each bounded file transfer pauses
+the ordinary worker deadline; restore its remaining budget afterward and drain
+cancellation before releasing host reservations or sandbox leases.
+Retried registrations remain readable after completion. Capture checks the previously inspected
 checkpoint under the host reservation. Persist import receipts with frozen
 input and pass them to first admission; reconcile existing keys before validation.
 Stable request IDs deduplicate publication; append numeric versions without

@@ -211,6 +211,133 @@ async def ready_attachment(plugin):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("clarification", [False, True])
+@pytest.mark.parametrize("lost_ack", [False, True])
+async def test_resumed_task_registers_files_with_its_active_execution_key(plugin, monkeypatch, clarification, lost_ack):
+    from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+
+    loaded, actions, service, runs, team, author, _, job = await producing_task(plugin)
+    runs.finish(job["id"], interrupted=not clarification)
+    if clarification:
+        request = SimpleNamespace(tool_call={"name": "ask_clarification", "id": "question", "args": {"question": "Which environment?", "clarification_type": "missing_info"}}, runtime=None)
+        command = ClarificationMiddleware().wrap_tool_call(request, lambda _: pytest.fail("intercept clarification"))
+        runs.threads[author["thread_id"]]["values"]["messages"].extend(m.model_dump() for m in command.update["messages"])
+    await service.tick()
+    method = "start" if clarification else "resume"
+    admit = getattr(runs, method)
+
+    async def lose_ack(**kwargs):
+        result = await admit(**kwargs)
+        if lost_ack:
+            raise OSError("Admission acknowledgement lost")
+        return result
+
+    monkeypatch.setattr(runs, method, lose_ack)
+    await actions["resume"]({"team_id": team["id"], "job_id": job["id"], "response": "staging" if clarification else {"approved": True}, "request_id": "answer"}, context(runs))
+    await service.tick()
+    args = {"team_id": team["id"], "request_id": "resumed-file", "name": "Report", "path": "/mnt/user-data/outputs/resumed.txt"}
+    # Registration must work both before and after the acknowledgement is saved.
+    before = await artifact_tools(loaded)["register_team_artifact"](args, context(runs, thread=author["thread_id"]))
+    monkeypatch.setattr(runs, method, admit)
+    await service.tick()
+    after = await artifact_tools(loaded)["register_team_artifact"]({**args, "request_id": "after-ack"}, context(runs, thread=author["thread_id"]))
+    assert before["artifact"]["source"]["run_id"] == after["artifact"]["source"]["run_id"] != job["id"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["import", "capture"])
+async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatch, operation):
+    if operation == "import":
+        _, _, service, runs, team, _, target = await ready_attachment(plugin)
+        method = "import_artifact"
+    else:
+        loaded, _, service, runs, team, author, _, target = await producing_task(plugin)
+        path = "/mnt/user-data/outputs/slow.txt"
+        runs.files[author["thread_id"], path] = b"retained bytes"
+        await artifact_tools(loaded)["register_team_artifact"]({"team_id": team["id"], "request_id": "file", "name": "Report", "path": path}, context(runs, thread=author["thread_id"]))
+        runs.finish(target["id"])
+        method = "read_artifact"
+    transfer = getattr(runs, method)
+    calls = 0
+
+    async def slow_transfer(**kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(10.1)
+        return await transfer(**kwargs)
+
+    monkeypatch.setattr(runs, method, slow_transfer)
+    await service.tick()
+    saved = await service.db("get", "alice", team["id"])
+    job = next(j for j in saved["jobs"] if j["id"] == target["id"])
+    if operation == "import":
+        assert job["run_id"] == target["id"] and job["artifact_imports"] and job["input"]
+    else:
+        assert job["status"] == "completed" and saved["artifacts"][0]["status"] == "ready"
+    await service.tick()
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_worker", [False, True])
+async def test_artifact_deadline_and_shutdown_drain_the_transfer(plugin, monkeypatch, cancel_worker):
+    from deerflow_extension_agent_teams import artifacts
+
+    _, _, service, runs, team, _, target = await ready_attachment(plugin)
+    entered, draining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    if not cancel_worker:
+        monkeypatch.setattr(artifacts, "ARTIFACT_TRANSFER_SECONDS", 0.01)
+
+    async def stalled(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            draining.set()
+            await release.wait()
+            raise
+
+    monkeypatch.setattr(runs, "import_artifact", stalled)
+    tick = asyncio.create_task(service.tick())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if cancel_worker:
+            tick.cancel()
+        await asyncio.wait_for(draining.wait(), 5)
+        assert not tick.done() and service.in_flight
+    finally:
+        release.set()
+        if cancel_worker:
+            with pytest.raises(asyncio.CancelledError):
+                await tick
+        else:
+            await tick
+    assert not service.in_flight and not service.workers
+    saved = await service.db("get", "alice", team["id"])
+    job = next(j for j in saved["jobs"] if j["id"] == target["id"])
+    assert job["input"] is None and job["run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_completed_transfer_restores_the_ordinary_poll_budget(plugin, monkeypatch):
+    from deerflow_extension_agent_teams import artifacts
+
+    monkeypatch.setattr(artifacts, "ARTIFACT_TRANSFER_SECONDS", 2)
+    transferred = False
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.1) as deadline:
+            token = artifacts.worker_deadline.set(deadline)
+            try:
+                await artifacts.transfer(asyncio.sleep, delay=0.15)
+                transferred = True
+                # Ordinary work must again time out, even after a slow file.
+                await asyncio.sleep(0.15)
+            finally:
+                artifacts.worker_deadline.reset(token)
+    assert transferred
+
+
+@pytest.mark.asyncio
 async def test_frozen_input_still_requires_unchanged_imports_after_conflict(plugin, monkeypatch):
     loaded, actions, service, runs, team, recipient, target = await ready_attachment(plugin)
     original_start = runs.start

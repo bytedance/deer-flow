@@ -272,8 +272,10 @@ own teams. Sharing a host conversation does **not** share its team's private dat
 - Each team has its own execution/control lock and background worker. Slow host
   calls in one team do not hold another team's create, send, cancel, resume,
   delete or reconnect operations, nor stop its background polling. Operations
-  within the same team remain serialized, with a ten-second timeout per job
-  advancement. Shutdown cancels and drains all workers before releasing the
+  within the same team remain serialized, with a ten-second budget for ordinary
+  job advancement. Each artifact import or capture pauses that budget and has
+  its own 25-minute maximum for the bounded remote snapshot protocol (up to
+  43 chunks with 30-second command timeouts). Shutdown cancels and drains all workers before releasing the
   database service lock.
 - Each conversation is serialized, including result receipts targeting a source
   shared across teams. The first unfinished job retains the conversation until

@@ -536,8 +536,12 @@ class Teams(Artifacts):
                         if job["status"] in TERMINAL:
                             continue
                         try:
-                            async with asyncio.timeout(10):
-                                await self.advance(owner, team, job, runs)
+                            async with asyncio.timeout(10) as deadline:
+                                token = artifacts.worker_deadline.set(deadline)
+                                try:
+                                    await self.advance(owner, team, job, runs)
+                                finally:
+                                    artifacts.worker_deadline.reset(token)
                         except AgentRunError as exc:
                             if exc.status_code in (403, 503):
                                 self.handles.pop(key, None)
@@ -619,6 +623,7 @@ class Teams(Artifacts):
                 await self.finish(owner, team, job, "failed", "An attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request")
                 return
             job["run_id"] = run.run_id
+            job["execution_key"] = job["id"]
             job["initial_run_id"] = run.run_id
             if job["status"] != "cancelling":
                 job["status"] = "running"
@@ -642,7 +647,7 @@ class Teams(Artifacts):
                 job.update(result_message_id=message_id, result_run_id=run.run_id)
             else:
                 run = await runs.resume(thread_id=thread, resume=job["resume"]["response"], idempotency_key=job["resume"]["key"])
-            job.update(run_id=run.run_id, status="cancelling" if job["status"] == "cancelling" else "running", resume=None, clarification=None)
+            job.update(run_id=run.run_id, execution_key=job["resume"]["key"], status="cancelling" if job["status"] == "cancelling" else "running", resume=None, clarification=None)
             await self.save_job(owner, team["id"], job)
         run = await runs.get(thread_id=thread, run_id=job["run_id"])
         if job["status"] == "cancelling":
@@ -743,6 +748,7 @@ class Teams(Artifacts):
                     artifacts=artifact_refs,
                     input=None,
                     run_id=None,
+                    execution_key=None,
                     status="queued",
                     error=None,
                     resume=None,

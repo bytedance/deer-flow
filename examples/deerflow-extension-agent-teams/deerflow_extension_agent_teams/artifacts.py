@@ -1,8 +1,10 @@
 """Task-bound declarations, immutable snapshots and version-specific handoffs."""
 
+import asyncio
 import base64
 import hashlib
 import json
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
@@ -93,6 +95,28 @@ def register(team, payload, context, executing_run_id=None, executing_job_id=Non
     return {"artifact": public(entry)}
 
 
+# One bounded 2 MiB snapshot needs up to 43 chunks plus publication/cleanup,
+# with a 30-second timeout per host command. Each file gets its own budget.
+ARTIFACT_TRANSFER_SECONDS = 1500
+worker_deadline: ContextVar[asyncio.Timeout | None] = ContextVar("team_worker_deadline", default=None)
+
+
+async def transfer(call, **kwargs):
+    deadline = worker_deadline.get()
+    if deadline is None:
+        return await call(**kwargs)
+    loop = asyncio.get_running_loop()
+    remaining = deadline.when() - loop.time()
+    if remaining <= 0:
+        raise TimeoutError
+    deadline.reschedule(loop.time() + ARTIFACT_TRANSFER_SECONDS)
+    try:
+        return await call(**kwargs)
+    finally:
+        if not deadline.expired():
+            deadline.reschedule(loop.time() + remaining)
+
+
 class Artifacts:
     async def register_artifact(self, payload, context):
         team = await self.member_snapshot(payload, context)
@@ -103,7 +127,7 @@ class Artifacts:
         if not existing:
             if not run_id or context.agent_runs is None or job is None or job["input"] is None or job["status"] == "waiting_input":
                 raise ValueError("Register files during an executing team task")
-            key = job["resume"]["key"] if job.get("resume") and job["resume"].get("started", True) else job["id"]
+            key = job["resume"]["key"] if job.get("resume") and job["resume"].get("started", True) else job.get("execution_key") or job["id"]
             await context.agent_runs.validate_artifact_source(thread_id=context.thread_id, run_id=run_id, idempotency_key=key)
         return await self.db("change", context.principal.user_id, team["id"], lambda current: register(current, payload, context, run_id if not existing else None, job["id"] if job else None))
 
@@ -162,7 +186,7 @@ class Artifacts:
                     checkpoint_id = job.get("capture_checkpoint_id")
                     if not checkpoint_id:
                         raise ValueError("Producing checkpoint unavailable")
-                    content = await self.handles[owner, team_id].read_artifact(thread_id=job["thread_id"], path=entry["path"], expected_checkpoint_id=checkpoint_id)
+                    content = await transfer(self.handles[owner, team_id].read_artifact, thread_id=job["thread_id"], path=entry["path"], expected_checkpoint_id=checkpoint_id)
                     await self.db("capture_artifact", owner, team_id, entry["id"], content, job["run_id"])
                     continue
                 except AgentRunError as exc:
@@ -183,7 +207,7 @@ class Artifacts:
         imports = []
         for ref in job.get("artifacts", []):
             entry, content = await self.db("artifact", owner, team["id"], ref["artifact_id"], ref["version"])
-            result = await runs.import_artifact(thread_id=job["thread_id"], filename=job["id"][:12] + "-" + entry["filename"], content=content)
+            result = await transfer(runs.import_artifact, thread_id=job["thread_id"], filename=job["id"][:12] + "-" + entry["filename"], content=content)
             if result.get("sha256") != hashlib.sha256(content).hexdigest() or result.get("size") != len(content) or not result.get("path", "").startswith("/mnt/user-data/uploads/"):
                 raise ValueError("Host did not confirm the imported artifact")
             imports.append({**ref, **result, "name": entry["name"], "source": entry["source"]})
