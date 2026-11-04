@@ -182,20 +182,3 @@ def _auto_user_context(request):
         yield
     finally:
         reset_current_user(token)
-
-
-@pytest.fixture
-def fixed_capacity_clock(monkeypatch):
-    """Keep the dated capacity scenarios recent without replacing the policy."""
-    from datetime import UTC, datetime
-    from functools import partial
-
-    from deerflow.agents.memory.backends.deermem.deermem.core import updater as deermem_updater
-
-    now = datetime(2026, 8, 13, tzinfo=UTC)
-    monkeypatch.setattr(
-        deermem_updater,
-        "select_facts_for_capacity",
-        partial(deermem_updater.select_facts_for_capacity, now=now),
-    )
-    monkeypatch.setattr(deermem_updater, "utc_now_iso_z", lambda: "2026-08-13T00:00:00Z")
