@@ -1534,31 +1534,10 @@ function getMessagesAfterBaseline(
 }
 
 /**
- * Human-message baseline for a prepared replay (regenerate / edit).
- *
- * A replay masks the turn it supersedes, so those messages leave the live
- * message list the moment the mask is applied. Baselining on the pre-mask count
- * means the replacement only ever restores the count instead of exceeding it,
- * and the optimistic copy is never recognised as confirmed. That matters for
- * the first turn of a thread, where the runtime re-keys the replacement message
- * so identity comparison cannot stand in for the count either.
- */
-export function countHumanMessagesExcludingSuperseded(
-  messages: Message[],
-  supersededMessageIds: readonly string[],
-): number {
-  const superseded = new Set(supersededMessageIds);
-  return messages.filter(
-    (message) =>
-      message.type === "human" && (!message.id || !superseded.has(message.id)),
-  ).length;
-}
-
-/**
  * Render-path gate mirroring the optimistic-clear effect: the optimistic
  * bubble is withdrawn from the merged view exactly when the render snapshot
- * itself holds the positioned visible copy that confirms it, so confirmation
- * and replacement land in the same frame the user sees (#7332).
+ * itself holds the visible copy that confirms it (positioned while streaming),
+ * so confirmation and replacement land in the same frame the user sees (#7332).
  */
 export function getVisibleOptimisticMessages(
   optimisticMessages: Message[],
@@ -1578,8 +1557,9 @@ export function getVisibleOptimisticMessages(
 
 /**
  * A render-snapshot copy confirms an optimistic message only when it is both
- * visible and positioned. DynamicContextMiddleware re-keys the submitted human
- * into a hidden SystemMessage(id=X) plus the visible HumanMessage(id=X__user);
+ * visible and, while streaming, positioned. DynamicContextMiddleware re-keys
+ * the submitted human into a hidden SystemMessage(id=X) plus the visible
+ * HumanMessage(id=X__user);
  * both normalize onto the optimistic identity, but the hidden control copy is
  * never rendered, so it must never withdraw the input (#7332). And a visible
  * copy without a trusted `deerflow_seq` has no guaranteed turn position: a

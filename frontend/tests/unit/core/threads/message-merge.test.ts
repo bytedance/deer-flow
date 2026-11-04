@@ -8,7 +8,6 @@ import {
   buildVisibleHistoryMessages,
   areOptimisticMessagesConfirmed,
   computeSummarizationTransientMessages,
-  countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
   getCurrentTurnRunIds,
   getSummarizationMiddlewareMessages,
@@ -420,15 +419,8 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
 });
 
 test("edit replay of the only turn hides the optimistic copy once the server human arrives", () => {
-  // The runtime re-keys the first user message of a thread, so the persisted
-  // replacement never matches the optimistic id and only a positioned visible
-  // copy can confirm it. Masking the superseded turn drops the live count to
-  // zero first.
-  const supersededHuman = {
-    id: "human-1__user",
-    type: "human",
-    content: "introduce Li Bai",
-  } as Message;
+  // The runtime re-keys the first user message of a thread, so the visible
+  // replacement confirms the optimistic bubble by its normalized identity.
   const optimisticHuman = {
     id: "replacement-1",
     type: "human",
@@ -441,12 +433,6 @@ test("edit replay of the only turn hides the optimistic copy once the server hum
     additional_kwargs: { deerflow_seq: 1 },
   } as Message;
 
-  const baseline = countHumanMessagesExcludingSuperseded(
-    [supersededHuman],
-    ["human-1__user", "ai-1"],
-  );
-  expect(baseline).toBe(0);
-
   expect(getVisibleOptimisticMessages([optimisticHuman], [])).toEqual([
     optimisticHuman,
   ]);
@@ -456,24 +442,7 @@ test("edit replay of the only turn hides the optimistic copy once the server hum
   expect(mergeMessages([], [serverHuman], [])).toEqual([serverHuman]);
 });
 
-test("countHumanMessagesExcludingSuperseded keeps turns the replay does not supersede", () => {
-  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
-  const supersededHuman = {
-    id: "human-2",
-    type: "human",
-    content: "two",
-  } as Message;
-  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
-
-  expect(
-    countHumanMessagesExcludingSuperseded(
-      [keptHuman, ai, supersededHuman],
-      ["human-2", "ai-2"],
-    ),
-  ).toBe(1);
-});
-
-test("getVisibleOptimisticMessages keeps optimistic user input until a positioned visible copy arrives", () => {
+test("getVisibleOptimisticMessages requires positioning only while streaming", () => {
   const optimisticHuman = {
     id: "opt-human-1",
     type: "human",
@@ -502,6 +471,15 @@ test("getVisibleOptimisticMessages keeps optimistic user input until a positione
   ).toEqual([optimisticHuman]);
   expect(
     getVisibleOptimisticMessages([optimisticHuman], [hiddenControlCopy]),
+  ).toEqual([optimisticHuman]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [unpositionedCopy], true),
+  ).toEqual([]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], [], true)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [hiddenControlCopy], true),
   ).toEqual([optimisticHuman]);
 });
 
@@ -602,7 +580,7 @@ test("areOptimisticMessagesConfirmed returns true when a positioned visible copy
   ).toBe(true);
 });
 
-test("areOptimisticMessagesConfirmed rejects hidden control and unpositioned copies", () => {
+test("areOptimisticMessagesConfirmed requires a visible copy, positioned while streaming", () => {
   const optimisticHuman = {
     id: "local-human-1",
     type: "human",
@@ -632,6 +610,21 @@ test("areOptimisticMessagesConfirmed rejects hidden control and unpositioned cop
     areOptimisticMessagesConfirmed([optimisticHuman], [unpositioned]),
   ).toBe(false);
   expect(areOptimisticMessagesConfirmed([optimisticHuman], [])).toBe(false);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [unpositioned], {
+      streamSettled: true,
+    }),
+  ).toBe(true);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [], {
+      streamSettled: true,
+    }),
+  ).toBe(false);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [hiddenControl], {
+      streamSettled: true,
+    }),
+  ).toBe(false);
 });
 
 test("areOptimisticMessagesConfirmed ignores optimistic messages without stable ids", () => {
