@@ -10,6 +10,8 @@ from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.runtime.goal import goal_waits_for_external_result, read_thread_goal
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 
+_TRUSTED = object()
+
 
 class BatchContinuations:
     def __init__(self, app):
@@ -111,7 +113,14 @@ class BatchContinuations:
                 return {"status": "suppressed"}
             raise
 
-    async def cancel(self, batch_id, user_id):
+    async def cancel(self, batch_id, user_id, *, thread_id=None, authority=_TRUSTED, authorize_only=False):
+        if authority is not _TRUSTED:
+            self.app.state.agent_runs_host.capture_batch_authority(authority, user_id=user_id)
+            async with authority._request("runs:cancel", thread_id):
+                if authorize_only:
+                    return
+        elif authorize_only:
+            return
         run_id = await self.app.state.subagent_batch_repo.continuation_run_id(batch_id, user_id=user_id)
         if run_id is None:
             return

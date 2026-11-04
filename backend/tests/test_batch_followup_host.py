@@ -79,7 +79,15 @@ async def batch_host(runtime, repo, monkeypatch, request):
         continuation_authority=runs,
         continuation_context={"goal": None, "context": {"mode": "flash", "locale": "en-US", **settings}, "config": {"recursion_limit": 99}},
     )
-    service = SubagentBatchService(repository=repo, config=SubagentBatchesConfig(enabled=True, max_attempts=1), runtime_config=SubagentRuntimeConfig(), prepare_continuation=controller.prepare, dispatch_continuation=controller.dispatch)
+    service = SubagentBatchService(
+        repository=repo,
+        config=SubagentBatchesConfig(enabled=True, max_attempts=1),
+        runtime_config=SubagentRuntimeConfig(),
+        prepare_continuation=controller.prepare,
+        dispatch_continuation=controller.dispatch,
+        cancel_continuation=controller.cancel,
+    )
+    state.subagent_batch_service = service
     await service.submit(submission)
     release.set()
     assert (await runs.wait(thread_id=thread, run_id=source.run_id, timeout=5)).status == "success"
@@ -339,3 +347,80 @@ async def test_worker_wakes_the_same_waiting_goal_and_accounts_once(batch_host, 
     assert observed == [1]
     assert await controller.dispatch(batch) == launched
     assert observed == [1]
+
+
+@pytest.mark.asyncio
+async def test_cancel_batch_tool_requires_runs_cancel_for_followups(batch_host, monkeypatch):
+    from types import SimpleNamespace
+
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY, AgentRunError
+    from test_batch_task_tool import tool_module
+
+    from app.gateway import services
+    from deerflow.subagents.batch_runtime import BatchSubmitRequest
+
+    controller, batch, repo, runs, state, request = batch_host
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: state.subagent_batch_service)
+    request.state.auth.permissions = ["threads:write", "threads:read", "runs:create", "runs:read"]
+    no_cancel_runs = state.agent_runs_host.bind(request)
+    request.state.auth.permissions.append("runs:cancel")
+
+    def tool_runtime(authority):
+        context = {"user_id": batch["user_id"], "thread_id": batch["thread_id"]}
+        if authority is not None:
+            context[AGENT_RUNS_CONTEXT_KEY] = authority
+        return SimpleNamespace(context=context)
+
+    ordinary = await state.subagent_batch_service.submit(
+        BatchSubmitRequest(
+            batch["user_id"],
+            batch["thread_id"],
+            batch["run_id"],
+            "ordinary-call",
+            "ordinary-submission",
+            "Ordinary batch",
+            "general-purpose",
+            [{"key": "a", "prompt": "Read A"}],
+            1,
+            1,
+            {},
+        )
+    )
+    assert await tool_module.cancel_batch.coroutine(runtime=tool_runtime(no_cancel_runs), batch_id=ordinary["id"]) == (
+        f"Batch {ordinary['id']} cancellation requested."
+    )
+
+    for authority in (no_cancel_runs, None):
+        with pytest.raises(AgentRunError) as exc_info:
+            await tool_module.cancel_batch.coroutine(runtime=tool_runtime(authority), batch_id=batch["id"])
+        assert exc_info.value.status_code == 403
+    assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "dispatching"
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    factory = services.resolve_agent_factory("lead_agent")
+
+    async def hold(_values):
+        entered.set()
+        await release.wait()
+        return {"messages": [AIMessage(content="finished followup")]}
+
+    monkeypatch.setattr(services, "resolve_agent_factory", lambda _: graph_factory(factory, hold))
+    try:
+        launched = await controller.dispatch(batch)
+        assert launched["status"] == "dispatched"
+        assert await repo.finish_continuation(batch["id"], lease_owner="continuation-worker", status="dispatched", run_id=launched["run_id"])
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(AgentRunError) as exc_info:
+            await tool_module.cancel_batch.coroutine(runtime=tool_runtime(no_cancel_runs), batch_id=batch["id"])
+        assert exc_info.value.status_code == 403
+        record = await state.run_manager.get(launched["run_id"])
+        assert not record.abort_event.is_set()
+        assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "dispatched"
+
+        result = await tool_module.cancel_batch.coroutine(runtime=tool_runtime(runs), batch_id=batch["id"])
+        assert result == f"Batch {batch['id']} cancellation requested."
+        assert (await runs.wait(thread_id=batch["thread_id"], run_id=launched["run_id"], timeout=5)).status == "interrupted"
+        assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "cancelled"
+    finally:
+        release.set()
+

@@ -134,6 +134,9 @@ def _log_release_failure(pending: Future[None], *, execution_id: str) -> None:
         logger.error("Registry release failed for batch execution %s", execution_id, exc_info=exc)
 
 
+_TRUSTED = object()
+
+
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
@@ -417,7 +420,22 @@ class SubagentBatchService:
         *,
         batch_id: str,
         user_id: str,
+        continuation_authority: Any = _TRUSTED,
     ) -> dict[str, Any] | None:
+        if continuation_authority is not _TRUSTED:
+            current = await self._repository.get_batch(batch_id, user_id=user_id)
+            if current is None:
+                return None
+            if current.get("continuation_status") is not None:
+                if self._cancel_continuation is None:
+                    raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
+                await self._cancel_continuation(
+                    batch_id,
+                    user_id,
+                    thread_id=current["thread_id"],
+                    authority=continuation_authority,
+                    authorize_only=True,
+                )
         batch = await self._repository.cancel_batch(batch_id, user_id=user_id)
         if batch is None:
             return None

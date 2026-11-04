@@ -44,8 +44,8 @@ no cookie, API key or Python capability. Restore checks current account/permissi
 conversation ownership and incarnation. Private continuation data is not returned.
 
 Batch cancellation revokes the existing SQL execution fence and stops an admitted
-follow-up, including after a lost launch reply. HTTP cancellation of a batch with a
-follow-up also requires `runs:cancel`. Trusted internal cleanup retains its existing
+follow-up, including after a lost launch reply. HTTP and tool cancellation of a batch
+with a follow-up also require `runs:cancel`. Trusted internal cleanup retains its existing
 path. Claim ownership/expiry lives only in the existing execution-lease table.
 Completed item results remain available. The Web panel discovers follow-up Runs
 through existing observers; refresh never launches work. Chat Stop remains available.
