@@ -1,6 +1,9 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
 Drain cleanup; preserve terminal outcomes on cancel.
+Queued capacity abandonment drains waiter removal and transferred-slot release
+across repeated caller cancellation, just like an acquired slot's final release.
+Regression: `tests/test_subagent_capacity.py`.
 
 Accumulate validated ToolMessage knowledge across values frames in
 `SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.

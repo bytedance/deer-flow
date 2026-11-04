@@ -97,3 +97,52 @@ async def test_repeated_cancellation_cannot_leak_running_slot(monkeypatch):
     async with asyncio.timeout(0.5):
         async with capacity.slot():
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_released", [False, True])
+@pytest.mark.parametrize("abandonment", ["cancel", "timeout"])
+async def test_abandoned_waiter_drains_cleanup_after_repeated_cancellation(owner_released, abandonment):
+    """Once cleanup starts, more cancellations cannot orphan a transferred slot."""
+    cleanup_started = asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self):
+            if self.locked():
+                cleanup_started.set()
+            return await super().acquire()
+
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1, max_queued=1, queue_timeout_seconds=1 if abandonment == "timeout" else 30))
+    capacity._lock = ObservedLock()
+    await capacity._acquire()
+    queued = asyncio.create_task(capacity._acquire())
+    async with asyncio.timeout(1):
+        while capacity.snapshot().queued == 0:
+            await asyncio.sleep(0)
+
+    await capacity._lock.acquire()
+    try:
+        if owner_released and abandonment == "cancel":
+            capacity._release_locked()
+        if abandonment == "cancel":
+            queued.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), 3)
+        if owner_released and abandonment == "timeout":
+            # A timed-out waiter's future is cancelled, so release skips it.
+            capacity._release_locked()
+        queued.cancel()
+        await asyncio.sleep(0)
+        queued.cancel()
+    finally:
+        capacity._lock.release()
+
+    async with asyncio.timeout(3):
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+    if not owner_released:
+        await capacity._release()
+    snapshot = capacity.snapshot()
+    assert (snapshot.running, snapshot.queued) == (0, 0)
+    async with asyncio.timeout(0.5):
+        async with capacity.slot():
+            pass
