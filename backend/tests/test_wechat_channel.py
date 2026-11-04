@@ -1696,29 +1696,54 @@ def test_poll_loop_updates_server_timeout(monkeypatch):
         "NaN",
         -1.0,
         0.0,
+        1,
+        999.999,
+        300_000.001,
+        10**300,
+        1e308,
     ],
 )
-def test_update_longpoll_timeout_ignores_invalid_server_value(value):
-    """Server-provided timeouts follow the same positive-finite contract as
-    configured ones: an overflow, infinity, NaN, zero or negative value must
-    not replace the previous valid timeout."""
+@pytest.mark.parametrize("previous_timeout", [None, 42.0])
+def test_update_longpoll_timeout_ignores_invalid_server_value(value, previous_timeout):
     from app.channels.wechat import WechatChannel
 
-    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "bot-token"})
-    channel._server_longpoll_timeout_seconds = 42.0
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "bot-token", "polling_timeout": 37})
+    channel._server_longpoll_timeout_seconds = previous_timeout
 
     channel._update_longpoll_timeout({"longpolling_timeout_ms": value})
 
-    assert channel._server_longpoll_timeout_seconds == 42.0
+    assert channel._server_longpoll_timeout_seconds == previous_timeout
+    assert channel._current_longpoll_timeout_seconds() == (37.0 if previous_timeout is None else previous_timeout)
 
 
-def test_poll_loop_survives_overflowing_server_timeout(monkeypatch):
-    """An overflowing server timeout must not abort the batch loop.
+@pytest.mark.parametrize(("value", "expected"), [(1_000, 1.0), ("42000", 42.0), (300_000, 300.0)])
+def test_update_longpoll_timeout_accepts_values_in_range(value, expected):
+    from app.channels.wechat import WechatChannel
 
-    A huge integer in ``longpolling_timeout_ms`` used to raise OverflowError
-    before the per-message loop and the cursor write, so every re-poll dropped
-    the same batch and never advanced ``get_updates_buf``.
-    """
+    channel = WechatChannel(bus=MessageBus(), config={"bot_token": "bot-token"})
+
+    channel._update_longpoll_timeout({"longpolling_timeout_ms": value})
+
+    assert channel._current_longpoll_timeout_seconds() == expected
+
+
+def test_update_longpoll_timeout_respects_opt_out():
+    from app.channels.wechat import WechatChannel
+
+    channel = WechatChannel(
+        bus=MessageBus(),
+        config={"bot_token": "bot-token", "polling_timeout": 37, "respect_server_longpoll_timeout": False},
+    )
+
+    channel._update_longpoll_timeout({"longpolling_timeout_ms": 42_000})
+
+    assert channel._server_longpoll_timeout_seconds is None
+    assert channel._current_longpoll_timeout_seconds() == 37.0
+
+
+@pytest.mark.parametrize("invalid_timeout", [10**400, 1e308, 1], ids=["overflow", "huge-finite", "too-short"])
+def test_poll_loop_ignores_invalid_server_timeout(monkeypatch, invalid_timeout):
+    """Process the batch and reuse the last valid timeout on the next request."""
     from app.channels.wechat import WechatChannel
 
     async def go():
@@ -1747,8 +1772,9 @@ def test_poll_loop_survives_overflowing_server_timeout(monkeypatch):
                             }
                         ],
                         "get_updates_buf": "cursor-2",
-                        "longpolling_timeout_ms": 10**400,
+                        "longpolling_timeout_ms": invalid_timeout,
                     },
+                    {"ret": 0, "msgs": [{"message_id": "stop"}]},
                 ],
                 **kwargs,
             )
@@ -1760,26 +1786,18 @@ def test_poll_loop_survives_overflowing_server_timeout(monkeypatch):
 
         async def _fake_handle_update(raw):
             handled.append(raw)
-            channel._running = False
+            if raw["message_id"] == "stop":
+                channel._running = False
 
         channel._handle_update = _fake_handle_update  # type: ignore[method-assign]
 
-        async def _stop_watchdog():
-            await asyncio.sleep(0.5)
-            channel._running = False
+        await asyncio.wait_for(channel._poll_loop(), 3.0)
 
-        watchdog = asyncio.create_task(_stop_watchdog())
-        try:
-            await asyncio.wait_for(channel._poll_loop(), 3.0)
-        finally:
-            watchdog.cancel()
-            await asyncio.gather(watchdog, return_exceptions=True)
-
-        assert [message["message_id"] for message in handled] == ["msg-1"]
+        assert [message["message_id"] for message in handled] == ["msg-1", "stop"]
         assert channel._get_updates_buf == "cursor-2"
         assert channel._server_longpoll_timeout_seconds == 42.0
-        assert len(post_calls) == 2
-        assert post_calls[1]["timeout"] == 47.0
+        assert [call["json"]["get_updates_buf"] for call in post_calls] == ["", "cursor-1", "cursor-2"]
+        assert [call["timeout"] for call in post_calls] == [40.0, 47.0, 47.0]
 
     _run(go())
 
