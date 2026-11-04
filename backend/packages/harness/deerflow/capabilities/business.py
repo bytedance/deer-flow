@@ -16,7 +16,18 @@ import time
 from typing import Annotated, Any, Literal
 
 import httpx
-from mcp.server.fastmcp import FastMCP
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except (ImportError, ModuleNotFoundError):
+    try:
+        from fastmcp import FastMCP  # type: ignore[no-redef]
+    except (ImportError, ModuleNotFoundError):
+        try:
+            from mcp.server.mcpserver import MCPServer as FastMCP  # type: ignore[no-redef]
+        except (ImportError, ModuleNotFoundError):
+            FastMCP = Any  # type: ignore[assignment,misc]
+
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
@@ -138,9 +149,11 @@ class BusinessClient:
         return await self._request(method, "https://api.hubapi.com" + path, headers={"Authorization": f"Bearer {self.credentials['access_token']}"}, **kwargs)
 
 
-def build_server(provider: str) -> FastMCP:
+def build_server(provider: str) -> Any:
     if provider not in CREDENTIALS:
         raise ValueError("Unknown business provider")
+    if FastMCP is Any:
+        raise RuntimeError("FastMCP or MCPServer is required to run the bundled business MCP server.")
     server = FastMCP(f"deerflow-{provider}", log_level="WARNING")
 
     def client() -> BusinessClient:

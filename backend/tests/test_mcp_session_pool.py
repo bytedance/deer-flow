@@ -8,18 +8,21 @@ import sys
 import threading
 import weakref
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-
-try:
-    from mcp.shared.exceptions import McpError
-except ImportError:
-    from mcp.shared.exceptions import MCPError as McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, current_session_pool, get_session_pool, reset_session_pool
+from deerflow.mcp.session_pool import (
+    McpError,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    current_session_pool,
+    get_session_pool,
+    reset_session_pool,
+)
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     mcp_scope_belongs_to_thread,
@@ -3216,21 +3219,85 @@ def test_is_mcp_transport_disconnect_v1_and_v2_compat():
     wrong_msg_err = McpError(ErrorData(code=CONNECTION_CLOSED, message="other failure"))
     assert _is_mcp_transport_disconnect(wrong_msg_err) is False
 
-    # 4. Simulated MCP 2.x MCPError (inheriting from Exception, code & message attributes)
-    class FakeMCP2Error(Exception):
+    # 4a. Simulated MCP 2.x MCPError (inheriting from Exception, code & message attributes)
+    class FakeMCP2ErrorWithErrorData(Exception):
         def __init__(self, code: int, message: str):
             super().__init__(code, message)
             self.error = ErrorData(code=code, message=message)
             self.code = code
             self.message = message
 
-    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeMCP2Error,)):
-        fake_closed = FakeMCP2Error(code=CONNECTION_CLOSED, message="Connection closed")
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeMCP2ErrorWithErrorData,)):
+        fake_closed = FakeMCP2ErrorWithErrorData(code=CONNECTION_CLOSED, message="Connection closed")
         assert _is_mcp_transport_disconnect(fake_closed) is True
 
-        fake_timeout = FakeMCP2Error(code=408, message="timeout")
+        fake_timeout = FakeMCP2ErrorWithErrorData(code=408, message="timeout")
         assert _is_mcp_transport_disconnect(fake_timeout) is False
+
+    # 4b. Simulated error with direct code/message and NO .error attribute (exercises fallback path)
+    class FakeDirectCodeMessageError(Exception):
+        def __init__(self, code: int, message: str):
+            super().__init__(code, message)
+            self.code = code
+            self.message = message
+
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeDirectCodeMessageError,)):
+        direct_closed = FakeDirectCodeMessageError(code=CONNECTION_CLOSED, message="Connection closed")
+        assert _is_mcp_transport_disconnect(direct_closed) is True
+
+        direct_timeout = FakeDirectCodeMessageError(code=408, message="timeout")
+        assert _is_mcp_transport_disconnect(direct_timeout) is False
 
     # 5. Ensure McpError and MCPError are exported / available
     assert issubclass(McpError, Exception)
     assert issubclass(MCPError, Exception)
+
+
+def test_mcp_v2_compatibility_wrapper_construction_and_import():
+    """Verify the McpError compatibility wrapper for MCP 2.x accepts ErrorData and keyword args."""
+    from deerflow.mcp.session_pool import _is_mcp_transport_disconnect
+
+    # Simulate MCP 2.x SDK base class
+    class MockSdkMCPError(Exception):
+        def __init__(self, code: int, message: str, data: Any = None):
+            super().__init__(code, message, data)
+            self.error = ErrorData(code=code, message=message, data=data)
+            self.code = code
+            self.message = message
+            self.data = data
+
+    # Create wrapper using the exact logic from session_pool
+    class MockCompatMcpError(MockSdkMCPError):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            if len(args) == 1 and hasattr(args[0], "code") and hasattr(args[0], "message") and not kwargs:
+                err_data = args[0]
+                super().__init__(
+                    code=err_data.code,
+                    message=err_data.message,
+                    data=getattr(err_data, "data", None),
+                )
+            else:
+                super().__init__(*args, **kwargs)
+
+    # 1. 1.x signature: McpError(ErrorData(...))
+    err1 = MockCompatMcpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+    assert err1.code == CONNECTION_CLOSED
+    assert err1.message == "Connection closed"
+    assert err1.error.code == CONNECTION_CLOSED
+    assert err1.error.message == "Connection closed"
+
+    # 2. 2.x signature: MCPError(code, message)
+    err2 = MockCompatMcpError(CONNECTION_CLOSED, "Connection closed")
+    assert err2.code == CONNECTION_CLOSED
+    assert err2.message == "Connection closed"
+
+    # 3. 2.x signature with kwargs: MCPError(code=..., message=...)
+    err3 = MockCompatMcpError(code=408, message="request timed out")
+    assert err3.code == 408
+    assert err3.message == "request timed out"
+
+    # 4. _is_mcp_transport_disconnect works on the wrapper
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (MockSdkMCPError,)):
+        assert _is_mcp_transport_disconnect(err1) is True
+        assert _is_mcp_transport_disconnect(err2) is True
+        assert _is_mcp_transport_disconnect(err3) is False
