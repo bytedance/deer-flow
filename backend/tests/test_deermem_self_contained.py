@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import UTC, datetime
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -24,7 +22,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.core import storage as deermem_storage
-from deerflow.agents.memory.backends.deermem.deermem.core import updater as deermem_updater
 from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import (
     filter_messages_for_memory,
 )
@@ -39,18 +36,6 @@ def deermem_data_dir(tmp_path, monkeypatch):
     d.mkdir()
     monkeypatch.setenv("DEERMEM_DATA_DIR", str(d))
     yield d
-
-
-@pytest.fixture
-def fixed_capacity_clock(monkeypatch):
-    """Keep the dated capacity scenarios recent without replacing the policy."""
-    now = datetime(2026, 8, 13, tzinfo=UTC)
-    monkeypatch.setattr(
-        deermem_updater,
-        "select_facts_for_capacity",
-        partial(deermem_updater.select_facts_for_capacity, now=now),
-    )
-    monkeypatch.setattr(deermem_updater, "utc_now_iso_z", lambda: "2026-08-13T00:00:00Z")
 
 
 class _FakeLLM:

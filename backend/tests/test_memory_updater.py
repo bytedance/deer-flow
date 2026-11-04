@@ -262,7 +262,7 @@ def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None
     ]
 
 
-def test_automatic_update_uses_hybrid_capacity_policy() -> None:
+def test_automatic_update_uses_hybrid_capacity_policy(fixed_capacity_clock) -> None:
     updater = _make_updater(
         config=_memory_config(
             fact_eviction_policy="hybrid-v1",
