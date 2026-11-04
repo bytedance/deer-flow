@@ -799,6 +799,43 @@ class TestMalformedToolCallIdRecovery:
         assert patched[1].tool_call_id == patched[0].tool_calls[0]["id"]
         assert patched[1].status != "error"
 
+    def test_invalid_same_name_sibling_does_not_make_executable_result_ambiguous(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("bash", "")],
+                invalid_tool_calls=[_invalid_tc(name="bash", tc_id="")],
+            ),
+            ToolMessage(content="REAL-BASH-OUTPUT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 3
+        executable_id = patched[0].tool_calls[0]["id"]
+        invalid_id = patched[0].invalid_tool_calls[0]["id"]
+        assert patched[1].content == "REAL-BASH-OUTPUT"
+        assert patched[1].tool_call_id == executable_id
+        assert patched[1].status != "error"
+        assert patched[2].tool_call_id == invalid_id
+        assert patched[2].status == "error"
+
+    def test_result_is_not_paired_to_a_turn_with_only_invalid_calls(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            _ai_with_invalid_tool_calls([_invalid_tc(name="bash", tc_id="")]),
+            ToolMessage(content="UNRELATED-RESULT", tool_call_id="", name="bash"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 2
+        assert patched[1].content != "UNRELATED-RESULT"
+        assert patched[1].status == "error"
+
     def test_multiple_empty_ids_get_distinct_ids_and_pair_in_order(self):
         mw = DanglingToolCallMiddleware()
         msgs = [

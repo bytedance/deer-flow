@@ -123,7 +123,13 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+    candidates = [
+        position
+        for position, entry in enumerate(open_calls)
+        if entry.get("executable", True)
+        and entry["original"] == result.tool_call_id
+        and _names_can_pair(entry["name"], result.name)
+    ]
     if not candidates or (len(candidates) > 1 and not positional):
         return None
     return open_calls.pop(candidates[0])["synthetic"]
@@ -403,6 +409,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
                 for source, tool_calls, field in sources:
                     relabeled, source_assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
+                    for entry in source_assigned:
+                        entry["executable"] = source != "invalid"
                     assigned.extend(source_assigned)
                     if not changed:
                         continue
