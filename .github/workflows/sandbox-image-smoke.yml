@@ -38,6 +38,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Free disk space for sandbox images
+        # This job only needs Python and Docker, not the runner's mobile/.NET/Haskell SDKs.
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup /opt/ghc
+          docker image prune --all --force
+          df -h /
+
       - name: Resolve immutable image references for this run
         # Pull on the runner's platform, then pass only immutable repo@sha256
         # references to pytest. This keeps both the baseline and the 1.11.0
