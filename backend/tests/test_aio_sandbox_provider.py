@@ -1897,6 +1897,8 @@ def failure_recovery_lifecycle(tmp_path, monkeypatch):
     info = provider._sandbox_infos["sandbox-failure-recovery"]
     info.sandbox_url = "https://sandbox.example.test"
     info.container_id = "container-generation-1"
+    running = _observe_destroy_target(provider, info)
+    provider._backend.destroy.side_effect = lambda target, **_kwargs: running.pop(target.sandbox_id, None)
     shell = MagicMock(spec=["exec_command", "create_session", "cleanup_session"])
     shell.exec_command.return_value = SimpleNamespace(data=SimpleNamespace(output="next-turn", exit_code=0, status="completed"))
     shell.create_session.side_effect = lambda id, **_kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
@@ -2206,7 +2208,7 @@ def test_destroy_retry_does_not_stop_a_runtime_fenced_during_its_probe(failure_r
         provider.destroy(old.sandbox_id)
     provider._backend.destroy.assert_not_called()
     assert provider._quarantine_store().contains(current)
-    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert old.sandbox_id in provider._cleanup_retries
 
 
 @pytest.mark.parametrize("body_error", [False, True], ids=["success-body", "failed-body"])
@@ -2263,22 +2265,238 @@ def test_destroy_retry_waits_for_the_final_heartbeat_verdict(failure_recovery_li
         message = "original cleanup failure" if body_error else ("heartbeat.*deferred" if verdict == "pending" else "lost its teardown lease")
         with pytest.raises(error, match=message):
             provider.destroy(old.sandbox_id)
-        assert old.sandbox_id in provider._cleanup_retry_ids
+        assert old.sandbox_id in provider._cleanup_retries
     finally:
         resume.set()
         for thread in heartbeat_threads:
             join(thread, 10)
 
 
-@pytest.mark.parametrize("entrypoint", ["destroy", "acquire-replacement"])
+@pytest.mark.parametrize("fence_failure", [False, True], ids=["durable-fence", "failed-fence"])
+@pytest.mark.parametrize("outcome", ["lease-loss", "delete-response-timeout"])
+def test_warm_reap_preserves_replacement_after_uncertain_stop(failure_recovery_lifecycle, monkeypatch, fence_failure, outcome):
+    from deerflow.config.sandbox_config import SandboxOwnershipConfig
+
+    provider, _, _, old = failure_recovery_lifecycle
+    provider.release(old.sandbox_id)
+    provider._warm_pool[old.sandbox_id] = (old, time.monotonic() - 100)
+    running = _observe_destroy_target(provider, old)
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-generation")
+    provider._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.01, ttl_multiplier=4)
+    provider._TEARDOWN_JOIN_TIMEOUT_SECONDS = 10
+    refresh_started, finish_refresh = threading.Event(), threading.Event()
+    claim, join = provider._ownership.claim, threading.Thread.join
+    heartbeat_threads = []
+    deleted = []
+
+    def final_refresh(sandbox_id, *, for_destroy=False):
+        if threading.current_thread().name == "sandbox-teardown-lease" and not finish_refresh.is_set():
+            refresh_started.set()
+            assert finish_refresh.wait(10)
+            return False
+        return claim(sandbox_id, for_destroy=for_destroy)
+
+    def stop(target, *, check=None):
+        if check is not None:
+            check()
+        # Remote DELETE addresses the logical ID, even for stale metadata.
+        deleted.append(running.pop(target.sandbox_id).container_id)
+        if len(deleted) == 1:
+            assert refresh_started.wait(10)
+            running[target.sandbox_id] = replacement
+            if outcome == "delete-response-timeout":
+                raise TimeoutError("DELETE response was lost")
+
+    def finish_at_join(thread, *args, **kwargs):
+        if thread.name == "sandbox-teardown-lease":
+            heartbeat_threads.append(thread)
+            finish_refresh.set()
+        return join(thread, *args, **kwargs)
+
+    monkeypatch.setattr(provider._ownership, "claim", final_refresh)
+    monkeypatch.setattr(threading.Thread, "join", finish_at_join)
+    provider._backend.destroy.side_effect = stop
+    try:
+        with monkeypatch.context() as patcher:
+            if fence_failure:
+                patcher.setattr(provider._quarantine_store(), "mark", MagicMock(side_effect=OSError("fence write failed")))
+                if outcome == "lease-loss":
+                    with pytest.raises(OSError, match="fence write failed"):
+                        provider._reap_expired_warm(1)
+                else:
+                    provider._reap_expired_warm(1)
+            else:
+                provider._reap_expired_warm(1)
+        provider._reap_expired_warm(1)
+
+        assert running.get(old.sandbox_id) is replacement, "a warm retry deleted the peer's replacement"
+        assert deleted == [old.container_id]
+        assert old.sandbox_id not in provider._warm_pool
+        assert provider._quarantine_store().contains(old)
+        assert provider.destroy(old.sandbox_id) is False
+        assert running.get(old.sandbox_id) is replacement
+        provider._backend.discover = MagicMock(side_effect=lambda _sid: type(old).from_dict(replacement.to_dict()))
+        assert provider.acquire("thread-failure-recovery", user_id="alice") == old.sandbox_id
+        assert provider._sandbox_infos[old.sandbox_id].container_id == replacement.container_id
+    finally:
+        finish_refresh.set()
+        for thread in heartbeat_threads:
+            join(thread, 10)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admission", ["orphan", "discovery", "async-discovery", "warm", "active"])
+@pytest.mark.parametrize("fence", ["empty-pending", "malformed-pending", "unknown-receipt"])
+async def test_unknown_quarantine_does_not_authorize_orphan_destruction(failure_recovery_lifecycle, admission, fence):
+    from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
+
+    provider, _, _, old = failure_recovery_lifecycle
+    running = _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("old stop failed")
+    with pytest.raises(RuntimeError, match="old stop failed"):
+        provider.destroy(old.sandbox_id)
+
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="healthy-replacement")
+    running[old.sandbox_id] = replacement
+    provider._backend.list_running = MagicMock(side_effect=lambda: [type(old).from_dict(replacement.to_dict())])
+    provider._backend.discover = MagicMock(side_effect=lambda _sid: type(old).from_dict(replacement.to_dict()))
+    provider._backend.destroy.side_effect = lambda target, **_kwargs: running.pop(target.sandbox_id)
+    provider._unowned_since[old.sandbox_id] = time.time() - compute_lease_ttl(provider._ownership_config) - 1
+    if admission == "warm":
+        provider._reconcile_orphans()
+        assert provider._warm_pool[old.sandbox_id][0].container_id == replacement.container_id
+    elif admission == "active":
+        assert provider.acquire("thread-failure-recovery", user_id="alice") == old.sandbox_id
+
+    store = provider._quarantine_store()
+    if fence == "unknown-receipt":
+        store.mark(type(old)(old.sandbox_id, ""))
+    else:
+        # Crash residue before the pending generation was completely written.
+        (store._directory(old) / ("p" + "0" * 15)).write_bytes(b"" if fence == "empty-pending" else b"partial")
+    snapshot = store.snapshot(replacement)
+    if admission == "orphan":
+        provider._reconcile_orphans()
+    else:
+        with pytest.raises(RuntimeError, match="quarantin|fenc|generation|replacement is deferred"):
+            if admission == "async-discovery":
+                await provider.acquire_async("thread-failure-recovery", user_id="alice")
+            else:
+                provider.acquire("thread-failure-recovery", user_id="alice")
+
+    assert running.get(old.sandbox_id) is replacement, "an unknown fence authorized deletion of a healthy orphan"
+    assert store.contains(replacement)
+    assert store.snapshot(replacement) == snapshot, "reuse refusal must not manufacture a matching generation receipt"
+    assert old.sandbox_id not in provider._warm_pool
+    assert provider._backend.destroy.call_count == 1
+
+
+@pytest.mark.parametrize("cleanup", ["idle-reap", "shutdown"])
+def test_adopted_replacement_finishes_its_own_lifecycle_without_old_retry(failure_recovery_lifecycle, cleanup):
+    from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
+
+    provider, _, _, old = failure_recovery_lifecycle
+    running = _observe_destroy_target(provider, old)
+    provider._backend.destroy.side_effect = RuntimeError("old stop failed")
+    with pytest.raises(RuntimeError, match="old stop failed"):
+        provider.destroy(old.sandbox_id)
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="adopted-generation")
+    running[old.sandbox_id] = replacement
+    provider._backend.list_running = MagicMock(side_effect=lambda: [type(old).from_dict(replacement.to_dict())])
+    provider._unowned_since[old.sandbox_id] = time.time() - compute_lease_ttl(provider._ownership_config) - 1
+    provider._reconcile_orphans()
+    assert provider._warm_pool[old.sandbox_id][0].container_id == replacement.container_id
+    provider._backend.destroy.side_effect = lambda target, **_kwargs: running.pop(target.sandbox_id)
+
+    if cleanup == "idle-reap":
+        current, _ = provider._warm_pool[old.sandbox_id]
+        provider._warm_pool[old.sandbox_id] = (current, time.monotonic() - 100)
+        provider._reap_expired_warm(1)
+    provider.shutdown()
+
+    assert not running
+    assert not provider._cleanup_retries
+    assert old.sandbox_id not in provider._warm_pool
+    assert provider._backend.destroy.call_count == 2
+
+
+@pytest.mark.parametrize("already_absent", [False, True], ids=["same-generation", "confirmed-absence"])
+def test_uncertain_warm_stop_can_finish_checked_recovery(failure_recovery_lifecycle, already_absent):
+    provider, _, _, info = failure_recovery_lifecycle
+    provider.release(info.sandbox_id)
+    provider._warm_pool[info.sandbox_id] = (info, time.monotonic() - 100)
+    running = _observe_destroy_target(provider, info)
+
+    def stop(target, **_kwargs):
+        if provider._backend.destroy.call_count == 1:
+            if already_absent:
+                running.pop(target.sandbox_id)
+            raise TimeoutError("uncertain DELETE response")
+        running.pop(target.sandbox_id)
+
+    provider._backend.destroy.side_effect = stop
+    provider._reap_expired_warm(1)
+    provider._reap_expired_warm(1)
+
+    assert not running
+    assert info.sandbox_id not in provider._warm_pool
+    assert not provider._cleanup_retries
+    assert not provider._quarantine_store().contains(info)
+    assert provider._backend.destroy.call_count == (1 if already_absent else 2)
+
+
+@pytest.mark.parametrize("cleanup", ["idle-reap", "shutdown"])
+@pytest.mark.parametrize("probe_failure", [False, True], ids=["inspected", "probe-failed"])
+def test_restarted_cleanup_check_ends_after_verified_replacement_admission(failure_recovery_lifecycle, cleanup, probe_failure):
+    from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
+
+    provider, _, _, old = failure_recovery_lifecycle
+    provider.release(old.sandbox_id)
+    provider._warm_pool.clear()
+    provider._ownership.release(old.sandbox_id)
+    provider._quarantine_store().mark(old)
+    replacement = type(old)(old.sandbox_id, old.sandbox_url, container_id="replacement-after-restart")
+    running = _observe_destroy_target(provider, replacement)
+    listings = iter([old, replacement])
+    provider._backend.list_running = MagicMock(side_effect=lambda: [type(old).from_dict(next(listings).to_dict())])
+    provider._backend.destroy.side_effect = lambda target, **_kwargs: running.pop(target.sandbox_id)
+    provider._unowned_since[old.sandbox_id] = time.time() - compute_lease_ttl(provider._ownership_config) - 1
+    if probe_failure:
+        provider._backend.is_absent.side_effect = RuntimeError("presence probe unavailable")
+
+    # A stale list selects the old receipt; authoritative inspection sees the
+    # replacement and retires only the old generation, without deleting it.
+    provider._reconcile_orphans()
+    assert running.get(old.sandbox_id) is replacement
+    assert provider._quarantine_store().contains(old) is probe_failure
+    provider._backend.is_absent.side_effect = lambda sid: sid not in running
+    provider._reconcile_orphans()
+    assert provider._warm_pool[old.sandbox_id][0].container_id == replacement.container_id
+    if cleanup == "idle-reap":
+        current, _ = provider._warm_pool[old.sandbox_id]
+        provider._warm_pool[old.sandbox_id] = (current, time.monotonic() - 100)
+        provider._reap_expired_warm(1)
+    provider.shutdown()
+
+    assert not running and not provider._cleanup_retries
+    assert provider._backend.destroy.call_count == 1
+    assert provider._quarantine_store().contains(old) is probe_failure
+
+
+@pytest.mark.parametrize("entrypoint", ["destroy", "acquire-replacement", "warm-reap"])
 def test_initial_quarantined_stop_checks_the_lease_between_backend_operations(failure_recovery_lifecycle, monkeypatch, entrypoint):
     from deerflow.config.sandbox_config import SandboxOwnershipConfig
 
     provider, sandbox, shell, info = failure_recovery_lifecycle
     module = importlib.import_module(type(provider).__module__)
+    _observe_destroy_target(provider, info)
     provider._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.01, ttl_multiplier=4)
-    shell.exec_command.side_effect = httpx.ReadTimeout("uncertain command")
-    sandbox.execute_command("uncertain-command")
+    if entrypoint == "warm-reap":
+        provider.release(info.sandbox_id)
+        provider._warm_pool[info.sandbox_id] = (info, time.monotonic() - 100)
+    else:
+        shell.exec_command.side_effect = httpx.ReadTimeout("uncertain command")
+        sandbox.execute_command("uncertain-command")
     if entrypoint == "acquire-replacement":
         provider._quarantine_store().mark(info)
         provider._sandboxes.clear()
@@ -2312,14 +2530,17 @@ def test_initial_quarantined_stop_checks_the_lease_between_backend_operations(fa
     monkeypatch.setattr(provider._ownership, "claim", lose_claim)
     monkeypatch.setattr(provider._ownership, "release", observe_heartbeat_release)
     provider._backend.destroy.side_effect = stop
-    with pytest.raises(module.SandboxPolicyReplacementDeferredError):
+    expectation = contextlib.nullcontext() if entrypoint == "warm-reap" else pytest.raises(module.SandboxPolicyReplacementDeferredError)
+    with expectation:
         if entrypoint == "destroy":
             provider.destroy(info.sandbox_id)
+        elif entrypoint == "warm-reap":
+            provider._reap_expired_warm(1)
         else:
             provider.acquire("thread-failure-recovery", user_id="alice")
     assert operations == ["stop-proxy"]
     assert provider._quarantine_store().contains(info)
-    assert info.sandbox_id in provider._cleanup_retry_ids
+    assert info.sandbox_id in provider._cleanup_retries
 
 
 @pytest.mark.asyncio
@@ -2926,6 +3147,8 @@ def test_acquire_recycles_quarantined_cached_sandbox_inline(tmp_path, monkeypatc
     provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-q-residue")
     info = provider._sandbox_infos["sandbox-q-residue"]
     info.container_id = "generation-dirty"
+    running = _observe_destroy_target(provider, info)
+    provider._backend.destroy.side_effect = lambda target, **_kwargs: running.pop(target.sandbox_id, None)
     sandbox.requires_container_recycle = True
     provider._thread_sandboxes[("alice", "thread-q")] = "sandbox-q-residue"
     provider._quarantine_store().mark(info)
@@ -3003,7 +3226,7 @@ def test_uncertain_runtime_preserves_live_holders_until_final_release(failure_re
         manager.release("fork")
         provider._backend.destroy.assert_called_once_with(info, check=ANY)
         assert provider.get(info.sandbox_id) is None
-        assert provider._quarantine_store().contains(info)
+        assert not provider._quarantine_store().contains(info)
     finally:
         discard_sandbox_lease_manager(provider)
 
@@ -3065,6 +3288,7 @@ def test_acquire_recycle_failure_defers_with_quarantine_reason(tmp_path, monkeyp
     provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-q-stuck")
     info = provider._sandbox_infos["sandbox-q-stuck"]
     info.container_id = "generation-stuck"
+    _observe_destroy_target(provider, info)
     sandbox.requires_container_recycle = True
     provider._thread_sandboxes[("alice", "thread-stuck")] = "sandbox-q-stuck"
     provider._quarantine_store().mark(info)
@@ -3738,7 +3962,7 @@ def test_failed_destroy_allows_replacement_acquisition(failure_recovery_lifecycl
         assert provider._sandbox_infos[acquired] is replacement
         assert provider.get(acquired) is not None
         assert provider.get_scoped(acquired, thread_id="thread-failure-recovery", user_id="alice") is not None
-        assert acquired not in provider._cleanup_retry_ids
+        assert acquired not in provider._cleanup_retries
         assert provider._quarantine_store().contains(old)
         assert not provider._quarantine_store().contains(replacement)
         provider._backend.destroy.assert_called_once_with(old, check=ANY)
@@ -3772,7 +3996,7 @@ def test_warm_reclaim_keeps_failed_stop_fence_for_unsafe_generation(failure_reco
     with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
         provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice")
 
-    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert old.sandbox_id in provider._cleanup_retries
     assert provider._quarantine_store().contains(candidate)
     assert provider.get(old.sandbox_id) is None
     assert old.sandbox_id not in provider._sandboxes
@@ -3800,7 +4024,7 @@ def test_warm_reclaim_does_not_clear_fence_if_entry_changes(failure_recovery_lif
     monkeypatch.setattr(provider, "_publish_ownership", swap_during_publish)
     assert provider._reclaim_warm_pool_sandbox("thread-failure-recovery", old.sandbox_id, user_id="alice") is None
     assert provider._warm_pool[old.sandbox_id][0] is unvalidated
-    assert old.sandbox_id in provider._cleanup_retry_ids
+    assert not provider._cleanup_retries
     assert provider._quarantine_store().contains(unvalidated)
     assert provider.get(old.sandbox_id) is None
     assert old.sandbox_id not in provider._sandboxes
@@ -3834,7 +4058,7 @@ def test_failed_destroy_record_write_blocks_cached_reuse_until_retry(tmp_path, m
         assert provider.get_scoped(info.sandbox_id, thread_id="thread", user_id="alice") is None
         assert provider.destroy(info.sandbox_id) is True
         assert provider._backend.destroy.call_count == 2
-        assert not provider._cleanup_retry_ids
+        assert not provider._cleanup_retries
         client.close.assert_called_once()
     finally:
         provider.reset()
@@ -3974,7 +4198,7 @@ def test_shutdown_retains_only_failed_resources_and_retries_them(tmp_path, monke
             provider.shutdown()
         assert provider._shutdown_called is False
         provider._ownership.close.assert_not_called()
-        assert provider._cleanup_retry_ids == {failed_id}
+        assert set(provider._cleanup_retries) == {failed_id}
         assert store.contains(running[failed_id]) is (not journal_failure)
         assert provider._backend.destroy.call_count == 2, "one failed resource skipped the others"
         provider.shutdown()
@@ -4013,7 +4237,7 @@ def test_shutdown_retry_still_closes_unfinished_executions(tmp_path):
         assert manager.binding_for("unfinished-run") == info.sandbox_id
         provider.shutdown()
         assert provider._backend.destroy.call_count == 2
-        assert not running and not provider._cleanup_retry_ids
+        assert not running and not provider._cleanup_retries
     finally:
         manager.close()
         provider.reset()
@@ -4308,7 +4532,7 @@ def test_create_sandbox_evicts_oldest_warm_replica_via_shared_lifecycle(tmp_path
     sandbox_id = provider._create_sandbox(None, "created", user_id="default")
 
     assert sandbox_id == "created"
-    provider._backend.destroy.assert_called_once_with(oldest_info)
+    provider._backend.destroy.assert_called_once_with(oldest_info, check=ANY)
     assert "warm-oldest" not in provider._warm_pool
     assert provider._warm_pool == {"warm-newest": (newest_info, 20.0)}
     assert provider._sandbox_infos["created"] is created_info
