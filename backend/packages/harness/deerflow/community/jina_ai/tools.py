@@ -27,6 +27,7 @@ def _coerce_timeout(value: object, default: int) -> int:
         return default
     try:
         timeout = int(value)
+        # For ints, isfinite raises OverflowError outside the finite float range.
         return timeout if timeout > 0 and math.isfinite(timeout) else default
     except (ValueError, OverflowError):
         return default
