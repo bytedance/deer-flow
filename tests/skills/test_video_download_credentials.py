@@ -78,7 +78,14 @@ def test_redirect_strips_key_but_still_downloads(
 
 @pytest.mark.parametrize(
     "location",
-    ["http://media.example/video", "https://user:password@media.example/video"],
+    [
+        "http://media.example/video",
+        "https://user:password@media.example/video",
+        "https://media.example:99999/video",
+        "https://generativelanguage.googleapis.com:99999/video",
+        "https://media.example:invalid/video",
+        "https://generativelanguage.googleapis.com:invalid/video",
+    ],
 )
 def test_unsafe_redirect_rejected_before_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, location: str
@@ -105,6 +112,23 @@ def test_unsafe_redirect_rejected_before_request(
     with pytest.raises(ValueError, match="HTTPS"):
         vid.download(API_URL, str(output))
     assert len(seen) == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("host", ["media.example", "generativelanguage.googleapis.com"])
+@pytest.mark.parametrize("port", ["99999", "invalid", "-1"])
+def test_malformed_port_rejected_before_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, host: str, port: str
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "synthetic-test-key")
+
+    def unexpected_get(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("Malformed URLs must be rejected before requests.get")
+
+    monkeypatch.setattr(vid.requests, "get", unexpected_get)
+    output = tmp_path / "video.mp4"
+    with pytest.raises(ValueError, match="Gemini video downloads require.*HTTPS"):
+        vid.download(f"https://{host}:{port}/video", str(output))
     assert not output.exists()
 
 

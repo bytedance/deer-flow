@@ -168,14 +168,23 @@ def download(url: str, output_file: str) -> None:
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
+    invalid_url_message = "Gemini video downloads require valid HTTPS URLs without embedded credentials"
     for _ in range(11):
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(invalid_url_message) from exc
         if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
-            raise ValueError("Gemini video downloads require HTTPS URLs without embedded credentials")
-        # Requests 不会在跨来源重定向时移除自定义 API-key 头，逐跳限制其来源。
-        trusted = parsed.hostname == "generativelanguage.googleapis.com" and parsed.port in (None, 443)
+            raise ValueError(invalid_url_message)
+        # Requests preserves custom API-key headers across redirects; scope them to each hop's origin.
+        trusted = parsed.hostname == "generativelanguage.googleapis.com" and port in (None, 443)
         headers = {"x-goog-api-key": gemini_api_key} if trusted else {}
-        response = requests.get(url, headers=headers, timeout=300, allow_redirects=False)
+        try:
+            response = requests.get(url, headers=headers, timeout=300, allow_redirects=False)
+        except requests.exceptions.InvalidURL as exc:
+            # Requests can parse the next redirect URL even with allow_redirects=False.
+            raise ValueError(invalid_url_message) from exc
         response.raise_for_status()
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("Location")
