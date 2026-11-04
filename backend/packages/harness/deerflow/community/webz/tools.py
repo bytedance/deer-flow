@@ -135,7 +135,7 @@ async def web_search_tool(
     if filters:
         body["filters"] = filters
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+        async with await asyncio.to_thread(httpx.AsyncClient, timeout=30.0, follow_redirects=False) as client:
             response = await client.post(
                 "https://api.webz.io/api/news/context",
                 headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
