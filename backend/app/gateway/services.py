@@ -16,7 +16,7 @@ import math
 import re
 import threading
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
@@ -2160,7 +2160,6 @@ async def start_run(
     require_existing_thread: bool = False,
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
-    admission_check: Callable[[], Awaitable[None]] | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2178,8 +2177,6 @@ async def start_run(
     evidence_origin : str | None
         Trusted Python entry-point provenance, never copied from request data.
         Internal launches without an explicit origin remain unknown.
-    admission_check
-        Trusted read-only check inside atomic admission, never request data.
     """
     # Cancel-capability gate. interrupt/rollback strategies terminate an already
     # active run — runs:cancel capability, not runs:create — so a create-only
@@ -2712,7 +2709,6 @@ async def start_run(
                         evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
                         run_id=admission_run_id,
                         **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
-                        **({"admission_check": admission_check} if admission_check is not None else {}),
                     )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc

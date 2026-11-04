@@ -245,8 +245,7 @@ async def test_resumed_native_batch_preserves_admitted_scope_in_followup(batch_h
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("late", [False, True], ids=["already-pending", "after-state-read"])
-async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, monkeypatch, late):
+async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, monkeypatch):
     from langchain_core.messages import ToolMessage
 
     from app.gateway import services
@@ -273,21 +272,11 @@ async def test_followup_waits_for_an_actual_answer_without_a_goal(batch_host, mo
         assert (await runs.wait(thread_id=batch["thread_id"], run_id=asked.run_id, timeout=5)).status == "success"
         assert (await state.run_manager.get(asked.run_id)).human_input_request == question
 
-    if late:
-        start = services.start_run
-        inserted = False
-
-        async def question_before_admission(*args, **kwargs):
-            nonlocal inserted
-            if kwargs.get("idempotency_key") and not inserted:
-                inserted = True
-                await ask()
-            return await start(*args, **kwargs)
-
-        monkeypatch.setattr(services, "start_run", question_before_admission)
-    else:
-        await ask()
-    assert await controller.dispatch(batch) is None
+    await ask()
+    assert await controller.dispatch(batch) == {"status": "waiting"}
+    # Waiting keeps the claim until its lease expires instead of every poll.
+    await state.subagent_batch_service._continue_batch(batch, "continuation-worker")
+    assert await repo.claim_continuations(now=datetime.now(UTC), lease_owner="poller", lease_seconds=120) == []
     assert await repo.continuation_run_id(batch["id"], user_id=batch["user_id"]) is None
     pending = await runs.get_state(thread_id=batch["thread_id"])
     assert extract_unanswered_human_input_request(pending["values"]["messages"]) == question

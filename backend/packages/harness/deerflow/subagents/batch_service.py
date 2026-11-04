@@ -140,6 +140,9 @@ _TRUSTED = object()
 class SubagentBatchService:
     """Lease, execute, and recover durable native-subagent batch items."""
 
+    # cancel_batch enforces runs:cancel for follow-ups with the caller's authority.
+    accepts_continuation_authority = True
+
     # Also used by focused shutdown tests constructing an instance via __new__.
     _stopping: bool = False
     _stop_drains: int = 0
@@ -334,6 +337,10 @@ class SubagentBatchService:
     async def _continue_batch(self, batch, owner):
         try:
             outcome = await self._dispatch_continuation(batch)
+            if outcome and outcome.get("status") == "waiting":
+                # A question can stay open for hours: keep the claim until its
+                # lease expires instead of rereading the conversation every poll.
+                return
             status = outcome.get("status", "dispatched") if outcome else "pending"
             run_id = outcome.get("run_id") if outcome else None
             saved = await self._repository.finish_continuation(batch["id"], lease_owner=owner, status=status, run_id=run_id)

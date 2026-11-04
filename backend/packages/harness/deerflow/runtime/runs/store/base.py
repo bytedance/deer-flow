@@ -11,7 +11,6 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -501,7 +500,6 @@ class RunStore(abc.ABC):
         evidence_origin: str = "unknown",
         evidence_agent_id: str | None = None,
         idempotency_request: dict[str, Any] | None = None,
-        admission_check: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -512,11 +510,7 @@ class RunStore(abc.ABC):
 
         Returns ``(new_run_dict, claimed_run_dicts)``.
         Raises ``IntegrityError`` on conflict for ``reject`` strategy.
-        Supporting stores run a short, read-only ``admission_check`` after
-        acquiring exclusive admission and roll back the insert if it raises.
         """
-        if admission_check is not None:
-            raise NotImplementedError("Legacy RunStore cannot perform atomic admission checks")
         legacy_impl = type(self).create_run_atomic
         if legacy_impl is RunStore.create_run_atomic:
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")

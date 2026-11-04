@@ -165,6 +165,17 @@ async def test_batch_task_rejects_duplicate_item_keys_without_submitting(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_cancel_batch_keeps_the_existing_submitter_signature(monkeypatch) -> None:
+    class ExistingSubmitter:
+        async def cancel_batch(self, *, batch_id, user_id):
+            return {"id": batch_id}
+
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: ExistingSubmitter())
+    result = await tool_module.cancel_batch.coroutine(runtime=_runtime(), batch_id="batch-1")
+    assert result == "Batch batch-1 cancellation requested."
+
+
+@pytest.mark.asyncio
 async def test_bound_batch_tools_use_the_explicit_submitter(monkeypatch) -> None:
     explicit = AsyncMock()
     explicit.get_batch.return_value = {

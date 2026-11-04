@@ -206,8 +206,6 @@ def _store_accepts_idempotency_parameter(store: RunStore, parameter_name: str) -
     parameter = parameters.get(parameter_name)
     if parameter is not None and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
         return True
-    if parameter_name == "admission_check":
-        return False  # An idempotency opt-in cannot promise to run a new check.
     if not any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
         return False
     implementation_owner = next(
@@ -2003,7 +2001,6 @@ class RunManager:
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
         execution_fence=None,
-        admission_check: Callable[[], Awaitable[None]] | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -2022,7 +2019,6 @@ class RunManager:
             idempotency_request=idempotency_request,
             run_id=run_id,
             execution_fence=execution_fence,
-            admission_check=admission_check,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -2097,7 +2093,6 @@ class RunManager:
         idempotency_request: dict[str, Any] | None = None,
         run_id: str | None = None,
         execution_fence=None,
-        admission_check: Callable[[], Awaitable[None]] | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -2130,8 +2125,6 @@ class RunManager:
 
         if execution_fence is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "execution_fence") or multitask_strategy != "reject"):
             raise RunIdempotencyUnsupported("The configured RunStore does not support execution fencing")
-        if admission_check is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "admission_check") or multitask_strategy != "reject"):
-            raise RunIdempotencyUnsupported("The configured RunStore does not support atomic admission checks")
 
         interrupted_records: list[RunRecord] = []
         record = RunRecord(
@@ -2227,8 +2220,6 @@ class RunManager:
                     }
                     if execution_fence is not None:
                         create_kwargs["execution_fence"] = execution_fence
-                    if admission_check is not None:
-                        create_kwargs["admission_check"] = admission_check
                     if idempotency_key is not None:
                         create_kwargs["idempotency_key"] = idempotency_key
                     if evidence_origin != "unknown":

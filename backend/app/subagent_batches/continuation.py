@@ -64,7 +64,7 @@ class BatchContinuations:
             state = await runs.get_state(thread_id=batch["thread_id"])
             values = state.get("values", {})
             if extract_unanswered_human_input_request(values.get("messages")) is not None:
-                return None
+                return {"status": "waiting"}
             goal = values.get("goal")
             goal_identity = {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None
             expected_goal = continuation.get("goal")
@@ -102,7 +102,6 @@ class BatchContinuations:
                 context=continuation.get("context"),
                 config=continuation.get("config"),
                 execution_fence=ExecutionFence(**batch["execution_fence"]),
-                checkpoint_id=state["checkpoint_id"],
                 goal_wakeup=goal_wakeup,
             )
             return {"status": "dispatched", "run_id": result.run_id}

@@ -11,6 +11,8 @@ self-references and cycles are rejected before saving. Dependent items consume n
 worker slot until every prerequisite succeeds without a guardrail stop reason.
 Retryable attempts keep dependents waiting; exhausted failures, cancellation or
 terminal capped results fail unstarted descendants. Independent items continue.
+Retrying a failed prerequisite by hand does not requeue the descendants it already
+failed; retry each blocked item as well.
 
 Item prompts must name their input/output paths. Ordering does not certify factual
 accuracy or make advisory acceptance mandatory. Use existing result readers; full
@@ -21,9 +23,9 @@ reports are not copied into every dependent's context.
 `continuation` describes remaining work the user already requested. After terminal
 batch results are saved, the lead performs that work in the original conversation
 through ordinary Run admission. Preserve the originating model selection, reasoning,
-limits and admitted retrieval scope. Busy conversations or unanswered questions
-wait. The checked conversation version is revalidated inside admission before any
-follow-up input is written; a changed version rolls back admission and retries later.
+limits and admitted retrieval scope. Busy conversations wait. While a question is
+unanswered the claim is kept until its lease expires, so the conversation is not
+reread on every poll.
 
 A stable idempotency key reconciles lost admission replies without another Run.
 Pending claims rotate so busy conversations do not starve others. Manual item retries

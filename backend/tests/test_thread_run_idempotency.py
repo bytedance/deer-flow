@@ -1321,8 +1321,6 @@ async def test_keyed_resume_rejects_ambiguous_kwargs_store_before_admission():
 
 @pytest.mark.anyio
 async def test_keyed_resume_allows_explicit_kwargs_store_capability():
-    from deerflow.runtime import RunIdempotencyUnsupported
-
     class ForwardingKwargsStore(MemoryRunStore):
         supports_idempotency_request_kwargs = True
 
@@ -1346,12 +1344,6 @@ async def test_keyed_resume_allows_explicit_kwargs_store_capability():
     persisted = await store.get(record.run_id)
     assert persisted is not None
     assert persisted["idempotency_request"] == identity
-    # Opting into idempotency kwargs does not promise to execute admission checks.
-    check = AsyncMock()
-    with pytest.raises(RunIdempotencyUnsupported, match="atomic admission"):
-        await manager.create_or_reject("other-thread", admission_check=check)
-    check.assert_not_awaited()
-    assert await store.list_by_thread("other-thread") == []
 
 
 @pytest.mark.anyio

@@ -332,11 +332,9 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     if submitter is None:
         return "Durable subagent batches are unavailable."
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
-    batch = await submitter.cancel_batch(
-        batch_id=batch_id,
-        user_id=resolve_runtime_user_id(runtime),
-        continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY),
-    )
+    # Only submitters that run follow-ups take the caller's run authority.
+    authority = {"continuation_authority": context.get(AGENT_RUNS_CONTEXT_KEY)} if getattr(submitter, "accepts_continuation_authority", False) else {}
+    batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), **authority)
     if batch is None:
         return "Batch not found."
     return f"Batch {batch_id} cancellation requested."
