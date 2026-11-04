@@ -119,6 +119,7 @@ class TestClientSkillSelection:
         for selection in [None, [], ["report-helper"]]:
             skill_client.load_config.return_value = AgentConfig(name="researcher", skills=selection)
             client.reset_agent()
+            assert client._agent_available_skills is None
             config = client._get_runnable_config("t1")
             config["metadata"] = {"existing": "preserved", "available_skills": ["stale"]}
             client._ensure_agent(config)

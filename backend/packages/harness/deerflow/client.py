@@ -288,6 +288,7 @@ class DeerFlowClient:
         self._agent = None
         self._agent_config_key = None
         self._effective_model_name = None
+        self._agent_available_skills = None
         self._loaded_agent_config_key = None
         self._loaded_agent_config = None
 

@@ -1,3 +1,6 @@
+`DeerFlowClient.reset_agent()` clears the cached skill selection together with
+the graph; rebuilds reload the saved selection within the caller's user scope.
+
 ### Request Trace Context (`packages/harness/deerflow/trace_context.py`)
 
 DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `deerflow_trace_id` key. Not Langfuse's trace id, not `run_id`, not the short subagent `trace_id` log label.
