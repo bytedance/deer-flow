@@ -1089,6 +1089,10 @@ URLs. The default local provider never enables the socket overlay.
 Local AIO sandbox port allocation stops at TCP port 65535. If the remaining
 ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
+In open network mode, a missing Docker/Apple Container CLI or a permission-denied
+CLI startup returns the reserved port while reporting the original error, so
+repeated attempts do not exhaust the port range. Restricted network mode
+retains its existing cleanup rules because a proxy may already hold the port.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
