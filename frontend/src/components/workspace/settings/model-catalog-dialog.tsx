@@ -266,7 +266,27 @@ export function ModelCatalogDialog({
                   ))}
                 </select>
               </label>
-              <label className="grid min-w-0 gap-1 text-sm">
+              {provider?.custom_endpoint && (
+                <label className="grid min-w-0 gap-1 text-sm">
+                  {text.endpoint}
+                  <Input
+                    type="url"
+                    value={connection.base_url ?? ""}
+                    onChange={(event) =>
+                      change(
+                        {
+                          provider: connection.provider,
+                          base_url: event.target.value,
+                        },
+                        "",
+                      )
+                    }
+                  />
+                </label>
+              )}
+              <label
+                className={`grid min-w-0 gap-1 text-sm ${provider?.custom_endpoint ? "sm:col-span-2" : ""}`}
+              >
                 {text.apiKey}
                 <Input
                   type="password"
@@ -282,24 +302,6 @@ export function ModelCatalogDialog({
                 />
               </label>
             </div>
-            {provider?.custom_endpoint && (
-              <label className="grid min-w-0 gap-1 text-sm">
-                {text.endpoint}
-                <Input
-                  type="url"
-                  value={connection.base_url ?? ""}
-                  onChange={(event) =>
-                    change(
-                      {
-                        provider: connection.provider,
-                        base_url: event.target.value,
-                      },
-                      "",
-                    )
-                  }
-                />
-              </label>
-            )}
             <Button
               variant="outline"
               disabled={!valid || busy}

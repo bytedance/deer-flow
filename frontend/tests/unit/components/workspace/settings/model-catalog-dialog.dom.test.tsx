@@ -139,3 +139,42 @@ it("stopping an import refreshes committed results and leaves the uncertain item
   ).toHaveProperty("disabled", false);
   expect(saved).toHaveBeenCalledTimes(1);
 });
+
+it("fills a custom connection in display order without losing the key", async () => {
+  render(
+    <ModelCatalogDialog
+      {...props}
+      providers={[
+        ...props.providers,
+        {
+          id: "openai-compatible",
+          display_name: "Custom",
+          requires_api_key: false,
+          custom_endpoint: true,
+        },
+      ]}
+    />,
+  );
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "openai-compatible" },
+  });
+  const endpoint = screen.getByLabelText(enUS.settings.models.endpoint);
+  const key = screen.getByLabelText("API Key");
+  const inputs = Array.from(document.querySelectorAll("input"));
+  expect(inputs.indexOf(endpoint as HTMLInputElement)).toBeLessThan(
+    inputs.indexOf(key as HTMLInputElement),
+  );
+  fireEvent.change(endpoint, {
+    target: { value: "https://custom.example/v1" },
+  });
+  fireEvent.change(key, { target: { value: "custom-key" } });
+  fireEvent.click(screen.getByRole("button", { name: "Fetch models" }));
+  await waitFor(() => expect(discover).toHaveBeenCalled());
+  expect(discover.mock.calls[0]![0]).toMatchObject({
+    provider: "openai-compatible",
+    base_url: "https://custom.example/v1",
+    api_key: "custom-key",
+  });
+  fireEvent.change(endpoint, { target: { value: "https://other.example/v1" } });
+  expect((key as HTMLInputElement).value).toBe("");
+});

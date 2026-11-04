@@ -16,10 +16,7 @@ import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { filterModels, projectRecentModels } from "@/core/models/catalog";
-import {
-  projectModelChoices,
-  type ModelChoiceProjection,
-} from "@/core/models/favorites";
+import { projectModelChoices } from "@/core/models/favorites";
 import { rememberModel, useRecentModels } from "@/core/models/recent";
 import { type Model } from "@/core/models/types";
 import { useModelFavorites } from "@/core/models/use-model-favorites";
@@ -39,10 +36,6 @@ type FocusedControl = {
   modelName: string;
   kind: "model" | "favorite";
 };
-
-function orderedModels(projection: ModelChoiceProjection): readonly Model[] {
-  return [...projection.favorites, ...projection.others];
-}
 
 function ModelDetails({ model }: { model: Model }) {
   return (
@@ -96,10 +89,32 @@ export function ModelPickerContent({
   const otherModels = projection.others.filter(
     (model) => !recentModels.some((recent) => recent.name === model.name),
   );
-  const visibleModels = orderedModels({
-    favorites: projection.favorites,
-    others: [...recentModels, ...otherModels],
-  });
+  const groups = [
+    {
+      key: "favorites",
+      heading: t.modelPicker.favorites,
+      models: projection.favorites,
+    },
+    { key: "recent", heading: t.modelPicker.recent, models: recentModels },
+    ...(providerNames.length > 1
+      ? [...new Set(otherModels.map((model) => model.provider ?? ""))].map(
+          (name) => ({
+            key: `provider:${name}`,
+            heading: name || t.modelPicker.otherModels,
+            models: otherModels.filter(
+              (model) => (model.provider ?? "") === name,
+            ),
+          }),
+        )
+      : [
+          {
+            key: "others",
+            heading: t.modelPicker.otherModels,
+            models: otherModels,
+          },
+        ]),
+  ];
+  const visibleModels = groups.flatMap((group) => group.models);
 
   const focusInitialModel = useCallback(() => {
     const preferredModel =
@@ -338,24 +353,11 @@ export function ModelPickerContent({
             </div>
           ) : (
             <>
-              {renderGroup(t.modelPicker.favorites, projection.favorites)}
-              {renderGroup(t.modelPicker.recent, recentModels)}
-              {providerNames.length > 1
-                ? [
-                    ...new Set(
-                      otherModels.map((model) => model.provider ?? ""),
-                    ),
-                  ].map((name) => (
-                    <div key={name}>
-                      {renderGroup(
-                        name || t.modelPicker.otherModels,
-                        otherModels.filter(
-                          (model) => (model.provider ?? "") === name,
-                        ),
-                      )}
-                    </div>
-                  ))
-                : renderGroup(t.modelPicker.otherModels, otherModels)}
+              {groups.map((group) => (
+                <div key={group.key}>
+                  {renderGroup(group.heading, group.models)}
+                </div>
+              ))}
             </>
           )}
         </div>

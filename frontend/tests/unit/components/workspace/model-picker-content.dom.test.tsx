@@ -479,3 +479,37 @@ it("searches model IDs and intersects provider filtering without changing select
   });
   expect(document.activeElement).toBe(modelButtons()[0]);
 });
+
+it("navigates in rendered provider order, including wrapping and filtered results", async () => {
+  favoriteNames = [];
+  const models = [
+    { ...MODELS[0]!, name: "a1", provider: "A" },
+    { ...MODELS[1]!, name: "b1", provider: "B" },
+    { ...MODELS[2]!, name: "a2", provider: "A" },
+  ];
+  render(<StatefulPicker models={models} selectedModelName="a1" />);
+  await screen.findByRole("group", { name: "A" });
+  const buttons = modelButtons();
+  expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Shared label (a1)",
+    "Gamma (a2)",
+    "Shared label (b1)",
+  ]);
+  for (const direction of ["ArrowDown", "ArrowUp"]) {
+    buttons[0]!.focus();
+    for (let step = 1; step <= buttons.length; step++) {
+      fireEvent.keyDown(document.activeElement!, { key: direction });
+      const index =
+        (direction === "ArrowDown" ? step : buttons.length - step) %
+        buttons.length;
+      expect(document.activeElement).toBe(buttons[index]);
+    }
+  }
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: "A" },
+  });
+  const filtered = modelButtons();
+  filtered[0]!.focus();
+  fireEvent.keyDown(filtered[0]!, { key: "ArrowDown" });
+  expect(document.activeElement).toBe(filtered[1]);
+});

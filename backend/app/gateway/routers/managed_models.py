@@ -251,10 +251,14 @@ async def discover_models(request: Request, body: ModelConnection):
         raise HTTPException(503, "Managed model storage is unavailable") from None
 
 
-def _save_import(profile: ManagedModel):
+def _save_import(profile: ManagedModel, connection: ModelConnection):
     config = get_app_config()
     reserved = {item.name for item in config.models if item.name not in config._managed_model_names}
-    return ManagedModelStore().save(profile, expected_revision=None, reserved_names=reserved, deduplicate=True).public()
+    source = (connection.saved_model_name, connection.expected_revision) if connection.saved_model_name and connection.expected_revision else None
+    try:
+        return ManagedModelStore().save(profile, expected_revision=None, reserved_names=reserved, deduplicate=True, expected_source=source).public()
+    except FileExistsError:
+        raise HTTPException(409, "Connection changed; reload before importing") from None
 
 
 @router.post("/import")
@@ -269,7 +273,7 @@ async def import_model(request: Request, body: ImportModelRequest):
         probe = await test_model(request, SaveModelRequest(config=profile))
         if not probe["ok"]:
             return {"status": "failed", "message": probe["message"]}
-        saved = await run_drained_write("Import managed model", _save_import, (HTTPException,), profile)
+        saved = await run_drained_write("Import managed model", _save_import, (HTTPException,), profile, body.connection)
         return {"status": "saved", "model": saved}
     except (OSError, ValueError):
         raise HTTPException(503, "Managed model storage is unavailable") from None

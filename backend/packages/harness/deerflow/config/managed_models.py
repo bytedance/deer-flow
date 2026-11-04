@@ -178,9 +178,11 @@ class ManagedModelStore:
             # Never include provider secrets or decrypted validation inputs.
             raise ValueError("Cannot read managed models; check the catalog and encryption key") from None
 
-    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None, deduplicate: bool = False) -> ManagedModel:
+    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None, deduplicate: bool = False, expected_source: tuple[str, str] | None = None) -> ManagedModel:
         with _lock, extensions_config_file_lock(self.path):
             records = self.list()
+            if expected_source is not None and not any((item.name, item.revision) == expected_source for item in records):
+                raise FileExistsError("Connection changed; reload before importing")
             if deduplicate:
                 for item in records:
                     if (item.provider, item.base_url, item.api_key, item.model) == (config.provider, config.base_url, config.api_key, config.model):

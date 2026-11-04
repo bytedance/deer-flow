@@ -24,7 +24,7 @@ async def fetch_model_catalog(profile: ManagedModel) -> tuple[list[str], bool]:
     key = profile.api_key.get_secret_value() if profile.api_key else None
     native = provider.protocol == "anthropic-messages"
     url = endpoint.rstrip("/") + ("/v1/models" if native else "/models")
-    headers = {"Accept": "application/json"}
+    headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
     if native:
         headers.update({"x-api-key": key or "", "anthropic-version": "2023-06-01"})
     elif key:
@@ -44,6 +44,10 @@ async def fetch_model_catalog(profile: ManagedModel) -> tuple[list[str], bool]:
                     if response.status_code in (404, 405):
                         raise DiscoveryError("discovery_unsupported")
                     if response.status_code != 200:
+                        raise DiscoveryError("discovery_failed")
+                    # Reject compression before HTTPX can allocate a decoded
+                    # chunk larger than our response budget.
+                    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
                         raise DiscoveryError("discovery_failed")
                     chunks = []
                     async for chunk in response.aiter_bytes():

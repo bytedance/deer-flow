@@ -180,3 +180,68 @@ def test_provider_projection_is_metadata_not_an_sdk_argument():
     app = AppConfig.model_validate({"models": [config], "sandbox": {"use": "test"}})
     client = create_chat_model(config.name, app_config=app, attach_tracing=False)
     assert "_managed_provider" not in client.model_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rotate", [False, True])
+@pytest.mark.parametrize("concurrent_import", [False, True])
+async def test_import_rechecks_saved_connection_after_probe(setup, monkeypatch, rotate, concurrent_import):
+    source = setup.save(ManagedModel(provider="openai", model="source", api_key="old-key"), expected_revision=None)
+    before = setup.path.read_bytes()
+
+    async def probe(request, body):
+        nonlocal before
+        assert body.config.api_key == SecretStr("old-key")
+        if concurrent_import:
+            setup.save(body.config, expected_revision=None)
+        if rotate:
+            setup.save(source.model_copy(update={"api_key": SecretStr("new-key")}), expected_revision=source.revision)
+            before = setup.path.read_bytes()
+        return {"ok": True, "message": "success"}
+
+    monkeypatch.setattr(router, "test_model", probe)
+    body = router.ImportModelRequest(connection=router.ModelConnection(provider="openai", saved_model_name=source.name, expected_revision=source.revision), model="new")
+    if rotate:
+        with pytest.raises(HTTPException) as exc:
+            await router.import_model(ADMIN, body)
+        assert exc.value.status_code == 409
+        assert setup.path.read_bytes() == before
+        assert len(setup.list()) == (2 if concurrent_import else 1)
+    else:
+        assert (await router.import_model(ADMIN, body))["status"] == "saved"
+        assert len(setup.list()) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoding", ["gzip", "br", "deflate", "identity, gzip"])
+async def test_compressed_catalog_is_rejected_before_reading(setup, monkeypatch, encoding):
+    reads = []
+    encodings = []
+
+    class CompressedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            import gzip
+
+            reads.append(True)
+            yield gzip.compress(b" " * (8 * 1024 * 1024))
+
+    async def send(client, request, **kwargs):
+        encodings.append(request.headers["accept-encoding"])
+        return httpx.Response(200, request=request, headers={"content-encoding": encoding}, stream=CompressedStream())
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    with pytest.raises(HTTPException) as exc:
+        await router.discover_models(ADMIN, connection())
+    assert exc.value.detail["code"] == "discovery_failed"
+    assert not reads
+    assert encodings == ["identity"]
+    assert not setup.path.exists()
+
+
+def test_import_source_must_still_exist_before_deduplication(setup):
+    profile = ManagedModel(provider="openai", model="existing", api_key="key")
+    setup.save(profile, expected_revision=None)
+    before = setup.path.read_bytes()
+    with pytest.raises(FileExistsError):
+        setup.save(profile, expected_revision=None, deduplicate=True, expected_source=("deleted-source", "old-revision"))
+    assert setup.path.read_bytes() == before
