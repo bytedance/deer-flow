@@ -14,7 +14,7 @@ import { Callout } from "nextra/components";
 | `TaskLifecycleContributor`   | `registry.task_lifecycle()`              | 每次 Lead 运行和子 Agent 的开始与结束 | 异步，被等待     | 任务存储            |
 | `SystemModelCallObserver`    | `registry.system_model_observer()`       | 每次 DeerFlow 自有模型调用之后     | 异步               | 任务存储，或分离存储 |
 | `AgentAssemblyObserver`      | `registry.agent_assembly_observer()`     | 每次 Agent 构建结束时              | **同步**           | 仅应用存储          |
-| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | 每次摘要压缩之后                   | 异步，即发即弃     | 分离存储            |
+| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | 每次摘要压缩之后                   | 异步，即发即弃     | 任务存储，或分离存储 |
 
 本页所有示例都来自同一个注册了全部四种贡献的扩展：
 
@@ -309,10 +309,13 @@ class ContextCompactionObserver(Protocol):
 | `output_content_hash`     | 摘要文本的 `canonical_hash`                            |
 | `compacted_message_count` | 移除了多少条消息                                       |
 | `kept_message_count`      | 保留了多少条消息                                       |
+| `task_id`                 | 压缩发生在哪个任务里；不在任务内时为 `None`            |
+| `run_id`                  | 该任务所属的运行，或 `None`                            |
+| `thread_id`               | 该任务所属的线程，或 `None`                            |
 
 要把事件和你手里的消息对应起来，必须用完全相同的方式哈希：`canonical_hash(message.content)`，直接传入 content 本身。绝不要先转成字符串，因为多模态 content 是 dict 列表，`str()` 的结果取决于键顺序。也不要试图事后通过对模型看到的内容做哈希来找回摘要：提示词里带的是摘要经过截断和转义的渲染版本，它的哈希不会等于 `output_content_hash`。
 
-这个通知是即发即弃的。它被分派到通知循环，不会阻塞模型这一轮；观察者收到的是**分离**存储，因为在这个调用点没有活跃任务。没有注册压缩观察者时，宿主连哈希这一步也会跳过。
+这个通知是即发即弃的。它被分派到通知循环，不会阻塞模型这一轮。在 Lead 运行或子 Agent 内部，观察者收到的是该任务的存储，`task_id`、`run_id`、`thread_id` 取自宿主放在其中的 `TaskInfo`，因此你可以按 `(thread_id, run_id)` 关联一次压缩，而不必去匹配哈希。手动 `/compact` 不在任何任务之内，所以观察者收到的是**分离**存储，三个 id 都是 `None`。没有父运行就启动的子 Agent 会传入它自己的存储，但其中没有 `TaskInfo`，所以 id 同样是 `None`。没有注册压缩观察者时，宿主连哈希这一步也会跳过。
 
 ### 示例
 
@@ -320,12 +323,13 @@ class ContextCompactionObserver(Protocol):
 class CompactionLogger:
     async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None:
         logger.info(
-            "%s v%s folded %d message(s) into summary %s, kept %d",
+            "%s v%s folded %d message(s) into summary %s, kept %d (run %s)",
             event.transform_kind,
             event.transform_version,
             event.compacted_message_count,
             event.output_content_hash[:12],
             event.kept_message_count,
+            event.run_id or "none",
         )
 ```
 
