@@ -227,10 +227,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="openai",
         display_name="OpenAI",
-        description="GPT-5, GPT-4.1, GPT-4o",
+        description="GPT-5.6, GPT-4.1, GPT-4o",
         use="langchain_openai:ChatOpenAI",
-        models=["gpt-5", "gpt-5-mini", "gpt-4.1", "gpt-4o"],
-        default_model="gpt-5",
+        models=["gpt-5.6-sol", "gpt-5.6-terra", "gpt-4.1", "gpt-4o"],
+        default_model="gpt-5.6-sol",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
         extra_config={
@@ -244,10 +244,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="openai_responses",
         display_name="OpenAI Responses API",
-        description="GPT-5 via /v1/responses",
+        description="GPT-5.6 via /v1/responses",
         use="langchain_openai:ChatOpenAI",
-        models=["gpt-5", "gpt-5-mini"],
-        default_model="gpt-5",
+        models=["gpt-5.6-sol", "gpt-5.6-terra"],
+        default_model="gpt-5.6-sol",
         env_var="OPENAI_API_KEY",
         package="langchain-openai",
         extra_config={
