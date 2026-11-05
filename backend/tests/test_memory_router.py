@@ -145,6 +145,43 @@ def test_import_route_without_agent_name_persists_default_bucket_markdown(tmp_pa
     assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_gateway_import"]
 
 
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("omit_revision", [False, True], ids=["older-revision", "omitted-revision"])
+def test_import_route_restores_edited_fact_from_backup(tmp_path, agent_name: str | None, omit_revision: bool) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Use PostgreSQL", "confidence": 0.9})
+            assert created.status_code == 200
+            fact_id = created.json()["facts"][0]["id"]
+            exported = client.get("/api/memory/export", params=params)
+            assert exported.status_code == 200
+            backup = exported.json()
+            if omit_revision:
+                backup["facts"][0].pop("revision")
+            edited = client.patch(f"/api/memory/facts/{fact_id}", params=params, json={"content": "Use SQLite"})
+            assert edited.status_code == 200
+
+            restored = client.post("/api/memory/import", params=params, json=backup)
+
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["facts"][0]["content"] == "Use PostgreSQL"
+            assert restored.json()["facts"][0]["id"] == fact_id
+            assert restored.json()["facts"][0]["revision"] == edited.json()["facts"][0]["revision"] + 1
+            reloaded = client.post("/api/memory/reload", params=params)
+            assert reloaded.status_code == 200
+            assert reloaded.json()["facts"] == restored.json()["facts"]
+    finally:
+        manager.close()
+
+
 def test_import_memory_route_preserves_source_error() -> None:
     app = make_authed_test_app()
     app.include_router(memory.router)
