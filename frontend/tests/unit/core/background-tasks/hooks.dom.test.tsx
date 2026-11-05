@@ -92,11 +92,15 @@ for (const { scope, cached } of [
   { scope: "detail", cached: true },
   { scope: "detail", cached: false },
   { scope: "list", cached: true },
+  { scope: "list", cached: false },
 ] as const) {
   test(`a delayed ${cached ? "cached" : "initial"} ${scope} read cannot undo cancellation after the panel closes`, async () => {
     const delayed = deferred<Response>();
     const before = scope === "detail" ? working : [working];
     const confirmed = scope === "detail" ? cancelled : [cancelled];
+    // An unloaded list is populated only by a fresh list GET.
+    const expectedAfterCancel =
+      scope === "list" && !cached ? undefined : confirmed;
     rs.mocked(fetch).mockImplementation((_url, init) =>
       init?.method === "POST"
         ? Promise.resolve(jsonResponse(cancelled))
@@ -127,14 +131,14 @@ for (const { scope, cached } of [
     await act(async () => {
       await result.current.cancel.mutateAsync(working.task_id);
     });
-    expect(client.getQueryData(key)).toEqual(confirmed);
+    expect(client.getQueryData(key)).toEqual(expectedAfterCancel);
 
     await act(async () => {
       // Deliberately ignore transport abort to verify the cache fence as well.
       delayed.resolve(jsonResponse(before));
       await delayed.promise;
     });
-    expect(client.getQueryData(key)).toEqual(confirmed);
+    expect(client.getQueryData(key)).toEqual(expectedAfterCancel);
 
     // A later legitimate refresh still updates the cache.
     rs.mocked(fetch).mockResolvedValue(jsonResponse(confirmed));

@@ -13,6 +13,7 @@ export async function fetchBackgroundTasks(
   signal?: AbortSignal,
 ): Promise<BackgroundTask[]> {
   const url = `${threadTasksUrl(threadId)}?limit=20`;
+  // Preserve the single-argument fetch call for callers that omit the signal.
   const response = signal ? await fetch(url, { signal }) : await fetch(url);
   if (!response.ok) {
     await throwGatewayApiError(
@@ -29,6 +30,7 @@ export async function fetchBackgroundTask(
   signal?: AbortSignal,
 ): Promise<BackgroundTaskDetail> {
   const url = threadTasksUrl(threadId, `/${encodeURIComponent(taskId)}`);
+  // Preserve the single-argument fetch call for callers that omit the signal.
   const response = signal ? await fetch(url, { signal }) : await fetch(url);
   if (!response.ok) {
     await throwGatewayApiError(

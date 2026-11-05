@@ -80,7 +80,7 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    for new/mock/static-demo threads and disable list queries unless `/api/features`
    reports startup-scoped `mcp_tasks` support. Default-disabled and memory-backend
    deployments therefore send no task requests. List at most 20 local records.
-   refresh every 3 seconds while any task is active, otherwise every 15 seconds.
+   Refresh every 3 seconds while any task is active, otherwise every 15 seconds.
    Fetch bounded details only for expanded cards and cancel via thread-scoped
    local IDs. Show results/previews, artifact metadata, input requests and bounded
    poll, notification and cancellation errors. Keep remote handles private.
