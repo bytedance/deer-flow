@@ -12,12 +12,22 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **subagents:** Durable batch items can wait for explicitly named prerequisites.
+  An optional, once-only lead-Agent follow-up completes a previously requested
+  summary or delivery after the batch ends, with persisted admission, cancellation
+  and authorization checks. Active Goals retain continuation ownership. ([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
 ### Fixed
+
+- **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
+  longer create or acquire a sandbox before the first sandbox-backed tool
+  call. Existing sandbox bindings and providers that require skill uploads
+  retain their eager synchronization behavior. ([#7782])
 
 - **parsing:** Follow-up suggestions and the `/goal` evaluator keep a literal
   `<think>` tag that appears inside a JSON string value, such as an answer
@@ -16026,6 +16036,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
