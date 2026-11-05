@@ -180,12 +180,17 @@ def test_business_module_mcp_fastmcp_import_fallback(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", MockMCP2FastMCPModule())
 
-    # Reload the module under the simulated MCP 2.x environment
     import deerflow.capabilities.business as business_mod
 
-    importlib.reload(business_mod)
+    try:
+        # Reload the module under the simulated MCP 2.x environment
+        importlib.reload(business_mod)
 
-    # connection_config and is_bundled_connection remain fully functional
-    cfg = business_mod.connection_config("wecom", {"webhook_key": "my-key"})
-    assert cfg["type"] == "stdio"
-    assert business_mod.is_bundled_connection(cfg["command"], cfg["args"], cfg["env"]) is True
+        # connection_config and is_bundled_connection remain fully functional
+        cfg = business_mod.connection_config("wecom", {"webhook_key": "my-key"})
+        assert cfg["type"] == "stdio"
+        assert business_mod.is_bundled_connection(cfg["command"], cfg["args"], cfg["env"]) is True
+    finally:
+        # Restore original module state so subsequent tests have real FastMCP
+        monkeypatch.undo()
+        importlib.reload(business_mod)
