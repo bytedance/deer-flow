@@ -136,8 +136,9 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
-HTTPX clients for RAGFlow, LightRAG, You.com, GroundRoute and Webz use
-`asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay on-loop.
+HTTPX clients for RAGFlow, LightRAG, You.com, GroundRoute, Webz and Browserless
+use `asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay
+on-loop.
 
 ### Harness / App Split
 

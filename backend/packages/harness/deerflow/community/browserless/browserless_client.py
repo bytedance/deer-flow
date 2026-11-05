@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -142,7 +143,8 @@ class BrowserlessClient:
 
         logger.debug(f"Fetching URL via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Client construction loads TLS trust synchronously; keep it off the loop.
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/content",
                     json=payload,
@@ -232,7 +234,8 @@ class BrowserlessClient:
 
         logger.debug(f"Capturing URL screenshot via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Client construction loads TLS trust synchronously; keep it off the loop.
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/screenshot",
                     json=payload,
