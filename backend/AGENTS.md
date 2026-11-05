@@ -138,7 +138,8 @@ Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
 HTTPX clients for several community providers, including RAGFlow, LightRAG,
 You.com, GroundRoute, Webz and InfoQuest, use `asyncio.to_thread` for synchronous
-TLS setup; requests and cleanup stay on-loop.
+TLS setup; requests and cleanup stay on-loop. and the construction is owned as a 
+task so cancelling during setup still closes the client it builds.
 The list is non-exhaustive: jsonify, SearXNG, Browserless, Jina 
 still construct their clients on the loop and should follow the same rule when
 touched.
