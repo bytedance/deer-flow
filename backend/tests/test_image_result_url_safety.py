@@ -88,6 +88,11 @@ def _stub_tencent_wsa(module, url):
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_search", return_value=(data, None))], _sync(module.web_search_tool)
 
 
+def _stub_desearch(module, url):
+    data = {"data": [{"title": "t", "link": url, "snippet": "c"}]}
+    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_desearch_get", return_value=(data, None))], _sync(module.web_search_tool)
+
+
 def _stub_serply(module, url):
     data = {"results": [{"title": "t", "link": url, "description": "c"}]}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_serply_get", return_value=(data, None))], _sync(module.web_search_tool)
@@ -167,6 +172,7 @@ _TEXT_SEARCH_STUBS = {
     "youcom": _stub_youcom,
     "tencent_wsa": _stub_tencent_wsa,
     "serply": _stub_serply,
+    "desearch": _stub_desearch,
     "groundroute": _stub_groundroute,
     "sofya": _stub_sofya,
     "ddg_search": _stub_ddg_search,

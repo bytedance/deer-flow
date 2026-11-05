@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Desearch", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -148,6 +148,18 @@ tools:
     # vertical: news   # 或 scholar；默认为普通 Google 搜索
 ```
 以 JSON 形式返回实时 Google 搜索结果。需要 [Serply](https://serply.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言。详见 [Serply 文档](https://serply.io/docs)。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.desearch.tools:web_search_tool
+    api_key: $DESEARCH_API_KEY
+    max_results: 5
+```
+使用 [Desearch API](https://desearch.ai) 搜索网页，需要 API Key。DeerFlow 每次搜索发送一个 GET /web 请求；该端点每次请求最多返回 20 条结果。`max_results` 默认为 5，在本地最多返回 10 条结果。不支持时间范围或域名过滤。详见[文档](https://desearch.ai/docs)。
 
 无需额外依赖。
 
