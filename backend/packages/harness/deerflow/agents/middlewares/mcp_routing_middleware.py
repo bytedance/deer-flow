@@ -59,9 +59,16 @@ class McpRoutingMiddleware(AgentMiddleware[AgentState]):
             name = str(raw_name)
             if not name:
                 continue
+            # A serialized index is untrusted shape: anything that is not a
+            # mapping carries no priority or keywords, so skip it instead of
+            # failing on ``.get``. Middleware construction happens per run, and
+            # one malformed entry would take every model call down with it.
+            if not isinstance(raw_entry, Mapping):
+                continue
             try:
                 priority = int(raw_entry.get("priority", 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError: int() refuses inf, which JSON accepts.
                 priority = 0
             raw_keywords = raw_entry.get("keywords") or []
             if not isinstance(raw_keywords, Sequence) or isinstance(raw_keywords, (str, bytes)):

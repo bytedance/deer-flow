@@ -12,6 +12,59 @@ import {
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
+  usage: {
+    title: "Token 用量",
+    description: "查看输入、输出及缓存命中 Token 用量。",
+    reportingNote:
+      "统计来自已记录的服务商用量；运行中或服务商未返回用量时可能不完整。缓存命中已包含在输入 Token 中。",
+    period: "统计周期",
+    last7Days: "近 7 天",
+    last30Days: "近 30 天",
+    refresh: "刷新",
+    tokens: "Token 总量",
+    runs: "运行次数",
+    inputTokens: "输入 Token",
+    outputTokens: "输出 Token",
+    cachedTokens: "缓存命中输入 Token",
+    daily: "每日 Token 用量",
+    dailyDetails: "查看每日明细",
+    models: "模型用量分布",
+    noUsage: "此周期内暂无用量记录。",
+    unknown: "未知",
+    timezoneNote: "每日统计使用浏览器当前的 UTC 时区偏移。",
+    date: "日期",
+    model: "模型",
+    noModels: "此周期内暂无模型用量记录。",
+    noRuns: "没有符合筛选条件的运行。",
+    recentRuns: "最近运行",
+    recentRunsHint: "包含所有日期，按最新时间排序，不受上方统计周期限制。",
+    status: "运行状态",
+    allStatuses: "全部状态",
+    pending: "排队中",
+    running: "运行中",
+    success: "已完成",
+    error: "失败",
+    timeout: "超时",
+    interrupted: "已中断",
+    cancelled: "已取消",
+    unknownStatus: "其他状态",
+    previous: "上一页",
+    next: "下一页",
+    page: (page) => `第 ${page} 页`,
+    started: "开始时间",
+    duration: "耗时",
+    conversation: "会话",
+    untitled: "未命名会话",
+    details: "错误详情",
+    loadFailed: "用量数据加载失败，请重试。",
+    retry: "重试",
+    forbidden: "你没有查看用量与运行记录的权限。",
+    unavailable: "当前服务器暂不支持用量统计。",
+    databaseRequired:
+      "用量统计暂不可用，需要 SQLite 或 PostgreSQL 数据库。如问题持续，请联系管理员。",
+    staticUnavailable: "静态演示模式不提供用量统计。",
+    loading: "正在加载用量…",
+  },
   // Locale meta
   locale: {
     localName: "中文",
@@ -88,6 +141,11 @@ export const zhCN: Translations = {
         title: "知识空间与连接",
         description:
           "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
+      },
+      knowledgeCenter: {
+        title: "知识中心",
+        description:
+          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
       },
       knowledgeManagement: {
         title: "知识入库与处理",
@@ -369,6 +427,12 @@ export const zhCN: Translations = {
   },
 
   modelPicker: {
+    search: "搜索模型名称或 ID…",
+    provider: "渠道",
+    allProviders: "全部渠道",
+    noResults: "没有匹配的模型",
+    recent: "最近使用",
+
     title: "选择模型",
     favorites: "收藏",
     otherModels: "其他模型",
@@ -615,6 +679,25 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    runInputMode: "运行中发送方式",
+    queueMode: "排队执行",
+    steerMode: "调整当前任务",
+    queueModeHelp: "当前任务结束后再执行",
+    steerModeHelp: "在下一处可处理的位置调整当前任务",
+    runInputSend: "发送补充消息",
+    runInputTextOnly:
+      "运行中请发送纯文字，附件和斜杠命令请等当前任务结束后发送。",
+    runInputUnavailable:
+      "尚未确认消息是否送达，请检查任务状态后重试，输入内容已保留。",
+    stopRun: "停止当前任务",
+    runInputQueued: "排队中",
+    runInputSteering: "等待加入当前任务",
+    runInputUnapplied: "本轮未确认生效",
+    runInputRetry: "重新发送",
+    runInputCancel: "移除这条消息",
+    runInputDispatching: "待确认",
+    runInputReplayUnavailable:
+      "这轮任务中途调整过，请发送新消息继续，暂不支持只重放其中一段。",
     stopStreamingUnavailable: "你的角色无权停止正在运行的回合。",
     startTurnUnavailable: "你的角色无权开启新的回合。",
   },
@@ -813,7 +896,9 @@ export const zhCN: Translations = {
   subagentBatches: {
     label: "批处理",
     title: "子智能体批处理",
-    description: "面向大量独立条目的持久化、可恢复执行。",
+    description: "在后台执行并保留进度的批量任务。",
+    followUpPending: "这批任务结束后，会继续完成你要求的后续工作。",
+    followUpStopped: "已停止自动接续。",
     workerUnavailable:
       "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
     empty: "暂无子智能体批处理",
@@ -1817,6 +1902,30 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     models: {
+      connectionSettings: "渠道配置",
+      importTitle: "获取并添加模型",
+      importDescription:
+        "获取渠道目录后，勾选模型并测试添加。测试可能产生接口费用，只有通过流式工具调用测试的模型才会启用。",
+      savedConnection: "使用已有渠道配置",
+      newConnection: "新建渠道配置",
+      fetchModels: "获取模型",
+      searchModels: "搜索模型…",
+      selectVisible: "选择当前结果",
+      clearSelection: "清空选择",
+      alreadyConfigured: "已配置",
+      noCatalogResults: "没有匹配的模型，请修改搜索或手动添加。",
+      catalogTruncated:
+        "目录最多显示 2,000 个模型或 20 页，其余模型可手动添加。",
+      discovery_unsupported: "此接口不支持获取模型目录，请手动填写模型 ID。",
+      discovery_failed: "获取目录失败，请检查渠道连接后重试。",
+      importUncertain: "结果未确认，重试时会检查模型是否已经保存。",
+      importStopped:
+        "已停止，已完成的模型会保留；可重试确认最后一项的保存结果。",
+      stopImport: "停止",
+      closeCatalog: "完成",
+      catalogCount: (visible, total, selected) =>
+        `显示 ${visible} / ${total} 个 · 已选 ${selected} 个`,
+      testAndAdd: (count) => `测试并添加（${count}）`,
       title: "模型",
       description: "管理供用户选择的共享模型。服务器配置中的模型为只读。",
       adminOnly: "只有管理员可以管理共享模型，演示模式不支持此功能。",

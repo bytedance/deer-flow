@@ -67,6 +67,7 @@ describe("ArtifactViewer", () => {
       threadId,
       isMock: false,
       full: false,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -79,6 +80,7 @@ describe("ArtifactViewer", () => {
         threadId,
         isMock: true,
         full: false,
+        signal: expect.any(AbortSignal),
       });
     });
   });
@@ -139,6 +141,7 @@ describe("ArtifactViewer", () => {
       threadId,
       isMock: false,
       full: true,
+      signal: expect.any(AbortSignal),
     });
     expect(screen.queryByRole("button", { name: "Load full file" })).toBe(null);
   });

@@ -16,6 +16,7 @@ import hashlib
 import logging
 import re
 import uuid
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
@@ -54,6 +55,7 @@ from app.gateway.conversation_reader import (
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE, get_trusted_internal_owner_user_id
 from app.gateway.pagination import trim_run_message_page
+from app.gateway.run_inputs import RunInputRequest, change_run_input, list_thread_inputs, submit_run_input
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -81,6 +83,32 @@ from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+
+
+@router.post("/{thread_id}/runs/{run_id}/inputs")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def create_run_input(thread_id: ThreadId, run_id: str, body: RunInputRequest, request: Request):
+    return await submit_run_input(thread_id, run_id, body, request)
+
+
+@router.get("/{thread_id}/inputs")
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def get_thread_inputs(thread_id: ThreadId, request: Request):
+    return await list_thread_inputs(thread_id, request)
+
+
+@router.delete("/{thread_id}/runs/{run_id}/inputs/{input_id}")
+@require_permission("runs", "cancel", owner_check=True, require_existing=True)
+async def remove_run_input(thread_id: ThreadId, run_id: str, input_id: str, request: Request):
+    return await change_run_input(thread_id, run_id, input_id, request)
+
+
+@router.post("/{thread_id}/runs/{run_id}/inputs/{input_id}/retry")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def retry_run_input(thread_id: ThreadId, run_id: str, input_id: str, request: Request):
+    return await change_run_input(thread_id, run_id, input_id, request, retry=True)
+
+
 REGENERATE_HISTORY_SCAN_LIMIT = 200
 # Doubled to keep ~200 effective checkpoints when duration-only checkpoints
 # (one per successful run in steady state) consume roughly half of history.
@@ -181,7 +209,7 @@ def compute_run_durations(runs) -> dict[str, int]:
     return durations
 
 
-def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> None:
+def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int], *, thread_id: str | None = None) -> None:
     """Attach each run's elapsed seconds to that run's final visible AI message only.
 
     ``turn_duration`` is the run's wall-clock lifetime (``compute_run_durations``),
@@ -209,10 +237,37 @@ def stamp_turn_duration_on_last_ai(messages, run_durations: dict[str, int]) -> N
             continue
         content = msg.get("content")
         payload = content if isinstance(content, dict) else msg
-        metadata = msg.get("metadata") or {}
+        metadata = msg.get("metadata")
+        if metadata is None:
+            metadata = {}
+        elif not isinstance(metadata, Mapping):
+            logger.warning(
+                "Ignoring malformed event metadata for thread %s at row seq %s: expected a mapping, got %s",
+                sanitize_log_param(thread_id or "<unknown>"),
+                msg.get("seq", "<unknown>"),
+                type(metadata).__name__,
+            )
+            metadata = {}
         is_middleware = str(metadata.get("caller", "")).startswith("middleware:")
         if payload.get("type") == "ai" and not is_middleware:
-            payload.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[rid]
+            raw_additional_kwargs = payload.get("additional_kwargs")
+            if raw_additional_kwargs is None:
+                additional_kwargs: dict[str, Any] = {}
+            elif isinstance(raw_additional_kwargs, Mapping):
+                # A Mapping is not necessarily mutable (for example, a
+                # MappingProxyType from a serializer), so copy it before
+                # attaching the duration.
+                additional_kwargs = dict(raw_additional_kwargs)
+            else:
+                logger.warning(
+                    "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+                    sanitize_log_param(thread_id or "<unknown>"),
+                    msg.get("seq", "<unknown>"),
+                    type(raw_additional_kwargs).__name__,
+                )
+                additional_kwargs = {}
+            payload["additional_kwargs"] = additional_kwargs
+            additional_kwargs["turn_duration"] = run_durations[rid]
             stamped.add(rid)
 
 
@@ -753,7 +808,17 @@ async def _require_successful_source_run(thread_id: str, run_id: str, request: R
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
     if _run_status_value(record) != RunStatus.success.value:
         raise HTTPException(status_code=409, detail="Only successful assistant runs can be edited and rerun")
+    await _reject_multi_input_replay(run_id, request, user_id=user_id)
     return record
+
+
+async def _reject_multi_input_replay(run_id: str, request: Request, *, user_id=None) -> None:
+    store = getattr(get_run_manager(request), "input_store", None)
+    if getattr(store, "supports_run_inputs", False) is not True:
+        return
+    row = await store.get(run_id, user_id=user_id)
+    if row is not None and any(entry.get("mode") == "steer" and entry.get("status") != "cancelled" for entry in (row.get("run_inputs") or {}).get("items", [])):
+        raise HTTPException(409, "This Run was adjusted while working; send a new message instead of replaying part of it")
 
 
 async def _find_interrupted_target_run_id(
@@ -832,6 +897,7 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         raise HTTPException(status_code=409, detail="Could not find the user message for this assistant response")
     if target_run_id is None:
         raise HTTPException(status_code=409, detail="Could not find source run for assistant message")
+    await _reject_multi_input_replay(target_run_id, request, user_id=await _run_scope_user_id(request, thread_id))
     previous_human_id = _message_id(previous_human)
     if not previous_human_id:
         raise HTTPException(status_code=409, detail="The source user message is missing an id")
@@ -1544,7 +1610,7 @@ async def list_thread_messages(
     run_durations = compute_run_durations(runs)
 
     if run_durations:
-        stamp_turn_duration_on_last_ai(messages, run_durations)
+        stamp_turn_duration_on_last_ai(messages, run_durations, thread_id=thread_id)
 
     return messages
 
@@ -1613,7 +1679,7 @@ async def _enrich_thread_message_page(
     # endpoints already use ``stamp_turn_duration_on_last_ai``; the page
     # endpoint was inlining the equivalent loop but stamping every AI row,
     # which #4163 fixed for the other paths and missed here.
-    stamp_turn_duration_on_last_ai(data, run_durations)
+    stamp_turn_duration_on_last_ai(data, run_durations, thread_id=thread_id)
     return data
 
 
@@ -1678,7 +1744,7 @@ async def list_run_messages(
         if record:
             durations = compute_run_durations([record])
             if durations:
-                stamp_turn_duration_on_last_ai(data, durations)
+                stamp_turn_duration_on_last_ai(data, durations, thread_id=thread_id)
 
     return {"data": data, "has_more": has_more}
 
@@ -1854,12 +1920,18 @@ async def list_run_events(
     user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     if event_types:
-        types = event_types.split(",")
+        # Split on commas and normalise each entry: the value goes straight into
+        # a SQL ``IN``, so a padded entry ("message, tool") would silently match
+        # nothing and return a 200 with a truncated audit trail. Blank entries
+        # carry no intent and are dropped; a filter that reduces to nothing is
+        # the same as no filter, matching the empty-string case above.
+        types = [name for entry in event_types.split(",") if (name := entry.strip())]
         if len(types) > MAX_EVENT_TYPE_FILTERS:
             raise HTTPException(
                 status_code=422,
                 detail=f"event_types accepts at most {MAX_EVENT_TYPE_FILTERS} values",
             )
+        types = types or None
     else:
         types = None
     events = await event_store.list_events(

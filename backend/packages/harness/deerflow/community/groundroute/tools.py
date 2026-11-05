@@ -112,7 +112,7 @@ def _response_results(data: object) -> list[dict] | None:
 
 
 async def _post_search(api_key: str, body: dict) -> dict:
-    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+    async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
         response = await client.post(
             _GROUNDROUTE_ENDPOINT,
             json=body,

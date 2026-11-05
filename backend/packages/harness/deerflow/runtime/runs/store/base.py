@@ -118,6 +118,22 @@ def run_is_before_cursor(
 
 
 class RunStore(abc.ABC):
+    supports_run_inputs = False
+
+    async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
+        """Atomically mutate a bounded input state with the current run row.
+
+        ``change`` is a synchronous host callback, never client-supplied code.
+        Serialize against status/cancellation; reject a foreign or expired owner.
+        """
+        raise NotImplementedError("Run inputs are unavailable in this store")
+
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+        raise NotImplementedError("Run inputs are unavailable in this store")
+
+    async def active_input_run(self, thread_id, *, user_id=None):
+        raise NotImplementedError("Run inputs are unavailable in this store")
+
     # Explicit idempotency_key / idempotency_request keyword parameters each
     # declare support for that field. An override accepting them only through
     # **kwargs must opt in below and persist both the key and resume identity.

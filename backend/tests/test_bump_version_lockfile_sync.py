@@ -45,19 +45,20 @@ pytestmark = pytest.mark.skipif(
     reason="the fake `uv` on PATH is an extensionless shebang script; Windows does not execute those",
 )
 
-# Minimal versions of the three files bump_version.sh rewrites, plus the lock
-# entry uv writes for the root ("virtual") package. Only the fields the script
-# touches are present, so a stray rewrite shows up as a diff.
+# Minimal versions of the files bump_version.sh rewrites, plus the lock entries
+# uv writes for the root package and the deerflow-harness workspace member. Only
+# the fields the script touches are present, so a stray rewrite shows up as a diff.
 PYPROJECT = '[project]\nname = "deer-flow"\nversion = "2.1.0-rc0"\n'
+HARNESS_PYPROJECT = '[project]\nname = "deerflow-harness"\nversion = "2.1.0-rc0"\n'
 PACKAGE_JSON = '{\n  "name": "deer-flow-frontend",\n  "version": "2.1.0-rc0",\n  "private": true\n}\n'
 CHART = 'apiVersion: v2\nname: deer-flow\nversion: 2.1.0-rc0\nappVersion: "2.1.0-rc0"\n'
-UV_LOCK = 'version = 1\n\n[[package]]\nname = "deer-flow"\nversion = "2.1.0rc0"\nsource = { virtual = "." }\n'
+UV_LOCK = 'version = 1\n\n[[package]]\nname = "deer-flow"\nversion = "2.1.0rc0"\nsource = { virtual = "." }\n\n[[package]]\nname = "deerflow-harness"\nversion = "2.1.0rc0"\nsource = { editable = "packages/harness" }\n'
 
-# Emulates the uv behavior the release flow depends on: `uv lock` records the
-# pyproject version in the root lock entry, in uv's PEP 440 form (for these
-# inputs that only means dropping the `-`), and `uv lock --check` (run by the
-# verify_versions.sh self-check) fails while the entry lags. The invocation is
-# logged so the test can tell whether the script called uv at all.
+# Emulates the uv behavior the release flow depends on: `uv lock` records each
+# workspace member's pyproject version in the lock, in uv's PEP 440 form (for
+# these inputs that only means dropping the `-`), and `uv lock --check` (run by
+# the verify_versions.sh self-check) fails while an entry lags. The invocation
+# is logged so the test can tell whether the script called uv at all.
 FAKE_UV = """#!/usr/bin/env python3
 import re
 import sys
@@ -74,21 +75,36 @@ if args not in (["lock"], ["lock", "--check"]):
 root = Path.cwd()
 lock_path = root / "uv.lock"
 lock_text = lock_path.read_text(encoding="utf-8")
-pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', pyproject).group(1)
-normalized = declared.replace("-", "")
-recorded = re.search(r'(?m)^name = "deer-flow"\\nversion = "([^"]+)"', lock_text).group(1)
+
+members = [("deer-flow", root / "pyproject.toml")]
+harness = root / "packages" / "harness" / "pyproject.toml"
+if harness.exists():
+    members.append(("deerflow-harness", harness))
+
+for name, pyproject in members:
+    declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', pyproject.read_text(encoding="utf-8")).group(1)
+    normalized = declared.replace("-", "")
+    recorded = re.search(rf'(?m)^name = "{name}"\\nversion = "([^"]+)"', lock_text).group(1)
+    if args == ["lock", "--check"]:
+        if recorded != normalized:
+            sys.exit("The lockfile at `uv.lock` needs to be updated, but `--check` was provided.")
+    else:
+        lock_text = lock_text.replace(
+            f'name = "{name}"\\nversion = "{recorded}"',
+            f'name = "{name}"\\nversion = "{normalized}"',
+            1,
+        )
 
 if args == ["lock", "--check"]:
-    sys.exit(0 if recorded == normalized else "The lockfile at `uv.lock` needs to be updated, but `--check` was provided.")
-lock_path.write_text(lock_text.replace(f'version = "{recorded}"', f'version = "{normalized}"', 1), encoding="utf-8")
+    sys.exit(0)
+lock_path.write_text(lock_text, encoding="utf-8")
 """
 
 
 def _write_sandbox(root: Path) -> Path:
     """Materialize a repo-shaped tree the scripts can run against."""
     (root / "scripts").mkdir(parents=True)
-    (root / "backend").mkdir()
+    (root / "backend" / "packages" / "harness").mkdir(parents=True)
     (root / "frontend").mkdir()
     (root / "deploy" / "helm" / "deer-flow").mkdir(parents=True)
 
@@ -96,6 +112,7 @@ def _write_sandbox(root: Path) -> Path:
         shutil.copy2(REPO_ROOT / "scripts" / name, root / "scripts" / name)
 
     (root / "backend" / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+    (root / "backend" / "packages" / "harness" / "pyproject.toml").write_text(HARNESS_PYPROJECT, encoding="utf-8")
     (root / "backend" / "uv.lock").write_text(UV_LOCK, encoding="utf-8")
     (root / "frontend" / "package.json").write_text(PACKAGE_JSON, encoding="utf-8")
     (root / "deploy" / "helm" / "deer-flow" / "Chart.yaml").write_text(CHART, encoding="utf-8")
@@ -144,6 +161,8 @@ def test_bump_version_refreshes_the_lockfile(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     assert _lock_version(root) == "2.2.0", "backend/uv.lock still pins the previous version"
     assert (root / "backend" / "pyproject.toml").read_text(encoding="utf-8") == PYPROJECT.replace("2.1.0-rc0", "2.2.0")
+    assert (root / "backend" / "packages" / "harness" / "pyproject.toml").read_text(encoding="utf-8") == HARNESS_PYPROJECT.replace("2.1.0-rc0", "2.2.0"), "the deerflow-harness workspace member must move with the release"
+    assert 'name = "deerflow-harness"\nversion = "2.2.0"' in (root / "backend" / "uv.lock").read_text(encoding="utf-8"), "uv rewrites the harness lock entry, and the script must let it"
     invocations = (bin_dir / "uv-calls.log").read_text(encoding="utf-8").splitlines()
     assert invocations and all(line.startswith("uv lock") for line in invocations), f"bump_version.sh never invoked uv lock: {invocations}"
 
@@ -157,6 +176,7 @@ def test_bump_version_normalizes_a_prerelease_into_the_lock(tmp_path: Path) -> N
 
     assert result.returncode == 0, result.stderr
     assert (root / "backend" / "pyproject.toml").read_text(encoding="utf-8") == PYPROJECT.replace("2.1.0-rc0", "2.1.0-rc1")
+    assert (root / "backend" / "packages" / "harness" / "pyproject.toml").read_text(encoding="utf-8") == HARNESS_PYPROJECT.replace("2.1.0-rc0", "2.1.0-rc1")
     assert _lock_version(root) == "2.1.0rc1", "uv normalizes the prerelease in the lock, and the script must let it"
 
 
@@ -175,4 +195,5 @@ def test_bump_version_refuses_to_run_without_uv(tmp_path: Path) -> None:
     assert result.returncode != 0, "a missing uv must be an error: the lock would stay stale"
     assert "uv" in (result.stderr + result.stdout)
     assert (root / "backend" / "pyproject.toml").read_text(encoding="utf-8") == PYPROJECT, "the script edited files before checking for uv"
+    assert (root / "backend" / "packages" / "harness" / "pyproject.toml").read_text(encoding="utf-8") == HARNESS_PYPROJECT, "the script edited files before checking for uv"
     assert _lock_version(root) == "2.1.0rc0"

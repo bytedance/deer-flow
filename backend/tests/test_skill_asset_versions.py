@@ -24,7 +24,7 @@ def assets(tmp_path, monkeypatch):
     storage = UserScopedSkillStorage("owner", host_path=str(tmp_path / "skills"))
     root = storage.get_custom_skill_dir("example")
     root.mkdir(parents=True)
-    (root / "SKILL.md").write_text(CONTENT, encoding="utf-8")
+    (root / "SKILL.md").write_text(CONTENT, encoding="utf-8", newline="")
     engine = create_engine(f"sqlite:///{tmp_path / 'mutations.db'}")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(engine, expire_on_commit=False)
