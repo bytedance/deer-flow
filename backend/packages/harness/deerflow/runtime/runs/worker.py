@@ -91,10 +91,12 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     should_continue_goal,
     visible_conversation_signature,
+    wake_goal_after_external_wait,
     write_thread_goal,
 )
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -746,6 +748,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1229,6 +1233,14 @@ async def run_agent(
                 )
             return
         started = True
+
+        goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
+        if goal_wakeup is not None:
+            if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
+                await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
+                return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
 
         if ctx.on_run_admitted is not None:
             try:

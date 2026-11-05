@@ -39,6 +39,13 @@ Regressions: `tests/test_aio_scoped_env_concurrency.py`.
 
 ## Reuse admission
 
+Open-mode creation returns its port reservation when the Docker or Apple
+Container CLI raises `FileNotFoundError` or `PermissionError` during spawn.
+Catch these only around the CLI call, preserving the original exception;
+post-start errors cannot prove absence. Restricted creation must not opt in:
+its proxy may already own the port, even if the final sandbox CLI cannot start.
+Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
+
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes
 that fence and ambiguous shell or bash creation tombstones; a pending creation
