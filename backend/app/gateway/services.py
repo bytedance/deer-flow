@@ -688,7 +688,7 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
     for field in ("continuation_count", "max_continuations", "no_progress_count", "max_no_progress_continuations"):
         if field in value and (type(value[field]) is not int or value[field] < 0):
             raise HTTPException(status_code=400, detail=f"{location}.{field} must be a non-negative integer")
-    return {**value, "objective": objective}
+    return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
@@ -2663,21 +2663,46 @@ async def start_run(
                 except Exception:
                     logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
             execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
-            await run_agent(
-                bridge,
-                run_mgr,
-                record,
-                ctx=execution_context,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=body.stream_subgraphs,
-                interrupt_before=body.interrupt_before,
-                interrupt_after=body.interrupt_after,
-                knowledge_scope=admitted_knowledge_scope,
-                **incarnation_kwargs,
-            )
+            artifact_imports = getattr(request.state, "extension_artifact_imports", None)
+            artifact_lifetime = None
+            if artifact_imports:
+                from contextlib import AsyncExitStack
+
+                from deerflow_extension_api import AgentRunError
+
+                from app.gateway.extension_artifacts import verify_imports
+
+                artifact_lifetime = AsyncExitStack()
+
+                async def verify_artifacts():
+                    # RunContext invokes this after durable admission and before
+                    # Agent construction. A reused key never launches a worker.
+                    try:
+                        await await_drained(verify_imports(request, record.user_id, thread_id, artifact_imports, lifetime=artifact_lifetime))
+                    except AgentRunError:
+                        record.stop_reason = "artifact_conflict"
+                        raise
+
+                execution_context = replace(execution_context, verify_artifacts=verify_artifacts)
+            try:
+                await run_agent(
+                    bridge,
+                    run_mgr,
+                    record,
+                    ctx=execution_context,
+                    agent_factory=agent_factory,
+                    graph_input=graph_input,
+                    config=config,
+                    stream_modes=stream_modes,
+                    stream_subgraphs=body.stream_subgraphs,
+                    interrupt_before=body.interrupt_before,
+                    interrupt_after=body.interrupt_after,
+                    knowledge_scope=admitted_knowledge_scope,
+                    **incarnation_kwargs,
+                )
+            finally:
+                if artifact_lifetime is not None:
+                    await await_drained(artifact_lifetime.aclose())
             if execution_context.agent_runs is not None and run_mgr.input_store is not None:
                 from app.gateway.run_inputs import dispatch_queued_inputs
                 from deerflow.runtime.runs.inputs import RunInputs
