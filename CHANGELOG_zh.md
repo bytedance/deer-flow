@@ -23,6 +23,10 @@
 
 ### 修复
 
+- **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
+  沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
+  ([#7782])
+
 - **扩展：** 上下文压缩观察者现在能知道压缩发生在哪个任务里。在 Lead 运行或子 Agent
   内部，观察者收到的是该任务的存储，而不再是分离存储；`CompactionEvent` 新增
   `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
@@ -12758,3 +12762,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
