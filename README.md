@@ -337,6 +337,12 @@ fences, including unclosed fences, in complete and streamed replies.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
 
+   Use **Fetch and add models** to reuse a saved connection or enter a new one,
+   search its catalog, and test selected models before adding them. Existing
+   entries are retained on retries; individual failures remain available to retry.
+   Chat pickers support name/ID search, provider filtering, favorites and the
+   eight most recently selected models, scoped to your account in this browser.
+
    The OpenAI preset routes `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
    `gpt-6-sol` and `gpt-6-luna` through the Responses API for tool calling,
    with model-specific thinking and reasoning-effort defaults. Flash mode
@@ -2690,6 +2696,11 @@ historical user messages do not grant current authorization. See
 
 Automatic and manual compaction exclude old todo reminder messages from both the
 summary input and retained context. The current todo list stays in thread state.
+Manual thread-state updates and run input must send it as a list of objects with
+string `content` and a `pending` / `in_progress` / `completed` status (a missing
+status defaults to `pending`); another shape is rejected with HTTP 400, and an
+already-stored entry of an unusable shape is ignored instead of failing the model
+call.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.

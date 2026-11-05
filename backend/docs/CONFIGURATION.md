@@ -342,6 +342,26 @@ Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
 
+Settings → Models → **Fetch and add models** reads the connection's model
+catalog without changing configuration. Administrators can reuse an existing
+saved connection without exposing its key, search IDs, select visible results,
+and test/add the selection. Each selected new model must pass the existing
+streaming tool-call probe before it is enabled. Tests can incur provider charges.
+Failures are displayed individually; stop/retry preserves successful imports and
+deduplicates by provider, endpoint, credential and model ID. Existing disabled
+profiles remain disabled. Renaming and enabling/disabling stay in the model editor.
+
+Discovery uses the provider's model-list endpoint (including Anthropic pagination)
+and reports unsupported endpoints for manual entry. It follows no redirects and
+caps reads at 20 seconds, 2 MiB and 2,000 model IDs/20 pages; truncated catalogs are
+marked. IDs do not establish chat/tool capabilities. No background synchronization
+or automatic enabling occurs just because a model appears in the catalog.
+
+Chat model pickers search display names, configured names, IDs and provider labels,
+with provider filtering and favorites/recent groups. The eight recent selections
+are browser-local and user-scoped, and only currently available models appear.
+Selecting a model continues to use the existing conversation/account preferences.
+
 The `openai` preset recognizes the exact IDs `gpt-6-astra`, `gpt-6.1-sol`,
 `gpt-6.1-terra`, `gpt-6-sol` and `gpt-6-luna`. They use the Responses API
 for both the connection probe and chat, including tool calls and tool-result

@@ -141,13 +141,15 @@ class ManagedModel(BaseModel):
             settings["supports_vision"] = self.supports_vision
         if self.max_tokens is not None:
             settings["max_tokens"] = self.max_tokens
-        return ModelConfig(
+        result = ModelConfig(
             name=self.name or "connection-check",
             display_name=self.display_name or f"{get_managed_model_provider(self.provider).display_name} · {self.model}"[:100],
             model=self.model,
             context_window=self.context_window,
             **settings,
         )
+        result._managed_provider = get_managed_model_provider(self.provider).display_name
+        return result
 
 
 class ManagedModelInputError(ValueError):
@@ -191,9 +193,15 @@ class ManagedModelStore:
             # Never include provider secrets or decrypted validation inputs.
             raise ValueError("Cannot read managed models; check the catalog and encryption key") from None
 
-    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None) -> ManagedModel:
+    def save(self, config: ManagedModel, *, expected_revision: str | None, reserved_names: set[str] | None = None, deduplicate: bool = False, expected_source: tuple[str, str] | None = None) -> ManagedModel:
         with _lock, extensions_config_file_lock(self.path):
             records = self.list()
+            if expected_source is not None and not any((item.name, item.revision) == expected_source for item in records):
+                raise FileExistsError("Connection changed; reload before importing")
+            if deduplicate:
+                for item in records:
+                    if (item.provider, item.base_url, item.api_key, item.model) == (config.provider, config.base_url, config.api_key, config.model):
+                        return item
             if not config.name:
                 if expected_revision is not None:
                     raise ManagedModelInputError("An existing model name is required when editing")
