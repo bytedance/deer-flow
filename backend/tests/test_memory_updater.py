@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import threading
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -270,6 +271,9 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
             fact_confidence_threshold=0.7,
         )
     )
+    now = datetime.now(UTC)
+    recent_timestamp = now.isoformat().replace("+00:00", "Z")
+    stale_timestamp = (now - timedelta(days=365)).isoformat().replace("+00:00", "Z")
     current_memory = _make_memory(
         facts=[
             *[
@@ -278,7 +282,7 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                     "content": f"high {index}",
                     "category": "preference",
                     "confidence": 0.99,
-                    "createdAt": "2026-08-12T00:00:00Z",
+                    "createdAt": recent_timestamp,
                 }
                 for index in range(8)
             ],
@@ -287,15 +291,15 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
                 "content": "stale high confidence",
                 "category": "preference",
                 "confidence": 0.9,
-                "createdAt": "2025-01-01T00:00:00Z",
+                "createdAt": stale_timestamp,
             },
             {
                 "id": "confirmed_recently",
                 "content": "recently confirmed preference",
                 "category": "preference",
                 "confidence": 0.7,
-                "createdAt": "2025-01-01T00:00:00Z",
-                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                "createdAt": stale_timestamp,
+                "lastConfirmedAt": recent_timestamp,
             },
         ]
     )
