@@ -2315,7 +2315,7 @@ async def test_history_cancelled_results_are_unavailable_before_and_after_admiss
     assert filtered["items"] == []
 
 
-def test_shared_state_budget_rejection_rolls_back_in_memory_mutations():
+def test_shared_state_budget_rejection_rolls_back_in_memory_mutations(plugin):
     from deerflow_extension_agent_teams import shared_state
 
     team = {
