@@ -35,7 +35,6 @@ def test_text_blocks_survive_the_fallback():
     assert [block["type"] for block in lc_content] == ["text", "file"]
     assert lc_content[0]["text"] == "here is your report"
     assert lc_content[1]["mime_type"] == "application/octet-stream"
-    assert lc_content[0]["mime_type"] == "application/octet-stream"
 
 
 def test_declared_non_image_mime_type_is_preserved():
