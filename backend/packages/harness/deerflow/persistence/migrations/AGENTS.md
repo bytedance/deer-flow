@@ -40,7 +40,7 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` (head).
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` (head).
 The preference revision uses an owner/key table with a cascading users FK;
 project documents use an owner-scoped shelf. MCP lease tokens, batch evidence,
 and run-idempotency identity add nullable columns without historical backfill or

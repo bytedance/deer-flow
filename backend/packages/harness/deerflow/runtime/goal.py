@@ -617,11 +617,49 @@ def should_continue_goal(goal: GoalState, evaluation: GoalEvaluation, *, no_prog
         return False
     if evaluation["blocker"] not in CONTINUABLE_GOAL_BLOCKERS:
         return False
+    return goal_has_continuation_budget(goal, no_progress_count=no_progress_count)
+
+
+def goal_has_continuation_budget(goal: GoalState, *, no_progress_count: int | None = None) -> bool:
+    """Shared limits for the native loop and a confirmed external-result wake-up."""
     if int(goal.get("continuation_count", 0)) >= int(goal.get("max_continuations", DEFAULT_MAX_GOAL_CONTINUATIONS)):
         return False
     current_no_progress = int(goal.get("no_progress_count", 0) if no_progress_count is None else no_progress_count)
     max_no_progress = int(goal.get("max_no_progress_continuations", DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS))
     return current_no_progress < max_no_progress
+
+
+def goal_waits_for_external_result(goal: GoalState | None, expected: Mapping[str, Any]) -> bool:
+    if not goal or goal.get("status") != "active" or any(goal.get(key) != expected.get(key) for key in ("created_at", "objective")):
+        return False
+    evaluation = goal.get("last_evaluation") or {}
+    return evaluation.get("blocker") == "external_wait" and evaluation.get("stand_down_reason") == "blocked:external_wait" and goal_has_continuation_budget(goal)
+
+
+async def wake_goal_after_external_wait(checkpointer: Any, thread_id: str, run_id: str, expected: Mapping[str, Any]) -> bool:
+    """Consume one existing Goal continuation after exclusive Run admission.
+
+    The Run ID makes recovery of the admitted Run idempotent. Other blockers,
+    changed goals and the existing continuation/no-progress limits stay stopped.
+    """
+    if checkpointer is None or not isinstance(expected, Mapping):
+        return False
+    async with goal_thread_lock(thread_id):
+        checkpoint = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+        if checkpoint is None:
+            return False
+        goal = copy.deepcopy(checkpoint.checkpoint.get("channel_values", {}).get("goal"))
+        if not isinstance(goal, dict) or goal.get("status") != "active" or any(goal.get(key) != expected.get(key) for key in ("created_at", "objective")):
+            return False
+        if goal.get("last_batch_wakeup_run_id") == run_id:
+            return True
+        if not goal_waits_for_external_result(goal, expected):
+            return False
+        goal["continuation_count"] = int(goal.get("continuation_count", 0)) + 1
+        goal["last_batch_wakeup_run_id"] = run_id
+        goal["updated_at"] = now_iso()
+        await write_thread_goal(checkpointer, thread_id, goal, as_node="batch_completion", expected_checkpoint_id=_checkpoint_id_from_tuple(checkpoint))
+        return True
 
 
 def latest_visible_assistant_signature(messages: list[Any]) -> str:

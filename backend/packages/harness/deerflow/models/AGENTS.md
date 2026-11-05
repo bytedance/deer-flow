@@ -78,7 +78,8 @@ generic `thinking_enabled` / `reasoning_effort` to it, and
 subagents, summarization, title, one-shot utilities): a required-thinking model
 never enters the disable branch, effort is mapped through aliases or the default
 and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
+template exists. For a top-level effort contract, a disabled template that sets
+`reasoning_effort: "none"` wins over explicit or default request effort. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
 byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
 OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
 the same policy first so run metadata reports the effective values. Design note:
