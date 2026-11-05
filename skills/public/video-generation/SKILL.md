@@ -154,5 +154,9 @@ Auto-selected by environment variables (CLI unchanged):
 - Force with `VIDEO_GENERATION_PROVIDER=gemini|minimax`.
 
 MiniMax overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
-`MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). The first reference image is used
-as MiniMax `first_frame_image`. MiniMax ignores `--aspect-ratio` (it uses resolution/duration).
+`MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`), `MINIMAX_VIDEO_RESOLUTION`
+(e.g. `768P` / `1080P` on Hailuo 2.3) and `MINIMAX_VIDEO_DURATION` (integer seconds,
+e.g. `6` / `10` on Hailuo 2.3). The first reference image is used as MiniMax
+`first_frame_image`. `--aspect-ratio` applies to Gemini only; for MiniMax set the
+resolution/duration envs instead — unset means the API defaults (draft cheaply at
+768P/6s, render finals at 1080P).
