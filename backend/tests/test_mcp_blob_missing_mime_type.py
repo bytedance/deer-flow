@@ -30,9 +30,11 @@ def test_blob_without_mime_type_degrades_to_octet_stream():
 
 
 def test_text_blocks_survive_the_fallback():
-    lc_content, _artifact = _convert_call_tool_result(_result(None, with_text=False))
+    lc_content, _artifact = _convert_call_tool_result(_result(None))
 
-    assert [block["type"] for block in lc_content] == ["file"]
+    assert [block["type"] for block in lc_content] == ["text", "file"]
+    assert lc_content[0]["text"] == "here is your report"
+    assert lc_content[1]["mime_type"] == "application/octet-stream"
     assert lc_content[0]["mime_type"] == "application/octet-stream"
 
 
