@@ -420,7 +420,7 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         if not isinstance(metadata, dict):
             raise ValueError("front matter is not a mapping")
         body = body.lstrip("\n")
-        # Unicode line separators can be data inside the fact body.
+        # read_text() normalizes CRLF and CR to LF; Unicode separators stay data.
         lines = body.split("\n")
         title = ""
         if lines and lines[0].startswith("# "):
