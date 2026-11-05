@@ -64,6 +64,7 @@ class BoxliteBox(Sandbox):
     #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
     #: survives into the next command.
     persistent_shell_sessions = False
+    artifact_root = "/mnt/user-data"
 
     TERMINAL_ERROR_MARKERS = (
         "vsock",

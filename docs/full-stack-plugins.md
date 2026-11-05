@@ -537,10 +537,42 @@ model configuration, tools, Skills and policies. No raw secrets are exposed.
 Missing evidence fails closed; the declarative revision remains a separate preflight
 guard. Evidence describes assembly-time configuration, not external service state.
 
+`AgentRuns.import_artifact(thread_id, filename, content)` (extension API 0.2.11)
+imports at most 2 MiB of retained bytes into an idle thread's uploads directory.
+It requires a plugin-scoped delegated handle and rechecks current thread-write
+authority. The host selects a content-addressed filename; identical calls reuse
+the copy, while a replaced or edited destination fails without overwriting it.
+The result contains `filename`, virtual `path`, `sha256` and `size`. Non-mounted
+sandboxes synchronize those exact bytes through an authorized sandbox lease.
+Remote publication uses descriptor-confined staging and conditional links, never
+`update_file`: changed files, hardlinks and symlinks are rejected without writes
+to the destination. Remote images require POSIX/Python 3, and sandbox adapters
+declare their actual `artifact_root` (`None` defaults to unsupported).
+Cancellation drains publication/synchronization before releasing the thread's
+mutation reservation. Descriptor confinement requires POSIX. This primitive
+stores no team policy, artifact versions or acceptance state; those belong to
+the extension.
+
+`ToolContext.run_id` is stamped from the worker's runtime, outside tool arguments.
+`AgentRuns.validate_artifact_source(thread_id, run_id, idempotency_key)` verifies
+the plugin-scoped execution key and running status, and checks capture support.
+This permits registration before a successful admission acknowledgement has
+reached the extension without attributing an unrelated turn to a queued job.
+
+`AgentRuns.start(..., artifact_imports=[receipt])` accepts up to four exact import
+receipts. After durable admission, the worker verifies local and remote hashes
+before constructing the Agent. Failures end with `stop_reason=artifact_conflict`.
+Existing idempotency keys are reconciled before this check, preserving retries
+after a Run edited its own copies. Keep the receipts with frozen input. The
+worker retains the verified remote sandbox lease through execution and drains
+its release across cancellation.
+
 `AgentRuns.read_artifact(thread_id, path)` authorizes a bounded (2 MiB) regular
 output-file snapshot, rejects symlink traversal, and reserves the thread against
-concurrent runs/edits while reading off-loop. The workflow extension stores those
-bytes append-only with SHA-256, approves exact versions, and serves preview and
+concurrent runs/edits while reading off-loop. Its optional `expected_checkpoint_id`
+is compared under that same reservation (412 on mismatch, 409 while busy).
+Non-mounted providers read live remote output through an authorized lease.
+The workflow extension stores those bytes append-only with SHA-256, approves exact versions, and serves preview and
 approved consumer reads from the same snapshot (16 KiB chunks). File versions are
 owner/workflow scoped; consumers cannot use an unapproved version. See the workflow
 extension README for limits and `captureArtifact` / `readArtifact` examples.

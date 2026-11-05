@@ -112,3 +112,12 @@ Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
 `/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
 `get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
 config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.
+
+Managed-model `/discover` and `/import` require administrator access before
+reading credentials or making outbound requests. Discovery is read-only and
+bounded (20 seconds, 2 MiB, 2,000 IDs/20 pages); it never follows redirects
+and requests identity encoding, rejecting compressed bodies before decoding.
+Import probes each new profile, saves through the drained writer, and atomically
+deduplicates retries without changing existing disabled profiles. Saved-key reuse
+requires matching connection and revision, checked again under the write lock
+after probing (409 on change); provider errors remain redacted.

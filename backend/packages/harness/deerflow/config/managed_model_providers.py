@@ -13,6 +13,7 @@ _OPENAI = "langchain_openai:ChatOpenAI"
 _DEEPSEEK = "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
 _MINIMAX = "deerflow.models.patched_minimax:PatchedChatMiniMax"
 MOONSHOT_K31_MODELS = frozenset({"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"})
+OPENAI_GPT6_MODELS = frozenset({"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"})
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,25 @@ def _capabilities(provider: str, model: str) -> dict[str, Any]:
     thinking/vision/effort is model-specific. Do not broaden these to substrings.
     """
     result: dict[str, Any] = {"reasoning": {"thinking": "unsupported", "dialect": "none"}}
-    if provider == "openai" and model in {"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"}:
+    if provider == "openai" and model in OPENAI_GPT6_MODELS:
+        # Presets supply base_url, so the factory deliberately skips its
+        # endpoint-agnostic GPT-6 routing fallback. Own the official route here.
+        required = model in {"gpt-6-astra", "gpt-6.1-sol"}
+        effort = {"values": ["low", "medium", "high", "xhigh", "max"], "aliases": {"minimal": "low"}}
+        result.update(
+            use_responses_api=True,
+            output_version="responses/v1",
+            supports_vision=True,
+            reasoning={"thinking": "required" if required else "optional", "dialect": "none", "effort": effort},
+        )
+        if required:
+            effort["default"] = "medium"
+        else:
+            effort["values"].insert(0, "none")
+            # Pick the default effort from the effective thinking mode.
+            result["when_thinking_enabled"] = {"reasoning_effort": "medium"}
+            result["when_thinking_disabled"] = {"reasoning_effort": "none"}
+    elif provider == "openai" and model in {"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"}:
         result["supports_vision"] = True
     elif provider == "anthropic" and model in {"claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-sonnet-4-5-20250929"}:
         result.update(
