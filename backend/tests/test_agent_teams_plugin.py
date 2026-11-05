@@ -2313,3 +2313,34 @@ async def test_history_cancelled_results_are_unavailable_before_and_after_admiss
     assert legacy["result"] == unavailable
     filtered = await service.search_results({"team_id": team["id"], "query": notice}, caller)
     assert filtered["items"] == []
+
+
+def test_shared_state_budget_rejection_rolls_back_in_memory_mutations():
+    from deerflow_extension_agent_teams import shared_state
+
+    team = {
+        "id": "team_test",
+        "goal": "Goal",
+        "members": [{"id": "m1", "name": "Agent 1", "agent": "a1", "thread_id": "t1"}],
+        "jobs": [{"id": "j1", "thread_id": "t1", "status": "running", "input": {}}],
+    }
+    caller = type("Context", (), {"thread_id": "t1"})()
+    for i in range(12):
+        shared_state.publish(team, {"team_id": "team_test", "request_id": f"req_{i}", "kind": "objective", "title": f"T{i}", "content": "A" * 950}, caller)
+    assert len(team["public_state"]["entries"]) == 12
+    assert team["public_state"]["revision"] == 12
+
+    with pytest.raises(ValueError, match="16,000 UTF-8 JSON bytes"):
+        shared_state.publish(team, {"team_id": "team_test", "request_id": "req_overflow", "kind": "objective", "title": "T_overflow", "content": "A" * 950}, caller)
+    assert len(team["public_state"]["entries"]) == 12
+    assert team["public_state"]["revision"] == 12
+
+    entry_0 = team["public_state"]["entries"][0]
+    rev_before = entry_0["revision"]
+    title_before = entry_0["title"]
+    team["goal"] = "G" * 30000
+    with pytest.raises(ValueError, match="shared context budget"):
+        shared_state.update(team, {"team_id": "team_test", "entry_id": entry_0["id"], "expected_revision": rev_before, "title": "New", "content": "New", "status": "active"}, caller)
+    assert entry_0["title"] == title_before
+    assert entry_0["revision"] == rev_before
+    assert team["public_state"]["revision"] == 12
