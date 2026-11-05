@@ -155,31 +155,64 @@ def extract_response_text(content: object) -> str:
     return str(content)
 
 
+def _json_payload_start(text: str) -> int:
+    """Index of the first ``{``/``[`` outside a reasoning block, or -1.
+
+    A JSON example inside a reasoning block must not become the payload, so the
+    scan steps over whole think blocks. An unclosed block before the payload is
+    a truncated response: there is no structured answer to find.
+    """
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "<":
+            opening = _THINK_OPEN_PREFIX_RE.match(text, index)
+            if opening is not None:
+                end = _find_tag_end(text, opening.end())
+                if end >= 0:
+                    if _is_self_closing_think_tag(text, index, end + 1):
+                        index = end + 1
+                        continue
+                    closing = _find_think_close(text, end + 1)
+                    if closing is not None:
+                        index = closing[1]
+                        continue
+                    return -1
+        if char in "{[":
+            return index
+        index += 1
+    return -1
+
+
 def strip_think_blocks_outside_json_strings(text: str) -> str:
     """Strip reasoning around a JSON response but keep tags inside string values.
 
     Structured parsers used to run :func:`strip_think_blocks` over the whole
     response before ``json.loads``. That deleted a literal ``<think>`` inside a
     JSON string value; an unclosed one cut the document mid-string and failed
-    parsing. Leading reasoning is still removed whole -- so a JSON example
-    inside a reasoning block is never mistaken for the answer -- and a block
-    found after the payload starts is removed only outside string literals.
-    Tags inside strings are data and are preserved verbatim.
-    """
-    candidate = strip_leading_think_blocks(text)
-    start = next((index for index, char in enumerate(candidate) if char in "{["), -1)
-    if start < 0:
-        return strip_think_blocks(candidate)
+    parsing. Tags inside string values are data and are preserved verbatim.
 
-    out = [candidate[:start]]
+    Everything outside the payload keeps :func:`strip_think_blocks` semantics:
+    the prose before it is stripped (so a JSON example inside a reasoning block
+    is never mistaken for the answer), a block between the payload's own tokens
+    is removed, and an unclosed block truncates the remainder as a truncated
+    model response. After the top-level payload closes, trailing prose goes
+    through the same strip/truncate rules.
+    """
+    start = _json_payload_start(text)
+    if start < 0:
+        return strip_think_blocks(text)
+
+    out = [strip_think_blocks(text[:start])]
     quote = ""
+    depth = 0
     index = start
-    while index < len(candidate):
-        char = candidate[index]
+    while index < len(text):
+        char = text[index]
         if quote:
             out.append(char)
-            if char == "\\" and index + 1 < len(candidate):
-                out.append(candidate[index + 1])
+            if char == "\\" and index + 1 < len(text):
+                out.append(text[index + 1])
                 index += 2
                 continue
             if char == quote:
@@ -191,18 +224,36 @@ def strip_think_blocks_outside_json_strings(text: str) -> str:
             out.append(char)
             index += 1
             continue
+        if char in "{[":
+            depth += 1
+            out.append(char)
+            index += 1
+            continue
+        if char in "}]":
+            depth -= 1
+            out.append(char)
+            index += 1
+            if depth <= 0:
+                # The top-level payload is closed: trailing prose is not JSON,
+                # so it keeps the old strip (and truncate) behavior.
+                out.append(strip_think_blocks(text[index:]))
+                break
+            continue
         if char == "<":
-            opening = _THINK_OPEN_PREFIX_RE.match(candidate, index)
+            opening = _THINK_OPEN_PREFIX_RE.match(text, index)
             if opening is not None:
-                end = _find_tag_end(candidate, opening.end())
+                end = _find_tag_end(text, opening.end())
                 if end >= 0:
-                    if _is_self_closing_think_tag(candidate, index, end + 1):
+                    if _is_self_closing_think_tag(text, index, end + 1):
                         index = end + 1
                         continue
-                    closing = _find_think_close(candidate, end + 1)
+                    closing = _find_think_close(text, end + 1)
                     if closing is not None:
                         index = closing[1]
                         continue
+                    # Unclosed outside a string: truncated mid-thought, so the
+                    # remainder cannot hold a payload either.
+                    return "".join(out).strip()
         out.append(char)
         index += 1
     return "".join(out).strip()

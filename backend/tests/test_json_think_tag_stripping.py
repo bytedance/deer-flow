@@ -49,3 +49,31 @@ def test_helper_keeps_tags_inside_strings_and_strips_them_outside():
 
     assert strip_think_blocks_outside_json_strings(payload) == payload
     assert strip_think_blocks_outside_json_strings('<think>reasoning</think>{"a": 1}') == '{"a": 1}'
+
+
+def test_goal_strips_a_reasoning_block_that_follows_prose():
+    evaluation = parse_goal_evaluation_response('Hmm. <think>{"satisfied": false}</think>{"satisfied": true, "reason": "ok"}')
+
+    assert evaluation["satisfied"] is True
+    assert evaluation["reason"] == "ok"
+
+
+def test_suggestions_strip_a_reasoning_block_that_follows_prose():
+    assert _parse_json_string_list('Okay. <think>["wrong"]</think>["right"]') == ["right"]
+
+
+def test_suggestions_drop_trailing_prose_after_an_unclosed_block():
+    # The old whole-text stripper truncated here; keep that so a trailing ']'
+    # cannot become the parsers' rfind target.
+    assert _parse_json_string_list('["Q1"] <think>tail mentioning ]') == ["Q1"]
+
+
+def test_goal_drops_trailing_prose_after_an_unclosed_block():
+    evaluation = parse_goal_evaluation_response('{"satisfied": true, "reason": "ok"} <think>tail mentioning }')
+
+    assert evaluation["satisfied"] is True
+    assert evaluation["reason"] == "ok"
+
+
+def test_trailing_stray_quote_cannot_mask_a_later_reasoning_block():
+    assert _parse_json_string_list('["Q1"] stray " quote <think>tail ]') == ["Q1"]

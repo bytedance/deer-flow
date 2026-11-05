@@ -19,6 +19,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **parsing:** Follow-up suggestions and the `/goal` evaluator keep a literal
+  `<think>` tag that appears inside a JSON string value, such as an answer
+  quoting the tag, while reasoning around the JSON is still removed. An
+  unclosed literal tag inside a string no longer truncates the document and
+  fails parsing, and reasoning outside the payload still strips and truncates
+  as before. ([#7907])
+
 - **gateway:** A caller-supplied thread ID that is a Windows reserved device
   name (`NUL`, `CON`, `COM1`, ...) is now rejected at the shared
   `validate_thread_id()` boundary. Such IDs previously passed validation but
@@ -16022,3 +16029,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
+[#7907]: https://github.com/bytedance/deer-flow/pull/7907
