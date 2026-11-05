@@ -337,6 +337,7 @@ export function MessageList({
   onBranchTurn,
   canRegenerate = false,
   activeRunId,
+  activeRunStartedAt = null,
   canEdit = false,
   editLockedByGoal = false,
   canBranch = false,
@@ -375,6 +376,8 @@ export function MessageList({
   ) => void | Promise<void>;
   canRegenerate?: boolean;
   activeRunId?: string;
+  /** Server start (epoch ms) of the active run, when known. */
+  activeRunStartedAt?: number | null;
   canEdit?: boolean;
   /** Edit would be allowed but for an active goal: show the pencil locked. */
   editLockedByGoal?: boolean;
@@ -501,8 +504,8 @@ export function MessageList({
   const browserView = useMaybeBrowserView();
   const pushBrowserFrame = browserView?.pushFrame;
   const messageCount = messages.length;
-  // The backend exposes no live start timestamp, so a mid-run mount measures
-  // from mount until authoritative persisted turn_duration replaces it.
+  // Start from mount or the loading edge, then move back to the active run's
+  // server start once known: a run observed mid-flight began before this view.
   const [turnStartTime, setTurnStartTime] = useState<number | null>(() =>
     thread.isLoading ? Date.now() : null,
   );
@@ -539,6 +542,20 @@ export function MessageList({
     }
     prevIsLoading.current = thread.isLoading;
   }, [groupedMessages, thread.error, thread.isLoading, threadId]);
+
+  useEffect(() => {
+    const startTime = turnStartTimeRef.current;
+    if (
+      !thread.isLoading ||
+      startTime === null ||
+      activeRunStartedAt === null ||
+      activeRunStartedAt >= startTime
+    ) {
+      return;
+    }
+    turnStartTimeRef.current = activeRunStartedAt;
+    setTurnStartTime(activeRunStartedAt);
+  }, [activeRunStartedAt, thread.isLoading]);
 
   useEffect(() => {
     // Only the primary chat surface drives the shared browser panel. The
