@@ -68,7 +68,7 @@ GOAL_OUTCOME_CHANNEL = "goal_outcome"
 
 _extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
-_strip_think_blocks = llm_text.strip_think_blocks
+_strip_think_blocks_outside_json_strings = llm_text.strip_think_blocks_outside_json_strings
 
 _goal_locks = AsyncKeyedLockTable[str]()
 
@@ -157,7 +157,7 @@ def build_goal_outcome(goal: GoalState, evaluation: GoalEvaluation, *, reply_mes
 
 def parse_goal_evaluation_response(text: str, *, require_assumption_attribution: bool = False) -> GoalEvaluation:
     """Parse the evaluator's JSON object response."""
-    candidate = _strip_markdown_code_fence(_strip_think_blocks(text))
+    candidate = _strip_markdown_code_fence(_strip_think_blocks_outside_json_strings(text))
     start = candidate.find("{")
     end = candidate.rfind("}")
     if start == -1 or end == -1 or end <= start:

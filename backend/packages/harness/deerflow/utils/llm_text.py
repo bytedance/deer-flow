@@ -153,3 +153,56 @@ def extract_response_text(content: object) -> str:
     if content is None:
         return ""
     return str(content)
+
+
+def strip_think_blocks_outside_json_strings(text: str) -> str:
+    """Strip reasoning around a JSON response but keep tags inside string values.
+
+    Structured parsers used to run :func:`strip_think_blocks` over the whole
+    response before ``json.loads``. That deleted a literal ``<think>`` inside a
+    JSON string value; an unclosed one cut the document mid-string and failed
+    parsing. Leading reasoning is still removed whole -- so a JSON example
+    inside a reasoning block is never mistaken for the answer -- and a block
+    found after the payload starts is removed only outside string literals.
+    Tags inside strings are data and are preserved verbatim.
+    """
+    candidate = strip_leading_think_blocks(text)
+    start = next((index for index, char in enumerate(candidate) if char in "{["), -1)
+    if start < 0:
+        return strip_think_blocks(candidate)
+
+    out = [candidate[:start]]
+    quote = ""
+    index = start
+    while index < len(candidate):
+        char = candidate[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and index + 1 < len(candidate):
+                out.append(candidate[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char == '"':
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char == "<":
+            opening = _THINK_OPEN_PREFIX_RE.match(candidate, index)
+            if opening is not None:
+                end = _find_tag_end(candidate, opening.end())
+                if end >= 0:
+                    if _is_self_closing_think_tag(candidate, index, end + 1):
+                        index = end + 1
+                        continue
+                    closing = _find_think_close(candidate, end + 1)
+                    if closing is not None:
+                        index = closing[1]
+                        continue
+        out.append(char)
+        index += 1
+    return "".join(out).strip()
