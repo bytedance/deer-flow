@@ -228,3 +228,9 @@ endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 ### Web model provider presets
 
 Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.
+
+Catalog imports use `ManagedModelStore.save(deduplicate=True)` under the existing
+thread/process lock, checking the saved source revision before deduplication
+by provider, endpoint, key and model ID. Ordinary edits
+retain revision checks. `_managed_provider` is private runtime display metadata;
+it must never enter serialized config or SDK request kwargs.
