@@ -6,20 +6,25 @@ import os
 import re
 import stat
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
+from typing import Any
 
 from deerflow_extension_api import AgentRunError
+from fastapi import Request
 
 from app.gateway.authz import try_acquire_sandbox_for_request
 from app.gateway.path_utils import normalize_outputs_virtual_path
 from deerflow.config.paths import get_paths
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
 MAX_BYTES = 2 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
-def validate_import_receipts(values):
+def validate_import_receipts(values: object) -> None:
+    """Reject malformed receipts or more than four bounded imports with 422."""
     if not isinstance(values, list) or len(values) > 4:
         raise AgentRunError(422, "Choose at most four imported artifacts")
     for value in values:
@@ -44,8 +49,12 @@ def validate_import_receipts(values):
 
 
 @asynccontextmanager
-async def snapshot_sandbox(request, user_id, thread_id):
-    """Exact snapshots require sandbox permission; this boundary fails closed."""
+async def snapshot_sandbox(request: Request, user_id: str, thread_id: str) -> AsyncIterator[Sandbox | None]:
+    """Yield a remote sandbox lease, or None for host-mounted thread data.
+
+    Permission denial raises 403 and an unavailable sandbox raises 503. Release
+    drains on cancellation; exact snapshots never fall back after a denied lease.
+    """
     from app.gateway.routers.uploads import _uses_thread_data_mounts
     from deerflow.config.app_config import get_app_config
     from deerflow.utils.file_io import await_drained, run_file_io
@@ -65,7 +74,11 @@ async def snapshot_sandbox(request, user_id, thread_id):
             await await_drained(lease.release())
 
 
-async def validate_capture_support(request, user_id, thread_id):
+async def validate_capture_support(request: Request, user_id: str, thread_id: str) -> None:
+    """Require POSIX capture and probe remote support before registration.
+
+    Raise 422 for unsupported capture, retaining lease authorization failures.
+    """
     from deerflow.sandbox.artifact_snapshot import validate_snapshot_support
     from deerflow.utils.file_io import run_file_io
 
@@ -76,7 +89,8 @@ async def validate_capture_support(request, user_id, thread_id):
             await run_file_io(validate_snapshot_support, sandbox)
 
 
-def validate_import(filename, content):
+def validate_import(filename: object, content: object) -> None:
+    """Reject unsafe filenames, non-POSIX hosts or content over 2 MiB with 422."""
     if os.name != "posix" or not isinstance(filename, str) or not filename or filename in (".", "..") or any(c in filename for c in "/\\") or any(ord(c) < 32 for c in filename):
         raise AgentRunError(422, "Use a plain artifact filename on POSIX")
     try:
@@ -87,8 +101,12 @@ def validate_import(filename, content):
         raise AgentRunError(422, "Artifact filename is too long or content exceeds 2 MiB")
 
 
-def write_import_snapshot(user_id, thread_id, namespace, filename, content):
-    """Publish a content-addressed upload without replacing existing files."""
+def write_import_snapshot(user_id: str, thread_id: str, namespace: str, filename: str, content: bytes) -> dict[str, Any]:
+    """Publish a confined content-addressed upload and return its import receipt.
+
+    Reuse only identical regular files; retain existing edits and raise 422 for
+    unsafe or changed destinations. Run filesystem work off the event loop.
+    """
     validate_import(filename, content)
     digest = hashlib.sha256(content).hexdigest()
     identity = hashlib.sha256(namespace.encode() + b"\0" + filename.encode() + b"\0" + content).hexdigest()[:32]
@@ -143,8 +161,12 @@ def write_import_snapshot(user_id, thread_id, namespace, filename, content):
             os.close(directory)
 
 
-async def import_snapshot(request, user_id, thread_id, namespace, filename, content):
-    """Publish on the host and synchronize the exact bytes to remote sandboxes."""
+async def import_snapshot(request: Request, user_id: str, thread_id: str, namespace: str, filename: str, content: bytes) -> dict[str, Any]:
+    """Return a receipt after publishing identical host and remote uploads.
+
+    Retain existing edits; unsafe/changed snapshots raise 422 and lease failures
+    keep their authorization/availability status. Cancellation drains file I/O.
+    """
     from deerflow.sandbox.artifact_snapshot import publish_snapshot
     from deerflow.utils.file_io import run_file_io
 
@@ -156,7 +178,13 @@ async def import_snapshot(request, user_id, thread_id, namespace, filename, cont
         return result
 
 
-async def read_snapshot(request, user_id, thread_id, path):
+async def read_snapshot(request: Request, user_id: str, thread_id: str, path: str) -> bytes:
+    """Capture bounded output bytes through host storage or an authorized lease.
+
+    Non-output paths raise HTTP 400; unsafe files raise 422 and host mutation
+    during capture raises 409. Remote snapshot and lease errors retain their
+    status. Cancellation drains I/O.
+    """
     from deerflow.sandbox.artifact_snapshot import read_snapshot as read_remote
     from deerflow.utils.file_io import run_file_io
 
@@ -167,8 +195,13 @@ async def read_snapshot(request, user_id, thread_id, path):
         return await run_file_io(read_output_snapshot, user_id, thread_id, path)
 
 
-async def verify_imports(request, user_id, thread_id, receipts, *, lifetime=None):
-    """Called only after new run admission, before Agent construction."""
+async def verify_imports(request: Request, user_id: str, thread_id: str, receipts: list[dict[str, Any]], *, lifetime: AsyncExitStack | None = None) -> None:
+    """Verify receipt bytes after new admission and before Agent construction.
+
+    A supplied lifetime retains the remote lease through execution; otherwise it
+    ends here. Missing, changed or inaccessible copies raise an artifact-specific
+    422. Cancellation drains file I/O before the enclosing lease is released.
+    """
     from deerflow.sandbox.artifact_snapshot import verify_snapshot
     from deerflow.utils.file_io import run_file_io
 
@@ -187,14 +220,19 @@ async def verify_imports(request, user_id, thread_id, receipts, *, lifetime=None
         raise AgentRunError(422, "Attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request") from exc
 
 
-def read_output_snapshot(user_id, thread_id, path):
+def read_output_snapshot(user_id: str, thread_id: str, path: str) -> bytes:
+    """Read bounded host output bytes without following links.
+
+    Non-output paths raise HTTP 400; unsafe files raise 422 and mutation during
+    capture raises 409. Run filesystem work off the event loop.
+    """
     if os.name != "posix" or not isinstance(path, str):
         raise AgentRunError(422, "Output capture requires POSIX and an output path")
     path = normalize_outputs_virtual_path(path)
     return _read_host_snapshot(user_id, thread_id, path.removeprefix("/mnt/user-data/outputs/"), "outputs")
 
 
-def _read_host_snapshot(user_id, thread_id, path, area):
+def _read_host_snapshot(user_id: str, thread_id: str, path: str, area: str) -> bytes:
     paths = get_paths()
     root = paths.base_dir.resolve()
     base = paths.sandbox_outputs_dir(thread_id, user_id=user_id) if area == "outputs" else paths.sandbox_uploads_dir(thread_id, user_id=user_id)

@@ -12,6 +12,33 @@ from deerflow_extension_api.plugins import ActionContext, ToolContext
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
 
+@pytest.mark.parametrize("host_version", ["0.2.10", "0.2.11"])
+def test_team_artifact_extension_requires_a_host_with_artifact_contracts(tmp_path, monkeypatch, host_version):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams"))
+    monkeypatch.setattr("deerflow.extensions.loader.API_VERSION", host_version)
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, "storage_path": str(tmp_path / "teams.sqlite")})])
+
+    if host_version == "0.2.10":
+        assert not loaded.plugins
+        assert len(diagnostics) == 1
+        assert "requires extension-api 0.2.11, host provides 0.2.10" in diagnostics[0].message
+    else:
+        assert not diagnostics
+        assert len(loaded.plugins) == 1
+
+
+def test_team_artifact_package_dependency_rejects_the_pre_artifact_api():
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    project = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams/pyproject.toml"
+    dependencies = tomllib.loads(project.read_text())["project"]["dependencies"]
+    requirement = next(Requirement(value) for value in dependencies if Requirement(value).name == "deerflow-extension-api")
+    assert "0.2.10" not in requirement.specifier
+    assert "0.2.11" in requirement.specifier
+
+
 class Runs:
     """Controllable host: records real admissions and separate thread states."""
 

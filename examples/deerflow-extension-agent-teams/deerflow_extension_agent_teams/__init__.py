@@ -39,7 +39,7 @@ class Contributor:
         return (MiddlewarePlacement(Mentions(self.teams), Placement.MODEL_LOGICAL, AgentScope.LEAD),)
 
 
-@extension(api="0.2.10", name="agent-teams")
+@extension(api="0.2.11", name="agent-teams")
 def install(registry, config):
     enabled = config.get("enabled", False)
     if type(enabled) is not bool or not isinstance(config.get("storage_path"), str):

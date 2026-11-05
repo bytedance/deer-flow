@@ -7,8 +7,11 @@ import logging
 import shlex
 import uuid
 from pathlib import PurePosixPath
+from typing import Any
 
 from deerflow_extension_api import AgentRunError
+
+from deerflow.sandbox.sandbox import Sandbox
 
 MAX_BYTES = 2 * 1024 * 1024
 CHUNK_BYTES = 49152
@@ -106,7 +109,7 @@ print(json.dumps(result))
 """
 
 
-def _call(sandbox, op, *, area=None, name="", **values):
+def _call(sandbox: Sandbox, op: str, *, area: str | None = None, name: str = "", **values: Any) -> dict[str, Any]:
     root = getattr(sandbox, "artifact_root", None)
     if not isinstance(root, str) or not root.startswith("/") or ".." in PurePosixPath(root).parts:
         raise AgentRunError(422, "Sandbox does not support safe artifact snapshots")
@@ -124,11 +127,18 @@ def _call(sandbox, op, *, area=None, name="", **values):
     return result
 
 
-def validate_snapshot_support(sandbox):
+def validate_snapshot_support(sandbox: Sandbox) -> None:
+    """Probe the declared POSIX/Python 3 root; reject unsafe support with 422."""
     _call(sandbox, "probe")
 
 
-def publish_snapshot(sandbox, filename, content):
+def publish_snapshot(sandbox: Sandbox, filename: str, content: bytes) -> None:
+    """Publish at most 2 MiB into uploads, reusing only identical regular files.
+
+    Unsafe paths, changed existing files or rejected remote operations raise
+    AgentRunError(422). Existing edits are retained; staging cleanup is attempted
+    even on failure. Run this synchronous command sequence off the event loop.
+    """
     if not isinstance(content, bytes) or len(content) > MAX_BYTES:
         raise AgentRunError(422, "Artifact exceeds 2 MiB")
     temporary = ".artifact-" + uuid.uuid4().hex + ".part"
@@ -143,11 +153,17 @@ def publish_snapshot(sandbox, filename, content):
             logger.warning("Failed to clean remote artifact staging file", exc_info=True)
 
 
-def verify_snapshot(sandbox, filename, sha256, size):
+def verify_snapshot(sandbox: Sandbox, filename: str, sha256: str, size: int) -> None:
+    """Check an uploads file's hash/size, raising 422 for unsafe or changed bytes."""
     _call(sandbox, "verify", area="uploads", name=filename, sha256=sha256, size=size)
 
 
-def read_snapshot(sandbox, relative_path):
+def read_snapshot(sandbox: Sandbox, relative_path: str) -> bytes:
+    """Read at most 2 MiB from outputs with file identity checked across chunks.
+
+    Raise AgentRunError(422) for unsafe paths, changed files or invalid remote
+    replies. Run this synchronous command sequence off the event loop.
+    """
     content, stamp = bytearray(), None
     while True:
         result = _call(sandbox, "read", area="outputs", name=relative_path, offset=len(content), stamp=stamp)

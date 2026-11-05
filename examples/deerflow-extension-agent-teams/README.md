@@ -5,8 +5,9 @@ shared record. Each member gets its own persistent conversation, bound to its
 Custom Agent name. Ordinary Agent configuration, tools, skills, memory,
 checkpoints and approval rules remain in effect. There is no mandatory supervisor.
 
-Requires DeerFlow's native mention-provider and full Agent run-control contracts
-(`deerflow-extension-api >= 0.2.10`). This package is opt-in, with no core team
+Requires DeerFlow's native mention-provider, host-stamped executing Run identity
+and artifact snapshot/import contracts
+(`deerflow-extension-api >= 0.2.11`). This package is opt-in, with no core team
 feature or frontend rebuild.
 
 ## Install

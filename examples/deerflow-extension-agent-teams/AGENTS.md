@@ -80,6 +80,8 @@ Run the backend plugin tests and the browser check documented in README.md after
 changes. The preview fixture has synthetic authentication and must remain
 loopback-only; never use it as a deployed Gateway.
 
+The artifact contract requires extension API 0.2.11 in both the package dependency
+and install marker; 0.2.10 hosts lack executing Run identity and artifact methods.
 Artifact declarations belong to the authenticated member's executing team job.
 Use host-stamped run identity and validate its execution key/status before new
 registrations; frozen queue input is not execution proof. Persist the active
