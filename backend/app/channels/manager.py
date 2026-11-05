@@ -69,6 +69,7 @@ from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
 from deerflow.uploads.manager import apply_upload_sandbox_permits
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.http_policy import control_plane_trust_env
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -305,15 +306,53 @@ def _make_gateway_client(gateway_url: str) -> httpx.AsyncClient:
     """Build the short-lived client for Gateway control-plane calls.
 
     A loopback Gateway must bypass ``HTTP_PROXY``, while an external one keeps
-    the environment proxy. Mirror ``app/gateway/health.py`` and keep the import
-    lazy: importing ``deerflow.community.aio_sandbox`` at module scope pulls in
-    the whole sandbox provider stack on every ``ChannelManager`` import, even
-    when no sandbox backend is configured.
+    the environment proxy. The policy itself lives in
+    :mod:`deerflow.utils.http_policy` so this module never imports the sandbox
+    provider stack.
     """
-    # Lazy: importing the aio_sandbox package pulls in the whole provider stack.
-    from deerflow.community.aio_sandbox.backend import sandbox_http_trust_env
+    return httpx.AsyncClient(trust_env=control_plane_trust_env(gateway_url))
 
-    return httpx.AsyncClient(trust_env=sandbox_http_trust_env(gateway_url))
+
+# Mirrors the client ``langgraph_sdk.get_client()`` builds, so the loopback path
+# below differs from it only in ``trust_env``.
+_LANGGRAPH_SDK_RETRIES = 5
+_LANGGRAPH_SDK_TIMEOUT = httpx.Timeout(connect=5, read=300, write=300, pool=5)
+
+
+def _make_langgraph_client(base_url: str, headers: Mapping[str, str]) -> Any:
+    """Build the ``langgraph_sdk`` async client used for channel run submission.
+
+    ``get_client()`` always builds ``httpx.AsyncHTTPTransport(retries=5)`` on an
+    ``httpx.AsyncClient`` that keeps ``trust_env`` at its default ``True`` and
+    exposes neither ``transport`` nor ``trust_env``, so a loopback Gateway would
+    still be sent through ``HTTP_PROXY``: control-plane calls are fixed but
+    ``runs.wait`` keeps hitting the proxy-generated error of #7876. Loopback and
+    private Gateways therefore get an explicit ``trust_env=False`` client handed
+    to the SDK; external Gateways keep the stock ``get_client()`` path.
+    """
+    from langgraph_sdk import __version__ as sdk_version
+    from langgraph_sdk import get_client
+
+    if control_plane_trust_env(base_url):
+        return get_client(url=base_url, headers=dict(headers))
+
+    try:  # langgraph-sdk keeps the async client in a private package since 0.3
+        from langgraph_sdk._async import LangGraphClient
+    except ImportError:  # older releases expose it directly on ``langgraph_sdk.client``
+        from langgraph_sdk.client import LangGraphClient
+
+    # ``get_client`` also folds an ``LANGGRAPH_API_KEY`` env var into the SDK
+    # headers; a control-plane Gateway authenticates with the internal auth
+    # headers above, so only those are forwarded here.
+    return LangGraphClient(
+        httpx.AsyncClient(
+            base_url=base_url,
+            transport=httpx.AsyncHTTPTransport(retries=_LANGGRAPH_SDK_RETRIES),
+            timeout=_LANGGRAPH_SDK_TIMEOUT,
+            headers={"User-Agent": f"langgraph-sdk-py/{sdk_version}", **headers},
+            trust_env=False,
+        )
+    )
 
 
 def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -2333,11 +2372,9 @@ class ChannelManager:
     def _get_client(self):
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
-            from langgraph_sdk import get_client
-
-            self._client = get_client(
-                url=self._langgraph_url,
-                headers={**create_internal_auth_headers(), **self._csrf_headers()},
+            self._client = _make_langgraph_client(
+                self._langgraph_url,
+                {**create_internal_auth_headers(), **self._csrf_headers()},
             )
         return self._client
 

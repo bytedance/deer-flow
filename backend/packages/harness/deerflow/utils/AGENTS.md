@@ -76,6 +76,20 @@ when all remaining ports are reserved or occupied, without probing invalid
 TCP ports. Keep the last valid port allocatable and preserve `max_range`.
 Regression coverage lives in `tests/test_port_allocator_bounds.py`.
 
+### Control-Plane Proxy Policy
+
+`http_policy.py::control_plane_trust_env` is the single answer to "should this
+client inherit `HTTP_PROXY`?" for DeerFlow's own hops. Loopback, private,
+link-local, `.localhost`, Docker/Podman-internal and cluster-local hostnames are
+control-plane traffic and must bypass the environment proxy; external FQDNs and
+public IPs keep it. The module stays dependency-free (no `httpx`, no sandbox
+imports) precisely so `app/channels/manager.py` and `app/gateway/health.py` can
+import it at module scope without loading the sandbox provider stack.
+`community/aio_sandbox/backend.py` re-exports it as `sandbox_http_trust_env` for
+existing sandbox call sites. Policy parity with the original sandbox-local
+implementation is covered by `tests/test_aio_sandbox_readiness.py`; the
+import-graph guard lives in `tests/test_channels.py`.
+
 ### Goal Objective Validation
 
 `goal_objective.py` owns the dependency-free normalized 4000-character objective

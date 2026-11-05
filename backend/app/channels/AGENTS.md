@@ -2,7 +2,11 @@
 
 Store JSON decode errors follow corrupt-file recovery; SQL import keeps the original bytes.
 
-IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle.
+IM channels use `langgraph-sdk` HTTP; Gateway owns thread lifecycle. Every hop to our own Gateway is control-plane traffic: `_make_gateway_client` and
+`_make_langgraph_client` share `deerflow.utils.http_policy`, so loopback/private Gateways bypass `HTTP_PROXY` while external ones keep it. `get_client()`
+hard-codes `trust_env=True` and exposes no transport override, so the `runs.wait` client is assembled on our own `httpx.AsyncClient`; leaving it on the SDK
+default keeps #7876 alive even after the control-plane clients are fixed. Importing `ChannelManager` must not load `deerflow.community.aio_sandbox`
+(`tests/test_channels.py::test_importing_channel_manager_loads_no_sandbox_provider_stack`).
 WeChat outbound: off-loop cap+1; overflow `None` before encryption/upload; <=0 unlimited.
 Cancel drains cursors; expiry drains cursor/auth reset under `_auth_lock`.
 Inbound: ingest/drop drains off-loop cleanup of owned dirs, never metadata paths.
