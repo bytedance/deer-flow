@@ -850,11 +850,11 @@ def _canonical_run_record_input(
     raw_input: dict[str, Any] | None,
     graph_input: object,
 ) -> dict[str, Any] | None:
-    """Persist the same normalized messages that cross run admission.
+    """Persist the same normalized messages, goal, and todos that cross run admission.
 
     The run record is a client-visible audit surface. Keeping the original raw
-    message there would preserve a non-canonical scope even though the graph
-    receives the validated form.
+    message or state metadata there would preserve a non-canonical scope even
+    though the graph receives the validated form.
     """
     if not isinstance(graph_input, dict):
         return raw_input
@@ -862,6 +862,9 @@ def _canonical_run_record_input(
     messages = graph_input.get("messages")
     if isinstance(messages, list):
         canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    for key in ("goal", "goal_outcome", "todos", "delegations"):
+        if key in graph_input:
+            canonical[key] = graph_input[key]
     return canonical
 
 
