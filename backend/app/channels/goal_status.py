@@ -87,11 +87,14 @@ def _count(value: object) -> int:
 def _stop_line(code: str, max_continuations: int, locale: str) -> str:
     """Why auto-continue stood down, by who acts next (the web bar's ``stopRowOf``)."""
     text = _TEXT[locale]
-    if code in CHECK_FAILURE_CODES:
-        # Not a verdict: the goal is checked again after the next message.
-        reason = goal_reason_text(code, locale)
-        return text["unchecked"].format(reason=reason[:1].upper() + reason[1:]) if reason else text["stopped_bare"]
+    # ``stand_down_reason`` is written as ``blocked:<code>``, so the code has to be
+    # unwrapped before every classification below; comparing the raw value only
+    # matched the prefixed codes by accident and made the unchecked branch dead.
     bare = code.removeprefix("blocked:")
+    if bare in CHECK_FAILURE_CODES:
+        # Not a verdict: the goal is checked again after the next message.
+        reason = goal_reason_text(bare, locale)
+        return text["unchecked"].format(reason=reason[:1].upper() + reason[1:]) if reason else text["stopped_bare"]
     if bare == "max_continuations_reached" and max_continuations <= 0:
         # Auto-continue was off for this goal: the check just found it unmet.
         bare = "goal_not_met_yet"
