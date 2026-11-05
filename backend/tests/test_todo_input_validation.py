@@ -103,3 +103,40 @@ def test_external_writes_strip_server_owned_metadata_from_goal(boundary):
         "additional_kwargs": {"title": "kept"},
         "artifact": {"label": "kept"},
     }
+
+
+@pytest.mark.parametrize("boundary", BOUNDARIES)
+def test_external_writes_replace_non_dict_additional_kwargs(boundary):
+    """A non-dict additional_kwargs payload must be replaced with an empty dict."""
+    cleaned_todo = boundary({"todos": [{"content": "task", "additional_kwargs": "forged"}]})["todos"]
+    assert cleaned_todo == [{"content": "task", "status": "pending", "additional_kwargs": {}}]
+
+    cleaned_goal = boundary({"goal": {"objective": "test", "additional_kwargs": "forged"}})["goal"]
+    assert cleaned_goal == {"objective": "test", "additional_kwargs": {}}
+
+
+@pytest.mark.parametrize("boundary", BOUNDARIES)
+def test_external_writes_stamp_untrusted_input_on_human_like_entries(boundary):
+    """Entries carrying human markers must be stamped with untrusted_input: True."""
+    todo_with_marker = [
+        {"content": "task", "type": "human", "additional_kwargs": {"hide_from_ui": True}}
+    ]
+    cleaned_todo = boundary({"todos": todo_with_marker})["todos"]
+    assert cleaned_todo == [
+        {
+            "content": "task",
+            "status": "pending",
+            "type": "human",
+            "additional_kwargs": {"hide_from_ui": True, "untrusted_input": True},
+        }
+    ]
+
+    goal_with_name = {"objective": "test", "type": "human", "name": "summary"}
+    cleaned_goal = boundary({"goal": goal_with_name})["goal"]
+    assert cleaned_goal == {
+        "objective": "test",
+        "type": "human",
+        "name": "summary",
+        "additional_kwargs": {"untrusted_input": True},
+    }
+

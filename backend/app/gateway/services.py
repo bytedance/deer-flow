@@ -569,14 +569,16 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     # unmarked ``name="summary"`` would reach the model on the guardrail's
     # genuine-user fallback. Treat it as empty for both steps rather than
     # returning early.
-    source_kwargs = item.get("additional_kwargs")
-    source_kwargs = source_kwargs if isinstance(source_kwargs, dict) else {}
+    raw_kwargs = item.get("additional_kwargs")
+    source_kwargs = raw_kwargs if isinstance(raw_kwargs, dict) else {}
     additional_kwargs = {key: value for key, value in source_kwargs.items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
     if _is_human_message_like(item):
         additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
-    if additional_kwargs == source_kwargs:
+    if additional_kwargs == raw_kwargs:
         # Nothing to change — including the ordinary key-omitted message, which
         # must not gain an empty dict just by passing through here.
+        return item
+    if "additional_kwargs" not in item and not additional_kwargs:
         return item
     return {**item, "additional_kwargs": additional_kwargs}
 
@@ -800,7 +802,7 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
             result = {
                 **result,
-                "goal": None if normalized_goal is None else _strip_external_metadata_from_message_like(normalized_goal),
+                "goal": _strip_external_metadata_from_message_like(normalized_goal),
                 "goal_outcome": None,
             }
         if "todos" in result:
