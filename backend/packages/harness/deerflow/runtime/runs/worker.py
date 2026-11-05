@@ -748,6 +748,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1237,6 +1239,8 @@ async def run_agent(
             if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
                 await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
                 return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
 
         if ctx.on_run_admitted is not None:
             try:

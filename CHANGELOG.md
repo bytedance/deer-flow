@@ -24,6 +24,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** A caller-supplied thread ID that is a Windows reserved device
+  name (`NUL`, `CON`, `COM1`, ...) is now rejected at the shared
+  `validate_thread_id()` boundary. Such IDs previously passed validation but
+  failed workspace creation on Windows hosts with `FileNotFoundError`. The
+  check reuses `windows_incompatible_segment()` and applies on every platform,
+  so threads with reserved-name IDs created on Linux hosts will fail
+  validation on read/resume/upload routes after upgrade (deletion still
+  works). ([#7892])
+
 - **extensions:** Context-compaction observers now learn which task a
   compaction happened in. Inside a lead run or subagent they receive that
   task's store instead of a detached one, and `CompactionEvent` gains
@@ -16017,3 +16026,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7892]: https://github.com/bytedance/deer-flow/pull/7892

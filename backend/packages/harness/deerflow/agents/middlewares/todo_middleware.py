@@ -20,11 +20,10 @@ re-engaging would only re-emit the same oversized tool call into the same cap.
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, override
 
 from langchain.agents.middleware import TodoListMiddleware
-from langchain.agents.middleware.todo import Todo
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
@@ -52,7 +51,22 @@ def _reminder_in_messages(messages: list[Any]) -> bool:
     return False
 
 
-def _format_todos(todos: list[Todo]) -> str:
+def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
+    """Return the stored todo entries this middleware can render.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite with any shape, so a stored value is not guaranteed to be the
+    list of mappings ``write_todos`` produces. Entries of any other shape are
+    dropped: one of them would otherwise raise on every model call of the thread,
+    because both hooks read this channel before the model runs.
+    """
+    todos = state.get("todos")
+    if not isinstance(todos, list):
+        return []
+    return [todo for todo in todos if isinstance(todo, Mapping)]
+
+
+def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
     for todo in todos:
@@ -62,7 +76,7 @@ def _format_todos(todos: list[Todo]) -> str:
     return "\n".join(lines)
 
 
-def _format_completion_reminder(todos: list[Todo]) -> str:
+def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a completion reminder for incomplete todo items."""
     incomplete = [t for t in todos if t.get("status") != "completed"]
     incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
@@ -153,7 +167,7 @@ class TodoMiddleware(TodoListMiddleware):
             # write_todos was denied for this build; context-loss detection only
             # exists to protect todo state the model cannot update anyway.
             return None
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        todos = _usable_todos(state)
         if not todos:
             return None
 
@@ -357,7 +371,7 @@ class TodoMiddleware(TodoListMiddleware):
             return None
 
         # 3. Allow exit when all todos are completed or there are no todos.
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        todos = _usable_todos(state)
         if not todos or all(t.get("status") == "completed" for t in todos):
             return None
 

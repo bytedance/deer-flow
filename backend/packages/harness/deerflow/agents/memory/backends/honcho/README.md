@@ -71,6 +71,13 @@ cannot see each other's memory by construction.
   workspace-scoped search, while the passive per-turn write middleware is
   retained because Honcho's deriver learns from `add()` writes.
 
+Search result `metadata` must be an object, null, or absent. The HTTP client
+rejects other containers before returning results, so `failure_policy.read`
+also covers metadata-shape failures: fail-open returns no search results and
+fail-closed raises `MemoryReadError`. A malformed later result does not expose
+a partial result set. Diagnostics name the result index and field, without
+echoing metadata or memory content.
+
 ## Incremental conversation capture
 
 Checkpoint history is cumulative. For messages with stable source IDs, the

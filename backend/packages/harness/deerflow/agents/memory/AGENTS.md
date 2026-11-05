@@ -19,6 +19,9 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
+apply the read policy to the whole result, with value-free diagnostics.
+
 #### Main components
 
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
