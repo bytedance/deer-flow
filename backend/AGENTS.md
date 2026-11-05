@@ -136,8 +136,11 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
-HTTPX clients for RAGFlow, LightRAG, You.com, GroundRoute and Webz use
+HTTPX clients for RAGFlow, LightRAG, You.com, GroundRoute, Webz and Crawl4AI use
 `asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay on-loop.
+The list is non-exhaustive: jsonify, SearXNG, Browserless, Jina and InfoQuest
+still construct their clients on the loop and should follow the same rule when
+touched.
 
 ### Harness / App Split
 
