@@ -1196,6 +1196,7 @@ downloading a partial transcript. Public demos export their bundled messages.
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
+Personal MCP HTTP/SSE connections admitted under the public-network policy load TLS trust off the Gateway event loop, while retaining public-address checks, certificate verification and per-origin connection isolation.
 Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
 Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
