@@ -119,8 +119,9 @@ def publish(team, payload, context):
     try:
         check_budget(team)
     except BaseException:
-        state["entries"].pop()
-        state["revision"] -= 1
+        if state["entries"] and state["entries"][-1] is entry:
+            state["entries"].pop()
+            state["revision"] -= 1
         raise
     return {"team_id": team["id"], "revision": state["revision"], "entry": {key: entry[key] for key in PUBLIC_FIELDS}}
 
