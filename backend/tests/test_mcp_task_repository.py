@@ -296,6 +296,113 @@ async def test_interleaved_reclaim_fences_inflight_notification_completion(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_concurrent_notification_claims_return_one_owner(tmp_path, monkeypatch):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "concurrent-notification-claim"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    assert await repo.apply_snapshot(
+        task_id,
+        lease_owner="poller",
+        lease_token=poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claim_kwargs = {"now": now, "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+
+    async with _pause_claim_mutation(
+        monkeypatch,
+        repo.claim_notification_work(lease_owner="worker-a", **claim_kwargs),
+    ) as (paused_claim, resume):
+        winner = await asyncio.wait_for(repo.claim_notification_work(lease_owner="worker-b", **claim_kwargs), timeout=5)
+        assert len(winner) == 1
+        before_resume = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+        assert before_resume is not None
+        resume.set()
+        stale = await asyncio.wait_for(paused_claim, timeout=5)
+
+    # The paused claim read the row before worker-b won it; its write must not
+    # overwrite the winning owner, token or dispatch phase.
+    assert stale == []
+    stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_lease_owner"] == "worker-b"
+    assert stored["notification_lease_token"] == winner[0]["notification_lease_token"]
+    assert stored["notification_status"] == winner[0]["notification_status"]
+    assert stored["dispatch_version"] == winner[0]["dispatch_version"]
+
+
+@pytest.mark.asyncio
+async def test_stale_claim_does_not_bypass_deferred_next_notification(tmp_path, monkeypatch):
+    repo = await _make_repo(tmp_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    task_id = "deferred-notification-claim"
+    await _create_working_task(repo, task_id=task_id, now=now)
+    poll = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    assert await repo.apply_snapshot(
+        task_id,
+        lease_owner="poller",
+        lease_token=poll[0]["lease_token"],
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claim_kwargs = {"now": now, "lease_seconds": 60, "limit": 1, "tracking_degraded_after_errors": 3}
+    seeded = await repo.claim_notification_work(lease_owner="seed", **claim_kwargs)
+    assert len(seeded) == 1
+    # Release the phase-preserving claim back to a due state: the status stays
+    # ``claimed`` while the row becomes claimable again.
+    assert await repo.release_notification_lease(
+        task_id,
+        lease_owner="seed",
+        notification_lease_token=seeded[0]["notification_lease_token"],
+        next_notification_at=now - timedelta(seconds=1),
+        error=None,
+    )
+    deferred_until = now + timedelta(seconds=30)
+
+    async with _pause_claim_mutation(
+        monkeypatch,
+        repo.claim_notification_work(lease_owner="worker-a", **claim_kwargs),
+    ) as (paused_claim, resume):
+        winner = await asyncio.wait_for(repo.claim_notification_work(lease_owner="worker-b", **claim_kwargs), timeout=5)
+        assert len(winner) == 1
+        # Worker-b releases the claim without changing its phase, moving the
+        # next attempt into the future (retry/defer backoff).
+        assert await repo.release_notification_lease(
+            task_id,
+            lease_owner="worker-b",
+            notification_lease_token=winner[0]["notification_lease_token"],
+            next_notification_at=deferred_until,
+            error="backoff",
+        )
+        resume.set()
+        stale = await asyncio.wait_for(paused_claim, timeout=5)
+
+    # The paused reader saw a due claim; the backoff belongs to the winning
+    # worker, so the stale claim must not deliver the notification early.
+    assert stale == []
+    stored = await repo.get(task_id, user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert stored is not None
+    assert stored["notification_lease_owner"] is None
+    assert datetime.fromisoformat(stored["next_notification_at"]) == deferred_until
+
+
+@pytest.mark.asyncio
 async def test_legacy_task_writer_leaves_thread_incarnation_null(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
