@@ -91,10 +91,12 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     should_continue_goal,
     visible_conversation_signature,
+    wake_goal_after_external_wait,
     write_thread_goal,
 )
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -746,6 +748,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1230,6 +1234,14 @@ async def run_agent(
             return
         started = True
 
+        goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
+        if goal_wakeup is not None:
+            if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
+                await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
+                return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
+
         if ctx.on_run_admitted is not None:
             try:
                 await ctx.on_run_admitted(record, config)
@@ -1238,23 +1250,26 @@ async def run_agent(
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
-            task_store = ExtensionData(task_id)
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
+            identity = TaskInfo(
                 task_id=task_id,
                 run_id=run_id,
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
             )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
+            task_store = ExtensionData(task_id)
+            # Seed the identity for every hook handed this store, not only
+            # lifecycle contributors: compaction events are named from it.
+            task_store.set(identity)
+            # A lifecycle contributor always implies a task store.
+            if extensions.has_task_lifecycle:
+                task_info = identity
+                await notify_task_start(
+                    extensions,
+                    task_store,
+                    task_info,
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
 
         if not record.ownership_lost and thread_store is not None:
             try:

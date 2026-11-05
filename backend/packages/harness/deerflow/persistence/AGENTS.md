@@ -22,10 +22,10 @@ On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrela
 
 ## Batch lease recovery
 
-Batch controls reserve the parent writer and reload its current state before
-deciding pause/resume/cancel. SQLite ignores SELECT FOR UPDATE; deriving a
-transition from the earlier snapshot can replace a committed terminal outcome.
-Keep the parent-before-item lock order and terminal completion timestamps.
+Batch controls reserve the parent writer and refresh state before applying
+pause/resume/cancel. SQLite ignores SELECT FOR UPDATE; using an earlier snapshot
+can overwrite committed terminal outcomes. Keep parent-before-item lock order
+and terminal completion timestamps.
 
 Batch lease recovery includes paused parents only when they have expired active
 items. Reconcile through the existing owner/expiry fence, then skip promotion and
@@ -65,7 +65,7 @@ missing or strictly older leases remain recoverable.
 
 ## MCP task notifications
 
-`mcp_tasks/sql.py::claim_notification_work` never returns a row without a dispatch event. A pending snapshot whose condition resolved before delivery (tracking recovered, or an answered `input_required` prompt returned the task to `working`) is consumed at claim time: `notified_version` advances, the content fingerprint clears so an identical later event is recorded again, stale error/attempt/dispatch state clears, status returns to `none`, and the claim lease is released instead of launching an empty event. A legacy row left without a dispatch event is consumed only when nothing newer exists; a newer recorded event is rebuilt and claimed instead. Consumption is a conditional UPDATE fenced on the event version and phase the claim read, so a concurrent newer event (SQLite has no row locks) is never acknowledged and stays claimable. Coverage: `tests/test_mcp_task_repository.py` (resolved snapshot, legacy retry, expired-claim reclaim, identical-event recurrence, interleaved newer completion, legacy launching/dispatched with and without a newer completion).
+`mcp_tasks/sql.py::claim_notification_work` never returns a row without a dispatch event. A pending snapshot whose condition resolved before delivery (tracking recovered, or an answered `input_required` prompt returned the task to `working`) is consumed at claim time: `notified_version` advances, the content fingerprint clears so an identical later event is recorded again, stale error/attempt/dispatch state clears, status returns to `none`, and the claim lease is released instead of launching an empty event. A legacy row left without a dispatch event is consumed only when nothing newer exists; a newer recorded event is rebuilt and claimed instead. Consumption is a conditional UPDATE fenced on the event version, notification phase and dispatch version the claim read, and on SQLite the claim itself is a conditional UPDATE fenced on those columns, the observed next attempt time and an absent or expired notification lease, so a concurrent newer event, a peer claim or a release/defer moving the next attempt (SQLite has no row locks) is never acknowledged, overwritten, returned twice or delivered ahead of its backoff. Coverage: `tests/test_mcp_task_repository.py` (resolved snapshot, legacy retry, expired-claim reclaim, identical-event recurrence, interleaved newer completion, two concurrent claims, a deferred backoff, legacy launching/dispatched with and without a newer completion).
 
 ## MCP control leases
 

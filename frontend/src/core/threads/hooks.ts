@@ -30,7 +30,7 @@ import { getBackendBaseURL } from "../config";
 import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
-import { getMessageRunId } from "../messages/run-duration";
+import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
 import { indexToolResults } from "../messages/tool-result";
 import {
@@ -2504,6 +2504,17 @@ export function useThreadStream({
     inputActiveRunId && !completedRunIdsRef.current.has(inputActiveRunId)
       ? inputActiveRunId
       : activeRunId;
+  // A run observed mid-flight (remount, chat switch, rejoin) started before
+  // this view did. Its record carries the same start that turn_duration uses.
+  const knownActiveRun = knownActiveRunId
+    ? runsQuery.data?.find((run) => run.run_id === knownActiveRunId)
+    : undefined;
+  const knownActiveRunStartedAt =
+    knownActiveRun &&
+    ACTIVE_RUN_STATUSES.has(String(knownActiveRun.status)) &&
+    !completedRunIdsRef.current.has(knownActiveRun.run_id)
+      ? parseRunStartTime(knownActiveRun.created_at)
+      : null;
 
   // reconnectOnMount only knows the run id stored in this tab's
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
@@ -3461,6 +3472,7 @@ export function useThreadStream({
     ),
     canSendInput: inputCapability && !!inputQuery.data?.active_run_id,
     activeRunId: knownActiveRunId,
+    activeRunStartedAt: knownActiveRunStartedAt,
   } as const;
 }
 
