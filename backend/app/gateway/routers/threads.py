@@ -805,6 +805,9 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+    if batch_repo is not None:
+        await batch_repo.suppress_thread_continuations(thread_id)
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -1512,6 +1515,9 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await _ensure_thread_for_goal(thread_id, request)
             await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
+            batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+            if batch_repo is not None:
+                await batch_repo.suppress_thread_continuations(thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ConflictError:
@@ -1532,6 +1538,9 @@ async def clear_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoal
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+            batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+            if batch_repo is not None:
+                await batch_repo.suppress_thread_continuations(thread_id)
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Clear the goal after the run finishes.") from None
     except LookupError:

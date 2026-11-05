@@ -323,7 +323,7 @@ are:
 
 | Provider ID | Service / credential scope | Endpoint | Protocol / authentication |
 | --- | --- | --- | --- |
-| `openai` | OpenAI API | `https://api.openai.com/v1` | Chat Completions / Bearer |
+| `openai` | OpenAI API | `https://api.openai.com/v1` | Responses for the GPT-6 IDs below; otherwise Chat Completions / Bearer |
 | `anthropic` | Anthropic API | `https://api.anthropic.com` | Native Messages `/v1/messages` / `x-api-key` |
 | `deepseek` | DeepSeek API | `https://api.deepseek.com` | Chat Completions / Bearer |
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
@@ -361,6 +361,17 @@ Chat model pickers search display names, configured names, IDs and provider labe
 with provider filtering and favorites/recent groups. The eight recent selections
 are browser-local and user-scoped, and only currently available models appear.
 Selecting a model continues to use the existing conversation/account preferences.
+
+The `openai` preset recognizes the exact IDs `gpt-6-astra`, `gpt-6.1-sol`,
+`gpt-6.1-terra`, `gpt-6-sol` and `gpt-6-luna`. They use the Responses API
+for both the connection probe and chat, including tool calls and tool-result
+follow-ups. Astra and GPT-6.1 Sol require thinking, default to `medium`, and
+accept `low`, `medium`, `high`, `xhigh` and `max`. The other three also accept
+`none`: disabling thinking uses `none`, while enabling it without an explicit
+effort uses `medium`. Generic `minimal` maps to `low`. Image input is enabled.
+Explicit capability overrides remain supported; routing stays provider-owned.
+Unknown IDs, older OpenAI presets and custom endpoints keep their existing
+behavior. See OpenAI's [GPT-6 protocol and parameter guide](https://developers.openai.com/api/docs/guides/latest-model).
 
 The `moonshot-cn` preset recognizes the exact IDs `kimi-k3.1-pro` and
 `kimi-k3.1-pro-highspeed`. Both require thinking, preserve reasoning history,
