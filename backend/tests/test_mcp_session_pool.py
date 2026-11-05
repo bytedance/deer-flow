@@ -16,6 +16,7 @@ import pytest
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import (
+    MCPError,
     McpError,
     MCPSessionPool,
     call_pooled_session_tool,
@@ -783,7 +784,7 @@ mcp.run(transport="stdio")
 
     with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
         wrapped = _make_session_pool_tool(original_tool, "crash", connection)
-        with pytest.raises(McpError, match="Connection closed") as exc_info:
+        with pytest.raises(MCPError, match="Connection closed") as exc_info:
             await wrapped.coroutine(deerflow_runtime=runtime)
 
         assert exc_info.value.error.code == CONNECTION_CLOSED
@@ -3253,9 +3254,11 @@ def test_is_mcp_transport_disconnect_v1_and_v2_compat():
     assert issubclass(MCPError, Exception)
 
 
-def test_mcp_v2_compatibility_wrapper_construction_and_import():
-    """Verify the McpError compatibility wrapper for MCP 2.x accepts ErrorData and keyword args."""
-    from deerflow.mcp.session_pool import _is_mcp_transport_disconnect
+def test_mcp_v2_compatibility_wrapper_construction_and_import(monkeypatch):
+    """Verify the production McpError compatibility wrapper for MCP 2.x accepts ErrorData and keyword args."""
+    import importlib
+    import sys
+    import types
 
     # Simulate MCP 2.x SDK base class
     class MockSdkMCPError(Exception):
@@ -3266,38 +3269,39 @@ def test_mcp_v2_compatibility_wrapper_construction_and_import():
             self.message = message
             self.data = data
 
-    # Create wrapper using the exact logic from session_pool
-    class MockCompatMcpError(MockSdkMCPError):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            if len(args) == 1 and hasattr(args[0], "code") and hasattr(args[0], "message") and not kwargs:
-                err_data = args[0]
-                super().__init__(
-                    code=err_data.code,
-                    message=err_data.message,
-                    data=getattr(err_data, "data", None),
-                )
-            else:
-                super().__init__(*args, **kwargs)
+    fake_module = types.ModuleType("mcp.shared.exceptions")
+    fake_module.MCPError = MockSdkMCPError
 
-    # 1. 1.x signature: McpError(ErrorData(...))
-    err1 = MockCompatMcpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
-    assert err1.code == CONNECTION_CLOSED
-    assert err1.message == "Connection closed"
-    assert err1.error.code == CONNECTION_CLOSED
-    assert err1.error.message == "Connection closed"
+    monkeypatch.setitem(sys.modules, "mcp.shared.exceptions", fake_module)
 
-    # 2. 2.x signature: MCPError(code, message)
-    err2 = MockCompatMcpError(CONNECTION_CLOSED, "Connection closed")
-    assert err2.code == CONNECTION_CLOSED
-    assert err2.message == "Connection closed"
+    import deerflow.mcp.session_pool as session_pool_mod
 
-    # 3. 2.x signature with kwargs: MCPError(code=..., message=...)
-    err3 = MockCompatMcpError(code=408, message="request timed out")
-    assert err3.code == 408
-    assert err3.message == "request timed out"
+    try:
+        importlib.reload(session_pool_mod)
+        CompatMcpError = session_pool_mod.McpError
+        assert issubclass(CompatMcpError, MockSdkMCPError)
 
-    # 4. _is_mcp_transport_disconnect works on the wrapper
-    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (MockSdkMCPError,)):
-        assert _is_mcp_transport_disconnect(err1) is True
-        assert _is_mcp_transport_disconnect(err2) is True
-        assert _is_mcp_transport_disconnect(err3) is False
+        # 1. 1.x signature: McpError(ErrorData(...))
+        err1 = CompatMcpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        assert err1.code == CONNECTION_CLOSED
+        assert err1.message == "Connection closed"
+        assert err1.error.code == CONNECTION_CLOSED
+        assert err1.error.message == "Connection closed"
+
+        # 2. 2.x signature: MCPError(code, message)
+        err2 = CompatMcpError(CONNECTION_CLOSED, "Connection closed")
+        assert err2.code == CONNECTION_CLOSED
+        assert err2.message == "Connection closed"
+
+        # 3. 2.x signature with kwargs: MCPError(code=..., message=...)
+        err3 = CompatMcpError(code=408, message="request timed out")
+        assert err3.code == 408
+        assert err3.message == "request timed out"
+
+        # 4. _is_mcp_transport_disconnect works on the wrapper
+        assert session_pool_mod._is_mcp_transport_disconnect(err1) is True
+        assert session_pool_mod._is_mcp_transport_disconnect(err2) is True
+        assert session_pool_mod._is_mcp_transport_disconnect(err3) is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(session_pool_mod)

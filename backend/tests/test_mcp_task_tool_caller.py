@@ -14,7 +14,7 @@ from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
 from deerflow.config.paths import Paths
-from deerflow.mcp.session_pool import McpError, MCPSessionPool
+from deerflow.mcp.session_pool import MCPError, McpError, MCPSessionPool
 from deerflow.mcp.task_tool_caller import McpTaskToolCaller
 from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot
@@ -435,7 +435,7 @@ mcp.run(transport="stdio")
             )
 
             server_config.tool_call_timeout = 0.05
-            with pytest.raises(McpError, match="Timed out while waiting") as exc_info:
+            with pytest.raises(MCPError, match="Timed out while waiting") as exc_info:
                 await caller.call_tool(
                     server_name="reports",
                     tool_name="status_report",

@@ -154,7 +154,10 @@ def build_server(provider: str) -> Any:
         raise ValueError("Unknown business provider")
     if FastMCP is Any:
         raise RuntimeError("FastMCP or MCPServer is required to run the bundled business MCP server.")
-    server = FastMCP(f"deerflow-{provider}", log_level="WARNING")
+    try:
+        server = FastMCP(f"deerflow-{provider}", log_level="WARNING")
+    except TypeError:
+        server = FastMCP(f"deerflow-{provider}")
 
     def client() -> BusinessClient:
         return BusinessClient(provider, {field: os.environ.get(variable, "") for field, variable in CREDENTIALS[provider].items()})
