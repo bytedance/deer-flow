@@ -137,3 +137,19 @@ def test_prepare_update_returns_new_signals_after_swap(tmp_path) -> None:
     _filtered, signals = r
     assert "preference" in signals
     assert len(_filtered) == 2  # not trivial -> kept
+
+
+# ── extract_message_text: content shapes ───────────────────────────────────
+
+
+def test_extract_message_text_treats_none_as_empty() -> None:
+    """A content-less message must not become the literal string ``"None"``.
+
+    ``str(None)`` is truthy, so the naive fallback would hand ``"None"`` to
+    signal detection and to the memory-update prompt as if it were real user
+    text. Mirrors ``utils/messages.py:message_content_to_text`` and
+    ``test_mem0_memory_backend.py::test_extract_message_text_treats_none_as_empty``.
+    """
+    msg = _human("")
+    msg.content = None
+    assert extract_message_text(msg) == ""

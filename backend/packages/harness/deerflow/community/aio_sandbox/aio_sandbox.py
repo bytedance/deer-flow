@@ -71,6 +71,7 @@ class AioSandbox(Sandbox):
     #: so shell state (exports, cwd, functions) carries from one command into
     #: the next — recorded bash evidence cannot prove a clean environment.
     persistent_shell_sessions = True
+    artifact_root = "/mnt/user-data"
 
     supports_command_cancellation = True
 

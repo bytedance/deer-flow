@@ -97,6 +97,13 @@ def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Patt
 def extract_message_text(message: Any) -> str:
     """Extract plain text from message content for filtering and signal detection."""
     content = getattr(message, "content", "")
+    if content is None:
+        # ``str(None)`` is the truthy literal ``"None"``, so a content-less
+        # message would survive every downstream ``text if text else ...``
+        # fallback and be reported as real user text. Keep this in step with
+        # ``deerflow/utils/messages.py:message_content_to_text`` and the mem0
+        # copy of this helper, which both return "" here.
+        return ""
     if isinstance(content, list):
         text_parts: list[str] = []
         for part in content:
