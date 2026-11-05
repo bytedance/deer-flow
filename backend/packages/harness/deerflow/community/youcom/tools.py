@@ -143,7 +143,7 @@ async def _search(api_key: str | None, query: str, count: int) -> dict:
     else:
         endpoint = _YOUCOM_KEYLESS_ENDPOINT
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+    async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
         response = await client.get(endpoint, params={"query": query, "count": count}, headers=headers)
     response.raise_for_status()
     return response.json()

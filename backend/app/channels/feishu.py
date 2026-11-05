@@ -668,9 +668,7 @@ class FeishuChannel(Channel):
     async def _upload_image(self, path) -> str:
         """Upload an image to Feishu and return the image_key."""
         response = await asyncio.to_thread(self._upload_image_sync, path)
-        if not response.success():
-            raise RuntimeError(f"Feishu image upload failed: code={response.code}, msg={response.msg}")
-        return response.data.image_key
+        return self._uploaded_key(response, "image")
 
     def _upload_file_sync(self, path, filename: str, file_type: str):
         with open(str(path), "rb") as f:
@@ -692,9 +690,17 @@ class FeishuChannel(Channel):
             file_type = "stream"
 
         response = await asyncio.to_thread(self._upload_file_sync, path, filename, file_type)
+        return self._uploaded_key(response, "file")
+
+    @staticmethod
+    def _uploaded_key(response, kind: str) -> str:
+        """Return the ``image_key``/``file_key`` of an upload response or raise with its log_id."""
         if not response.success():
-            raise RuntimeError(f"Feishu file upload failed: code={response.code}, msg={response.msg}")
-        return response.data.file_key
+            raise RuntimeError(f"Feishu {kind} upload failed: code={response.code}, msg={response.msg}, log_id={response.get_log_id()}")
+        key = getattr(getattr(response, "data", None), f"{kind}_key", None)
+        if not isinstance(key, str) or not key:
+            raise RuntimeError(f"Feishu {kind} upload returned no {kind}_key: log_id={response.get_log_id()}")
+        return key
 
     async def receive_file(self, msg: InboundMessage, thread_id: str, *, user_id: str | None = None) -> InboundMessage:
         """Download a Feishu file into the thread uploads directory.

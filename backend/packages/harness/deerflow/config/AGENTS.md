@@ -30,7 +30,9 @@ explicitly carries forward the existing owner's display name when re-bootstrappi
 the Gateway explicitly overrides it when supplied, including null to clear.
 Both stores use `parse_agent_config` to ignore only an invalid stored
 `display_name` on read, logging the agent identifier without the invalid value
-and without rewriting storage. Other config errors still
+and without rewriting storage. It also reads a stored null `description`
+(a bare YAML key, or what `PUT /api/agents/{name}` used to write) as `""`; that
+route now stores an explicit null as `""`. Other config errors still
 raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
@@ -225,4 +227,24 @@ endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 
 ### Web model provider presets
 
+The five exact OpenAI GPT-6 IDs in `OPENAI_GPT6_MODELS` explicitly select Responses:
+their preset supplies `base_url`, which intentionally bypasses the factory's
+fallback routing. Astra and 6.1 Sol require thinking; Terra, Sol and Luna can
+disable it with `none`. For optional presets, the enable template defaults to
+`medium` and the disabled template's `none` takes precedence over request effort.
+Explicit reasoning overrides discard incompatible preset effort values while
+preserving non-effort templates and provider-owned Responses routing. Translate
+saved effort paths to ChatOpenAI's `reasoning_effort` on a runtime copy, leaving
+encrypted records unchanged. After resolving effort and caller overrides, omit
+temperature, top_p and top_logprobs for these official presets unless effort is
+`none`; preserve sampling for that disabled mode and other providers.
+Keep custom endpoints and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
+`tests/test_managed_openai_gpt6.py`.
+
 Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.
+
+Catalog imports use `ManagedModelStore.save(deduplicate=True)` under the existing
+thread/process lock, checking the saved source revision before deduplication
+by provider, endpoint, key and model ID. Ordinary edits
+retain revision checks. `_managed_provider` is private runtime display metadata;
+it must never enter serialized config or SDK request kwargs.

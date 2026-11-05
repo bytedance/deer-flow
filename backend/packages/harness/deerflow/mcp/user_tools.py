@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import inspect
 import threading
 
 from langchain_core.tools import ToolException
@@ -15,8 +16,23 @@ from deerflow.tools.mcp_metadata import get_mcp_source
 from deerflow.tools.sync import make_sync_tool_wrapper
 
 
+def _runtime_parameter(coroutine) -> str:
+    """Name of the parameter LangGraph injects the ``ToolRuntime`` into.
+
+    Pooled stdio wrappers expose ``deerflow_runtime`` so a business argument
+    named ``runtime`` survives; HTTP/SSE tools keep ``langchain-mcp-adapters``'
+    own ``runtime`` parameter.
+    """
+    try:
+        parameters = inspect.signature(coroutine).parameters
+    except (TypeError, ValueError):
+        return "runtime"
+    return "deerflow_runtime" if "deerflow_runtime" in parameters else "runtime"
+
+
 def _guard(tool, owner: str, server_name: str):
     original = tool.coroutine
+    runtime_parameter = _runtime_parameter(original)
     snapshot: PersonalMcpConfigSnapshot | None = None
     snapshot_lock = threading.Lock()
 
@@ -29,7 +45,7 @@ def _guard(tool, owner: str, server_name: str):
 
     @functools.wraps(original)
     async def invoke(*args, **kwargs):
-        if resolve_runtime_user_id(kwargs.get("runtime")) != owner:
+        if resolve_runtime_user_id(kwargs.get(runtime_parameter)) != owner:
             raise ToolException("This MCP connection belongs to another user")
         server = await asyncio.to_thread(current_connection)
         if server is None:

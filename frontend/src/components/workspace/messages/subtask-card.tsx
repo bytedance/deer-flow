@@ -117,7 +117,7 @@ export function SubtaskCard({
     fetchSubtaskSteps(threadId, runId, taskId)
       .then((steps) => {
         if (steps.length > 0) {
-          updateSubtask({ id: taskId, steps });
+          updateSubtask({ id: taskId, steps }, { stepSource: "history" });
         }
       })
       .catch(() => {

@@ -12,12 +12,86 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **subagents:** Durable batch items can wait for explicitly named prerequisites.
+  An optional, once-only lead-Agent follow-up completes a previously requested
+  summary or delivery after the batch ends, with persisted admission, cancellation
+  and authorization checks. Active Goals retain continuation ownership. ([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
 ### Fixed
+
+- **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
+  longer create or acquire a sandbox before the first sandbox-backed tool
+  call. Existing sandbox bindings and providers that require skill uploads
+  retain their eager synchronization behavior. ([#7782])
+  
+- **gateway:** A caller-supplied thread ID that is a Windows reserved device
+  name (`NUL`, `CON`, `COM1`, ...) is now rejected at the shared
+  `validate_thread_id()` boundary. Such IDs previously passed validation but
+  failed workspace creation on Windows hosts with `FileNotFoundError`. The
+  check reuses `windows_incompatible_segment()` and applies on every platform,
+  so threads with reserved-name IDs created on Linux hosts will fail
+  validation on read/resume/upload routes after upgrade (deletion still
+  works). ([#7892])
+
+- **extensions:** Context-compaction observers now learn which task a
+  compaction happened in. Inside a lead run or subagent they receive that
+  task's store instead of a detached one, and `CompactionEvent` gains
+  `task_id`, `run_id` and `thread_id` (default `None`), copied from the
+  `TaskInfo` the host now seeds into every task store even when no lifecycle
+  contributor is registered. A manual `/compact` still gets a detached store
+  and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
+  extensions keep working. ([#7831])
+
+- **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
+  longer lost when a card request fails, for example without card permission
+  or during a DingTalk outage. dingtalk-stream logs a failed card request and
+  returns as if it succeeded, so neither the text running reply nor the
+  `sampleMarkdown` fallback for the final answer ever ran. The channel now
+  sends card requests itself and falls back when one fails. ([#7781])
+  
+- **harness:** Retrying a failed item no longer reopens a cancelled durable
+  subagent batch. `retry_item` kept only a paused batch as it was, so a failed
+  item of a cancelled batch put the batch back to `queued`, the worker claimed
+  and ran the item, and the batch ended `completed`. The retry route now
+  answers 409 for a cancelled batch, including when the cancel commits while
+  the retry is in flight on SQLite, and the workspace no longer offers Retry
+  there. Retrying in a completed, failed, running or paused batch is
+  unchanged. ([#7792])
+
+- **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
+  description to empty. It used to store the null, which the agent config
+  rejects, so the agent then failed every load: the update, GET and repair
+  updates returned 500, the file backend dropped it from the agent list, the
+  database backend failed the owner's whole list, and chats with it failed.
+  Agents already stored with a null description load again. ([#7638])
+
+- **sandbox:** Cancelled native Runs now stop their owned AIO and POSIX local
+  bash processes, including ordinary `nohup` children, before releasing the
+  execution lease. Concurrent work and background services from successful
+  earlier turns remain running. ([#7772])
+  
+- **agents:** A clarification no longer overwrites an earlier question when the
+  provider reuses a tool-call ID across turns (for example `call_0` on every
+  response). Its message ID, which is also the human-input `request_id`, named
+  only the call ID, so the later question replaced the earlier one in place and
+  the later call was left without a result. The ID now also names the
+  AIMessage that issued the call; a retry of the same call keeps its ID.
+  ([#7762])
+
+- **projects:** The trash retention sweep no longer deletes live document
+  originals when the data directory, `users/`, a user's directory or a
+  user's `projects/` is a symlink. It protected each document by its resolved
+  path but walked the unresolved tree, so no document matched and every
+  original older than 24 hours was removed as an orphan, at Gateway startup
+  and from `GET /api/trash/documents`. ([#7732])
+
+- **chat:** Cancelling a queued input after dispatch starts no longer
+  prevents subsequent queued inputs from executing. ([#7746])
 
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
   as well as both Gateway logs; it printed only the Gateway logs, the same as
@@ -15945,7 +16019,17 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
 [#7665]: https://github.com/bytedance/deer-flow/pull/7665
 [#7723]: https://github.com/bytedance/deer-flow/pull/7723
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
+[#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7892]: https://github.com/bytedance/deer-flow/pull/7892
