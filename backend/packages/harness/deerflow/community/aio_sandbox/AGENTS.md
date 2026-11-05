@@ -39,6 +39,18 @@ post-start errors cannot prove absence. Restricted creation must not opt in:
 its proxy may already own the port, even if the final sandbox CLI cannot start.
 Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
 
+Restricted creation tracks the proxy's `docker create` boundary per attempt.
+Only a definite CLI spawn failure, successful proxy removal, or authoritative
+proxy absence permits returning its port. Preserve the creation error through
+ordinary rollback/probe failures; network removal can fail after the port is free.
+Publish uncertain attempt records before probing, and compare their identities
+before release so delayed probes cannot free successor reservations. Same-ID
+creation reconciles these backend-instance records before allocating again;
+active destroy operations own their release. Destroy and fenced absent teardown
+clear the same records. Durable uncertain-start admission needs its own
+generation-safe recovery contract. Regressions:
+`tests/test_aio_sandbox_restricted_creation_ports.py`.
+
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes
 that fence and ambiguous shell or bash creation tombstones; a pending creation

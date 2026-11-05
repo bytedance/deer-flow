@@ -1106,8 +1106,13 @@ ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
 In open network mode, a missing Docker/Apple Container CLI or a permission-denied
 CLI startup returns the reserved port while reporting the original error, so
-repeated attempts do not exhaust the port range. Restricted network mode
-retains its existing cleanup rules because a proxy may already hold the port.
+repeated attempts do not exhaust the port range. Restricted network creation
+returns its reservation when no proxy could have been created or after confirming
+that the proxy has been removed, including when later network cleanup fails.
+An uncertain proxy keeps its reservation. Before another attempt for the same sandbox allocates a
+port, the local backend checks whether that proxy has disappeared and reclaims
+the pending reservation. These failed-creation records have the lifetime of the
+local backend instance.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
