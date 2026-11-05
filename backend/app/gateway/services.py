@@ -688,7 +688,7 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
     for field in ("continuation_count", "max_continuations", "no_progress_count", "max_no_progress_continuations"):
         if field in value and (type(value[field]) is not int or value[field] < 0):
             raise HTTPException(status_code=400, detail=f"{location}.{field} must be a non-negative integer")
-    return {**value, "objective": objective}
+    return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
 
 
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:

@@ -896,7 +896,9 @@ export const zhCN: Translations = {
   subagentBatches: {
     label: "批处理",
     title: "子智能体批处理",
-    description: "面向大量独立条目的持久化、可恢复执行。",
+    description: "在后台执行并保留进度的批量任务。",
+    followUpPending: "这批任务结束后，会继续完成你要求的后续工作。",
+    followUpStopped: "已停止自动接续。",
     workerUnavailable:
       "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
     empty: "暂无子智能体批处理",
