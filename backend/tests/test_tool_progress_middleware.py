@@ -1886,3 +1886,16 @@ def test_tool_progress_and_loop_detection_coexist_without_interfering():
     # comparison would be trivially True and would not detect accidental modifications.
     assert tp_mw._pending.get(("t1", "r1"), []) == []
     assert ld_mw._pending_warnings.get(("ld-thread", "ld-run"), []) == ld_warnings_snapshot
+
+
+def test_null_tool_call_id_not_stringified_to_none():
+    """A tool call whose id is JSON null must yield an empty tool_call_id,
+    not the literal string "None" - "None" passes _valid_tool_call_id and
+    would defeat the dangling-call relabelling pass (issue #7846)."""
+    mw = _make_mw(stagnation_threshold=2, warn_escalation_count=1)
+    rt = _make_runtime()
+    req = _make_tool_request(runtime=rt)
+    req.tool_call = {"name": "web_search", "id": None}
+    # Force the blocked branch directly via the helper.
+    blocked = mw._make_blocked_message(req, "web_search", "blocked by test")
+    assert blocked.tool_call_id == ""

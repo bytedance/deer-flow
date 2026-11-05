@@ -1022,3 +1022,23 @@ class TestStampingGateBugFix:
             lambda r: ToolMessage(content=READ_FILE_EMPTY, tool_call_id="call-1", name="read_file"),
         )
         assert READ_MARK_KEY in res.additional_kwargs, "a full read of a genuinely empty file must stamp a read mark"
+
+
+def test_null_tool_call_id_not_stringified_to_none():
+    """A tool call whose id is JSON null must yield an empty tool_call_id,
+    not the literal string "None" - "None" passes _valid_tool_call_id and
+    would defeat the dangling-call relabelling pass (issue #7846)."""
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
+
+    path = "/mnt/user-data/outputs/report.md"
+
+    def reader(_runtime, p):
+        return "v1"
+
+    mw = ReadBeforeWriteMiddleware(content_reader=reader, config=ReadBeforeWriteConfig())
+    request = _make_request("write_file", {"description": "d", "path": path, "content": "v2"}, tool_call_id=None)
+    handler = MagicMock()
+    result = mw.wrap_tool_call(request, handler)
+    handler.assert_not_called()
+    assert result.tool_call_id == ""
