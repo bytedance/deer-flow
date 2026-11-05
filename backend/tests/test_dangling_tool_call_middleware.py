@@ -822,6 +822,25 @@ class TestMalformedToolCallIdRecovery:
         assert patched[2].tool_call_id == invalid_id
         assert patched[2].status == "error"
 
+    def test_result_matching_only_invalid_sibling_is_dropped(self):
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage(
+                content="",
+                tool_calls=[_tc("bash", "")],
+                invalid_tool_calls=[_invalid_tc(name="edit", tc_id="")],
+            ),
+            ToolMessage(content="INVALID-ONLY-RESULT", tool_call_id="", name="edit"),
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert len(patched) == 3
+        tool_messages = [message for message in patched if isinstance(message, ToolMessage)]
+        assert all(message.content != "INVALID-ONLY-RESULT" for message in tool_messages)
+        assert all(message.status == "error" for message in tool_messages)
+
     def test_result_is_not_paired_to_a_turn_with_only_invalid_calls(self):
         mw = DanglingToolCallMiddleware()
         msgs = [

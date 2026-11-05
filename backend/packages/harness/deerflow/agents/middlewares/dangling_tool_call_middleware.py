@@ -75,8 +75,10 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     The id is derived from the call's position so both the pairing pass and the
     model-bound message agree on it without threading state between them.
 
-    Returns the rewritten list, one ``{original, synthetic, name}`` claim entry per
-    relabelled call, and whether anything changed.
+    Returns the rewritten list, one
+    ``{original, synthetic, name, executable}`` claim entry per relabelled call,
+    and whether anything changed. Calls from ``invalid_tool_calls`` are marked
+    non-executable so their results cannot claim a pairing.
     """
     relabeled: list = []
     assigned: list[dict] = []
@@ -88,7 +90,14 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
         synthetic = f"{_SYNTHETIC_TOOL_CALL_ID_PREFIX}{msg_index}_{source}_{position}"
         relabeled.append({**tool_call, "id": synthetic})
         changed = True
-        assigned.append({"original": tool_call.get("id"), "synthetic": synthetic, "name": _tool_call_name(tool_call)})
+        assigned.append(
+            {
+                "original": tool_call.get("id"),
+                "synthetic": synthetic,
+                "name": _tool_call_name(tool_call),
+                "executable": source != "invalid",
+            }
+        )
     return relabeled, assigned, changed
 
 
@@ -108,7 +117,8 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
 
     Malformed originals are all equally empty, so they cannot identify their own
     result; ``open_calls`` is already scoped to the issuing turn. Within that turn the
-    result's name narrows the candidates, and only a *forced* choice is taken:
+    result's name narrows the candidates, non-executable calls from
+    ``invalid_tool_calls`` are excluded, and only a *forced* choice is taken:
 
     * one compatible call — its name, or being the turn's only call, identifies it;
     * several compatible calls — position identifies them, but only while ``positional``
@@ -126,7 +136,7 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     candidates = [
         position
         for position, entry in enumerate(open_calls)
-        if entry.get("executable", True)
+        if entry["executable"]
         and entry["original"] == result.tool_call_id
         and _names_can_pair(entry["name"], result.name)
     ]
@@ -409,8 +419,6 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
                 for source, tool_calls, field in sources:
                     relabeled, source_assigned, changed = _relabel_tool_call_ids(tool_calls, index, source)
-                    for entry in source_assigned:
-                        entry["executable"] = source != "invalid"
                     assigned.extend(source_assigned)
                     if not changed:
                         continue
