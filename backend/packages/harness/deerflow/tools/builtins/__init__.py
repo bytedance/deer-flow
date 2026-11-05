@@ -1,6 +1,7 @@
 from .background_tasks_tool import cancel_background_task, list_background_tasks
 from .batch_task_tool import batch_status, batch_task, cancel_batch, read_batch_result
 from .clarification_tool import ask_clarification_tool
+from .inspect_run_status_tool import build_inspect_run_status_tool
 from .list_uploaded_files_tool import list_uploaded_files
 from .present_file_tool import present_file_tool
 from .review_skill_package_tool import review_skill_package
@@ -15,6 +16,7 @@ __all__ = [
     "present_file_tool",
     "review_skill_package",
     "ask_clarification_tool",
+    "build_inspect_run_status_tool",
     "view_image_tool",
     "task_tool",
     "batch_task",

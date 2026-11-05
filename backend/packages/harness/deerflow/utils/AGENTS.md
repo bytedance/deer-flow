@@ -1,3 +1,18 @@
+### Readability Fallback
+
+`readability.py` caches the optional Readability.js availability probe. If the
+Node extractor is unavailable, its probe raises, or an attempted extraction
+cannot launch Node, subsequent calls in that process use readabilipy's Python
+fallback without retrying Node. A non-zero Node exit can be document-specific,
+so it falls back only for that document and later documents retry Node. If a
+future readabilipy version removes the private availability probe, log that
+once at import and attempt extraction instead of silently disabling Node. Keep
+successful Node extraction unchanged and allow unexpected parser/programming
+exceptions to propagate. The resolved-body fallback preserves article links
+when Python extraction returns the original document wrapper. Regression
+coverage lives in `tests/test_readability.py` and
+`tests/test_web_fetch_relative_links.py`.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
@@ -7,13 +22,36 @@ umask; replacements preserve existing permission bits before publication. Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 `cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
-`skills/projection.py`'s private manifest writer, project document staging, and
-Gateway upload staging.
+`skills/projection.py`'s private manifest writer, project document staging,
+extension snapshot rollback (including removal of a file that did not exist),
+the managed plugins-block rewrite, custom-skill file writes, per-user
+skill-state writes, Gateway upload staging, and the Gateway skill-archive
+upload copy and its post-install discard. The upload route discards that
+archive before closing the multipart form and suppresses close errors.
 Use it on publication failure or after deciding to discard an owned
 temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
 transferred duplicate descriptor owned by the cleanup caller. Shelf discards
 must preserve both a rejected project's 404 and a dedup hit's 200 response.
 Callers retain their own serialization, permissions and publication policy.
+Shelf `stage_document_bytes` drains preparation, writes, close and failure
+cleanup before propagating cancellation. Retain the opened handle across its
+handoff, but leave waiting for incoming chunks cancellable; regressions in
+`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Shelf conversion also drains its final staging discard before releasing
+single-flight ownership. Cleanup failures warn without replacing the conversion
+result, original error or cancellation; the retention sweep owns later retries.
+Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
+Local Linux/macOS text revisions opt into a short `temporary_prefix` and
+`preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
+`file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
+macOS uses native descriptor ACL APIs and `fcopyfile(COPYFILE_XATTR)`; Linux uses
+descriptor xattrs, including its access ACL, removing inherited extras. Errors
+abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
+flags and content-bound privilege attributes rather than reattach stale privileges to new
+content. Other publisher callers retain their existing mode-only contract.
+Do not restore old timestamps on a content revision, including an empty save.
+Source-descriptor close failures are best-effort warnings, not save failures;
+guard diagnostics so the publication result or original interruption survives.
 Failure cleanup must preserve the original publication exception, including
 interruptions. Descriptor close and sibling unlink are separate best-effort
 operations: a close failure must not prevent the unlink attempt.
@@ -82,12 +120,37 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers,
+skill moderation (`scan_skill_content`), the goal evaluator, thread title
+generation, and in-graph context compaction build providers through
+`run_assembly` before awaiting inference; the run worker calls its cached
+evaluator factory the same way. Provider construction can read local
+credentials; keep it off the event loop and the default executor while
+preserving request context. Cancellation during construction must not start
+inference. A scan without `app_config` (in-graph `skill_manage`) reads the live
+config in the same pool, and its fail-closed fallback reuses that config rather
+than reading it again on the loop. Other model construction is separate and
+not covered here: manual compaction (`compact_thread_context` builds the
+summarization middleware and its models inline) and, inside graph runs,
+subagent construction.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`,
+`tests/blocking_io/test_system_model_offloop.py`,
+`tests/blocking_io/test_title_model_offloop.py` and
+`tests/blocking_io/test_summarization_model_offloop.py`.
+
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
 cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
 pins offload, executor isolation, request context, and failure ordering.
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
+
+### Document Conversion
+
+`file_conversion.convert_file_to_markdown` resolves the live PDF converter in
+its drained parsing worker. Config cache hits still stat/hash files; keep them
+off-loop with parsing. Cold/cache-hit coverage uses real temporary configs in
+`tests/blocking_io/test_file_conversion_offloop.py`.
 
 ### Uploaded Document Summaries
 
@@ -154,9 +217,17 @@ retain their existing portability exemptions.
 ### Advisory File Lock Retries
 
 `file_lock.retry_until_locked` owns contention-only acquisition retries for the
-Windows Lark and extension-manager locks and bounded skill-projection reads.
+Windows Lark, extension-manager and channel runtime-config locks and bounded
+skill-projection reads.
 Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
 Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
-extension management waits indefinitely, and skill export retains its existing
-deadline, 0.02-second cadence and cancellation check. Clocks and sleeps are
-injectable; tests must not patch the shared stdlib time module.
+extension management and channel runtime config wait indefinitely, and skill
+export retains its existing deadline, 0.02-second cadence and cancellation
+check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
+time module.
+The channel caller wraps its injected sleep to warn once after 50 contention
+retries; the helper remains responsible for error classification and cadence.
+
+`parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
+and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
+shared delay bound. Callers retain numeric/header precedence and local backoff.

@@ -488,6 +488,13 @@ def _resolve_current_user_sid() -> str:
         ["whoami", "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        # whoami writes the account name in the console's ANSI code page, which does
+        # not need to match the interpreter's encoding (e.g. UTF-8 mode on a Chinese Windows).
+        # Without errors="replace" the decoder raises inside subprocess's reader
+        # thread and leaves stdout as None. Only the SID (ASCII) and the CSV
+        # delimiters matter here, so replacing the account name is harmless.
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:
@@ -1272,6 +1279,8 @@ def _publish_bytes_atomically(path: Path, content: bytes) -> None:
     staged skill files and manifests become read-only through
     ``make_skill_tree_sandbox_readable``. The parent directory is not fsynced,
     so this helper alone does not guarantee publication survives power loss.
+    A failed write, fsync, or replace leaves the previous file intact.
+    Removing the temporary is best-effort and must not replace that error.
     """
     fd, temporary_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     temporary = Path(temporary_name)
@@ -1443,7 +1452,7 @@ def _write_json_file_atomic(path: Path, payload: dict[str, Any]) -> None:
         temp_path.chmod(0o600)
         os.replace(temp_path, path)
     finally:
-        temp_path.unlink(missing_ok=True)
+        cleanup_failed_atomic_write(temp_path)
 
 
 _LARK_FLOW_DEVICE_CODE_UNSET: Any = object()

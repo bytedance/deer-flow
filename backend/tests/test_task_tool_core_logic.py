@@ -1098,6 +1098,49 @@ def test_task_tool_context_mode_captures_dispatch_time_history(monkeypatch, cont
         assert captured.get("context_snapshot") is None
 
 
+@pytest.mark.parametrize("duplicate_id", [False, True])
+def test_task_dispatch_snapshot_does_not_include_unfinished_ambiguous_calls(monkeypatch, duplicate_id):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    runtime = _make_runtime()
+    runtime.state["messages"] = [
+        HumanMessage(content="Keep the user requirement"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "bash", "args": {"command": "COMPLETED_COMMAND"}, "id": "finished"},
+                {"name": "task", "args": {"prompt": "UNFINISHED_DELEGATION"}, "id": "finished" if duplicate_id else "pending"},
+            ],
+        ),
+        ToolMessage(content="Observed command result", tool_call_id="finished", name="bash"),
+    ]
+    before = [message.model_dump() for message in runtime.state["messages"]]
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    result = _run_task_tool(runtime=runtime, prompt="Current delegated task", subagent_type="general-purpose", tool_call_id="current-dispatch", context_mode="snapshot")
+    assert _task_tool_message(result).additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    snapshot = captured["context_snapshot"]
+    assert "UNFINISHED_DELEGATION" not in snapshot.content_json
+    assert ("COMPLETED_COMMAND" in snapshot.content_json) is (not duplicate_id)
+    assert "Keep the user requirement" in snapshot.content_json
+    assert "Observed command result" in snapshot.content_json
+    assert [message.model_dump() for message in runtime.state["messages"]] == before
+
+
 def test_task_tool_context_mode_schema_rejects_unknown_mode():
     from pydantic import ValidationError
 

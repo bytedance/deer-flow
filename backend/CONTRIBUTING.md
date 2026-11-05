@@ -316,8 +316,8 @@ extensions:
 Configured middleware runs after the built-in middleware and optional loop/token
 guards. On the lead-agent pipeline, it runs before the terminal-response,
 model-length, safety, and clarification tail; subagents have no
-terminal-response, model-length, or clarification stage, so configured middleware is
-followed by the optional safety guard, `DurableContextMiddleware`, optional
+terminal-response or clarification stage, so configured middleware is followed
+by the model-length guard, the optional safety guard, `DurableContextMiddleware`, optional
 `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and
 `SystemMessageCoalescingMiddleware`. Treat middleware class paths as trusted
 operator configuration because loading one executes Python code.

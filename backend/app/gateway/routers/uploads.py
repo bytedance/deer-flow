@@ -441,11 +441,22 @@ async def upload_files(
             raise HTTPException(status_code=400, detail=str(e))
         for file in files:
             if not file.filename:
+                # Starlette builds an UploadFile even for a part with an empty
+                # filename; dropping it silently kept `success: true` over an
+                # empty `files` + `skipped_files`, bypassing the #7122 gate
+                # exactly like the unsafe-name arm below (#7160).
+                logger.warning("Skipping upload part without a filename")
+                skipped_files.append("(unnamed file)")
                 continue
             try:
                 file_info = await service.ingest_chunks(_stream_upload_file(file), display_name=file.filename)
-            except UnsafeFilenameError:
-                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+            except UnsafeFilenameError as exc:
+                # The rejected name must reach the caller: leaving it out of
+                # skipped_files kept `success: true` over an empty `files`
+                # list, which let the chat send proceed without the
+                # attachment the user asked for (#7160).
+                logger.warning("Skipping upload with unsafe filename %r: %s", file.filename, exc)
+                skipped_files.append(file.filename)
                 continue
             except UnsafeUploadDestinationError as e:
                 logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
@@ -467,7 +478,11 @@ async def upload_files(
             message += f"; skipped {len(skipped_files)} unsafe file(s)"
 
         return UploadResponse(
-            success=not skipped_files,
+            # ``success`` means "at least one file was stored": an all-rejected
+            # batch must be a failure so the #7122 frontend gate blocks the
+            # send, while a mixed batch still succeeds and reports the dropped
+            # names through ``skipped_files`` (#7160).
+            success=bool(uploaded_files),
             files=uploaded_files,
             message=message,
             skipped_files=skipped_files,

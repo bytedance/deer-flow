@@ -117,7 +117,7 @@ export function SubtaskCard({
     fetchSubtaskSteps(threadId, runId, taskId)
       .then((steps) => {
         if (steps.length > 0) {
-          updateSubtask({ id: taskId, steps });
+          updateSubtask({ id: taskId, steps }, { stepSource: "history" });
         }
       })
       .catch(() => {
@@ -258,7 +258,11 @@ export function SubtaskCard({
                     (step.tool_name ?? t.subtasks[task.status])
                   ) : (
                     <div className="text-muted-foreground line-clamp-3 text-sm">
-                      <MarkdownContent content={step.text} isLoading={false} />
+                      <MarkdownContent
+                        content={step.text}
+                        isLoading={false}
+                        components={reportComponents}
+                      />
                     </div>
                   )
                 }

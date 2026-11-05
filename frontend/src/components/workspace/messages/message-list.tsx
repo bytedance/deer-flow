@@ -26,7 +26,11 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
-import { extractArtifactsFromThread } from "@/core/artifacts/utils";
+import {
+  areStringArraysEqual,
+  collectThreadArtifactPaths,
+  extractArtifactsFromThread,
+} from "@/core/artifacts/utils";
 import {
   createKnowledgeSourceReader,
   type RetrievalSource,
@@ -112,6 +116,10 @@ import {
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
+import {
+  createMarkdownLinkComponent,
+  MessageArtifactPathsContext,
+} from "./markdown-link";
 import { MessageGroup, getMessageGroupReasoningMessage } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import {
@@ -137,19 +145,12 @@ type SettledStreamMetadataState = {
   snapshot: StreamMetadataSnapshot;
 };
 
-function sameStrings(previous: readonly string[], next: readonly string[]) {
-  return (
-    previous.length === next.length &&
-    previous.every((value, index) => value === next[index])
-  );
-}
-
 function useStableArtifactPaths(paths: readonly string[] | undefined) {
   const previousPathsRef = useRef<readonly string[]>(EMPTY_ARTIFACT_PATHS);
   return useMemo(() => {
     const nextPaths = paths ?? EMPTY_ARTIFACT_PATHS;
     const previousPaths = previousPathsRef.current;
-    if (sameStrings(previousPaths, nextPaths)) {
+    if (areStringArraysEqual(previousPaths, nextPaths)) {
       return previousPaths;
     }
     previousPathsRef.current = nextPaths;
@@ -335,6 +336,8 @@ export function MessageList({
   onSubmitHumanInput,
   onBranchTurn,
   canRegenerate = false,
+  activeRunId,
+  activeRunStartedAt = null,
   canEdit = false,
   editLockedByGoal = false,
   canBranch = false,
@@ -372,6 +375,9 @@ export function MessageList({
     messageIds: string[],
   ) => void | Promise<void>;
   canRegenerate?: boolean;
+  activeRunId?: string;
+  /** Server start (epoch ms) of the active run, when known. */
+  activeRunStartedAt?: number | null;
   canEdit?: boolean;
   /** Edit would be allowed but for an active goal: show the pencil locked. */
   editLockedByGoal?: boolean;
@@ -417,6 +423,15 @@ export function MessageList({
     return byMessage;
   }, [messages, readMessageKnowledgeSources]);
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const isSteeredRun = useCallback(
+    (message: Message) => {
+      const runId =
+        getMessageRunId(message) ?? message.additional_kwargs?.run_id;
+      const progress = thread.values.applied_run_inputs;
+      return !!progress?.ids.length && runId === progress.run_id;
+    },
+    [thread.values.applied_run_inputs],
+  );
   // Schedule event lines sit at the end of the turn they followed.
   const placedTaskEvents = useMemo(
     () =>
@@ -489,8 +504,8 @@ export function MessageList({
   const browserView = useMaybeBrowserView();
   const pushBrowserFrame = browserView?.pushFrame;
   const messageCount = messages.length;
-  // The backend exposes no live start timestamp, so a mid-run mount measures
-  // from mount until authoritative persisted turn_duration replaces it.
+  // Start from mount or the loading edge, then move back to the active run's
+  // server start once known: a run observed mid-flight began before this view.
   const [turnStartTime, setTurnStartTime] = useState<number | null>(() =>
     thread.isLoading ? Date.now() : null,
   );
@@ -527,6 +542,20 @@ export function MessageList({
     }
     prevIsLoading.current = thread.isLoading;
   }, [groupedMessages, thread.error, thread.isLoading, threadId]);
+
+  useEffect(() => {
+    const startTime = turnStartTimeRef.current;
+    if (
+      !thread.isLoading ||
+      startTime === null ||
+      activeRunStartedAt === null ||
+      activeRunStartedAt >= startTime
+    ) {
+      return;
+    }
+    turnStartTimeRef.current = activeRunStartedAt;
+    setTurnStartTime(activeRunStartedAt);
+  }, [activeRunStartedAt, thread.isLoading]);
 
   useEffect(() => {
     // Only the primary chat surface drives the shared browser panel. The
@@ -594,12 +623,23 @@ export function MessageList({
     () =>
       collectRenderedSubtasks(
         groupedMessages,
-        (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
+        (groupIndex) =>
+          thread.isLoading &&
+          (groupIndex === lastGroupIndex ||
+            (!!activeRunId &&
+              Boolean(
+                groupedMessages[groupIndex]?.messages.some(
+                  (m) =>
+                    (getMessageRunId(m) ?? m.additional_kwargs?.run_id) ===
+                    activeRunId,
+                ),
+              ))),
         t.subtasks.failed,
         t.subtasks.subtask,
       ),
     [
       groupedMessages,
+      activeRunId,
       lastGroupIndex,
       t.subtasks.failed,
       t.subtasks.subtask,
@@ -1045,7 +1085,13 @@ export function MessageList({
           {enableRegenerateForTurn &&
             actionTarget?.id &&
             onRegenerateMessage && (
-              <Tooltip content={t.common.regenerate}>
+              <Tooltip
+                content={
+                  isSteeredRun(actionTarget)
+                    ? t.inputBox.runInputReplayUnavailable
+                    : t.common.regenerate
+                }
+              >
                 <Button
                   aria-label={t.common.regenerate}
                   size="icon-sm"
@@ -1053,6 +1099,7 @@ export function MessageList({
                   variant="ghost"
                   disabled={
                     !canRegenerate ||
+                    isSteeredRun(actionTarget) ||
                     replayActionBusy ||
                     regeneratingMessageId === actionTarget.id
                   }
@@ -1086,12 +1133,14 @@ export function MessageList({
       branchingMessageId,
       canBranch,
       canRegenerate,
+      isSteeredRun,
       onBranchTurn,
       onRegenerateMessage,
       regeneratingMessageId,
       replayActionBusy,
       t.common.branch,
       t.common.regenerate,
+      t.inputBox.runInputReplayUnavailable,
     ],
   );
 
@@ -1146,8 +1195,16 @@ export function MessageList({
     ],
   );
 
-  const artifactPaths = useStableArtifactPaths(
-    extractArtifactsFromThread(thread),
+  const stateArtifactPaths = extractArtifactsFromThread(thread);
+  const threadArtifactPaths = useMemo(
+    () => collectThreadArtifactPaths(stateArtifactPaths, messages),
+    [stateArtifactPaths, messages],
+  );
+  const artifactPaths = useStableArtifactPaths(threadArtifactPaths);
+  // Message text rendered outside MessageListItem resolves artifact links too.
+  const threadLinkComponents = useMemo(
+    () => ({ a: createMarkdownLinkComponent(threadId) }),
+    [threadId],
   );
 
   if (thread.isThreadLoading && messages.length === 0) {
@@ -1299,6 +1356,8 @@ export function MessageList({
                       const isLatestEditableHumanMessage =
                         group.type === "human" &&
                         !group.scheduledOrigin &&
+                        !msg.additional_kwargs?.run_input_id &&
+                        !isSteeredRun(msg) &&
                         Boolean(msg.id) &&
                         msg.id === latestEditableHumanMessageId &&
                         !replayActionBusy &&
@@ -1418,28 +1477,33 @@ export function MessageList({
                     group,
                     groupIndex,
                     <div className="w-full">
-                      <HumanInputCard
-                        answeredResponse={answeredResponse}
-                        disabled={
-                          thread.isLoading ||
-                          pending ||
-                          Boolean(answeredResponse) ||
-                          humanInputState.latestOpenRequestId !==
-                            humanInputRequest.request_id ||
-                          !onSubmitHumanInput
-                        }
-                        pending={pending}
-                        request={humanInputRequest}
-                        onSubmit={
-                          onSubmitHumanInput
-                            ? (response) =>
-                                handleSubmitHumanInput(
-                                  humanInputRequest,
-                                  response,
-                                )
-                            : undefined
-                        }
-                      />
+                      <MessageArtifactPathsContext.Provider
+                        value={artifactPaths}
+                      >
+                        <HumanInputCard
+                          answeredResponse={answeredResponse}
+                          disabled={
+                            thread.isLoading ||
+                            pending ||
+                            Boolean(answeredResponse) ||
+                            humanInputState.latestOpenRequestId !==
+                              humanInputRequest.request_id ||
+                            !onSubmitHumanInput
+                          }
+                          pending={pending}
+                          request={humanInputRequest}
+                          threadId={threadId}
+                          onSubmit={
+                            onSubmitHumanInput
+                              ? (response) =>
+                                  handleSubmitHumanInput(
+                                    humanInputRequest,
+                                    response,
+                                  )
+                              : undefined
+                          }
+                        />
+                      </MessageArtifactPathsContext.Provider>
                       {renderTokenUsage({
                         messages: group.messages,
                         turnUsageMessages,
@@ -1453,10 +1517,15 @@ export function MessageList({
                     group,
                     groupIndex,
                     <div className="w-full">
-                      <MarkdownContent
-                        content={extractContentFromMessage(message)}
-                        isLoading={thread.isLoading}
-                      />
+                      <MessageArtifactPathsContext.Provider
+                        value={artifactPaths}
+                      >
+                        <MarkdownContent
+                          content={extractContentFromMessage(message)}
+                          isLoading={thread.isLoading}
+                          components={threadLinkComponents}
+                        />
+                      </MessageArtifactPathsContext.Provider>
                       {renderTokenUsage({
                         messages: group.messages,
                         turnUsageMessages,
@@ -1494,11 +1563,16 @@ export function MessageList({
                   groupIndex,
                   <div className="w-full">
                     {group.messages[0] && hasContent(group.messages[0]) && (
-                      <MarkdownContent
-                        content={extractContentFromMessage(group.messages[0])}
-                        isLoading={thread.isLoading}
-                        className="mb-4"
-                      />
+                      <MessageArtifactPathsContext.Provider
+                        value={artifactPaths}
+                      >
+                        <MarkdownContent
+                          content={extractContentFromMessage(group.messages[0])}
+                          isLoading={thread.isLoading}
+                          className="mb-4"
+                          components={threadLinkComponents}
+                        />
+                      </MessageArtifactPathsContext.Provider>
                     )}
                     <ArtifactFileList
                       archiveDownloadsEnabled={
@@ -1547,20 +1621,25 @@ export function MessageList({
                 )) {
                   if (hasReasoning(message)) {
                     results.push(
-                      <MessageGroup
+                      <MessageArtifactPathsContext.Provider
                         key={"thinking-group-" + message.id}
-                        messages={[message]}
-                        durationSeconds={
-                          reasoningDurations.get(message)?.durationSeconds
-                        }
-                        isLoading={groupIsLoading}
-                        deferBrowserPreviews={thread.isLoading}
-                        tokenDebugSteps={getTokenDebugStepsForMessages([
-                          message,
-                        ])}
-                        showTokenDebugSummaries={showTokenDebugSummaries}
-                        toolArtifacts={thread.values?.tool_artifacts}
-                      />,
+                        value={artifactPaths}
+                      >
+                        <MessageGroup
+                          messages={[message]}
+                          durationSeconds={
+                            reasoningDurations.get(message)?.durationSeconds
+                          }
+                          isLoading={groupIsLoading}
+                          deferBrowserPreviews={thread.isLoading}
+                          tokenDebugSteps={getTokenDebugStepsForMessages([
+                            message,
+                          ])}
+                          showTokenDebugSummaries={showTokenDebugSummaries}
+                          threadId={threadId}
+                          toolArtifacts={thread.values?.tool_artifacts}
+                        />
+                      </MessageArtifactPathsContext.Provider>,
                     );
                   } else if (message.id) {
                     subagentDebugMessageIds.push(message.id);
@@ -1576,15 +1655,22 @@ export function MessageList({
                       continue;
                     }
                     results.push(
-                      <SubtaskCard
+                      <MessageArtifactPathsContext.Provider
                         key={"task-group-" + taskId}
-                        taskId={taskId}
-                        threadId={threadId}
-                        runId={(message as { run_id?: string }).run_id}
-                        isLoading={groupIsLoading}
-                        fallbackTask={fallbackTask}
-                        resultMessage={findSubtaskResultMessage(group, taskId)}
-                      />,
+                        value={artifactPaths}
+                      >
+                        <SubtaskCard
+                          taskId={taskId}
+                          threadId={threadId}
+                          runId={(message as { run_id?: string }).run_id}
+                          isLoading={groupIsLoading}
+                          fallbackTask={fallbackTask}
+                          resultMessage={findSubtaskResultMessage(
+                            group,
+                            taskId,
+                          )}
+                        />
+                      </MessageArtifactPathsContext.Provider>,
                     );
                   }
                 }
@@ -1606,20 +1692,23 @@ export function MessageList({
                 group,
                 groupIndex,
                 <div className="w-full">
-                  <MessageGroup
-                    messages={group.messages}
-                    durationSeconds={
-                      reasoningDurations.values().next().value?.durationSeconds
-                    }
-                    isLoading={groupIsLoading}
-                    deferBrowserPreviews={thread.isLoading}
-                    threadId={threadId}
-                    tokenDebugSteps={getTokenDebugStepsForMessages(
-                      group.messages,
-                    )}
-                    showTokenDebugSummaries={showTokenDebugSummaries}
-                    toolArtifacts={thread.values?.tool_artifacts}
-                  />
+                  <MessageArtifactPathsContext.Provider value={artifactPaths}>
+                    <MessageGroup
+                      messages={group.messages}
+                      durationSeconds={
+                        reasoningDurations.values().next().value
+                          ?.durationSeconds
+                      }
+                      isLoading={groupIsLoading}
+                      deferBrowserPreviews={thread.isLoading}
+                      threadId={threadId}
+                      tokenDebugSteps={getTokenDebugStepsForMessages(
+                        group.messages,
+                      )}
+                      showTokenDebugSummaries={showTokenDebugSummaries}
+                      toolArtifacts={thread.values?.tool_artifacts}
+                    />
+                  </MessageArtifactPathsContext.Provider>
                   {renderTokenUsage({
                     messages: group.messages,
                     turnUsageMessages,

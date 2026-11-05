@@ -1260,8 +1260,12 @@ def test_upload_files_rejects_dotdot_and_dot_filenames(tmp_path):
         for bad_name in ["..", "."]:
             file = UploadFile(filename=bad_name, file=BytesIO(b"data"))
             result = asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=[file], config=SimpleNamespace()))
-            assert result.success is True
+            # Nothing was stored, so the batch must not report success: the
+            # #7122 frontend gate keys on it, and a silent success let a chat
+            # send proceed without the attachment (#7160).
+            assert result.success is False
             assert result.files == [], f"Expected no files for unsafe filename {bad_name!r}"
+            assert result.skipped_files == [bad_name]
 
         # Path-traversal prefixes are stripped to the basename and accepted safely
         file = UploadFile(filename="../etc/passwd", file=BytesIO(b"data"))

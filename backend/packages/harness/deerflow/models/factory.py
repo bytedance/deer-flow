@@ -7,6 +7,7 @@ from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider
 from deerflow.models.reasoning import ReasoningContract, ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
@@ -272,8 +273,9 @@ def _apply_contract_thinking_settings(
     * Disabled: ``when_thinking_disabled`` when present, else the dialect's
       disable payload. No effort value is ever synthesized here.
     * Effort: written last at ``effort.path`` so a validated request wins over
-      a template value; ``None`` leaves any profile/template value in place. A
-      model without an effort contract never forwards ``reasoning_effort``.
+      a template value. An explicit top-level ``reasoning_effort: "none"`` in
+      the disabled template takes precedence because it is the off switch.
+      A model without an effort contract never forwards ``reasoning_effort``.
     """
     dialect = contract.dialect if contract.dialect != "auto" else _infer_dialect(effective_wte)
     # Both directions mirror whichever vLLM switch the template declares, so a
@@ -290,6 +292,8 @@ def _apply_contract_thinking_settings(
         _merge_thinking_payload(settings, payload)
     elif model_config.when_thinking_disabled is not None:
         _merge_thinking_payload(settings, model_config.when_thinking_disabled)
+        if contract.effort is not None and contract.effort.path == "reasoning_effort" and model_config.when_thinking_disabled.get("reasoning_effort") == "none":
+            requested_reasoning_effort = None
     else:
         _merge_thinking_payload(settings, _dialect_payload(dialect, enabled=False, chat_template_kwargs=chat_template_kwargs))
     if contract.effort is None or contract.effort.path != "reasoning_effort":
@@ -710,6 +714,17 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
     effective_model_settings = dict(model_settings_from_config)
     effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    if (
+        issubclass(model_class, BaseChatOpenAI)
+        and effective_model_settings.get("model") in OPENAI_GPT6_MODELS
+        and effective_model_settings.get("base_url") == get_managed_model_provider("openai").endpoint
+        and effective_model_settings.get("use_responses_api") is True
+        and effective_model_settings.get("reasoning_effort") != "none"
+    ):
+        # Resolve templates, request effort and caller overrides before filtering.
+        # The locked SDK only applies these sampling restrictions to GPT-5.
+        for key in ("temperature", "top_p", "top_logprobs"):
+            effective_model_settings.pop(key, None)
     model_instance = model_class(**effective_model_settings)
 
     if translate_context_window:

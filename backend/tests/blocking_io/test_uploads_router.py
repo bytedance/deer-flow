@@ -92,6 +92,77 @@ async def test_upload_endpoint_mounted_provider_does_not_block_event_loop(tmp_pa
     assert await asyncio.to_thread(target.read_bytes) == b"hello uploads"
 
 
+async def test_unsafe_filename_is_reported_as_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rejected filename must reach the caller in ``skipped_files`` (#7160)."""
+    _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+
+    result = await call_unwrapped(
+        uploads.upload_files,
+        "t-unsafe-mixed",
+        request=None,
+        files=[
+            UploadFile(filename="ok.txt", file=BytesIO(b"kept document")),
+            UploadFile(filename="bad\x00name.txt", file=BytesIO(b"dropped document")),
+        ],
+        config=SimpleNamespace(),
+    )
+
+    # A mixed batch still succeeds because a file was stored; the dropped name
+    # is visible in skipped_files instead of disappearing.
+    assert result.success is True
+    assert [item.filename for item in result.files] == ["ok.txt"]
+    assert result.skipped_files == ["bad\x00name.txt"]
+    assert "skipped 1 unsafe file(s)" in result.message
+    user_id = get_effective_user_id()
+    listing = await asyncio.to_thread(lambda: sorted(path.name for path in get_uploads_dir("t-unsafe-mixed", user_id=user_id).iterdir()))
+    assert listing == ["ok.txt"]
+
+
+async def test_all_unsafe_filenames_report_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every file rejected means ``success: false``: the #7122 frontend gate
+    blocks the chat send on that, so a silent ``success: true`` here let a
+    message go out without any of the requested attachments."""
+    _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+
+    result = await call_unwrapped(
+        uploads.upload_files,
+        "t-unsafe-all",
+        request=None,
+        files=[
+            UploadFile(filename="bad\x00one.txt", file=BytesIO(b"dropped one")),
+            UploadFile(filename="bad\x00two.txt", file=BytesIO(b"dropped two")),
+        ],
+        config=SimpleNamespace(),
+    )
+
+    assert result.success is False
+    assert result.files == []
+    assert result.skipped_files == ["bad\x00one.txt", "bad\x00two.txt"]
+
+
+async def test_unnamed_part_is_reported_as_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A multipart part with an empty filename must not vanish silently (#7160)."""
+    _reset_paths(tmp_path, monkeypatch)
+    monkeypatch.setattr(uploads, "get_sandbox_provider", lambda: _MountedProvider())
+
+    result = await call_unwrapped(
+        uploads.upload_files,
+        "t-unnamed-part",
+        request=None,
+        files=[
+            UploadFile(filename="", file=BytesIO(b"dropped part")),
+            UploadFile(filename="ok.txt", file=BytesIO(b"kept document")),
+        ],
+        config=SimpleNamespace(),
+    )
+
+    assert result.success is True
+    assert [item.filename for item in result.files] == ["ok.txt"]
+    assert result.skipped_files == ["(unnamed file)"]
+
+
 @pytest.mark.parametrize(
     "filename", [".upload-notes.part", r"folder\.upload-notes.part", r"C:\users\.upload-notes.part", ".upload-notes.part.", ".upload-notes.part ", r"folder\.upload-notes.part. ", ".UPLOAD-NOTES.PART", r"folder\.Upload-NoTeS.Part ."]
 )

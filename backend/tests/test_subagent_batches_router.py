@@ -72,6 +72,7 @@ def test_gateway_mounts_subagent_batch_routes() -> None:
     paths = {route.path for route in create_app().routes}
     assert "/api/threads/{thread_id}/subagent-batches" in paths
     assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/items" in paths
+    assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/items/{position}" in paths
     assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl" in paths
 
 
@@ -137,16 +138,67 @@ async def test_item_list_route_never_reads_full_results(monkeypatch, tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch) -> None:
+async def test_selected_item_route_returns_service_projection_and_scopes_thread(monkeypatch) -> None:
     repo = Repository()
+    service = AsyncMock()
+    service.read_browser_batch_item.return_value = {
+        "id": "item-1",
+        "position": 0,
+        "status": "succeeded",
+        "report": "full report",
+        "evidence": None,
+    }
+    monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+
+    result = await subagent_batches.get_batch_item.__wrapped__(
+        thread_id="thread-1",
+        batch_id="batch-1",
+        position=0,
+        request=_request(repo, service=service),
+    )
+
+    assert result["report"] == "full report"
+    service.read_browser_batch_item.assert_awaited_once_with(
+        batch_id="batch-1",
+        user_id="user-1",
+        thread_id="thread-1",
+        position=0,
+    )
+
+    service.read_browser_batch_item.return_value = None
+    with pytest.raises(HTTPException) as missing:
+        await subagent_batches.get_batch_item.__wrapped__(
+            thread_id="thread-1",
+            batch_id="batch-1",
+            position=1,
+            request=_request(repo, service=service),
+        )
+    assert missing.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("continuation", "can_cancel"), [(None, False), ("pending", False), ("dispatched", False), ("dispatched", True)])
+async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch, continuation, can_cancel) -> None:
+    from app.gateway.authz import AuthContext
+
+    repo = Repository()
+    repo.batch["continuation_status"] = continuation
     service = AsyncMock()
     service.cancel_batch.return_value = _batch(status="cancelled")
     monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+    request = _request(repo, service=service)
+    request.state = SimpleNamespace(auth_source="pat", auth=AuthContext(None, ["threads:write", *(["runs:cancel"] if can_cancel else [])]))
+    if continuation and not can_cancel:
+        with pytest.raises(HTTPException) as denied:
+            await subagent_batches.cancel_batch.__wrapped__(thread_id="thread-1", batch_id="batch-1", request=request)
+        assert denied.value.status_code == 403
+        service.cancel_batch.assert_not_awaited()
+        return
 
     result = await subagent_batches.cancel_batch.__wrapped__(
         thread_id="thread-1",
         batch_id="batch-1",
-        request=_request(repo, service=service),
+        request=request,
     )
     assert result["status"] == "cancelled"
     service.cancel_batch.assert_awaited_once_with(batch_id="batch-1", user_id="user-1")

@@ -893,3 +893,69 @@ async def test_commit_then_error_never_replays_or_issues_evidence_receipt(eviden
         assert (await reader.get_snapshot(thread_id="t-r", run_id="r")).seal_state != "sealed"
     finally:
         await journal.close(flush=False)
+
+
+@pytest.mark.asyncio
+async def test_force_close_during_receipt_cannot_return_confirmed_bounds(evidence, monkeypatch):
+    import asyncio
+
+    _sf, events, runs, _reader = evidence
+    await put_run(runs)
+    journal = RunJournal("r", "t-r", events, user_id="alice")
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = events.evidence_receipt
+
+    async def held_receipt(*args):
+        receipt = await original(*args)
+        entered.set()
+        await release.wait()
+        return receipt
+
+    monkeypatch.setattr(events, "evidence_receipt", held_receipt)
+    finish = asyncio.create_task(journal.finish_evidence())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await journal.close(flush=False)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(finish, return_exceptions=True), timeout=5)
+    with pytest.raises(RuntimeError, match="force-closed"):
+        finish.result()
+
+
+@pytest.mark.asyncio
+async def test_normal_close_waits_for_terminal_confirmation_before_detach(evidence):
+    import asyncio
+
+    _sf, events, runs, _reader = evidence
+    await put_run(runs)
+    journal = RunJournal("r", "t-r", events, user_id="alice")
+    journal.record_middleware("accepted", name="accepted", hook="end", action="done", changes={})
+    entered, release, closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def confirm_tail():
+        entered.set()
+        await release.wait()
+        assert not journal._closed
+        await events.put_if_absent(thread_id="t-r", run_id="r", event_type="test.tail", category="trace", user_id="alice")
+
+    async def close():
+        closing.set()
+        await journal.close()
+
+    finish = asyncio.create_task(journal.finish_evidence(before_receipt=confirm_tail))
+    close_task = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        close_task = asyncio.create_task(close())
+        await asyncio.wait_for(closing.wait(), timeout=5)
+        assert not close_task.done()
+        assert not journal._closed
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(finish, *([close_task] if close_task else []), return_exceptions=True), timeout=5)
+    receipt = finish.result()
+    close_task.result()
+    assert receipt.event_count == 2
+    assert receipt.upper_event_seq == 2
+    assert journal._closed

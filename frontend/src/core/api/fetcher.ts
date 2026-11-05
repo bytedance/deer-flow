@@ -39,7 +39,16 @@ export function readCsrfCookie(): string | null {
   if (typeof document === "undefined") return null;
   for (const pair of document.cookie.split("; ")) {
     if (pair.startsWith(CSRF_COOKIE_PREFIX)) {
-      return decodeURIComponent(pair.slice(CSRF_COOKIE_PREFIX.length));
+      const value = pair.slice(CSRF_COOKIE_PREFIX.length);
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        // Cookies are shared by every app on the same host. A value set or
+        // truncated outside the gateway (or a stray `%` escape) is still a
+        // string, and throwing here would break every API call — fall back
+        // to the raw value, as `getLocaleFromCookie` does.
+        return value;
+      }
     }
   }
   return null;

@@ -84,6 +84,28 @@ describe("ArtifactTablePreview", () => {
       }).value,
     ).toBe(longText);
   });
+  it("cuts a long cell by code points so an emoji never splits", () => {
+    // 120 code points but 121 UTF-16 units: the cell fits and keeps its last
+    // character instead of losing it to a unit-based cut.
+    const fits = `${"a".repeat(118)}😀b`;
+    // 122 code points: the cut lands after the whole emoji, never inside it.
+    const overflows = `${"a".repeat(119)}😀bc`;
+    state.result.rows = [
+      ["ID", "Note"],
+      ["00123", fits],
+      ["00456", overflows],
+    ];
+    mount();
+    // 120 code points is inside the budget: no expand control at all.
+    expect(screen.getByRole("cell", { name: fits })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "View cell: row 1, column 2" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "View cell: row 2, column 2" })
+        .textContent,
+    ).toBe(`${"a".repeat(119)}😀`);
+  });
   it("offers an explicit retry without displaying stale data on failure", () => {
     state.status = "error";
     mount();

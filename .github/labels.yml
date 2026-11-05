@@ -1,9 +1,9 @@
 # Declarative label source of truth for DeerFlow.
 #
 # This file is the single source of truth for repository labels used by the
-# auto-labeling workflows (.github/workflows/pr-labeler.yml, pr-triage.yml,
-# issue-triage.yml). Auto-labelers can only apply labels that already exist,
-# so every label referenced by a workflow MUST be declared here.
+# auto-labeling workflow (.github/workflows/triage.yml). Auto-labelers can only
+# apply labels that already exist, so every label applied by that workflow MUST
+# be declared here; scripts/check_label_declarations.py enforces that pair.
 #
 # Apply with:  uv run --with pyyaml python scripts/sync_labels.py [--repo OWNER/NAME]
 # CI keeps it in sync via .github/workflows/label-sync.yml (runs on changes here).
@@ -30,7 +30,7 @@ labels:
     color: d876e3
     description: Further information is requested
 
-  # ── Area (auto, by changed paths — see .github/labeler.yml) ───────────────
+  # ── Area (auto, by changed paths — see workflows/triage.yml) ──────────────
   # Mirrors the "Surface area" section of the pull request template.
   - name: "area:frontend"
     color: c5def5
@@ -60,7 +60,7 @@ labels:
     color: c5def5
     description: Dependency manifests / lockfiles
 
-  # ── Size (auto, by additions + deletions — see pr-triage.yml) ─────────────
+  # ── Size (auto, by additions + deletions — see workflows/triage.yml) ──────
   - name: "size/XS"
     color: "009900"
     description: PR changes < 20 lines
@@ -77,7 +77,7 @@ labels:
     color: ee5500
     description: PR changes 700+ lines
 
-  # ── Risk (auto, by changed paths — see pr-triage.yml) ─────────────────────
+  # ── Risk (auto, by changed paths — see workflows/triage.yml) ──────────────
   - name: "risk:low"
     color: 0e8a16
     description: "Low risk: docs / i18n / assets only"

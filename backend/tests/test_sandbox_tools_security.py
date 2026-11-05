@@ -470,6 +470,85 @@ def test_validate_local_tool_path_prioritizes_user_data_before_custom_mounts() -
             validate_local_tool_path(f"{VIRTUAL_PATH_PREFIX}/workspace/../../etc/passwd", _THREAD_DATA, read_only=True)
 
 
+def test_volume_mount_config_normalizes_trailing_slashes() -> None:
+    """The provider strips trailing slashes when building mappings; the config must too.
+
+    Otherwise a natural ``container_path: /mnt/reports/`` spelling works at the
+    sandbox layer while every tool's path gate compares against the raw value
+    and rejects the mount with a confusing PermissionError.
+    """
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports/").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports//").container_path == "/mnt/reports"
+    assert VolumeMountConfig(host_path="/tmp/host", container_path="/mnt/reports").container_path == "/mnt/reports"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", "///", ""])
+def test_volume_mount_config_rejects_the_container_root(raw: str) -> None:
+    """The container root and a blank value cannot be expressed in the path gates, so reject them at load.
+
+    On ``main`` an empty ``container_path`` made the gates match every absolute
+    path (``path == "" or path.startswith("/")``), letting one mount's
+    ``read_only`` flag silently apply to all paths.
+    """
+    from pydantic import ValidationError
+
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        VolumeMountConfig(host_path="/tmp/host", container_path=raw)
+
+
+def test_skills_config_normalizes_trailing_slashes() -> None:
+    """skills.container_path feeds the same as-is prefix comparison in _is_skills_path."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    assert SkillsConfig(container_path="/mnt/skills/").container_path == "/mnt/skills"
+    assert SkillsConfig(container_path="/mnt/skills//").container_path == "/mnt/skills"
+    assert SkillsConfig().container_path == "/mnt/skills"
+
+
+@pytest.mark.parametrize("raw", ["/", "//", ""])
+def test_skills_config_rejects_the_container_root(raw: str) -> None:
+    from pydantic import ValidationError
+
+    from deerflow.config.skills_config import SkillsConfig
+
+    with pytest.raises(ValidationError, match="container_path"):
+        SkillsConfig(container_path=raw)
+
+
+def test_is_skills_path_accepts_prefix_declared_with_trailing_slash() -> None:
+    """A skills prefix configured as ``/mnt/skills/`` must keep gating skills paths."""
+    from deerflow.config.skills_config import SkillsConfig
+
+    prefix = SkillsConfig(container_path="/mnt/skills/").container_path
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value=prefix):
+        assert _is_skills_path("/mnt/skills/reporter/SKILL.md")
+        assert not _is_skills_path("/mnt/skillsmalformed/SKILL.md")
+
+
+def test_validate_local_tool_path_accepts_mount_declared_with_trailing_slash() -> None:
+    """A mount configured as ``/mnt/reports/`` must keep working for reads and writes."""
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=False)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
+def test_validate_local_tool_path_honors_read_only_mount_declared_with_trailing_slash() -> None:
+    from deerflow.config.sandbox_config import VolumeMountConfig
+
+    mounts = [VolumeMountConfig(host_path="/tmp/host-reports", container_path="/mnt/reports/", read_only=True)]
+    with patch("deerflow.sandbox.tools._get_custom_mounts", return_value=mounts):
+        validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=True)
+        with pytest.raises(PermissionError, match="read-only mount"):
+            validate_local_tool_path("/mnt/reports/notes.txt", _THREAD_DATA, read_only=False)
+
+
 def test_validate_local_tool_path_rejects_bare_virtual_root() -> None:
     """The bare /mnt/user-data root without trailing slash is not a valid sub-path."""
     with pytest.raises(PermissionError, match="Only paths under"):
@@ -753,6 +832,35 @@ def test_replace_virtual_paths_in_command_does_not_rewrite_prefix_siblings(sibli
 
     assert result == f"cat {sibling}"
     assert "/tmp/deer-flow/threads/t1" not in result
+
+
+@pytest.mark.parametrize(
+    "embedded",
+    [
+        "http://localhost:2026/api/threads/abc/artifacts/mnt/user-data/outputs/report.html",
+        "https://example.com/mnt/user-data/outputs/a.txt",
+        "backup/mnt/user-data/outputs/a.txt",
+        "./mnt/user-data/outputs/a.txt",
+    ],
+)
+def test_replace_virtual_paths_in_command_does_not_rewrite_embedded_roots(embedded: str) -> None:
+    """The left-hand mirror of the prefix-sibling rule above.
+
+    ``/mnt/user-data`` inside a longer path or URL — notably DeerFlow's own
+    artifact URLs — is not a virtual path. Rewriting it splices the thread's host
+    directory into the URL, so the request misses and leaks the host layout.
+    """
+    result = replace_virtual_paths_in_command(f"curl -s {embedded}", _THREAD_DATA)
+
+    assert result == f"curl -s {embedded}"
+    assert "/tmp/deer-flow/threads/t1" not in result
+
+
+def test_replace_virtual_paths_in_command_still_rewrites_roots_that_start_a_path() -> None:
+    result = replace_virtual_paths_in_command("cat file:///mnt/user-data/outputs/a.txt --out=/mnt/user-data/outputs/b.txt", _THREAD_DATA)
+
+    assert "/mnt/user-data" not in result
+    assert result.count("/tmp/deer-flow/threads/t1/user-data/outputs/") == 2
 
 
 @pytest.mark.parametrize(

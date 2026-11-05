@@ -27,12 +27,46 @@ def test_validate_thread_id_accepts_canonical_ids(thread_id: str) -> None:
         "has space",
         "line\nbreak",
         "线程",
+        # Windows reserved device names break workspace creation on Windows
+        # hosts (e.g. Paths.ensure_thread_dirs raising FileNotFoundError for
+        # "NUL"), so they are rejected at the shared validation boundary via
+        # windows_incompatible_segment().
+        "NUL",
+        "nul",
+        "Nul",
+        "CON",
+        "PRN",
+        "AUX",
+        "COM1",
+        "LPT9",
     ],
 )
 def test_validate_thread_id_rejects_noncanonical_ids(thread_id: str) -> None:
     from deerflow.utils.thread_id import validate_thread_id
 
     with pytest.raises(ValueError, match="Invalid thread_id"):
+        validate_thread_id(thread_id)
+
+
+@pytest.mark.parametrize(
+    "thread_id",
+    [
+        "NUL",
+        "nul",
+        "Nul",
+        "CON",
+        "PRN",
+        "AUX",
+        "COM1",
+        "LPT9",
+    ],
+)
+def test_validate_thread_id_rejects_windows_reserved_names(thread_id: str) -> None:
+    """Reserved device names hit the windows_incompatible_segment branch, not
+    just the character-pattern branch."""
+    from deerflow.utils.thread_id import validate_thread_id
+
+    with pytest.raises(ValueError, match="reserved Windows device name"):
         validate_thread_id(thread_id)
 
 

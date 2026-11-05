@@ -54,7 +54,7 @@ class Artifacts:
         name = text(PurePosixPath(path).name, 160)
         async with asyncio.timeout(10):
             content = await entry["runs"].read_artifact(thread_id=source["thread_id"], path=path)
-        info = await asyncio.to_thread(self.store.capture_artifact, owner, record["id"], step_id, name, content)
+        info = await asyncio.to_thread(self.store.capture_artifact, owner, record["id"], step_id, name, content, **({"execution_record": record} if self.clustered else {}))
         info.update(
             source_step_id=source["step_id"],
             source_run_id=source["run_id"],

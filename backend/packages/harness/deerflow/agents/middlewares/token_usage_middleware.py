@@ -241,10 +241,13 @@ def _subagent_usage_from_tool_message(message: ToolMessage) -> dict[str, int] | 
     return normalize_token_usage(additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
 
 
-def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
+def _build_attribution(message: AIMessage, todos: Any) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
-    current_todos = list(todos)
+    # ``todos`` is the stored channel value: checkpoint writes and direct
+    # integrations can Overwrite it with any shape, so normalize it before
+    # reading entries instead of trusting the write_todos shape.
+    current_todos = _normalize_todos(todos)
 
     for raw_tool_call in tool_calls:
         if not isinstance(raw_tool_call, dict):
@@ -277,6 +280,36 @@ def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     }
 
 
+def _add_subagent_usage(message: AIMessage, usage: dict[str, int]) -> AIMessage:
+    previous = message.usage_metadata or {}
+    merged = {
+        **previous,
+        "input_tokens": previous.get("input_tokens", 0) + usage["input_tokens"],
+        "output_tokens": previous.get("output_tokens", 0) + usage["output_tokens"],
+        "total_tokens": previous.get("total_tokens", 0) + usage["total_tokens"],
+    }
+    return message.model_copy(update={"usage_metadata": merged})
+
+
+def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[str, dict[str, int]]]) -> list[AIMessage]:
+    """Return AIMessage copies carrying usage of subagents that outlived their ToolMessage.
+
+    A steered task's pending ToolMessage is no longer next to the latest
+    AIMessage and its receipt is a HumanMessage, so the terminal-message walk
+    below cannot see this usage. The caller owns delivering each entry once.
+    """
+    updates: dict[int, AIMessage] = {}
+    indexes = [idx for idx in range(len(messages) - 1, -1, -1) if isinstance(messages[idx], AIMessage)]
+    for tool_call_id, usage in deferred:
+        # Compaction can drop the dispatch, so fall back to the newest AIMessage.
+        target = next((idx for idx in indexes if _has_tool_call(messages[idx], tool_call_id)), indexes[0] if indexes else None)
+        if target is None:
+            logger.warning("Token budget missed subagent usage for %s: no AIMessage to charge", tool_call_id)
+            continue
+        updates[target] = _add_subagent_usage(updates.get(target, messages[target]), usage)
+    return [updates[idx] for idx in sorted(updates)]
+
+
 def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMessage | ToolMessage]:
     """Return copied dispatch/terminal message updates without current-step attribution."""
     # Annotate subagent token usage onto the AIMessage that dispatched it.
@@ -306,14 +339,7 @@ def _attribute_completed_subagent_usage(messages: list[Any]) -> dict[int, AIMess
                         # AIMessage (multiple task calls in one response),
                         # or merge fresh from the original message.
                         existing_update = state_updates.get(dispatch_idx)
-                        prev = existing_update.usage_metadata if isinstance(existing_update, AIMessage) else (getattr(candidate, "usage_metadata", None) or {})
-                        merged = {
-                            **prev,
-                            "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
-                            "output_tokens": prev.get("output_tokens", 0) + subagent_usage["output_tokens"],
-                            "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
-                        }
-                        state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
+                        state_updates[dispatch_idx] = _add_subagent_usage(existing_update if isinstance(existing_update, AIMessage) else candidate, subagent_usage)
                         tool_metadata = dict(tool_msg.additional_kwargs)
                         tool_metadata[SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY] = True
                         state_updates[idx] = tool_msg.model_copy(update={"additional_kwargs": tool_metadata})

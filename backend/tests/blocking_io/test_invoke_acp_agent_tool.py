@@ -62,7 +62,8 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
     @contextlib.asynccontextmanager
     async def fake_spawn_agent_process(client, command, *args, env=None, cwd=None):
         captured["cwd"] = cwd
-        yield _Connection(), SimpleNamespace()
+        # An agent process that stays alive for the whole exchange.
+        yield _Connection(), SimpleNamespace(stderr=None, wait=asyncio.Event().wait)
 
     monkeypatch.setattr(acp, "spawn_agent_process", fake_spawn_agent_process)
 

@@ -51,7 +51,7 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
 Parameters:
 
 - `--prompt-file`: Absolute path to JSON prompt file (required)
-- `--reference-images`: Absolute paths to reference image (optional)
+- `--reference-images`: Absolute paths to reference images (optional). Images used by the provider must have a recognized filename extension: `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` (case-insensitive). Missing or other extensions are rejected before submission. Filenames must match their contents: the script neither validates image contents nor converts bytes. Recognizing an extension does not guarantee that the selected provider accepts that format.
 - `--output-file`: Absolute path to output image file (required)
 - `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
 
@@ -123,6 +123,10 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
 > Do NOT read the python file, just call it with the parameters.
 
 ## Output Handling
+
+The generation command exits with status 1 and writes errors to stderr when
+generation fails, including missing provider credentials. Only present the video
+after the command succeeds; a file left by an earlier run is not a new result.
 
 After generation:
 

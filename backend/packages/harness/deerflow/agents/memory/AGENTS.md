@@ -1,5 +1,16 @@
 ### Memory System
 
+`locale.py::with_memory_locale` captures a supported run `context.locale` on
+queued message copies only, after PII redaction, for normal/async/emergency
+writes. Stamp every message so filtering and watermark slicing retain the
+preference; strip inbound/stale `deerflow_ui_locale` metadata when no supported
+run locale exists. Never change checkpoint messages or memory backend APIs.
+Bundled DeerMem reads this optional metadata into its human data message,
+keeping system text static and the portable backend free of host imports.
+Language influences new prose, not JSON keys or bulk translation of stored facts.
+`test_ui_language_preference.py` pins DeerMem's locale keys and display names
+to the host allowlist without importing host code into the portable backend.
+
 DeerMem `prompt_prepend`/`prompt_append` wrap the first system message from
 `memory_update` after formatting, without touching its human data message or
 cached templates. This is the live summary/fact extraction path; do not wire
@@ -8,11 +19,16 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
+apply the read policy to the whole result, with value-free diagnostics.
+
 #### Main components
 
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
 - `agents/middlewares/memory_middleware.py` queues filtered conversations for passive capture.
 - `summarization_hook.py` connects memory work to the summarization lifecycle.
+  Async compaction runs it in a worker: `add_nowait` is sync HTTP for mem0,
+  Honcho and OpenViking (`tests/blocking_io/test_summarization_memory_flush.py`).
 - `tools.py` provides `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete`.
 - `backends/deermem/` contains the default local backend.
 - `backends/mem0/`, `backends/openviking/`, and `backends/honcho/` contain optional adapters.
@@ -273,7 +289,7 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
-An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
+An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Stored facts are editable JSON: a `confidence` such as `10**400` is a valid JSON integer, and every fact-confidence coercion on a read or import path (`_coerce_source_confidence`, the dedup merge comparison, `prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import normalization) must treat the resulting `OverflowError` like any other unusable value. Canonical storage still rejects an out-of-range confidence as corruption at load time; these helpers cover values reaching them through editable or legacy paths. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
@@ -320,6 +336,26 @@ Use the earliest source review deadline for its next review.
 
 #### Remote backends
 
+Mem0 search and management convert facts inside the read-policy boundary.
+Context injection also deduplicates inside that boundary; unhashable record IDs
+raise a value-redacted `Mem0APIError` (`tests/test_mem0_context_record_ids.py`).
+Invalid score/categories/metadata fields omit field values from `Mem0APIError`s.
+Diagnostics carry only bounded opaque record IDs, otherwise `<unavailable>`;
+missing/null defaults stay compatible and local programming errors propagate.
+
+Mem0 normalizes JSON syntax, Unicode decoding, and parser recursion failures
+to Mem0APIError.
+It validates object response envelopes and lists of object records in the
+HTTP client before returning recall data. Invalid structures raise Mem0APIError,
+so existing read policies apply to search, injection, management and export.
+Validate every page; a malformed later page must not publish a partial listing.
+Missing results and valid empty lists retain the existing empty-read behavior.
+Decoding and structure errors identify the endpoint and list page without memory
+contents; structure errors also identify the invalid container or record type.
+Preserve decoding causes. Catch RecursionError only at JSON parsing; local
+programming errors must still propagate.
+Regressions use offline HTTP transports in `tests/test_mem0_response_policy.py`.
+
 Strict reads use the backend-neutral `MemoryReadError`.
 Backends declare their policy through `read_failures_are_fatal_for_config()`.
 `DynamicContextMiddleware` preserves that policy at its injection timeout.
@@ -350,6 +386,17 @@ Do not add embedded OpenViking imports, root-key access, or trusted identity hea
 Honcho is a remote HTTP adapter for user-model memory.
 It creates one workspace per resolved `user_id`.
 A missing user fails closed to no memory.
+Capture stable-ID messages incrementally using remote `deerflow_source_id`
+metadata, scoped by session and including owner/role/text in the opaque identity.
+Never deduplicate distinct source IDs by text. Consume every filtered lookup page
+before appending a batch; failed/malformed lookups must not become blind replays.
+Cap each lookup at 10 pages, aborting over-budget captures without partial results;
+duplicate stored identities may span pages. Distinguish lookup/write warnings.
+Bound batches to Honcho's 100-message limit. Keep lookup + append under the
+process-local session lock; do not claim cross-process exactly-once delivery.
+ID-less direct callers remain append-only; legacy records lack capture identities.
+Pin cumulative graph turns, restart/compaction, failures and pagination through
+the real HTTP client in `tests/test_honcho_incremental_capture.py`.
 Its async methods offload synchronous HTTP work with `asyncio.to_thread`.
 Honcho's `from_config` consumes the `should_keep_hidden_message` host hook.
 Its write path drops hidden human messages unless that hook accepts them;
@@ -378,6 +425,10 @@ Checkpoint reuse requires the block to exist before the run.
 Gateway input handling removes forged dynamic-context markers.
 
 `prompt.py::_count_tokens` controls the injection budget.
+Oversized summaries use bounded prefix search, counting each assembled candidate
+with its omission marker, separators and protected Facts block. Only counted
+fits replace the facts-only fallback; BPE prefix counts need not be monotone,
+so the search guarantees a fitting candidate rather than the longest prefix.
 Default `tiktoken` mode loads and caches its encoding lazily.
 A failed load uses character estimation for a 600-second cooldown.
 Concurrent callers use character estimation while one load is active.

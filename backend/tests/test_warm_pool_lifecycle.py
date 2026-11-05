@@ -100,7 +100,8 @@ def test_stop_idle_checker_rejects_live_thread_after_timeout() -> None:
     [
         ("deerflow.community.aio_sandbox.aio_sandbox_provider", "AioSandboxProvider"),
         ("deerflow.community.boxlite.provider", "BoxliteProvider"),
-        ("deerflow.community.tenki.provider", "TenkiSandboxProvider"),
+        # Tenki separates the permanent admission fence from cleanup completion;
+        # test_tenki_lifecycle exercises its retry through the real constructor.
         ("deerflow.community.opensandbox.provider", "OpenSandboxProvider"),
     ],
 )

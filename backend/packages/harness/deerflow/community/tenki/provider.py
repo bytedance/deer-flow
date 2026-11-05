@@ -23,6 +23,8 @@ import shlex
 import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -97,6 +99,10 @@ def _import_client() -> type[Client]:
     return Client
 
 
+class _ShutdownIncompleteError(RuntimeError):
+    """Cleanup still owns acquisitions or remote terminations that need retry."""
+
+
 class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider):
     """Run each DeerFlow sandbox as a Tenki cloud microVM."""
 
@@ -128,9 +134,17 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
+        self._shutdown_complete = False
+        self._shutdown_lock = threading.Lock()
+        self._accepting = True
+        self._acquires = 0
+        # Object identity matters: a replacement can have the same logical id
+        # while an older remote generation still needs termination.
+        self._pending_closes: dict[int, TenkiSandbox] = {}
+        self._closing: set[int] = set()
         self._client: Client | None = None
         self._config = self._load_config()
-        atexit.register(self.shutdown)
+        atexit.register(self._shutdown_at_exit)
         self._start_idle_checker()
 
     def _load_config(self) -> dict[str, Any]:
@@ -225,20 +239,38 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         super()._start_idle_checker()
 
     def _active_count_locked(self) -> int:
-        return len(self._sandboxes)
+        return len(self._sandboxes) + len(self._pending_closes)
+
+    def _cleanup_idle_resources(self, idle_timeout: float) -> None:
+        self._retry_pending_closes()
+        super()._cleanup_idle_resources(idle_timeout)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: TenkiSandbox, *, reason: str) -> None:
         self._close_quietly(entry, context=f"warm pool, reason={reason}")
 
-    def _invalidate_sandbox(self, sandbox_id: str, reason: str) -> None:
+    def _invalidate_sandbox(self, sandbox_id: str, reason: str, *, expected_sandbox: TenkiSandbox | None = None) -> None:
         """Destroy and deregister a sandbox after a terminal command-path failure."""
         to_close: TenkiSandbox | None = None
         with self._lock:
+            active = self._sandboxes.get(sandbox_id)
+            warm_entry = self._warm_pool.get(sandbox_id)
+            current = active or (warm_entry[0] if warm_entry is not None else None)
+            if expected_sandbox is not None and current is not expected_sandbox:
+                # Operations already in flight can fail after another failure
+                # has removed their adapter and acquire rebuilt this scope.
+                # The logical id is stable; only the originating adapter owns
+                # the right to invalidate this active or warm generation.
+                logger.debug("Ignoring late terminal failure from replaced Tenki sandbox %s: %s", sandbox_id, reason)
+                return
             active = self._sandboxes.pop(sandbox_id, None)
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             for key in [k for k, sid in self._thread_sandboxes.items() if sid == sandbox_id]:
                 self._thread_sandboxes.pop(key, None)
             to_close = active or (warm_entry[0] if warm_entry is not None else None)
+            if to_close is not None:
+                # Transfer ownership atomically with deregistration. Shutdown
+                # must see this handle even before its close worker starts.
+                self._pending_closes[id(to_close)] = to_close
 
         if to_close is None:
             logger.warning("Tenki sandbox %s failed terminally but was not tracked: %s", sandbox_id, reason)
@@ -248,18 +280,41 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
     # ── Acquire / release ────────────────────────────────────────────────
 
-    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
-        if thread_id is None:
-            sandbox_id = str(uuid.uuid4())[:8]
-            sandbox = self._create_sandbox(sandbox_id)
+    @contextmanager
+    def _acquiring(self) -> Iterator[None]:
+        with self._lock:
+            if not self._accepting:
+                raise RuntimeError("Tenki provider is retired or shutting down")
+            self._acquires += 1
+        try:
+            yield
+        finally:
             with self._lock:
-                self._sandboxes[sandbox.id] = sandbox
-            return sandbox.id
+                self._acquires -= 1
 
-        key = self._thread_key(thread_id, user_id)
-        sandbox_id = self._sandbox_id(thread_id, user_id or "")
-        with self._acquire_serializer.hold(sandbox_id):
-            return self._acquire_scope_locked(key, sandbox_id)
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        with self._acquiring():
+            if thread_id is None:
+                sandbox_id = str(uuid.uuid4())[:8]
+                sandbox = self._create_sandbox(sandbox_id)
+                return self._publish_sandbox(sandbox)
+
+            key = self._thread_key(thread_id, user_id)
+            sandbox_id = self._sandbox_id(thread_id, user_id or "")
+            with self._acquire_serializer.hold(sandbox_id):
+                return self._acquire_scope_locked(key, sandbox_id)
+
+    def _publish_sandbox(self, sandbox: TenkiSandbox, key: tuple[str, str] | None = None) -> str:
+        with self._lock:
+            if self._accepting:
+                self._sandboxes[sandbox.id] = sandbox
+                if key is not None:
+                    self._thread_sandboxes[key] = sandbox.id
+                return sandbox.id
+        # The synchronous SDK worker owns its handle through this cleanup even
+        # when the async caller abandoned its await while create was running.
+        self._close_quietly(sandbox, context="acquired after provider retirement")
+        raise RuntimeError("Tenki provider retired or shut down during acquire")
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire without blocking the event loop.
@@ -275,6 +330,8 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
     def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str) -> str:
         with self._lock:
+            if not self._accepting:
+                raise RuntimeError("Tenki provider is retired or shutting down")
             existing = self._thread_sandboxes.get(key)
             if existing is not None and existing in self._sandboxes:
                 return existing
@@ -282,14 +339,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         reclaimed = self._reclaim_warm_pool(sandbox_id)
         if reclaimed is not None:
             with self._lock:
+                if not self._accepting:
+                    raise RuntimeError("Tenki provider retired or shut down during acquire")
                 self._thread_sandboxes[key] = reclaimed
             return reclaimed
 
         sandbox = self._create_sandbox(sandbox_id)
-        with self._lock:
-            self._sandboxes[sandbox.id] = sandbox
-            self._thread_sandboxes[key] = sandbox.id
-        return sandbox.id
+        return self._publish_sandbox(sandbox, key)
 
     def _create_sandbox(self, sandbox_id: str) -> TenkiSandbox:
         # Enforce replica soft cap: evict the oldest warm sandbox if active + warm
@@ -341,30 +397,45 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         except Exception as e:
             logger.warning("Tenki bootstrap for %s raised: %s", sandbox_id, e)
         logger.info("Created Tenki sandbox %s (name=%s)", sandbox_id, self._sandbox_name(sandbox_id))
-        return TenkiSandbox(
+        sandbox = TenkiSandbox(
             sandbox_id,
             remote,
             default_env=self._config["environment"],
             home_dir=self._config["home_dir"],
-            on_terminal_failure=self._invalidate_sandbox,
+            on_terminal_failure=lambda failed_id, reason: self._invalidate_sandbox(failed_id, reason, expected_sandbox=sandbox),
         )
+        return sandbox
 
-    @staticmethod
-    def _terminate_orphan(sandbox_id: str, remote: Any) -> None:
+    def _terminate_orphan(self, sandbox_id: str, remote: Any) -> None:
         """Terminate a microVM that was created but never handed to the adapter."""
-        try:
-            remote.close()
-            logger.warning("Terminated Tenki sandbox %s after it failed to become ready", sandbox_id)
-        except Exception as e:
-            logger.error("Leaked Tenki sandbox %s (id=%s): could not terminate after readiness failure: %s", sandbox_id, getattr(remote, "id", "?"), e)
+        self._close_quietly(TenkiSandbox(sandbox_id, remote), context="readiness failure")
 
-    @staticmethod
-    def _close_quietly(sandbox: TenkiSandbox, *, context: str) -> None:
-        """Close a sandbox where the caller has no way to act on a failure."""
+    def _close_quietly(self, sandbox: TenkiSandbox, *, context: str) -> None:
+        """Own termination until accepted, retaining failures for a later sweep."""
+        token = id(sandbox)
+        with self._lock:
+            self._pending_closes[token] = sandbox
+            if token in self._closing:
+                return
+            self._closing.add(token)
+        closed = False
         try:
             sandbox.close()
         except Exception as e:
             logger.warning("Error closing Tenki sandbox %s (%s): %s", sandbox.id, context, e)
+        else:
+            closed = True
+        finally:
+            with self._lock:
+                if closed:
+                    self._pending_closes.pop(token, None)
+                self._closing.discard(token)
+
+    def _retry_pending_closes(self) -> None:
+        with self._lock:
+            pending = list(self._pending_closes.values())
+        for sandbox in pending:
+            self._close_quietly(sandbox, context="retry termination")
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         with self._lock:
@@ -386,12 +457,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 return
             if self._shutdown_called:
                 close_sandbox = sandbox
+                self._pending_closes[id(sandbox)] = sandbox
             else:
                 self._warm_pool[sandbox_id] = (sandbox, time.monotonic())
 
         if close_sandbox is not None:
             self._close_quietly(close_sandbox, context="released during shutdown")
-            logger.info("Closed released Tenki sandbox %s because shutdown is in progress", sandbox_id)
+            logger.info("Requested termination of released Tenki sandbox %s because shutdown is in progress", sandbox_id)
         else:
             logger.info("Released Tenki sandbox %s to warm pool (microVM still running)", sandbox_id)
 
@@ -429,7 +501,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             warm_entry = self._warm_pool.pop(sandbox_id, None)
             if warm_entry is None:
                 return None  # Raced with another thread
-            self._sandboxes[sandbox_id] = warm_entry[0]
+            admitted = self._accepting
+            if admitted:
+                self._sandboxes[sandbox_id] = warm_entry[0]
+
+        if not admitted:
+            self._close_quietly(warm_entry[0], context="reclaimed after provider retirement")
+            raise RuntimeError("Tenki provider retired or shut down during acquire")
 
         logger.info("Reclaimed warm-pool Tenki sandbox %s", sandbox_id)
         return sandbox_id
@@ -443,6 +521,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         instance's idle reaper and atexit shutdown instead of orphaning them.
         """
         with self._lock:
+            self._accepting = False
             now = time.monotonic()
             for sandbox_id, sandbox in self._sandboxes.items():
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
@@ -450,26 +529,35 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._thread_sandboxes.clear()
             self._acquire_serializer.close()
 
-    def shutdown(self) -> None:
-        with self._lock:
-            if self._shutdown_called:
-                return
-            self._shutdown_called = True
-
+    def _shutdown_at_exit(self) -> None:
         try:
-            self._stop_idle_checker()
-        except Exception:
+            self.shutdown()
+        except _ShutdownIncompleteError as e:
+            logger.warning("%s", e)
+
+    def shutdown(self) -> None:
+        # Shutdown retries cleanup but never reopens admission. An SDK call
+        # cannot be forcibly cancelled: its worker retains ownership and closes
+        # a late handle. Report unfinished work instead of pretending to drain
+        # it or blocking shutdown on an unbounded remote call.
+        with self._shutdown_lock:
             with self._lock:
-                self._shutdown_called = False
-            raise
-
-        with self._lock:
-            active = list(self._sandboxes.values())
-            warm = [sandbox for sandbox, _ in self._warm_pool.values()]
-            self._sandboxes.clear()
-            self._warm_pool.clear()
-            self._thread_sandboxes.clear()
+                if self._shutdown_complete:
+                    return
+                self._shutdown_called = True
+                self._accepting = False
             self._acquire_serializer.close()
-
-        for sandbox in active + warm:
-            self._close_quietly(sandbox, context="shutdown")
+            self._stop_idle_checker()
+            with self._lock:
+                active = list(self._sandboxes.values())
+                warm = [sandbox for sandbox, _ in self._warm_pool.values()]
+                self._sandboxes.clear()
+                self._warm_pool.clear()
+                self._thread_sandboxes.clear()
+                previous_pending = list(self._pending_closes.values())
+            for sandbox in {id(box): box for box in active + warm + previous_pending}.values():
+                self._close_quietly(sandbox, context="shutdown")
+            with self._lock:
+                if self._acquires or self._pending_closes:
+                    raise _ShutdownIncompleteError(f"Tenki shutdown incomplete: {self._acquires} acquires and {len(self._pending_closes)} terminations pending; retry shutdown")
+                self._shutdown_complete = True

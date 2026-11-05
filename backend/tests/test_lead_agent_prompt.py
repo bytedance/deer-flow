@@ -746,6 +746,8 @@ def test_system_prompt_language_rule_covers_scheduled_runs_and_stored_text():
     line = " ".join(part.strip() for part in lines[start:end])
 
     assert "the user's latest message" in line
+    assert "An explicit user request for a response language takes precedence" in line
+    assert "<response_language_preference>" in line
     assert "short notes before tool calls" in line
     assert "task titles, scheduled instructions and notes" in line
     assert "scheduled run" in line

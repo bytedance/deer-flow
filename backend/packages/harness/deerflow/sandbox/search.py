@@ -159,7 +159,7 @@ def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
         return b"\0" in handle.read(sample_size)
 
 
-def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
+def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200, relative_prefix: str = "") -> tuple[list[str], bool]:
     matches: list[str] = []
     truncated = False
     root = root.resolve()
@@ -185,6 +185,8 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
         if include_dirs:
             for name in dirs:
                 rel_path = (rel_dir / name).as_posix()
+                if relative_prefix:
+                    rel_path = f"{relative_prefix}/{rel_path}"
                 if path_matches(pattern, rel_path):
                     matches.append(str(Path(current_root) / name))
                     if len(matches) >= max_results:
@@ -195,6 +197,8 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
             if should_ignore_name(name):
                 continue
             rel_path = (rel_dir / name).as_posix()
+            if relative_prefix:
+                rel_path = f"{relative_prefix}/{rel_path}"
             if path_matches(pattern, rel_path):
                 matches.append(str(Path(current_root) / name))
                 if len(matches) >= max_results:
@@ -248,6 +252,7 @@ def find_grep_matches(
     max_results: int = 100,
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     line_summary_length: int = DEFAULT_LINE_SUMMARY_LENGTH,
+    relative_prefix: str = "",
 ) -> tuple[list[GrepMatch], bool]:
     matches: list[GrepMatch] = []
     truncated = False
@@ -288,6 +293,8 @@ def find_grep_matches(
                 yield Path(current_root) / name, (rel_dir / name).as_posix()
 
     for candidate_path, rel_path in candidate_files():
+        if relative_prefix:
+            rel_path = f"{relative_prefix}/{rel_path}"
         if glob_pattern is not None and not path_matches(glob_pattern, rel_path):
             continue
 

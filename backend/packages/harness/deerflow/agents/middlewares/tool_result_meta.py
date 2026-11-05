@@ -156,7 +156,7 @@ def _extract_json_error_text(content: str) -> str | None:
     """
     try:
         data = json.loads(content)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return None
     error = data.get("error") if isinstance(data, dict) else None
     if not error:
@@ -305,16 +305,26 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
             # the tool.  Classify raw text only when the content is not valid JSON.
             try:
                 is_json_dict = isinstance(json.loads(content), dict)
+            except RecursionError:
+                # Depth-limited analysis cannot establish an error category.
+                # Do not infer auth/stop from incidental fields in the raw JSON.
+                attrs = {**_UNKNOWN_ERROR}
             except (json.JSONDecodeError, ValueError):
-                is_json_dict = False
-            attrs = {**_UNKNOWN_ERROR} if is_json_dict else _classify_error_text(content)
+                attrs = _classify_error_text(content)
+            else:
+                attrs = {**_UNKNOWN_ERROR} if is_json_dict else _classify_error_text(content)
         meta = _make_meta(status="error", source="tool_return", **attrs)
     elif content.startswith(_ERROR_PREFIX):
         attrs = _classify_error_text(content[len(_ERROR_PREFIX) :])
         meta = _make_meta(status="error", source="tool_return", **attrs)
     elif (json_error := _extract_json_error_text(content)) is not None:
-        attrs = _classify_error_text(json_error)
-        meta = _make_meta(status="error", source="tool_return", **attrs)
+        if msg.name == "read_file":
+            # Native reads return document text, not a tool error envelope.
+            # Explicit failures above still take precedence over file content.
+            meta = _make_meta(status="success", source="content_analysis")
+        else:
+            attrs = _classify_error_text(json_error)
+            meta = _make_meta(status="error", source="tool_return", **attrs)
     elif failed_bash:
         # A nonzero shell exit does not raise a Python exception. Keep it
         # recoverable: grep/diff and diagnostic probes can legitimately use 1.

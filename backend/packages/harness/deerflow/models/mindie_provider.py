@@ -225,11 +225,28 @@ def _decode_escaped_newlines_outside_fences(content: str) -> str:
     if "\\n" not in content:
         return content
 
-    parts = re.split(r"(```[\s\S]*?```)", content)
-    for idx, part in enumerate(parts):
-        if part.startswith("```"):
-            continue
-        parts[idx] = part.replace("\\n", "\n")
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(content):
+        candidates = [(position, delimiter) for delimiter in ("```", "~~~") if (position := content.find(delimiter, cursor)) >= 0]
+        if not candidates:
+            parts.append(content[cursor:].replace("\\n", "\n"))
+            break
+
+        start, delimiter = min(candidates)
+        end = content.find(delimiter, start + len(delimiter))
+        if end < 0:
+            # An unterminated Markdown fence extends to the end of the reply.
+            # Preserve it verbatim, including any complete pair that uses the
+            # other supported delimiter, to match the streaming decoder.
+            parts.append(content[cursor:start].replace("\\n", "\n"))
+            parts.append(content[start:])
+            break
+
+        parts.append(content[cursor:start].replace("\\n", "\n"))
+        end += len(delimiter)
+        parts.append(content[start:end])
+        cursor = end
     return "".join(parts)
 
 
@@ -237,16 +254,16 @@ class _EscapedNewlineStreamDecoder:
     """Decode literal `\\n` outside fenced code blocks across streamed chunks.
 
     `_decode_escaped_newlines_outside_fences` needs the whole reply to pair
-    ``` delimiters, and a token-sized chunk almost never contains both, so
+    ``` or ~~~ delimiters, and a token-sized chunk rarely contains both, so
     decoding chunks independently would also decode escapes inside fences.
     This decoder carries the fence state between chunks and holds back a
-    trailing partial ```/`\\n` sequence, so the joined stream equals the
+    trailing partial delimiter or `\\n` sequence, so the joined stream equals the
     one-shot decode of the same reply. A fence the stream never closes keeps
     its escapes: an unterminated fence still renders as code.
     """
 
     def __init__(self) -> None:
-        self._inside_fence = False
+        self._fence_delimiter: str | None = None
         self._pending = ""
 
     def push(self, text: str) -> str:
@@ -255,36 +272,40 @@ class _EscapedNewlineStreamDecoder:
         self._pending = ""
         out = []
         while data:
-            fence = data.find("```")
-            if self._inside_fence:
+            if self._fence_delimiter is not None:
+                fence = data.find(self._fence_delimiter)
                 if fence == -1:
-                    # The closing ``` may be split across chunks: emit the
+                    # The closing delimiter may be split across chunks: emit the
                     # fenced code verbatim and keep a partial closer pending.
-                    hold = len(data) - len(data.rstrip("`"))
+                    hold = len(data) - len(data.rstrip(self._fence_delimiter[0]))
                     out.append(data[: len(data) - hold])
                     self._pending = data[len(data) - hold :]
                     break
-                # Fenced code up to and including its closing ``` stays verbatim.
-                out.append(data[: fence + 3])
-                data = data[fence + 3 :]
-                self._inside_fence = False
+                # Fenced code through its matching closer stays verbatim.
+                delimiter_length = len(self._fence_delimiter)
+                out.append(data[: fence + delimiter_length])
+                data = data[fence + delimiter_length :]
+                self._fence_delimiter = None
                 continue
-            if fence == -1:
-                # Outside a fence the tail may still grow into ``` or into an
+
+            candidates = [(position, delimiter) for delimiter in ("```", "~~~") if (position := data.find(delimiter)) >= 0]
+            if not candidates:
+                # Outside a fence the tail may still grow into a delimiter or an
                 # escape split across the boundary; hold it back, decode the rest.
-                hold = len(data) - len(data.rstrip("`\\"))
+                hold = len(data) - len(data.rstrip("`~\\"))
                 out.append(_decode_escaped_newlines_outside_fences(data[: len(data) - hold]))
                 self._pending = data[len(data) - hold :]
                 break
-            # Prose before the opening ``` decodes; the fence itself does not.
+            fence, delimiter = min(candidates)
+            # Prose before the opening delimiter decodes; the fence itself does not.
             out.append(_decode_escaped_newlines_outside_fences(data[:fence]))
-            out.append(data[fence : fence + 3])
-            data = data[fence + 3 :]
-            self._inside_fence = True
+            out.append(delimiter)
+            data = data[fence + len(delimiter) :]
+            self._fence_delimiter = delimiter
         return "".join(out)
 
     def flush(self) -> str:
-        """Return text held back for a partial ```/`\\n` at the end of the stream."""
+        """Return text held back for a partial delimiter/`\\n` at stream end."""
         pending, self._pending = self._pending, ""
         return pending
 

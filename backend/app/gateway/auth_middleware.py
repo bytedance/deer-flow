@@ -207,6 +207,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Browser extension pages are bound to the account that loaded their
+        # descriptor. Cookies can change in another tab before React observes it.
+        # This is a stale-view fence, not an authorization grant; CLI callers may
+        # omit it and all existing route/resource checks still apply.
+        expected_viewer = request.headers.get("x-deerflow-plugin-viewer")
+        if get_request_route_path(request).startswith("/api/extensions/") and expected_viewer is not None and expected_viewer != str(user.id):
+            return JSONResponse(status_code=409, content={"detail": "Account changed; reload this extension view."})
+
         # Stamp both request.state.user (for the contextvar pattern)
         # and request.state.auth (so @require_permission's "auth is
         # None" branch short-circuits instead of running the entire

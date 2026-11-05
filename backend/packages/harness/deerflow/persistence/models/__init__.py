@@ -24,6 +24,7 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.channel_leases.model import ChannelLeaseRow
 from deerflow.persistence.channel_runtime_configs.model import ChannelRuntimeConfigRow
 from deerflow.persistence.channel_thread_bindings.model import ChannelThreadBindingRow
+from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.login_throttle.model import LoginThrottleRow
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
@@ -46,6 +47,7 @@ from deerflow.persistence.user.model import UserPreferenceRow, UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
 __all__ = [
+    "ExtensionExecutionLeaseRow",
     "AgentRow",
     "ChannelConnectionRow",
     "ChannelConversationRow",

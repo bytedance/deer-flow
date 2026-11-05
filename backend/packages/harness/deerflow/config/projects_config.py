@@ -102,6 +102,18 @@ class ProjectsConfig(BaseModel):
             field_doc="Caller-side wait limit for one summary model call; abandons the wait (not the remote work), and never covers document conversion.",
         ),
     )
+    search_max_chars_per_document: int = Field(
+        default=1_000_000,
+        ge=1000,
+        le=50_000_000,
+        description="Per-document scan cap for search_project_documents, in decoded CHARACTERS (not bytes — CJK differs 3x). The tool reads it per call, so edits apply without a restart.",
+    )
+    search_max_total_chars: int = Field(
+        default=8_000_000,
+        ge=1000,
+        le=500_000_000,
+        description=("Whole-shelf total content-scan budget for search_project_documents, in decoded characters; must be >= search_max_chars_per_document (a violation resets both keys to defaults). Read per call; no restart needed."),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -156,3 +168,21 @@ class ProjectsConfig(BaseModel):
             else:
                 cleaned[name] = coerced
         return cleaned
+
+    @model_validator(mode="after")
+    def _search_budget_combo(self) -> ProjectsConfig:
+        """Combined search-budget rule: total must cover the per-document cap.
+
+        A violation resets BOTH keys together — resetting only one could
+        still leave the combination invalid.
+        """
+        if self.search_max_total_chars < self.search_max_chars_per_document:
+            logger.warning(
+                "projects.search_max_total_chars (%d) < search_max_chars_per_document (%d); resetting both to defaults",
+                self.search_max_total_chars,
+                self.search_max_chars_per_document,
+            )
+            defaults = type(self)()
+            self.search_max_chars_per_document = defaults.search_max_chars_per_document
+            self.search_max_total_chars = defaults.search_max_total_chars
+        return self

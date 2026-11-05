@@ -2028,6 +2028,16 @@ def test_retry_after_date_boundaries(monkeypatch: pytest.MonkeyPatch, delta_seco
     assert _extract_retry_after_ms(exc) == expected_ms
 
 
+@pytest.mark.parametrize("raw", ["Thu, 01 Jan 2026 00:01:00 GMT", "Thursday, 01-Jan-26 00:01:00 GMT", "Thu Jan  1 00:01:00 2026"])
+def test_retry_after_date_formats_use_utc(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    from deerflow.agents.middlewares import llm_error_handling_middleware as middleware
+
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(middleware, "time", SimpleNamespace(time=lambda: now.timestamp()))
+    exc = FakeError("rate limited", status_code=429, headers={"Retry-After": raw})
+    assert _extract_retry_after_ms(exc) == 60000
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("header_name", ["Retry-After", "retry-after-ms"])

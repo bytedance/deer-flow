@@ -790,9 +790,10 @@ async def test_delivery_write_retries_before_persisting_success():
             self.attempts = 0
 
         async def put_if_absent(self, **kwargs):
-            self.attempts += 1
-            if self.attempts == 1:
-                raise RuntimeError("transient event store outage")
+            if kwargs["event_type"] == "run.delivery":
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise RuntimeError("transient event store outage")
             return await super().put_if_absent(**kwargs)
 
     event_store = FlakyReceiptStore()

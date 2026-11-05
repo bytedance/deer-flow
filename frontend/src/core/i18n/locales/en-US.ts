@@ -12,6 +12,60 @@ import {
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
@@ -44,6 +98,11 @@ export const enUS: Translations = {
         title: "Script workflows",
         description:
           "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
+      },
+      reportSections: {
+        title: "Sectioned long-form writing",
+        description:
+          "Write long reports section by section and assemble them into a downloadable Markdown document.",
       },
       agentTeams: {
         title: "Agent teams",
@@ -84,6 +143,21 @@ export const enUS: Translations = {
         title: "LightRAG",
         description:
           "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      },
+      knowledgePlatform: {
+        title: "Knowledge spaces and connections",
+        description:
+          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeCenter: {
+        title: "Knowledge center",
+        description:
+          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
+      },
+      knowledgeManagement: {
+        title: "Knowledge ingestion and processing",
+        description:
+          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
       },
       weknora: {
         title: "WeKnora knowledge retrieval",
@@ -245,6 +319,15 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  browserStream: {
+    connecting: "Connecting…",
+    disconnected: "Disconnected",
+    handshakeTimeout:
+      "Live browser connection timed out. Check your network or proxy, then turn Live off and on to retry.",
+    connectionFailed:
+      "Live browser connection failed or closed. Check your connection and access permissions, then turn Live off and on to retry.",
+  },
+
   skillUsage: {
     used: "Skills used",
     title: "Skills",
@@ -276,6 +359,11 @@ export const enUS: Translations = {
   home: {
     docs: "Docs",
     blog: "Blog",
+    searchDocs: "Search docs…",
+    searchDocsLabel: "Search documentation",
+    searchNoResults: "No results. Try fewer or different words.",
+    searchLoadFailed: "Search is unavailable right now.",
+    searchLoading: "Loading…",
   },
 
   // Welcome
@@ -362,6 +450,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -552,6 +646,8 @@ export const enUS: Translations = {
           "Token budget reached. Send a message to continue; a new run starts with a fresh budget.",
         loopCapped:
           "Repeated tool calls triggered a safety stop. Adjust the approach and send a new message to retry; your goal stays active.",
+        recursionCapped:
+          "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
         missingEvidence:
           "Goal check: evidence missing. Ask it to show the result or explain what's missing; if the goal no longer applies, run /goal clear.",
         runFailed:
@@ -625,6 +721,25 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
@@ -844,7 +959,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -857,6 +974,18 @@ export const enUS: Translations = {
     cancel: "Cancel",
     retryItem: "Retry",
     exportResults: "Export JSONL",
+    viewResult: "Review result",
+    resultTitle: "Batch result",
+    resultDescription: "Stored report and captured evidence for this item.",
+    report: "Report",
+    evidence: "Captured evidence",
+    noEvidence: "No captured evidence",
+    acceptance: "Acceptance",
+    noReport: "No report has been stored yet.",
+    loadResultFailed: "Couldn't load batch result",
+    truncated: "Report truncated",
+    omittedEvidence: (count) => `${count} evidence entries omitted`,
+    pagesLabel: "Pages",
     viewItems: "View items",
     hideItems: "Hide items",
     itemsFailed: "Couldn't load batch items",
@@ -1220,6 +1349,7 @@ export const enUS: Translations = {
         noProgress: "No progress between turns",
         tokenCapped: "Token budget reached",
         loopCapped: "Repeated tool calls reached the safety limit",
+        recursionCapped: "The run reached its step limit",
         evaluatorFailed: "Couldn't check the goal; the run itself may be fine",
         noDurableEndOfTurn: "Couldn't check the goal: no final reply was saved",
         threadChanged:
@@ -1672,6 +1802,24 @@ export const enUS: Translations = {
       expiredTitle: "QR code expired",
       failedTitle: "Unable to connect",
     },
+    bindingCode: {
+      description: (provider: string) =>
+        `Send this command to the ${provider} bot to link it to your DeerFlow account.`,
+      loading: "Generating a binding code…",
+      copy: "Copy command",
+      copied: "Copied",
+      copyFailed: "Could not copy. Select and copy the command above.",
+      expiresAt: (time: string) => `Expires at ${time}`,
+      waiting: (provider: string) => `Waiting for your message in ${provider}…`,
+      connected: (provider: string) => `${provider} is connected`,
+      done: "Done",
+      expired: "This binding code has expired.",
+      newCode: "Generate a new code",
+      failed: "Could not create a binding code.",
+      tooManyCodes:
+        "Too many unused codes. Use a code you already have or wait about 10 minutes for them to expire.",
+      retry: "Try again",
+    },
     setupDescription:
       "Enter the values needed by this server process. They are not written to config.yaml.",
     saveAndConnect: "Save and connect",
@@ -1708,6 +1856,9 @@ export const enUS: Translations = {
   // Tool calls
   toolCalls: {
     details: "Tool details",
+    failed: "Failed",
+    scheduleTaskPending: "Scheduled task operation",
+    stopScheduledTaskPending: "Pause this scheduled task",
     toolName: "Tool name",
     callId: "Call ID",
     input: "Input",
@@ -1856,6 +2007,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",
@@ -2037,7 +2216,8 @@ export const enUS: Translations = {
       lightDescription: "Bright palette with higher contrast for daytime.",
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
-      languageDescription: "Switch between languages.",
+      languageDescription:
+        "Choose the interface language and preferred language for replies.",
     },
     tools: {
       adminRequired: "Admin privileges are required to manage MCP tools.",
@@ -2533,6 +2713,10 @@ export const enUS: Translations = {
         "SSO login is not allowed for your account. Contact your administrator.",
       account_disabled:
         "This account has been disabled. Contact your administrator.",
+      invalid_email: "Please enter a valid email address.",
+      password_too_short: "Password must be at least 6 characters.",
+      registration_password_too_short:
+        "Password must be at least 8 characters.",
     },
   },
 };

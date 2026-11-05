@@ -4,10 +4,15 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { toast } from "sonner";
+
+import { threadHistoryQueryKey } from "@/core/threads/hooks";
+import { runInputsKey } from "@/core/threads/run-inputs";
 
 import {
   controlSubagentBatch,
+  fetchSubagentBatchItemDetail,
   fetchSubagentBatchItems,
   fetchSubagentBatches,
   retrySubagentBatchItem,
@@ -18,13 +23,20 @@ export const subagentBatchesKey = (threadId: string) =>
   ["subagent-batches", threadId] as const;
 export const subagentBatchItemsKey = (threadId: string, batchId: string) =>
   [...subagentBatchesKey(threadId), batchId, "items"] as const;
+export const subagentBatchItemDetailKey = (
+  threadId: string,
+  batchId: string,
+  position: number,
+) => [...subagentBatchItemsKey(threadId, batchId), position, "detail"] as const;
 const SUBAGENT_BATCH_ITEMS_PAGE_SIZE = 100;
 
 export function useSubagentBatches(
   threadId: string,
   options: { enabled?: boolean; polling?: boolean } = {},
 ) {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const observed = useRef({ threadId, runs: new Set<string>() });
+  const query = useQuery({
     queryKey: subagentBatchesKey(threadId),
     queryFn: () => fetchSubagentBatches(threadId),
     enabled: options.enabled !== false && Boolean(threadId),
@@ -34,6 +46,26 @@ export function useSubagentBatches(
     },
     refetchIntervalInBackground: false,
   });
+  useEffect(() => {
+    if (observed.current.threadId !== threadId) {
+      observed.current = { threadId, runs: new Set<string>() };
+    }
+    const newRuns =
+      query.data?.flatMap((batch) =>
+        batch.continuation_run_id &&
+        !observed.current.runs.has(batch.continuation_run_id)
+          ? [batch.continuation_run_id]
+          : [],
+      ) ?? [];
+    if (!newRuns.length) return;
+    for (const runId of newRuns) observed.current.runs.add(runId);
+    void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+    void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
+    void queryClient.invalidateQueries({
+      queryKey: threadHistoryQueryKey(threadId),
+    });
+  }, [query.data, queryClient, threadId]);
+  return query;
 }
 
 export function useSubagentBatchItems(
@@ -60,6 +92,45 @@ export function useSubagentBatchItems(
     refetchInterval: (query) => {
       if (options.polling === false) return false;
       return (query.state.data?.pages.length ?? 0) <= 1 ? 3000 : false;
+    },
+    refetchIntervalInBackground: false,
+  });
+}
+
+export function useSubagentBatchItemDetail(
+  threadId: string,
+  batchId: string,
+  position: number | null,
+  options: { enabled?: boolean; polling?: boolean; revision?: string } = {},
+) {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (position === null || options.revision === undefined) return;
+    // A terminal detail stops polling, but another client can retry the item.
+    // Compact-list revisions invalidate this cached detail; disabled dialogs do
+    // not refetch until reopened.
+    void queryClient.invalidateQueries({
+      queryKey: subagentBatchItemDetailKey(threadId, batchId, position),
+      exact: true,
+    });
+  }, [queryClient, threadId, batchId, position, options.revision]);
+  return useQuery({
+    queryKey:
+      position === null
+        ? [...subagentBatchItemsKey(threadId, batchId), "detail", "closed"]
+        : subagentBatchItemDetailKey(threadId, batchId, position),
+    queryFn: () => fetchSubagentBatchItemDetail(threadId, batchId, position!),
+    enabled:
+      options.enabled !== false &&
+      Boolean(threadId) &&
+      Boolean(batchId) &&
+      position !== null,
+    refetchInterval: (query) => {
+      if (options.polling === false) return false;
+      const status = query.state.data?.status;
+      return status && ["succeeded", "failed", "cancelled"].includes(status)
+        ? false
+        : 2000;
     },
     refetchIntervalInBackground: false,
   });

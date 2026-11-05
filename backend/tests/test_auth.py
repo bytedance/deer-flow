@@ -2250,3 +2250,13 @@ def test_validate_next_param_rejects_unsafe_paths():
     assert validate_next_param("/foo\\bar") is None
     assert validate_next_param("//evil.example") is None
     assert validate_next_param("https://evil.example") is None
+    # Browsers delete tab, LF and CR before parsing, turning these into
+    # protocol-relative URLs; every other C0 control and DEL is rejected too.
+    assert validate_next_param("/\t//evil.example") is None
+    assert validate_next_param("/\n//evil.example") is None
+    assert validate_next_param("/\r//evil.example") is None
+    assert validate_next_param("/\n/evil.example") is None
+    assert validate_next_param("/workspace\x00") is None
+    assert validate_next_param("/workspace\x7f") is None
+    # Percent-encoded forms are not decoded by URL parsers and stay local.
+    assert validate_next_param("/%0A//evil.example") == "/%0A//evil.example"

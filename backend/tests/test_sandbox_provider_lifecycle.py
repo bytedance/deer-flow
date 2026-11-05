@@ -333,3 +333,15 @@ def test_failed_shutdown_does_not_replace_a_concurrently_installed_provider():
     finally:
         sandbox_provider.reset_sandbox_provider()
         discard_sandbox_lease_manager(old)
+
+
+def test_sandbox_shutdown_ownership_nests_and_is_released_on_error():
+    """Overlapping hosts keep ownership until the last one exits, even on failure."""
+    assert sandbox_provider.host_owns_sandbox_shutdown() is False
+    with sandbox_provider.hold_sandbox_shutdown_ownership():
+        with pytest.raises(RuntimeError, match="startup failed"):
+            with sandbox_provider.hold_sandbox_shutdown_ownership():
+                assert sandbox_provider.host_owns_sandbox_shutdown() is True
+                raise RuntimeError("startup failed")
+        assert sandbox_provider.host_owns_sandbox_shutdown() is True
+    assert sandbox_provider.host_owns_sandbox_shutdown() is False

@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _pytest.terminal import format_session_duration
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, MessagesState, StateGraph
@@ -172,6 +173,31 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
     assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (False, False)
 
 
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        (_summary("ℹ", todo=1) + "\n" + "  at fixture\n" * 150, (True, True)),
+        (_summary("ℹ", failed=1) + "\n" + "  at fixture\n" * 150, (True, False)),
+        (_summary("ℹ", passed=0, todo=1) + "\n" + "  at fixture\n" * 150, (False, False)),
+        (_summary("ℹ", failed=1) + "\n" + "diagnostic\n" * 150 + _summary("ℹ"), (True, False)),
+        ("0 passed\n" + "diagnostic\n" * 150 + "2 passed", (False, False)),
+    ],
+    ids=["pass-before-stack", "failure-before-stack", "all-todo-before-stack", "failure-before-passing-tail", "zero-before-passing-tail"],
+)
+def test_full_summary_survives_bounded_harvest(executor_module, monkeypatch, output, expected):
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": "node --test"}}]), ToolMessage(content=output, tool_call_id="node-call")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    assert len(executions[0]["output_tail"]) <= 1000
+    verdict = check_acceptance_criteria(["tests_passed:node --test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("overrides", [{"shell_persistent": True}, {"shell_persistent": None}, {"command_truncated": True}, {"command": "echo other; node --test"}, {"command": "node --test > log"}])
+def test_full_summary_does_not_bypass_admission(overrides):
+    assert _verdict("", test_summary="passed", **overrides)["leaves"][0]["checked"] is False
+
+
 @pytest.mark.skipif(os.name == "nt" or shutil.which("node") is None, reason="Requires POSIX LocalSandbox and Node.js")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reporter", ["tap", "spec", "color-spec"])
@@ -194,6 +220,8 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
         ("describe('1 failed', () => { test('sample', () => {}); });", (True, True)),
         ("test('sample', () => { throw Error('fixture'); });", (True, False)),
         ("test('pending', { timeout: 20 }, () => new Promise(() => {}));", (True, False)),
+        ("console.log('12 passed'); for (let i=0; i<250; i++) test.skip('t'+i,()=>{});", (False, False)),
+        ("console.log('validation found 2 errors'); for (let i=0; i<250; i++) test('t'+i,()=>{});", (True, True)),
     ],
     ids=[
         "pass",
@@ -212,12 +240,12 @@ def test_harvest_drops_a_partial_label_before_interpreting_counts(executor_modul
         "summary-like-suite",
         "failure",
         "cancelled",
+        "stray-pass-all-skipped",
+        "stray-error-all-passing",
     ],
 )
 async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, executor_module, reporter, body, expected):
-    # Keep reporter counts inside the bounded evidence tail regardless of
-    # temporary-path length; truncation itself has dedicated coverage above.
-    (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\nError.stackTraceLimit = 0;\n" + body, encoding="utf-8")
+    (tmp_path / "sample.test.cjs").write_text("const { test, describe } = require('node:test');\n" + body, encoding="utf-8")
     monkeypatch.delenv("NO_COLOR", raising=False)
     sandbox = LocalSandbox("node-evidence", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path))])
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: sandbox if sandbox_id == sandbox.id else None))
@@ -242,3 +270,138 @@ async def test_real_node_results_reach_parent_acceptance(tmp_path, monkeypatch, 
     assert len(executions) == 1 and executions[0]["shell_persistent"] is False
     verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
     assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected, (outputs, verdict)
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("node") is None, reason="Requires POSIX LocalSandbox and Node.js")
+def test_real_node_todo_stack_after_summary_survives_harvest(tmp_path, monkeypatch, executor_module):
+    workspace = tmp_path / ("long-path-" * 15)
+    workspace.mkdir()
+    test_file = workspace / "sample.test.cjs"
+    test_file.write_text(
+        "const {test}=require('node:test');\ntest('sample',()=>{});\ntest('1 failed',{todo:true},()=>{throw Error('fixture');});\n",
+        encoding="utf-8",
+    )
+    command = f"NO_COLOR=1 FORCE_COLOR=1 {shlex.quote(shutil.which('node'))} --test --test-reporter=spec {shlex.quote(str(test_file))}"
+    sandbox = LocalSandbox("node-long-todo-evidence")
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda sandbox_id: sandbox if sandbox_id == sandbox.id else None))
+    output = sandbox.execute_command(command, timeout=30)
+    state = {
+        "sandbox": {"sandbox_id": sandbox.id},
+        "messages": [AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": command}}]), ToolMessage(content=output, tool_call_id="node-call")],
+    }
+    executions = executor_module._harvest_bash_executions(state)
+    assert len(output) > 1000
+    assert len(executions[0]["output_tail"]) <= 1000
+    assert executions[0]["test_summary"] == "passed"
+    verdict = check_acceptance_criteria([f"tests_passed:{command}"], bash_executions=executions)
+    assert verdict["all_hold"] is True, (output, executions, verdict)
+
+
+@pytest.mark.parametrize("prefix", ["#", "ℹ"])
+@pytest.mark.parametrize("log", ["12 passed", "all tests passed", "validation found 2 errors", "1 failed"])
+@pytest.mark.parametrize("passed,skipped,expected", [(0, 250, (False, False)), (250, 0, (True, True))])
+def test_node_counts_outrank_incidental_logs(executor_module, monkeypatch, prefix, log, passed, skipped, expected):
+    output = (f"# {log}" if prefix == "#" else log) + "\n" + "diagnostic\n" * 250 + _summary(prefix, passed=passed, skipped=skipped)
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": "node --test"}}]), ToolMessage(content=output, tool_call_id="node-call")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    verdict = check_acceptance_criteria(["tests_passed:node --test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize(
+    "sibling,expected", [("2 passed in 0.01s", (True, True)), ("1 failed in 0.01s", (True, False)), ("Tests run: 2, Failures: 0, Errors: 0, Skipped: 0", (True, True)), ("Tests run: 2, Failures: 1, Errors: 0, Skipped: 0", (True, False))]
+)
+def test_node_counts_preserve_other_runner_summaries(sibling, expected):
+    verdict = _verdict(_summary(passed=0, skipped=250) + "\n" + sibling)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+def test_harvest_reuses_unchanged_summaries_and_invalidates_changes(executor_module, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.subagents import acceptance_checks
+
+    classify = Mock(wraps=acceptance_checks.summarize_test_output)
+    monkeypatch.setattr(acceptance_checks, "summarize_test_output", classify)
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    call = AIMessage(content="", tool_calls=[{"name": "bash", "id": "node-call", "args": {"command": "node --test"}}])
+    tool = ToolMessage(content=_summary(), tool_call_id="node-call")
+    cache = {}
+    for _ in range(5):
+        entries = executor_module._harvest_bash_executions({"messages": [call, tool]}, summary_cache=cache)
+        assert entries[0]["test_summary"] == "passed"
+    assert classify.call_count == 1
+    tool.content = _summary(failed=1)
+    entries = executor_module._harvest_bash_executions({"messages": [call, tool]}, summary_cache=cache)
+    assert entries[0]["test_summary"] == "failed"
+    assert classify.call_count == 2
+
+
+def test_summary_cache_is_bounded_and_tracks_compaction(executor_module, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.subagents import acceptance_checks
+
+    classify = Mock(wraps=acceptance_checks.summarize_test_output)
+    monkeypatch.setattr(acceptance_checks, "summarize_test_output", classify)
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    calls = [{"name": "bash", "id": f"call-{i}", "args": {"command": "node --test"}} for i in range(25)]
+    ai = AIMessage(content="", tool_calls=calls)
+    tools = [ToolMessage(content=_summary(), tool_call_id=call["id"]) for call in calls]
+    cache = {}
+    for _ in range(3):
+        entries = executor_module._harvest_bash_executions({"messages": [ai, *tools]}, summary_cache=cache)
+        assert len(entries) == len(cache) == 20
+    assert classify.call_count == 20
+    executor_module._harvest_bash_executions({"messages": [ai, tools[-1]]}, summary_cache=cache)
+    assert list(cache) == ["call-24"]
+    assert classify.call_count == 20
+    executor_module._harvest_bash_executions({"messages": [AIMessage(content="compacted")]}, summary_cache=cache)
+    assert cache == {}
+
+
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize(
+    "sibling,expected",
+    [
+        ("1 failed, 1 passed, 1 warning in 0.05s", (True, False)),
+        ("2 passed, 3 warnings in 0.05s", (True, True)),
+        ("=== 1 failed, 1 passed, 2 warnings in 0.05s ===", (True, False)),
+    ],
+)
+def test_node_sibling_pytest_warning_summaries(node_passed, sibling, expected):
+    verdict = _verdict(_summary(passed=node_passed, skipped=1) + "\n" + sibling)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("duration", [59.0, 60.0, 65.0, 3605.0, 86405.0, 172805.0])
+@pytest.mark.parametrize("prefix,newline,decoration", [("#", "\n", ""), ("ℹ", "\r\n", "===")])
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize("summary,expected", [("1 failed, 1 passed, 1 warning", (True, False)), ("2 passed, 3 warnings", (True, True))])
+def test_harvest_preserves_pytest_sibling_duration(executor_module, monkeypatch, duration, prefix, newline, decoration, node_passed, summary, expected):
+    sibling = f"{decoration} {summary} in {format_session_duration(duration)} {decoration}".strip()
+    output = (_summary(prefix, passed=node_passed, skipped=1) + "\n" + sibling + "\n" + "diagnostic\n" * 150).replace("\n", newline)
+    messages = [AIMessage(content="", tool_calls=[{"name": "bash", "id": "mixed-test-call", "args": {"command": "make test"}}]), ToolMessage(content=output, tool_call_id="mixed-test-call")]
+    monkeypatch.setattr(executor_module, "_harvest_shell_persistence", lambda state: False)
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+    assert len(executions[0]["output_tail"]) <= 1000
+    assert summary not in executions[0]["output_tail"]
+    assert executions[0]["test_summary"] == ("passed" if expected[1] else "failed")
+    verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == expected
+
+
+@pytest.mark.parametrize("suffix", [" (extra log text)", " (0:1:05)", " (0:61:05)", " (0:01:05) trailing log text"])
+def test_node_sibling_pytest_duration_does_not_admit_arbitrary_suffixes(suffix):
+    verdict = _verdict(_summary(passed=0, skipped=1) + "\n2 passed in 65.00s" + suffix)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (False, False)
+
+
+@pytest.mark.parametrize("node_passed", [0, 1])
+@pytest.mark.parametrize("cases", ["--- SKIP: TestA (0.00s)", "--- PASS: TestA (0.00s)", "--- SKIP: TestA (0.00s)\n--- PASS: TestB (0.00s)"])
+def test_node_sibling_go_preserves_case_evidence(node_passed, cases):
+    output = _summary(passed=node_passed, skipped=1) + "\n=== RUN   TestA\n" + cases + "\nok  \texample/pkg\t0.002s"
+    verdict = _verdict(output)
+    holds = node_passed > 0 or "--- PASS:" in cases
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (holds, holds)

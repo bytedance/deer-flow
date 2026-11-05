@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import RunEventStore, match_ai_message_run_id, normalize_message_ids
+from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, match_ai_message_run_id, normalize_message_ids
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -286,8 +286,12 @@ class JsonlRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
+        user_id: str | None | _AutoSentinel = AUTO,
+        lifecycle_guard=None,
     ):
         async def mutate():
+            if lifecycle_guard is not None and not await lifecycle_guard():
+                raise RunEventLifecycleRejected(f"Run lifecycle no longer admits terminal evidence for {thread_id}/{run_id}")
             existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
             for event in existing:
                 if event.get("event_type") == event_type:

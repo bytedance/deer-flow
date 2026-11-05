@@ -446,6 +446,64 @@ def test_nginx_conf_is_accepted_by_nginx(tmp_path, state_name):
 
 
 # ---------------------------------------------------------------------------
+# --out validation
+# ---------------------------------------------------------------------------
+
+_OUT_ARGV = {
+    "render-config": lambda out: ["render-config", "--base", str(REPO_ROOT / "config.example.yaml"), "--out", str(out), "--database-url", DATABASE_URL, "--redis-url", REDIS_URL, "--state-dir", str(out.parent / "state")],
+    "secrets": lambda out: ["secrets", "--out", str(out)],
+    "nginx-conf": lambda out: ["nginx-conf", "--out", str(out), "--state-dir", str(out.parent / "state"), "--listen-port", "2027", "--gateway-port", "8001", "--gateway-port", "8011"],
+}
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_a_directory_out_before_writing(tmp_path, capsys, command):
+    out = tmp_path / "bundle"
+    out.mkdir()
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](out))
+
+    assert exit_info.value.code == 2
+    assert f"--out must be a file path, not a directory: {out}" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == [out], "a rejected --out must not leave a temporary file behind"
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_an_out_whose_parent_is_a_file(tmp_path, capsys, command):
+    parent = tmp_path / "not-a-dir"
+    parent.write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](parent / "bundle"))
+
+    assert exit_info.value.code == 2
+    assert f"--out parent must be a directory: {parent}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("missing", ["missing", "a/b"])
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_rejects_a_file_ancestor_behind_missing_directories(tmp_path, capsys, command, missing):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exit_info:
+        mi.main(_OUT_ARGV[command](blocker / missing / "secrets.env"))
+
+    assert exit_info.value.code == 2
+    assert f"--out parent must be a directory: {blocker}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", sorted(_OUT_ARGV))
+def test_cli_still_creates_missing_out_parents(tmp_path, command):
+    out = tmp_path / "a" / "b" / "secrets.env"
+
+    assert mi.main(_OUT_ARGV[command](out)) == 0
+
+    assert out.is_file()
+
+
+# ---------------------------------------------------------------------------
 # Check helpers
 # ---------------------------------------------------------------------------
 
@@ -547,6 +605,47 @@ def test_shell_script_rejects_unknown_commands(tmp_path):
 
     assert result.returncode != 0
     assert "Unknown command" in result.stderr
+
+
+_GATEWAY_LOGS = ("gateway-a.log", "gateway-b.log")
+_NGINX_LOGS = ("nginx.log", "nginx-error.log", "nginx-access.log")
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [((), _GATEWAY_LOGS), (("b",), ("gateway-b.log",)), (("nginx",), _NGINX_LOGS), (("all",), _GATEWAY_LOGS + _NGINX_LOGS)],
+    ids=["default", "b", "nginx", "all"],
+)
+def test_shell_script_logs_prints_the_selected_files(tmp_path, args, expected):
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS + _NGINX_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
+    for name in expected:
+        assert f"line from {name}" in result.stdout
+
+
+@pytest.mark.parametrize(("args", "expected"), [(("all",), _GATEWAY_LOGS), (("nginx",), ())], ids=["all", "nginx"])
+def test_shell_script_logs_skips_nginx_files_when_nginx_never_started(tmp_path, args, expected):
+    # start_nginx bails on a missing binary or busy port, leaving only Gateway logs.
+    logs = tmp_path / "state" / "logs"
+    logs.mkdir(parents=True)
+    for name in _GATEWAY_LOGS:
+        (logs / name).write_text(f"line from {name}\n", encoding="utf-8")
+    env = {**os.environ, "DEERFLOW_MI_STATE_DIR": str(tmp_path / "state")}
+
+    result = subprocess.run([require_script_bash(), str(SHELL_PATH), "logs", *args], capture_output=True, text=True, timeout=30, env=env)
+
+    assert result.returncode == 0, result.stderr
+    headers = [line.removeprefix("==> ").removesuffix(" <==") for line in result.stdout.splitlines() if line.startswith("==> ")]
+    assert [Path(header).name for header in headers] == list(expected)
 
 
 def test_makefile_exposes_harness_targets():

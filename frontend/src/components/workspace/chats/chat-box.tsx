@@ -15,6 +15,7 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Sheet,
   SheetContent,
@@ -22,6 +23,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import {
+  areStringArraysEqual,
+  collectThreadArtifactPaths,
+} from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -137,10 +142,20 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
   const browserViewOpen = browserEnabled && (browserView?.open ?? false);
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
+  // A reopened thread's values carry no `artifacts` (see
+  // collectThreadArtifactPaths); recover them from its present_files calls.
+  const stateArtifacts = thread.values.artifacts;
+  const threadArtifactPaths = useMemo(
+    () =>
+      collectThreadArtifactPaths(
+        Array.isArray(stateArtifacts) ? stateArtifacts : [],
+        thread.messages,
+      ),
+    [stateArtifacts, thread.messages],
+  );
   useEffect(() => {
-    const threadArtifacts = Array.isArray(thread.values.artifacts)
-      ? thread.values.artifacts
-      : undefined;
+    const threadArtifacts =
+      threadArtifactPaths.length > 0 ? [...threadArtifactPaths] : undefined;
 
     if (threadIdRef.current !== threadId) {
       threadIdRef.current = threadId;
@@ -150,7 +165,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
     // Update artifacts from the current thread
     // An empty initial state must not erase artifacts restored by the provider
     // before the persisted thread state has arrived.
-    if (threadArtifacts && threadArtifacts.length > 0) {
+    if (threadArtifacts && !areStringArraysEqual(artifacts, threadArtifacts)) {
       setArtifacts(threadArtifacts);
     }
 
@@ -173,12 +188,13 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
     }
   }, [
     threadId,
+    artifacts,
     autoSelectFirstArtifact,
     deselect,
     selectArtifact,
     selectedArtifact,
     setArtifacts,
-    thread.values.artifacts,
+    threadArtifactPaths,
   ]);
 
   const artifactPanelOpen = useMemo(() => {
@@ -391,13 +407,13 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
               <header className="shrink-0">
                 <h2 className="text-lg font-medium">Artifacts</h2>
               </header>
-              <main className="min-h-0 grow">
+              <ScrollArea className="min-h-0 grow">
                 <ArtifactFileList
                   className="max-w-(--container-width-sm) p-4 pt-12"
                   files={artifacts}
                   threadId={threadId}
                 />
-              </main>
+              </ScrollArea>
             </div>
           )}
         </div>

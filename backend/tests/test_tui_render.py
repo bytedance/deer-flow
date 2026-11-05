@@ -68,15 +68,13 @@ def test_actively_streaming_assistant_stays_plain():
 
 def test_prior_message_stays_markdown_when_a_followup_run_starts():
     # Regression: sending a follow-up must NOT revert a finalized markdown answer
-    # to raw text. Between RunStarted and the new answer's first delta (and during
-    # the client's re-emit of prior messages), the previous answer is the last
-    # assistant row — it must still render as Markdown.
+    # to raw text. Between RunStarted and the new answer's first delta, the
+    # previous answer is the last assistant row — it must still render as Markdown.
     state = initial_state()
     state = reduce(state, AssistantDelta(id="m1", text="**bold answer**"))
     state = reduce(state, RunEnded())
     state = reduce(state, UserSubmitted("follow up"))
-    state = reduce(state, RunStarted())
-    state = reduce(state, AssistantDelta(id="m1", text="**bold answer**"))  # re-emit, no new answer yet
+    state = reduce(state, RunStarted())  # no new answer yet
 
     out = _render_to_text(render_transcript(state))
     assert "**bold answer**" not in out  # still Markdown-rendered

@@ -378,7 +378,7 @@ Docker 빌드는 기본적으로 업스트림 `uv` 레지스트리를 사용합�
 
 백엔드 프로세스는 다음 설정 접근 시 `config.yaml` 변경 사항을 자동으로 반영하므로, 개발 중 모델 메타데이터를 업데이트할 때 수동으로 재시작할 필요가 없습니다.
 
-Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행에 적용되며, IM 채널 실행과 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
+Gateway 실행(run)은 API 요청이 값을 지정하지 않은 경우 최상위 `recursion_limit` 값(`config.yaml`에 설정)을 사용합니다. 기본값은 `100`이며, 유효한 요청별 값이 우선하고 `max_recursion_limit`(기본값 `1000`)이 두 값 모두의 상한이 됩니다. 변경 사항은 Gateway를 재시작하지 않아도 다음 실행부터 적용됩니다. 이 최상위 설정은 Gateway API 실행과 IM 채널 실행에 적용됩니다. IM 채널의 `session.config`에 지정한 `recursion_limit`이 우선하며, GitHub 채널 실행은 자체 하한을 유지합니다. 임베디드 `DeerFlowClient` 실행은 각자의 기본값과 호출별 재정의 경로를 그대로 유지합니다.
 체크포인트 저장소 설정인 `database.checkpoint_channel_mode`와 `database.checkpoint_delta.snapshot_frequency`(기본값 `10`)는 예외입니다. 두 설정 모두 프로세스가 처음 에이전트를 빌드할 때(`DeerFlowClient`를 통한 경우 포함) 고정되므로, 안전하게 변경하려면 프로세스를 재시작해야 합니다.
 
 선택 사항인 `database.checkpoint_cache` 섹션(delta 채널 모드 전용)은 구체화된 체크포인트 이력을 캐시합니다. `type`은 `memory`(기본값) 또는 `redis`이며, `max_entries: 0`으로 설정하면 캐시가 비활성화됩니다. `redis` 백엔드는 Gateway/비동기 경로 전용이며, 동기 TUI/임베디드 경로는 `memory`만 지원합니다. 이 캐시는 성능만을 위한 것으로 비활성화해도 결과가 동일합니다. 따라서 고정되는 일이 없으며, 하나의 체크포인트 데이터베이스를 공유하는 워커들이 서로 다른 캐시 설정으로 실행되어도 안전합니다. Redis 스레드 정리는 설정된 `key_prefix`를 glob 메타문자까지 포함해 리터럴 텍스트로 취급하므로, 삭제는 해당 네임스페이스와 스레드 안에서만 이루어집니다.
@@ -706,8 +706,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false
@@ -1197,7 +1195,7 @@ Agent settings에서 **Tool access**는 설정된 모든 도구 그룹을 상속
 비전을 지원하는 에이전트의 경우 `view_image`와 그 뒤에 이어지는 모델 컨텍스트 이미지 읽기에도 `sandbox:execute`가 필요합니다. 도구 이름만 허용해서는 이미지 파일 접근 권한이 부여되지 않으며, 샌드박스 실행이 거부된 역할은 권한이 변경된 후 이전에 기록된 이미지 메타데이터를 다시 읽을 수 없습니다. 외부 실행 입력과 스레드 상태 업데이트로는 `viewed_images`나 `thread_data`를 설정할 수 없습니다. 저장된 이미지를 호스트 사본에서 읽을 때는 해당 경로가 현재 사용자의 스레드와 기록된 가상 이미지 경로로 해석되어야 합니다.
 각 모델 요청에는 최근에 본 이미지가 최대 4개, base64 이미지 데이터가 최대 28 MiB까지 포함됩니다. 이 제한으로 제외된 이미지는 생략된 것으로 보고되며, 에이전트는 `view_image`를 다시 호출해 이미지를 컨텍스트로 다시 가져올 수 있습니다.
 
-고급 배포에서는 `config.yaml` 또는 `extensions_config.json`의 `extensions.middlewares` 아래에 `AgentMiddleware` 클래스를 선언하여 에이전트 런타임 자체를 확장할 수도 있습니다. 각 항목은 `module.path:ClassName` 문자열(인자 없는 생성자) 또는 객체 `{class, kwargs}`이며, 객체의 `kwargs`는 생성자에 전달됩니다. `kwargs` 값은 JSON 타입(객체, 배열, 문자열, 숫자, 불리언, null)이어야 하며, YAML 날짜와 타임스탬프는 JSON과 일치하도록 ISO 문자열로 변환됩니다. DeerFlow는 설정된 같은 목록을 리드 에이전트와 서브에이전트 파이프라인에 불러오며, 그 위치는 기본 제공 런타임 미들웨어와 루프/토큰 가드 뒤, 그리고 terminal-response/safety/clarification 꼬리 앞입니다. 따라서 엔터프라이즈 포크는 기본 제공 미들웨어 빌더를 패치하지 않고도 도메인 가드레일, 도구 호출 거버넌스, 관측성 훅을 추가할 수 있습니다. 패키지 누락, 잘못된 클래스, 손상된 모듈, 생성자 오류는 에이전트 생성 시점에 명확한 오류로 실패합니다. `config.yaml`과 `extensions_config.json`은 운영자가 제어하는 신뢰된 파일로 취급하세요. 커스텀 도구, 모델, 샌드박스, 가드레일, MCP 서버, MCP 인터셉터 선언과 마찬가지로 미들웨어 경로는 곧 코드 실행입니다. Gateway의 스킬/MCP 토글 엔드포인트는 이 필드를 보존하지만 `extensions.middlewares`에 대한 API 쓰기 경로는 제공하지 않습니다. 리드 에이전트 전용/서브에이전트 전용 미들웨어 목록을 따로 지정하는 기능은 아직 지원되지 않습니다.
+고급 배포에서는 `config.yaml` 또는 `extensions_config.json`의 `extensions.middlewares` 아래에 `AgentMiddleware` 클래스를 선언하여 에이전트 런타임 자체를 확장할 수도 있습니다. 각 항목은 `module.path:ClassName` 문자열(인자 없는 생성자) 또는 객체 `{class, kwargs, apply_to}`이며, 객체의 `kwargs`는 생성자에 전달됩니다. `kwargs` 값은 JSON 타입(객체, 배열, 문자열, 숫자, 불리언, null)이어야 하며, YAML 날짜와 타임스탬프는 JSON과 일치하도록 ISO 문자열로 변환됩니다. DeerFlow는 각 체인에 대해 선택된 설정 항목을 리드 에이전트와 서브에이전트 파이프라인에 불러오며, 그 위치는 기본 제공 런타임 미들웨어와 루프/토큰 가드 뒤, 그리고 terminal-response/safety/clarification 꼬리 앞입니다. 따라서 엔터프라이즈 포크는 기본 제공 미들웨어 빌더를 패치하지 않고도 도메인 가드레일, 도구 호출 거버넌스, 관측성 훅을 추가할 수 있습니다. 패키지 누락, 잘못된 클래스, 손상된 모듈, 생성자 오류는 에이전트 생성 시점에 명확한 오류로 실패합니다. `config.yaml`과 `extensions_config.json`은 운영자가 제어하는 신뢰된 파일로 취급하세요. 커스텀 도구, 모델, 샌드박스, 가드레일, MCP 서버, MCP 인터셉터 선언과 마찬가지로 미들웨어 경로는 곧 코드 실행입니다. Gateway의 스킬/MCP 토글 엔드포인트는 이 필드를 보존하지만 `extensions.middlewares`에 대한 API 쓰기 경로는 제공하지 않습니다. 객체의 선택적 `apply_to`는 `both`(기본값), `lead`, `subagent`를 지원하며, 문자열 항목과 이 필드를 생략한 객체는 계속 두 파이프라인 모두에 적용됩니다. 해당 체인에서 제외된 항목은 임포트하거나 인스턴스화하지 않습니다.
 
 패키지화되고 설정 가능한 런타임 통합에는 DeerFlow의 확장 관리자를 사용하세요. 확장 관리자는 Python 패키지 요구 사항, 공개 HTTPS Git URL, 또는 로컬 디렉터리를 받아 백엔드 전용 `extensions` 의존성 그룹에 패키지를 설치하고, `backend/uv.lock`을 업데이트하며, 시작 시에만 읽는 `config.yaml`의 최상위 `plugins:` 목록에 활성화된 항목을 추가합니다.
 
@@ -1927,7 +1925,7 @@ deerflow --recursion-limit 250 --print "task" # override the headless agent-loop
 
 스트리밍 대화록(Markdown으로 렌더링된 답변), 간결한 도구 활동 카드, `/` 슬래시 명령 팔레트, 화면 전용 `/clear`, `/goal` 목표 관리, `/model` 및 `/threads` 선택기, 입력 기록, PageUp/PageDown 대화록 탐색, `Esc` / `Ctrl+C` 중단을 갖춘 키보드 중심의 채팅 화면입니다. 입력창(composer)은 붙여 넣은 코드, 스택 트레이스, 여러 문단으로 된 프롬프트의 줄바꿈과 들여쓰기를 보존하며, `Enter`를 누르면 전체 문서를 보냅니다. 대화록이 갱신될 때 위로 스크롤한 상태라면 읽던 위치를 유지하고, 맨 아래로 돌아오면 다시 새 출력을 따라갑니다. `/clear`는 스레드나 저장된 대화를 삭제하지 않고 현재 터미널 화면에서 행만 제거합니다. `/new`와 `/clear`는 실행 중에는 진행 중인 화면 상태를 재설정하는 대신 기다려 달라고 안내합니다. TUI에서 연 세션은 웹 UI 사이드바에도 표시됩니다. TUI는 로컬 기본 사용자로 공유 스레드 저장소에 기록하므로, **Gateway를 실행하지 않고도** 터미널과 웹이 동기화된 상태를 유지합니다.
 
-실행 중에는 `/resume`, `/threads`, `/switch`가 대화를 전환하기 전에 기다려 달라고 안내합니다. 잘못된 `/resume` 참조는 TUI를 닫거나 현재 대화를 바꾸지 않고 오류만 표시합니다. 중단 후에는 두 프롬프트가 같은 대화를 사용하더라도 이전 실행에서 늦게 도착한 스트림 동작이 다음 실행의 화면이나 상태를 바꿀 수 없습니다. 이미 진행 중인 도구 호출은 끝까지 완료되므로, 완료될 때까지 그 대화의 새 프롬프트는 경쟁 상태를 피하도록 알림과 함께 보류되며, `/new`와 `/resume`은 계속 사용할 수 있습니다. 실행을 시작할 수 없으면 TUI가 오류를 보고하고 유휴 상태로 돌아가므로 재시도할 수 있습니다. 보류되었거나 시작할 수 없는 메시지는 입력창에 남아 있으므로 `Enter`로 다시 보낼 수 있습니다.
+실행 중에는 `/resume`, `/threads`, `/switch`가 대화를 전환하기 전에 기다려 달라고 안내합니다. 잘못된 `/resume` 참조는 TUI를 닫거나 현재 대화를 바꾸지 않고 오류만 표시합니다. 중단 후에는 두 프롬프트가 같은 대화를 사용하더라도 이전 실행에서 늦게 도착한 스트림 동작이 다음 실행의 화면이나 상태를 바꿀 수 없습니다. 이미 진행 중인 도구 호출은 끝까지 완료되므로, 완료될 때까지 그 대화의 새 프롬프트는 경쟁 상태를 피하도록 알림과 함께 보류되며, `/new`와 `/resume`은 계속 사용할 수 있습니다. 종료할 때도 그 단계가 끝나기를 기다렸다가 TUI를 닫으며, `Ctrl+C`를 한 번 더 누르면 그 단계를 저장하지 않고 바로 종료합니다. 실행을 시작할 수 없으면 TUI가 오류를 보고하고 유휴 상태로 돌아가므로 재시도할 수 있습니다. 보류되었거나 시작할 수 없는 메시지는 입력창에 남아 있으므로 `Enter`로 다시 보낼 수 있습니다.
 
 입력창의 마지막 행에서 `Down`은 입력 기록을 탐색하는 중이 아니면 보내지 않은 초안을 건드리지 않습니다. 기록을 불러온 뒤에는 앞으로 이동해 저장해 둔 초안을 복원합니다.
 

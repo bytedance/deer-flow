@@ -1748,6 +1748,37 @@ async def test_naive_end_at_is_wall_clock_time_in_the_task_timezone(http):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("operation", "field"), [("create", "run_at"), ("update", "run_at"), ("create", "end_at"), ("update", "end_at"), ("resume", "end_at")])
+async def test_http_rejects_nonexistent_local_time_without_writing(http, monkeypatch, operation, field):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 10, 22, tzinfo=UTC)
+
+    monkeypatch.setattr(scheduled_tasks, "datetime", FixedDatetime)
+    wall_time = "2027-03-14T02:30:00"
+    fields = {"schedule_type": "once", "schedule_spec": {"run_at": wall_time}} if field == "run_at" else {"end_at": wall_time}
+    if operation == "create":
+        response = await http.client.post("/api/scheduled-tasks", json={**_CREATE, "timezone": "America/New_York", **fields})
+    else:
+        await _seed(http.repo, timezone="America/New_York", next_run_at=datetime(2026, 10, 23, tzinfo=UTC))
+        if operation == "resume":
+            await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+        before = await http.repo.get("task-l", user_id=OWNER)
+        if operation == "update":
+            response = await http.client.patch("/api/scheduled-tasks/task-l", json=fields)
+        else:
+            response = await http.client.post("/api/scheduled-tasks/task-l/resume", json=fields)
+    detail = coded(response, 422, "invalid_schedule" if field == "run_at" else "invalid_request")
+    assert "does not exist" in detail["message"]
+    if operation == "create":
+        assert await http.repo.list_by_user(OWNER) == []
+    else:
+        assert await http.repo.get("task-l", user_id=OWNER) == before
+    assert http.launches == []
+
+
+@pytest.mark.asyncio
 async def test_create_keeps_the_prompt_and_stores_the_stop_condition_apart(http):
     response = await http.client.post(
         "/api/scheduled-tasks",

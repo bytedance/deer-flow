@@ -34,7 +34,7 @@ Memory has two operation modes:
 1. **Injection in both modes**: at the start of each conversation, the agent's current memory is injected into the system prompt at a controlled token budget (`max_injection_tokens`).
 2. **Middleware mode (default)**: `MemoryMiddleware` runs after each Lead Agent turn. It filters the conversation, queues a background update, and extracts new facts automatically. Updates are debounced by `debounce_seconds` to batch rapid changes.
 3. **Tool mode (experimental)**: DeerFlow registers `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete` as agent tools and skips `MemoryMiddleware`. The model decides when to search, read, or write memory, so effectiveness depends on model tool-use behavior. These explicit CRUD tools are not the passive staleness-review path; operators who enable tool mode are opting into model-directed updates/deletes instead of the middleware staleness guardrails.
-4. **Per-agent memory**: when a custom agent is active, its memory is stored separately from the global memory. This keeps different agents' knowledge isolated.
+4. **Per-agent facts**: the default DeerMem backend stores each custom agent's learned facts in its own facts directory. Agents share one memory manifest within the same user.
 
 In tool mode, the five `memory_*` tool names are reserved. If an MCP server or custom tool already uses `memory_search`, `memory_get`, `memory_add`, `memory_update`, or `memory_delete`, the existing tool keeps that name and the colliding memory tool is skipped with a warning.
 
@@ -295,12 +295,14 @@ guide.
 
 ## Global vs per-agent memory
 
-DeerFlow supports two levels of memory:
+DeerFlow scopes memory files per user and facts per agent:
 
-- **Global memory**: stored at `{base_dir}/memory.json`. Used when no specific agent is active or when the agent has no per-agent memory file.
-- **Per-agent memory**: stored at `{base_dir}/agents/{agent_name}/memory.json`. Used when a custom agent is active, keeping that agent's learned knowledge separate.
+- **Per-user memory**: `{base_dir}/users/{user_id}/memory.json` holds that user's cross-task summary. `agent_name` does not select a different memory file.
+- **Per-agent facts**: `{base_dir}/users/{user_id}/agents/{agent_name}/facts/` sits next to the same user's memory file, keeping one agent's learned facts separate from another's. The `{agent_name}` segment is lowercased, and names are restricted to `A-Z`, `a-z`, `0-9` and `-`.
 
-The `MemoryMiddleware` automatically selects the correct memory file based on the active `agent_name` in the request configuration.
+A caller without a `user_id` falls back to the unscoped legacy root `{base_dir}/memory.json` — see the `Legacy: no user_id` branch in `deermem/core/paths.py`.
+
+The `MemoryMiddleware` selects which agent's facts directory to read from the active `agent_name` in the request configuration.
 
 Agent names used for memory storage are validated against `AGENT_NAME_PATTERN` to ensure filesystem safety.
 
@@ -308,11 +310,11 @@ Agent names used for memory storage are validated against `AGENT_NAME_PATTERN` t
 
 By default, memory files are stored under the backend base directory:
 
-- Base directory: `backend/.deer-flow/`
-- Global memory: `backend/.deer-flow/memory.json`
-- Per-agent memory: `backend/.deer-flow/agents/{agent_name}/memory.json`
+- Base directory: `backend/.deer-flow/` (the `runtime_home()` state directory, overridable with `DEER_FLOW_HOME`)
+- Per-user memory: `backend/.deer-flow/users/{user_id}/memory.json`
+- Per-agent facts: `backend/.deer-flow/users/{user_id}/agents/{agent_name}/facts/`
 
-You can change the storage path with the `storage_path` field. Relative paths are resolved against the base directory. Use an absolute path to store memory in a custom location.
+You can change that root with `memory.backend_config.storage_path`, and the value must be a **directory**: an absolute path is used as the root, a relative path resolves against the state directory, and an empty value keeps the default. A file-style value (the pre-abstraction `storage_path: memory.json`) is dropped with a warning by `deerflow/config/memory_config.py`, and a value pointing at an existing file makes `DeerMemConfig` raise at construction.
 
 ## Custom storage backend
 

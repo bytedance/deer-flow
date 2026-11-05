@@ -97,6 +97,25 @@ class RunCreateRequest(BaseModel):
         lifted["conversation_references"] = references
         return lifted
 
+    @field_validator("config")
+    @classmethod
+    def reject_non_object_config_sections(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """``config.configurable`` and ``config.context`` are objects or null.
+
+        Run admission and the stateless thread selector read both as mappings,
+        so any other JSON value must be a validation error, not a Gateway fault.
+        """
+        if value is None:
+            return value
+        for section in ("configurable", "context"):
+            if value.get(section) is not None and not isinstance(value[section], dict):
+                raise PydanticCustomError(
+                    "invalid_run_config_section",
+                    "config.{section} must be an object or null",
+                    {"section": section},
+                )
+        return value
+
     @model_validator(mode="after")
     def validate_configurable_thread_id(self) -> RunCreateRequest:
         """Validate the stateless-run thread selector inside RunnableConfig."""

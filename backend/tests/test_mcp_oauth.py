@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor, get_initial_oauth_headers
 
 
@@ -707,6 +708,69 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
 
     # Exactly one real token fetch: the cancelled waiter must never reach
     # _fetch_token, so the third call is the only one that performs it.
+    assert len(post_calls) == 1
+
+
+@pytest.mark.parametrize("failure", ["cancel", "error"])
+def test_failed_refresh_owner_allows_cross_loop_waiters_to_retry(monkeypatch, failure):
+    """Pending callers on other loops elect one replacement after owner failure."""
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    retry_entered = threading.Event()
+    release_retry = threading.Event()
+    waiters_ready = [threading.Event(), threading.Event()]
+    attempts = 0
+    attempts_guard = threading.Lock()
+    post_calls: list[dict[str, Any]] = []
+
+    class HeldClient(_MockAsyncClient):
+        async def post(self, url, data):
+            nonlocal attempts
+            with attempts_guard:
+                attempts += 1
+                attempt = attempts
+            if attempt == 1:
+                owner_entered.set()
+                assert await asyncio.to_thread(release_owner.wait, 5), "test did not release owner"
+                if failure == "cancel":
+                    asyncio.current_task().cancel()
+                    await asyncio.sleep(0)
+                raise RuntimeError("first refresh failed")
+            retry_entered.set()
+            assert await asyncio.to_thread(release_retry.wait, 5), "test did not release retry"
+            return await super().post(url, data)
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: HeldClient(payload={"access_token": "recovered-token", "expires_in": 3600}, post_calls=post_calls, **kwargs))
+    manager = OAuthTokenManager({"secure-http": McpOAuthConfig(enabled=True, token_url="https://auth.example.com/token", client_id="client-id", client_secret="client-secret")})
+
+    async def call(ready=None):
+        request = asyncio.create_task(manager.get_authorization_header("secure-http"))
+        if ready is not None:
+            # Run after the request has suspended while the original owner is held.
+            asyncio.get_running_loop().call_soon(ready.set)
+        return await asyncio.wait_for(request, 5)
+
+    with ThreadPoolExecutor(max_workers=3) as callers:
+        owner = callers.submit(asyncio.run, call())
+        try:
+            assert owner_entered.wait(5), "owner did not start refresh"
+            waiters = [callers.submit(asyncio.run, call(ready)) for ready in waiters_ready]
+            for ready in waiters_ready:
+                assert ready.wait(5), "waiter did not suspend its authorization request"
+            assert attempts == 1
+            release_owner.set()
+            with pytest.raises(asyncio.CancelledError if failure == "cancel" else RuntimeError):
+                owner.result(timeout=5)
+            assert retry_entered.wait(5), "waiters did not retry refresh"
+            assert attempts == 2
+            release_retry.set()
+            assert [waiter.result(timeout=5) for waiter in waiters] == ["Bearer recovered-token", "Bearer recovered-token"]
+        finally:
+            release_owner.set()
+            release_retry.set()
+
+    assert asyncio.run(manager.get_authorization_header("secure-http")) == "Bearer recovered-token"
+    assert attempts == 2
     assert len(post_calls) == 1
 
 

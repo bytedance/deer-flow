@@ -30,13 +30,19 @@ class ScriptedModel(BaseChatModel):
     answer: str
     identifier: str
     reported_usage: dict | None = None
+    answers: list[str] | None = None
+    normal_completion: bool = False
 
     @property
     def _llm_type(self):
         return "scripted-accounting"
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        response = AIMessage(content=self.answer, usage_metadata=self.reported_usage, response_metadata={"model_name": self.identifier})
+        answer = self.answers.pop(0) if self.answers else self.answer
+        metadata = {"model_name": self.identifier}
+        if self.normal_completion:
+            metadata["finish_reason"] = "stop"
+        response = AIMessage(content=answer, usage_metadata=self.reported_usage, response_metadata=metadata)
         return ChatResult(generations=[ChatGeneration(message=response)])
 
 
@@ -55,7 +61,7 @@ async def run_store(request):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("response", ["valid", "invalid_json", "missing_usage"])
+@pytest.mark.parametrize("response", ["valid", "invalid_json", "missing_usage", "recovered_json", "repeated_invalid_json", "unsatisfied_json"])
 async def test_worker_terminal_ledger_includes_evaluator_usage_without_visible_critic(run_store, monkeypatch, response):
     events = MemoryRunEventStore()
     checkpointer = InMemorySaver()
@@ -63,8 +69,12 @@ async def test_worker_terminal_ledger_includes_evaluator_usage_without_visible_c
     metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Report"}
     record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
     lead = ScriptedModel(answer="The report is verified.", identifier="lead-model", reported_usage={"input_tokens": 30, "output_tokens": 10, "total_tokens": 40})
+    verdict = json.dumps({"satisfied": response != "unsatisfied_json", "blocker": "missing_evidence", "reason": "PRIVATE_CRITIC_VERDICT", "relied_on_assumption": False})
+    critic_calls = 2 if response in {"recovered_json", "repeated_invalid_json"} else 1
     critic = ScriptedModel(
-        answer="PRIVATE_CRITIC_INVALID" if response == "invalid_json" else json.dumps({"satisfied": True, "reason": "PRIVATE_CRITIC_VERDICT", "relied_on_assumption": False}),
+        answer="PRIVATE_CRITIC_INVALID" if response in {"invalid_json", "repeated_invalid_json"} else verdict,
+        answers=["PRIVATE_CRITIC_INVALID", verdict] if response == "recovered_json" else None,
+        normal_completion=response in {"recovered_json", "repeated_invalid_json", "unsatisfied_json"},
         identifier="critic-model",
         reported_usage=None if response == "missing_usage" else {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100, "input_token_details": {"cache_read": 32}},
     )
@@ -90,7 +100,7 @@ async def test_worker_terminal_ledger_includes_evaluator_usage_without_visible_c
         config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
     )
     row = await run_store.get(record.run_id, user_id="alice")
-    assert row["llm_call_count"] == 2
+    assert row["llm_call_count"] == 1 + critic_calls
     assert row["lead_agent_tokens"] == 40
     pricing = {"lead-model": _ModelPricing(2, 4, "USD"), "critic-model": _ModelPricing(2, 4, "USD", 0.5)}
     cost = _run_cost(pricing, model_name="lead-model", total_input_tokens=row["total_input_tokens"], total_output_tokens=row["total_output_tokens"], token_usage_by_model=row["token_usage_by_model"])
@@ -98,12 +108,15 @@ async def test_worker_terminal_ledger_includes_evaluator_usage_without_visible_c
         assert row["token_usage_by_model"]["critic-model"]["missing_usage_calls"] == 1
         assert cost is None
     else:
-        assert row["middleware_tokens"] == 100
-        assert row["total_input_tokens"] == 110
-        assert row["total_output_tokens"] == 30
-        assert row["total_tokens"] == 140
-        assert row["token_usage_by_model"]["critic-model"]["cache_read_tokens"] == 32
-        assert cost == pytest.approx(0.000292)
+        assert row["middleware_tokens"] == 100 * critic_calls
+        assert row["total_input_tokens"] == 30 + 80 * critic_calls
+        assert row["total_output_tokens"] == 10 + 20 * critic_calls
+        assert row["total_tokens"] == 40 + 100 * critic_calls
+        assert row["token_usage_by_model"]["critic-model"]["cache_read_tokens"] == 32 * critic_calls
+        assert cost == pytest.approx(0.0001 + 0.000192 * critic_calls)
+    if response in {"recovered_json", "repeated_invalid_json", "unsatisfied_json"}:
+        assert row["goal_verdict"]["satisfied"] is (response == "recovered_json")
+        assert row["goal_verdict"]["continuations"] == 0
     history = await events.list_messages("result", user_id="alice")
     assert "PRIVATE_CRITIC" not in json.dumps(history)
 

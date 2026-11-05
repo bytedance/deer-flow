@@ -45,6 +45,7 @@ from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -132,15 +133,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         )
         tmp_path = Path(tmp_path_str)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(states, f, indent=2)
+            handle = os.fdopen(fd, "w", encoding="utf-8", newline="")
+            fd = None  # The file object now owns the descriptor.
+            with handle:
+                json.dump(states, handle, indent=2)
             tmp_path.replace(self._skill_states_file)
-        except Exception:
-            # Best-effort cleanup of the temp file on failure.
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        except BaseException:
+            cleanup_failed_atomic_write(tmp_path, fd)
             raise
 
     def get_skill_enabled_state(self, skill_name: str) -> bool:
@@ -218,15 +217,27 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # extensions_config (handled by ``super().load_skills`` above). Re-read
         # from disk here too so another worker's update cannot be masked by
         # this process's singleton cache while rebuilding a user projection.
-        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
-        extensions_config = ExtensionsConfig.from_file()
-        skills = [
-            dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
-            if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
-            else s
-            for s in skills
-        ]
+        try:
+            extensions_config = ExtensionsConfig.from_file()
+            skills = [
+                dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
+                if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
+                else s
+                for s in skills
+            ]
+        except Exception as e:
+            # Same degraded mode as ``LocalSkillStorage.load_skills``: a config
+            # that cannot be read says nothing about which skills are enabled,
+            # so the per-user AND cannot be evaluated. Raising here would take
+            # the whole user-scoped listing down over an unrelated defect in the
+            # file, so fail closed instead — every skill is listed, none is
+            # enabled. ``from_file`` resolves ``$VAR`` placeholders before
+            # validation, so only the failure shape is safe to log (see
+            # ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every user-scoped skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]
@@ -413,14 +424,14 @@ class UserScopedSkillStorage(LocalSkillStorage):
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None
             try:
-                with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=str(target.parent)) as tmp_file:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", delete=False, dir=str(target.parent)) as tmp_file:
                     tmp_path = Path(tmp_file.name)
                     tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
             finally:
                 if tmp_path is not None:
-                    tmp_path.unlink(missing_ok=True)
+                    cleanup_failed_atomic_write(tmp_path)
 
     # ------------------------------------------------------------------
     # Public helpers

@@ -6,6 +6,8 @@ import path from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { extensionCatalog } from "../../src/core/extensions/catalog";
+
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 
 let gateway: ChildProcess;
@@ -448,7 +450,18 @@ for (const locale of ["en-US", "zh-CN"]) {
         exact: true,
       }),
     ).toBeVisible();
-    await expect(page.getByRole("article")).toHaveCount(11);
+    await expect(page.getByRole("article")).toHaveCount(
+      extensionCatalog.length,
+    );
+    const management = page.getByRole("article").filter({
+      hasText: zh ? "知识入库与处理" : "Knowledge ingestion and processing",
+    });
+    await expect(management).toHaveCount(1);
+    await expect(management).toContainText(
+      zh
+        ? "需要安装和配置，不包含管理页面。"
+        : "Requires installation and configuration; no management page is included.",
+    );
     const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
     await expect(lightrag).toHaveCount(1);
     await expect(lightrag).toContainText(
@@ -672,10 +685,10 @@ test("catalog remains discoverable when runtime discovery fails", async ({
   await expect(
     page.getByRole("alert").filter({ hasText: "Extensions unavailable." }),
   ).toBeVisible();
-  await expect(page.getByRole("article")).toHaveCount(11);
+  await expect(page.getByRole("article")).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Catalog extension" }),
-  ).toHaveCount(11);
+  ).toHaveCount(extensionCatalog.length);
   await expect(
     page.getByRole("article").filter({ hasText: "Script workflows" }),
   ).toHaveCount(1);

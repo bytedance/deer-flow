@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.persistence.base import Base
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
@@ -13,6 +14,7 @@ from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.runtime import RunStatus
 from deerflow.runtime.runs.manager import RunRecord
 from deerflow.runtime.runs.schemas import DisconnectMode
+from deerflow.scheduler.host_notes import RUN_ERROR_INTERRUPTED
 
 
 @asynccontextmanager
@@ -20,19 +22,22 @@ async def _database(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'completion.db'}")
     try:
         async with engine.begin() as connection:
-            await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__]))
+            await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[ScheduledTaskRow.__table__, ScheduledTaskRunRow.__table__, RunRow.__table__]))
         yield engine, async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
 
 
-async def _launching_occurrence(sf, *, schedule_type):
+async def _launching_occurrence(sf, *, schedule_type, suffix="completion", trigger="manual"):
     now = datetime(2026, 9, 9, 8, tzinfo=UTC)
     tasks = ScheduledTaskRepository(sf)
     occurrences = ScheduledTaskRunRepository(sf)
+    task_id = f"task-{suffix}"
+    occurrence_id = f"occurrence-{suffix}"
+    thread_id = f"thread-{suffix}"
     spec = {"run_at": now.isoformat()} if schedule_type == "once" else {"cron": "0 9 * * *"}
     await tasks.create(
-        task_id="task-completion",
+        task_id=task_id,
         user_id="user-1",
         thread_id=None,
         context_mode="fresh_thread_per_run",
@@ -45,15 +50,15 @@ async def _launching_occurrence(sf, *, schedule_type):
         next_run_at=now,
     )
     await occurrences.create(
-        run_record_id="occurrence-completion",
-        task_id="task-completion",
-        thread_id="thread-completion",
+        run_record_id=occurrence_id,
+        task_id=task_id,
+        thread_id=thread_id,
         scheduled_for=now,
-        trigger="manual",
+        trigger=trigger,
         status="queued",
     )
     claimed = await occurrences.claim_queued_run(
-        "occurrence-completion",
+        occurrence_id,
         lease_owner="launcher",
         now=now,
         lease_seconds=120,
@@ -61,7 +66,7 @@ async def _launching_occurrence(sf, *, schedule_type):
     )
     assert claimed is not None
     await tasks.update(
-        "task-completion",
+        task_id,
         user_id="user-1",
         updates={"status": "running" if schedule_type == "once" else "enabled", "last_error": "previous error"},
     )
@@ -92,10 +97,10 @@ def _completion(status, error):
     )
 
 
-async def _snapshot(sf):
+async def _snapshot(sf, task_id="task-completion", occurrence_id="occurrence-completion"):
     async with sf() as session:
-        task = await session.get(ScheduledTaskRow, "task-completion")
-        occurrence = await session.get(ScheduledTaskRunRow, "occurrence-completion")
+        task = await session.get(ScheduledTaskRow, task_id)
+        occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
         assert task is not None and occurrence is not None
         return task.to_dict(), occurrence.to_dict()
 
@@ -155,6 +160,168 @@ async def test_completion_before_launch_bookkeeping_is_durable_and_counted_once(
         assert task_after_retry["run_count"] == 1
         assert task_after_retry["status"] == task["status"]
         assert task_after_retry["last_error"] == expected_error
+
+
+async def _running_occurrence_with_terminal_run(
+    sf,
+    *,
+    run_status: str,
+    error: str | None = None,
+    goal_objective: str | None = None,
+    goal_verdict: dict | None = None,
+    suffix: str = "completion",
+    trigger: str = "manual",
+    schedule_type: str = "cron",
+):
+    tasks, occurrences, now = await _launching_occurrence(sf, schedule_type=schedule_type, suffix=suffix, trigger=trigger)
+    occurrence_id = f"occurrence-{suffix}"
+    task_id = f"task-{suffix}"
+    thread_id = f"thread-{suffix}"
+    run_id = f"run-{suffix}"
+    await occurrences.update_status(
+        occurrence_id,
+        status="running",
+        run_id=run_id,
+        started_at=now,
+    )
+    await tasks.update(
+        task_id,
+        user_id="user-1",
+        updates={"next_run_at": now if schedule_type == "once" else now + timedelta(days=1), "goal_objective": goal_objective},
+    )
+    async with sf() as session:
+        if goal_objective is not None:
+            occurrence = await session.get(ScheduledTaskRunRow, occurrence_id)
+            assert occurrence is not None
+            occurrence.goal_objective = goal_objective
+        session.add(
+            RunRow(
+                run_id=run_id,
+                thread_id=thread_id,
+                user_id="user-1",
+                status=run_status,
+                error=error,
+                metadata_json={"scheduled_task_id": task_id, "scheduled_task_run_id": occurrence_id},
+                goal_verdict=goal_verdict,
+            )
+        )
+        await session.commit()
+    return tasks, occurrences, now
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["manual", "scheduled"])
+async def test_run_once_finalizes_running_occurrence_from_terminal_run(tmp_path, trigger):
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(sf, run_status="success", trigger=trigger)
+        service = _service(tasks, occurrences)
+
+        await service.run_once(now=now)
+
+        task, occurrence = await _snapshot(sf)
+        assert occurrence["status"] == "success"
+        assert task["status"] == "enabled"
+        assert task["run_count"] == 1
+        assert await tasks.reconcile_terminal_runs(now=now) == 0
+        assert await _snapshot(sf) == (task, occurrence)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_terminal_runs_isolates_a_poisoned_candidate(tmp_path, caplog):
+    import logging
+
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(sf, run_status="success", suffix="aaa-poisoned", trigger="scheduled")
+        await _running_occurrence_with_terminal_run(sf, run_status="success", suffix="zzz-healthy", trigger="scheduled")
+        service = _service(tasks, occurrences)
+        original = tasks._finalization_observer
+
+        async def poisoned_observer(session, task, occurrence, *, events):
+            if task is not None and task.id == "task-aaa-poisoned":
+                raise RuntimeError("poisoned finalization observer")
+            if original is not None:
+                await original(session, task, occurrence, events=events)
+
+        tasks.set_finalization_observer(poisoned_observer)
+
+        with caplog.at_level(logging.ERROR):
+            await service.run_once(now=now)
+
+        healthy_task, healthy_occurrence = await _snapshot(sf, "task-zzz-healthy", "occurrence-zzz-healthy")
+        poisoned_task, poisoned_occurrence = await _snapshot(sf, "task-aaa-poisoned", "occurrence-aaa-poisoned")
+        assert healthy_occurrence["status"] == "success"
+        assert healthy_task["status"] == "enabled"
+        assert poisoned_occurrence["status"] == "running"
+        assert poisoned_task["status"] == "enabled"
+        assert "Failed to reconcile scheduled occurrence occurrence-aaa-poisoned" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_run_once_projects_once_task_from_terminal_run(tmp_path):
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(sf, run_status="success", schedule_type="once", trigger="scheduled")
+        service = _service(tasks, occurrences)
+
+        await service.run_once(now=now)
+
+        task, occurrence = await _snapshot(sf)
+        assert occurrence["status"] == "success"
+        assert task["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_run_once_uses_terminal_run_goal_verdict(tmp_path):
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(
+            sf,
+            run_status="success",
+            goal_objective="ship it",
+            goal_verdict={"satisfied": False, "stand_down_reason": "not_met"},
+        )
+        service = _service(tasks, occurrences)
+
+        await service.run_once(now=now)
+
+        task, occurrence = await _snapshot(sf)
+        assert occurrence["status"] == "unmet"
+        assert occurrence["error"] == "not_met"
+        assert task["last_error"] == "not_met"
+
+
+@pytest.mark.asyncio
+async def test_run_once_leaves_running_occurrence_with_live_run_alone(tmp_path):
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(sf, run_status="running")
+        service = _service(tasks, occurrences)
+
+        await service.run_once(now=now)
+
+        task, occurrence = await _snapshot(sf)
+        assert occurrence["status"] == "running"
+        assert task["status"] == "enabled"
+        assert task["run_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("run_status", "error", "occurrence_status", "expected_error"),
+    [
+        ("error", "boom", "failed", "boom"),
+        ("timeout", "time limit", "failed", "time limit"),
+        ("interrupted", None, "interrupted", RUN_ERROR_INTERRUPTED),
+    ],
+)
+async def test_run_once_finalizes_terminal_run_outcomes(tmp_path, run_status, error, occurrence_status, expected_error):
+    async with _database(tmp_path) as (_engine, sf):
+        tasks, occurrences, now = await _running_occurrence_with_terminal_run(sf, run_status=run_status, error=error)
+        service = _service(tasks, occurrences)
+
+        await service.run_once(now=now)
+
+        task, occurrence = await _snapshot(sf)
+        assert occurrence["status"] == occurrence_status
+        assert task["status"] == "enabled"
+        assert task["last_error"] == expected_error
 
 
 @pytest.mark.asyncio

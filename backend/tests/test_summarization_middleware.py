@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextvars
+import threading
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock
@@ -374,6 +376,38 @@ async def test_abefore_model_calls_hooks_same_as_sync() -> None:
 
     assert len(captured) == 1
     assert [message.content for message in captured[0].messages_to_summarize] == ["user-1", "assistant-1"]
+
+
+_HOOK_CONTEXT: contextvars.ContextVar[str] = contextvars.ContextVar("_HOOK_CONTEXT")
+
+
+@pytest.mark.anyio
+async def test_abefore_model_runs_hooks_in_a_worker_with_sync_semantics(caplog: pytest.LogCaptureFixture) -> None:
+    loop_thread = threading.get_ident()
+    calls: list[tuple[str, int, str | None]] = []
+
+    def _hook(name: str):
+        def hook(_: SummarizationEvent) -> None:
+            calls.append((name, threading.get_ident(), _HOOK_CONTEXT.get(None)))
+
+        return hook
+
+    def _broken_hook(_: SummarizationEvent) -> None:
+        raise RuntimeError("hook failure")
+
+    middleware = _middleware(before_summarization=[_hook("first"), _broken_hook, _hook("second")])
+    token = _HOOK_CONTEXT.set("run-context")
+    try:
+        with caplog.at_level("ERROR"):
+            result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+    finally:
+        _HOOK_CONTEXT.reset(token)
+
+    assert [name for name, _, _ in calls] == ["first", "second"]
+    assert all(thread != loop_thread for _, thread, _ in calls)
+    assert all(context == "run-context" for _, _, context in calls)
+    assert "before_summarization hook _broken_hook failed" in caplog.text
+    assert isinstance(result["messages"][0], RemoveMessage)
 
 
 def test_memory_flush_hook_skips_when_memory_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
