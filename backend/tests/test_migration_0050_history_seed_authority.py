@@ -36,7 +36,9 @@ async def test_existing_strict_database_refreshes_persisted_guard(seed_db, leadi
         authority = history_seed_authority(reservation, db.thread, seed_kind="checkpoint")
         with producer_scope(authority), pytest.raises(DBAPIError):
             await db.events.put_batch(batch)
-        await asyncio.to_thread(command.upgrade, cfg, "head")
+        # This fixture contains only the Run/history tables. Exercise 0050,
+        # not later migrations that require unrelated application tables.
+        await asyncio.to_thread(command.upgrade, cfg, "0050_history_seed_authority")
         with producer_scope(authority):
             rows = await db.events.put_batch(batch)
     assert [row["seq"] for row in rows] == ([1, 2, 3] if leading_ai else [1, 2, 3, 4])
