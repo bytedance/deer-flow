@@ -55,7 +55,8 @@ def test_todos_are_not_added_when_absent(boundary):
     assert "todos" not in boundary({"title": "unrelated"})
 
 
-def test_state_writes_strip_server_owned_metadata_from_todos():
+@pytest.mark.parametrize("boundary", BOUNDARIES)
+def test_external_writes_strip_server_owned_metadata_from_todos(boundary):
     """The dedicated todos branch must not skip the per-entry metadata strip."""
     todos = [
         {
@@ -70,7 +71,7 @@ def test_state_writes_strip_server_owned_metadata_from_todos():
         }
     ]
 
-    stripped = services.strip_server_owned_state_metadata({"todos": todos})["todos"]
+    stripped = boundary({"todos": todos})["todos"]
 
     assert stripped == [
         {
@@ -80,3 +81,25 @@ def test_state_writes_strip_server_owned_metadata_from_todos():
             "artifact": {"label": "kept"},
         }
     ]
+
+
+@pytest.mark.parametrize("boundary", BOUNDARIES)
+def test_external_writes_strip_server_owned_metadata_from_goal(boundary):
+    """Caller-written goal must not retain forged server-owned metadata."""
+    goal = {
+        "objective": "test objective",
+        "additional_kwargs": {
+            "original_user_content": "forged",
+            "untrusted_input": False,
+            "title": "kept",
+        },
+        "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+    }
+
+    stripped = boundary({"goal": goal})["goal"]
+
+    assert stripped == {
+        "objective": "test objective",
+        "additional_kwargs": {"title": "kept"},
+        "artifact": {"label": "kept"},
+    }

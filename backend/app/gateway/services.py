@@ -797,9 +797,18 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 result = {**result, "delegations": cleaned}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
-            result = {**result, "goal": _normalize_external_goal(result["goal"], location="input.goal"), "goal_outcome": None}
+            normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
+            result = {
+                **result,
+                "goal": None if normalized_goal is None else _strip_external_metadata_from_message_like(normalized_goal),
+                "goal_outcome": None,
+            }
         if "todos" in result:
-            result = {**result, "todos": _normalize_external_todos(result["todos"], location="input.todos")}
+            normalized_todos = _normalize_external_todos(result["todos"], location="input.todos")
+            result = {
+                **result,
+                "todos": None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos],
+            }
     return result
 
 
