@@ -47,6 +47,8 @@ class _ExistingRestrictedSandbox(RuntimeError):
 class _RestrictedCreateAttempt:
     port: int
     proxy_may_exist: bool = False
+    creating: bool = True
+    teardowns: int = 0
 
 
 @dataclass(frozen=True)
@@ -658,10 +660,10 @@ class LocalContainerBackend(SandboxBackend):
         # ledger tracks only our local reservations, never container identity;
         # present-resource inspection must not inherit it. Name vacancy under
         # the provider's teardown fences is its sole fallback release proof.
-        self._unknown_cleanup_ports: dict[str, set[int]] = {}
-        # Failed creation may have no main generation. Keep each attempt's
-        # identity so a delayed absence probe cannot release a successor's port.
-        self._failed_create_ports: dict[str, dict[int, _RestrictedCreateAttempt]] = {}
+        self._unknown_cleanup_ports: dict[str, dict[int, object]] = {}
+        # Register before resources can become visible to discovery. Attempts
+        # retain their identity through creation, failure, and concurrent teardown.
+        self._create_port_attempts: dict[str, dict[int, _RestrictedCreateAttempt]] = {}
         self._pending_cleanup_ports_lock = threading.Lock()
         self._runtime = self._detect_runtime()
 
@@ -999,6 +1001,9 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             restricted_attempt = _RestrictedCreateAttempt(port) if self._network_mode != "open" else None
+            if restricted_attempt is not None:
+                with self._pending_cleanup_ports_lock:
+                    self._create_port_attempts.setdefault(sandbox_id, {})[port] = restricted_attempt
             try:
                 if self._network_mode == "open":
                     container_id = self._start_container(
@@ -1020,11 +1025,13 @@ class LocalContainerBackend(SandboxBackend):
                         relay_token=relay_token,
                         attempt=restricted_attempt,
                     )
+                    self._handoff_created_port(sandbox_id, restricted_attempt)
                 break
             except _ExistingRestrictedSandbox as exc:
                 if restricted_attempt is not None and restricted_attempt.proxy_may_exist and urlparse(exc.info.sandbox_url).port == port:
                     # Adoption transfers this attempt's reservation to the
                     # returned runtime. Its ordinary destroy owns the release.
+                    self._handoff_created_port(sandbox_id, restricted_attempt)
                     return exc.info
                 if restricted_attempt is not None:
                     self._settle_failed_create_port(sandbox_id, restricted_attempt)
@@ -1075,47 +1082,59 @@ class LocalContainerBackend(SandboxBackend):
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
         )
 
+    def _handoff_created_port(self, sandbox_id: str, attempt: _RestrictedCreateAttempt) -> None:
+        """Transfer a successful reservation without reviving a retired attempt."""
+        with self._pending_cleanup_ports_lock:
+            current = self._create_port_attempts.get(sandbox_id, {})
+            if current.get(attempt.port) is attempt:
+                attempt.creating = False
+                if not attempt.teardowns:
+                    current.pop(attempt.port)
+                    if not current:
+                        self._create_port_attempts.pop(sandbox_id)
+
     def _settle_failed_create_port(self, sandbox_id: str, attempt: _RestrictedCreateAttempt) -> bool:
         """Release a failed attempt only when its proxy cannot hold the port."""
-        if not attempt.proxy_may_exist:
-            release_port(attempt.port)
-            return True
-        # Publish before inspecting so concurrent teardown can retire this
-        # exact attempt, and an interrupted probe leaves a recoverable record.
         with self._pending_cleanup_ports_lock:
-            self._failed_create_ports.setdefault(sandbox_id, {})[attempt.port] = attempt
-        proxy_name, _ = self._resource_names(sandbox_id)
-        try:
-            if proxy_name in self._inspect_container_entries([proxy_name], timeout=5):
+            if self._create_port_attempts.get(sandbox_id, {}).get(attempt.port) is not attempt:
                 return False
-        except Exception:
-            # Preserve the creation error when the runtime cannot answer.
-            return False
+            attempt.creating = False
+        if attempt.proxy_may_exist:
+            proxy_name, _ = self._resource_names(sandbox_id)
+            try:
+                if proxy_name in self._inspect_container_entries([proxy_name], timeout=5):
+                    return False
+            except Exception:
+                # Preserve the creation error when the runtime cannot answer.
+                return False
         with self._pending_cleanup_ports_lock:
-            current = self._failed_create_ports.get(sandbox_id, {})
+            current = self._create_port_attempts.get(sandbox_id, {})
             if current.get(attempt.port) is not attempt or self._port_teardown_pending(sandbox_id, attempt.port):
                 return False
             current.pop(attempt.port)
             if not current:
-                self._failed_create_ports.pop(sandbox_id)
+                self._create_port_attempts.pop(sandbox_id)
             release_port(attempt.port)
         return True
 
     def _port_teardown_pending(self, sandbox_id: str, port: int) -> bool:
         """Whether destroy owns this release; caller holds the ledger lock."""
-        return (sandbox_id, port) in self._pending_cleanup_ports.values() or port in self._unknown_cleanup_ports.get(sandbox_id, set())
+        attempt = self._create_port_attempts.get(sandbox_id, {}).get(port)
+        return (attempt is not None and attempt.teardowns > 0) or (sandbox_id, port) in self._pending_cleanup_ports.values() or port in self._unknown_cleanup_ports.get(sandbox_id, {})
 
     def _reclaim_failed_create_ports(self, sandbox_id: str) -> None:
         """Retry only reservation bookkeeping; never remove a peer's resources."""
         with self._pending_cleanup_ports_lock:
-            pending = dict(self._failed_create_ports.get(sandbox_id, {}))
+            pending = dict(self._create_port_attempts.get(sandbox_id, {}))
+            if any(attempt.creating for attempt in pending.values()):
+                raise RuntimeError(f"Restricted sandbox {sandbox_id} has another creation in progress")
         if not pending:
             return
         proxy_name, _ = self._resource_names(sandbox_id)
         if proxy_name in self._inspect_container_entries([proxy_name], timeout=5):
             raise RuntimeError(f"Restricted sandbox {sandbox_id} still has a proxy from an unconfirmed creation")
         with self._pending_cleanup_ports_lock:
-            current = self._failed_create_ports.get(sandbox_id, {})
+            current = self._create_port_attempts.get(sandbox_id, {})
             # An adopted runtime may now be in destroy(). Its teardown owns
             # the release even if the proxy disappeared before the main stop.
             for port, attempt in pending.items():
@@ -1124,7 +1143,7 @@ class LocalContainerBackend(SandboxBackend):
                     release_port(port)
             if current:
                 raise RuntimeError(f"Restricted sandbox {sandbox_id} has another unconfirmed creation")
-            self._failed_create_ports.pop(sandbox_id, None)
+            self._create_port_attempts.pop(sandbox_id, None)
 
     def _start_restricted_sandbox(
         self,
@@ -1386,40 +1405,65 @@ class LocalContainerBackend(SandboxBackend):
         except (TypeError, ValueError):
             port = None
         generation = info.container_id if self._runtime == "docker" else None
-        if generation:
-            with self._pending_cleanup_ports_lock:
+        pending = None
+        unknown_pending = None
+        with self._pending_cleanup_ports_lock:
+            if generation:
                 pending = self._pending_cleanup_ports.get(generation)
                 port = pending[1] if pending is not None else port
-                if port:
-                    self._pending_cleanup_ports[generation] = (info.sandbox_id, port)
-        elif port:
-            with self._pending_cleanup_ports_lock:
-                self._unknown_cleanup_ports.setdefault(info.sandbox_id, set()).add(port)
+                if port and pending is None:
+                    pending = (info.sandbox_id, port)
+                    self._pending_cleanup_ports[generation] = pending
+            elif port:
+                unknown_pending = self._unknown_cleanup_ports.setdefault(info.sandbox_id, {}).setdefault(port, object())
+            # An empty replacement URL carries no evidence about an active
+            # creation. Only its failed predecessors can be included by ID.
+            attempts = {reserved_port: attempt for reserved_port, attempt in self._create_port_attempts.get(info.sandbox_id, {}).items() if not attempt.creating or reserved_port == port}
+            for attempt in attempts.values():
+                attempt.teardowns += 1
         restricted_cleanup = self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement)
         # Keep the main generation inspectable if proxy teardown fails. Once
         # its proxy is removed, a failed main stop retains the known reservation
         # above for a subsequent generation-fenced retry.
-        if restricted_cleanup:
-            self._remove_restricted_proxy(info.sandbox_id)
-        # Prefer Docker's generation ID; names also support older metadata and
-        # Apple Container's caller-selected identity.
-        stop_target = info.container_id or info.container_name
-        if stop_target:
-            self._stop_container(stop_target)
-        # The proxy has been removed and the main stop succeeded. Network
-        # cleanup cannot retain this host port, and a timeout there must not
-        # strand its reservation after the main generation disappears.
-        if generation:
+        removed = False
+        try:
+            if restricted_cleanup:
+                self._remove_restricted_proxy(info.sandbox_id)
+            # Prefer Docker's generation ID; names also support older metadata
+            # and Apple Container's caller-selected identity.
+            stop_target = info.container_id or info.container_name
+            if stop_target:
+                self._stop_container(stop_target)
+            removed = True
+        finally:
             with self._pending_cleanup_ports_lock:
-                pending = self._pending_cleanup_ports.get(generation)
-                if pending is not None:
-                    release_port(pending[1])
-                    self._pending_cleanup_ports.pop(generation)
-                    self._forget_cleanup_port(info.sandbox_id, pending[1])
-        elif port:
-            with self._pending_cleanup_ports_lock:
-                release_port(port)
-                self._forget_cleanup_port(info.sandbox_id, port)
+                for attempt in attempts.values():
+                    attempt.teardowns -= 1
+                if removed:
+                    # Release only the ownership observed before teardown. A
+                    # concurrent destroy may already have handed this port on.
+                    current = self._create_port_attempts.get(info.sandbox_id, {})
+                    port_attempt = attempts.get(port)
+                    owns_port = current.get(port) is port_attempt and (port_attempt is None or port_attempt.teardowns == 0)
+                    if generation:
+                        if pending is not None and self._pending_cleanup_ports.get(generation) is pending and owns_port:
+                            self._pending_cleanup_ports.pop(generation)
+                            self._forget_cleanup_port(info.sandbox_id, pending[1])
+                            release_port(pending[1])
+                    elif port and self._unknown_cleanup_ports.get(info.sandbox_id, {}).get(port) is unknown_pending and owns_port:
+                        self._forget_cleanup_port(info.sandbox_id, port)
+                        release_port(port)
+                    for reserved_port, attempt in attempts.items():
+                        if current.get(reserved_port) is attempt and not attempt.teardowns:
+                            # A nested known-port destroy can register this
+                            # generation after an empty-URL destroy took its
+                            # snapshot. The last owner completes that release.
+                            if generation and self._pending_cleanup_ports.get(generation) == (info.sandbox_id, reserved_port):
+                                self._pending_cleanup_ports.pop(generation)
+                            if not self._port_teardown_pending(info.sandbox_id, reserved_port):
+                                self._forget_cleanup_port(info.sandbox_id, reserved_port)
+                                release_port(reserved_port)
+        # Network cleanup cannot retain a host port once both containers are gone.
         if restricted_cleanup:
             self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False, remove_proxy=False)
 
@@ -1427,14 +1471,14 @@ class LocalContainerBackend(SandboxBackend):
         """Remove a released reservation; caller holds the cleanup ledger lock."""
         pending = self._unknown_cleanup_ports.get(sandbox_id)
         if pending is not None:
-            pending.discard(port)
+            pending.pop(port, None)
             if not pending:
                 self._unknown_cleanup_ports.pop(sandbox_id)
-        failed = self._failed_create_ports.get(sandbox_id)
+        failed = self._create_port_attempts.get(sandbox_id)
         if failed is not None:
             failed.pop(port, None)
             if not failed:
-                self._failed_create_ports.pop(sandbox_id)
+                self._create_port_attempts.pop(sandbox_id)
 
     def complete_absent_teardown(self, sandbox_id: str) -> None:
         """Release local reservations after fenced, authoritative name vacancy.
@@ -1443,6 +1487,10 @@ class LocalContainerBackend(SandboxBackend):
         only after confirming absence under both teardown fences, before it
         retires quarantine records. Metadata inspection stays read-only.
         """
+        with self._pending_cleanup_ports_lock:
+            attempts = {port: attempt for port, attempt in self._create_port_attempts.get(sandbox_id, {}).items() if not attempt.creating}
+            generations = {generation: entry for generation, entry in self._pending_cleanup_ports.items() if entry[0] == sandbox_id}
+            unknown = dict(self._unknown_cleanup_ports.get(sandbox_id, {}))
         if self._runtime == "docker":
             # A timeout can remove the main container before its deterministic
             # sidecar/networks are cleaned. Retry even after a process restart,
@@ -1451,15 +1499,29 @@ class LocalContainerBackend(SandboxBackend):
             # behind the existing-resource mismatch guard.
             self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False, strict=True)
         with self._pending_cleanup_ports_lock:
-            ports = {port for owner_id, port in self._pending_cleanup_ports.values() if owner_id == sandbox_id}
-            ports.update(self._unknown_cleanup_ports.pop(sandbox_id, set()))
-            ports.update(self._failed_create_ports.pop(sandbox_id, {}))
-            # Drop every reservation owned by this logical ID from the ledgers
-            # in one pass. The set union releases each port at most once even if
-            # a reservation ever exists in more than one ledger.
-            retained = {generation: entry for generation, entry in self._pending_cleanup_ports.items() if entry[0] != sandbox_id}
-            self._pending_cleanup_ports.clear()
-            self._pending_cleanup_ports.update(retained)
+            current = self._create_port_attempts.get(sandbox_id, {})
+            # Keep all ledgers aligned when a create or destroy still owns a
+            # reservation, or when a newer attempt appeared during cleanup.
+            protected = {port for port, attempt in current.items() if attempt is not attempts.get(port) or attempt.teardowns}
+            ports = set()
+            for generation, entry in generations.items():
+                if self._pending_cleanup_ports.get(generation) is entry and entry[1] not in protected:
+                    self._pending_cleanup_ports.pop(generation)
+                    ports.add(entry[1])
+            current_unknown = self._unknown_cleanup_ports.get(sandbox_id, {})
+            for port, token in unknown.items():
+                if current_unknown.get(port) is token and port not in protected:
+                    current_unknown.pop(port)
+                    ports.add(port)
+            if not current_unknown:
+                self._unknown_cleanup_ports.pop(sandbox_id, None)
+            for port, attempt in attempts.items():
+                if current.get(port) is attempt and port not in protected:
+                    current.pop(port)
+                    ports.add(port)
+            if not current:
+                self._create_port_attempts.pop(sandbox_id, None)
+            # A reservation can be present in more than one ledger.
             for port in ports:
                 release_port(port)
 

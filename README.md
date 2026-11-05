@@ -1113,6 +1113,7 @@ An uncertain proxy keeps its reservation. Before another attempt for the same sa
 port, the local backend checks whether that proxy has disappeared and reclaims
 the pending reservation. These failed-creation records have the lifetime of the
 local backend instance.
+Replacement cleanup also recovers recorded ports when sandbox URLs are empty.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence

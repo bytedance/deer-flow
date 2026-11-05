@@ -43,11 +43,14 @@ Restricted creation tracks the proxy's `docker create` boundary per attempt.
 Only a definite CLI spawn failure, successful proxy removal, or authoritative
 proxy absence permits returning its port. Preserve the creation error through
 ordinary rollback/probe failures; network removal can fail after the port is free.
-Publish uncertain attempt records before probing, and compare their identities
-before release so delayed probes cannot free successor reservations. Same-ID
-creation reconciles these backend-instance records before allocating again;
-active destroy operations own their release. Destroy and fenced absent teardown
-clear the same records. Durable uncertain-start admission needs its own
+Register each attempt before creating resources, and compare its identity before
+every release, including after successful rollback. Active attempts keep their
+reservations during same-ID retry checks. Destroy captures failed attempts before
+I/O, and can capture an active attempt only when its port matches the metadata.
+Empty-URL replacement cleanup releases captured reservations after success;
+overlapping teardowns retain them until the last owner finishes. Fenced absent
+teardown also uses an entry snapshot so late completion preserves newer records.
+Durable uncertain-start admission needs its own
 generation-safe recovery contract. Regressions:
 `tests/test_aio_sandbox_restricted_creation_ports.py`.
 

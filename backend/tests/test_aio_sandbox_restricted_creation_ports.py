@@ -9,7 +9,9 @@ proxy stop remains observable during later reconciliation.
 import json
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -591,5 +593,301 @@ def test_recovery_waits_for_an_adopted_containers_destroy_to_finish(restricted_b
 
     assert interleaved
     assert allocator.allocate(port, max_range=1) == port
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "rejected"])
+def test_late_creation_failure_cannot_release_a_destroyed_instances_successor(restricted_backend, monkeypatch, outcome):
+    delayed_failure = subprocess.TimeoutExpired(["docker", "run"], timeout=1) if outcome == "timeout" else rejected_start("daemon rejected late sandbox start")
+    expected_error = subprocess.TimeoutExpired if outcome == "timeout" else RuntimeError
+    backend, allocator, port, docker = restricted_backend(None)
+    readiness_requests = allow_readiness_http(monkeypatch)
+    successors = []
+    interleaved = False
+
+    def destroy_before_create_returns(cmd, **kwargs):
+        nonlocal interleaved
+        if not interleaved and cmd[1] == "run":
+            interleaved = True
+            # The daemon publishes the main container while its original CLI
+            # invocation is still waiting to return a success/error receipt.
+            docker.calls.append(tuple(cmd))
+            docker.record_main_container(cmd)
+            info = backend.discover("sandbox")
+            assert info is not None and not info.requires_replacement
+            assert info.sandbox_url == f"http://localhost:{port}"
+            backend.destroy(info)
+            successors.append(backend.create("successor-thread", "successor"))
+            raise delayed_failure
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", destroy_before_create_returns)
+    with pytest.raises(expected_error) as caught:
+        backend.create("thread", "sandbox")
+
+    if outcome == "timeout":
+        assert caught.value is delayed_failure
+    else:
+        assert "daemon rejected late sandbox start" in str(caught.value)
+    assert interleaved
+    assert readiness_requests == [f"http://localhost:{port}/v1/sandbox"]
+    assert successors[0].sandbox_url == f"http://localhost:{port}"
+    assert docker.published_ports == [port, port]
+    assert_reserved(allocator, port)
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+@pytest.mark.parametrize("reenter_create", [False, True])
+def test_destroy_with_empty_url_releases_failed_creation_port_once(restricted_backend, monkeypatch, reenter_create):
+    backend, allocator, port, docker = restricted_backend(rejected_start(), fail_proxy_stop=True)
+    with pytest.raises(RuntimeError, match="daemon rejected sandbox start"):
+        backend.create("thread", "sandbox")
+
+    main_command = list(next(cmd for cmd in docker.calls if cmd[:2] == ("docker", "run")))
+    docker.record_main_container(main_command)
+    proxy = docker.containers[docker.proxy_names[0]]
+    proxy["Config"]["Labels"]["deerflow.network_policy_digest"] = "older-policy"
+    info = backend.discover("sandbox")
+    assert info is not None and info.requires_replacement
+    assert info.sandbox_url == ""
+    assert_reserved(allocator, port)
+    docker.fail_proxy_stop = False
+    reentered = False
+
+    def retry_while_main_stop_is_pending(cmd, **kwargs):
+        nonlocal reentered
+        if reenter_create and cmd[1] == "stop" and cmd[-1] == info.container_id:
+            reentered = True
+            assert docker.proxy_names[0] not in docker.containers
+            calls_before_retry = len(docker.calls)
+            with pytest.raises(RuntimeError):
+                backend.create("thread", "sandbox")
+            assert all(call[:2] != ("docker", "create") for call in docker.calls[calls_before_retry:])
+            assert_reserved(allocator, port)
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", retry_while_main_stop_is_pending)
+    backend.destroy(info)
+
+    assert reentered is reenter_create
+    assert docker.containers == {}
+    assert allocator.allocate(port, max_range=1) == port
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+def test_empty_url_destroy_owns_release_while_creation_settles_absence(restricted_backend, monkeypatch):
+    backend, allocator, port, docker = restricted_backend(rejected_start(), fail_proxy_stop=True)
+    settlement_waiting = Event()
+    resume_settlement = Event()
+    destroy_waiting = Event()
+    resume_destroy = Event()
+    creation_thread = None
+    main_generation = None
+
+    def interleave_settlement_and_destroy(cmd, **kwargs):
+        nonlocal main_generation
+        if cmd[1] == "run":
+            entry = docker.record_main_container(cmd)
+            main_generation = entry["Id"]
+            docker.containers[docker.proxy_names[0]]["Config"]["Labels"]["deerflow.network_policy_digest"] = "older-policy"
+        if cmd[1] == "stop" and cmd[-1] == "offline-restricted-sandbox":
+            # Rollback cannot remove the main or proxy. Both remain visible
+            # when the failed create reaches its first port-owner probe.
+            return docker._response(cmd, kwargs, stderr="daemon denied main stop", returncode=1)
+        if get_ident() == creation_thread and docker.proxy_names and cmd == ["docker", "inspect", docker.proxy_names[0]]:
+            settlement_waiting.set()
+            assert resume_settlement.wait(5), "creation settlement was not resumed"
+        if cmd[1] == "stop" and cmd[-1] == main_generation:
+            assert docker.proxy_names[0] not in docker.containers
+            destroy_waiting.set()
+            assert resume_destroy.wait(5), "main destruction was not resumed"
+        return docker.run(cmd, **kwargs)
+
+    def create_and_expect_failure():
+        nonlocal creation_thread
+        creation_thread = get_ident()
+        with pytest.raises(RuntimeError, match="daemon rejected sandbox start"):
+            backend.create("thread", "sandbox")
+
+    monkeypatch.setattr(local_backend.subprocess, "run", interleave_settlement_and_destroy)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        creation = workers.submit(create_and_expect_failure)
+        destruction = None
+        try:
+            assert settlement_waiting.wait(5), "creation never reached port settlement"
+            info = backend.discover("sandbox")
+            assert info is not None and info.requires_replacement
+            assert info.sandbox_url == ""
+            docker.fail_proxy_stop = False
+            destruction = workers.submit(backend.destroy, info)
+            assert destroy_waiting.wait(5), "destroy never reached the main stop"
+            resume_settlement.set()
+            creation.result(timeout=5)
+            assert_reserved(allocator, port)
+        finally:
+            resume_settlement.set()
+            resume_destroy.set()
+            creation.result(timeout=5)
+            if destruction is not None:
+                destruction.result(timeout=5)
+
+    assert docker.containers == {}
+    assert allocator.allocate(port, max_range=1) == port
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+def test_same_id_create_preserves_an_active_pre_proxy_reservation(restricted_backend, monkeypatch):
+    backend, allocator, port, docker = restricted_backend(None)
+    allow_readiness_http(monkeypatch)
+    interleaved = False
+
+    def retry_before_proxy_creation(cmd, **kwargs):
+        nonlocal interleaved
+        if not interleaved and cmd[:3] == ["docker", "network", "create"]:
+            interleaved = True
+            # The outer create has reserved its port and completed preflight.
+            # Proxy absence cannot justify reclaiming this active reservation.
+            with pytest.raises(RuntimeError):
+                backend.create("thread", "sandbox")
+            assert_reserved(allocator, port)
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", retry_before_proxy_creation)
+    info = backend.create("thread", "sandbox")
+
+    assert interleaved
+    assert info.sandbox_url == f"http://localhost:{port}"
+    assert_reserved(allocator, port)
+    # Successful creation must retire its active-attempt marker so an ordinary
+    # later call can discover and adopt the healthy runtime.
+    adopted = backend.create("thread", "sandbox")
+    assert adopted.container_id == info.container_id
+    assert adopted.sandbox_url == info.sandbox_url
+    assert docker.published_ports == [port]
+    assert_reserved(allocator, port)
+
+
+def test_old_empty_url_destroy_preserves_a_new_pre_proxy_reservation(restricted_backend, monkeypatch):
+    backend, allocator, port, docker = restricted_backend(rejected_start(), fail_proxy_stop=True)
+    with pytest.raises(RuntimeError, match="daemon rejected sandbox start"):
+        backend.create("thread", "sandbox")
+
+    main_command = list(next(cmd for cmd in docker.calls if cmd[:2] == ("docker", "run")))
+    docker.record_main_container(main_command)
+    docker.containers[docker.proxy_names[0]]["Config"]["Labels"]["deerflow.network_policy_digest"] = "older-policy"
+    old_info = backend.discover("sandbox")
+    assert old_info is not None and old_info.requires_replacement
+    assert old_info.sandbox_url == ""
+
+    # External removal leaves a stale replacement snapshot. The next create
+    # reclaims the old failed reservation and starts a new attempt on its port.
+    docker.containers.clear()
+    docker.networks.clear()
+    docker.fail_proxy_stop = False
+    docker.start_error = None
+    interleaved = False
+
+    def destroy_old_snapshot_before_new_proxy(cmd, **kwargs):
+        nonlocal interleaved
+        if not interleaved and cmd[:3] == ["docker", "network", "create"]:
+            interleaved = True
+            backend.destroy(old_info)
+            assert_reserved(allocator, port)
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", destroy_old_snapshot_before_new_proxy)
+    info = backend.create("thread", "sandbox")
+
+    assert interleaved
+    assert info.sandbox_url == f"http://localhost:{port}"
+    assert docker.published_ports == [port, port]
+    assert_reserved(allocator, port)
+    backend.destroy(info)
+    assert allocator.allocate(port, max_range=1) == port
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+def test_nested_same_generation_destroy_releases_an_empty_url_attempt_once(restricted_backend, monkeypatch):
+    backend, allocator, port, docker = restricted_backend(rejected_start(), fail_proxy_stop=True)
+    with pytest.raises(RuntimeError, match="daemon rejected sandbox start"):
+        backend.create("thread", "sandbox")
+
+    main_command = list(next(cmd for cmd in docker.calls if cmd[:2] == ("docker", "run")))
+    docker.record_main_container(main_command)
+    docker.containers[docker.proxy_names[0]]["Config"]["Labels"]["deerflow.network_policy_digest"] = "older-policy"
+    empty_url_info = backend.discover("sandbox")
+    known_url_info = backend.inspect_runtime("sandbox")
+    assert empty_url_info is not None and empty_url_info.requires_replacement
+    assert empty_url_info.sandbox_url == ""
+    assert known_url_info is not None
+    assert known_url_info.sandbox_url == f"http://localhost:{port}"
+    assert known_url_info.container_id == empty_url_info.container_id
+    docker.fail_proxy_stop = False
+    interleaved = False
+
+    def destroy_known_metadata_inside_empty_url_destroy(cmd, **kwargs):
+        nonlocal interleaved
+        if not interleaved and cmd[1] == "stop" and cmd[-1] == empty_url_info.container_id:
+            interleaved = True
+            # The outer destroy has already removed the proxy. A concurrent
+            # caller has retained this generation's earlier port-bearing view.
+            backend.destroy(known_url_info)
+            assert backend.is_absent("sandbox") is True
+            assert_reserved(allocator, port)
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", destroy_known_metadata_inside_empty_url_destroy)
+    backend.destroy(empty_url_info)
+
+    assert interleaved
+    assert docker.containers == {}
+    docker.start_error = None
+    successor = backend.create("successor-thread", "successor")
+    assert successor.sandbox_url == f"http://localhost:{port}"
+    assert_reserved(allocator, port)
+    backend.complete_absent_teardown("sandbox")
+    assert_reserved(allocator, port)
+
+
+def test_absent_teardown_preserves_a_port_until_its_destroy_returns(restricted_backend, monkeypatch):
+    backend, allocator, port, docker = restricted_backend(rejected_start(), fail_proxy_stop=True)
+    with pytest.raises(RuntimeError, match="daemon rejected sandbox start"):
+        backend.create("thread", "sandbox")
+
+    main_command = list(next(cmd for cmd in docker.calls if cmd[:2] == ("docker", "run")))
+    docker.record_main_container(main_command)
+    allow_readiness_http(monkeypatch)
+    info = backend.discover("sandbox")
+    assert info is not None and not info.requires_replacement
+    assert info.sandbox_url == f"http://localhost:{port}"
+    docker.fail_proxy_stop = False
+    interleaved = False
+
+    def settle_absence_before_stop_receipt_returns(cmd, **kwargs):
+        nonlocal interleaved
+        response = docker.run(cmd, **kwargs)
+        if not interleaved and cmd[1] == "stop" and cmd[-1] == info.container_id:
+            interleaved = True
+            # Docker has removed the main, but destroy still owns this attempt
+            # until the outstanding stop receipt returns to its caller.
+            assert backend.is_absent("sandbox") is True
+            backend.complete_absent_teardown("sandbox")
+            assert_reserved(allocator, port)
+        return response
+
+    monkeypatch.setattr(local_backend.subprocess, "run", settle_absence_before_stop_receipt_returns)
+    backend.destroy(info)
+
+    assert interleaved
+    assert docker.containers == {}
+    docker.start_error = None
+    successor = backend.create("successor-thread", "successor")
+    assert successor.sandbox_url == f"http://localhost:{port}"
+    assert_reserved(allocator, port)
     backend.complete_absent_teardown("sandbox")
     assert_reserved(allocator, port)
