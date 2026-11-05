@@ -177,16 +177,28 @@ async def test_selected_item_route_returns_service_projection_and_scopes_thread(
 
 
 @pytest.mark.asyncio
-async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch) -> None:
+@pytest.mark.parametrize(("continuation", "can_cancel"), [(None, False), ("pending", False), ("dispatched", False), ("dispatched", True)])
+async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch, continuation, can_cancel) -> None:
+    from app.gateway.authz import AuthContext
+
     repo = Repository()
+    repo.batch["continuation_status"] = continuation
     service = AsyncMock()
     service.cancel_batch.return_value = _batch(status="cancelled")
     monkeypatch.setattr(subagent_batches, "get_current_user", AsyncMock(return_value="user-1"))
+    request = _request(repo, service=service)
+    request.state = SimpleNamespace(auth_source="pat", auth=AuthContext(None, ["threads:write", *(["runs:cancel"] if can_cancel else [])]))
+    if continuation and not can_cancel:
+        with pytest.raises(HTTPException) as denied:
+            await subagent_batches.cancel_batch.__wrapped__(thread_id="thread-1", batch_id="batch-1", request=request)
+        assert denied.value.status_code == 403
+        service.cancel_batch.assert_not_awaited()
+        return
 
     result = await subagent_batches.cancel_batch.__wrapped__(
         thread_id="thread-1",
         batch_id="batch-1",
-        request=_request(repo, service=service),
+        request=request,
     )
     assert result["status"] == "cancelled"
     service.cancel_batch.assert_awaited_once_with(batch_id="batch-1", user_id="user-1")
