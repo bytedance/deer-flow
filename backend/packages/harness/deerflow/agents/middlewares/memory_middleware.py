@@ -42,6 +42,9 @@ def redact_queued_messages(messages: list, pii_redaction_config: PiiRedactionCon
     redacted ``content`` alone would still leak either one to the memory
     backend.
     """
+    if pii_redaction_config is None or not pii_redaction_config.enabled:
+        return list(messages)
+
     redactor = _make_redactor(pii_redaction_config)
 
     redacted = []
@@ -102,15 +105,37 @@ def _redact_strings(value: object, redactor: _Redactor) -> object:
     """
     if isinstance(value, str):
         return redactor.redact(value)
-    if isinstance(value, list):
-        return [_redact_strings(item, redactor) for item in value]
-    if isinstance(value, dict):
-        rebuilt = {}
-        for key, item in value.items():
-            new_key = redactor.redact(key) if isinstance(key, str) else key
-            rebuilt[new_key] = _redact_strings(item, redactor)
-        return rebuilt
-    return value
+    if not isinstance(value, (dict, list)):
+        return value
+
+    rebuilt = {} if isinstance(value, dict) else []
+    stack = [(value, iter(value.items()) if isinstance(value, dict) else enumerate(value), rebuilt)]
+    ancestors = {id(value)}
+    while stack:
+        source, items, target = stack[-1]
+        try:
+            key, item = next(items)
+        except StopIteration:
+            ancestors.remove(id(source))
+            stack.pop()
+            continue
+
+        new_key = redactor.redact(key) if isinstance(key, str) else key
+        if isinstance(item, str):
+            rewritten = redactor.redact(item)
+        elif isinstance(item, (dict, list)):
+            if id(item) in ancestors:
+                raise ValueError("Cyclic tool arguments are not supported JSON")
+            rewritten = {} if isinstance(item, dict) else []
+            ancestors.add(id(item))
+            stack.append((item, iter(item.items()) if isinstance(item, dict) else enumerate(item), rewritten))
+        else:
+            rewritten = item
+        if isinstance(target, dict):
+            target[new_key] = rewritten
+        else:
+            target.append(rewritten)
+    return rebuilt
 
 
 class MemoryMiddlewareState(AgentState):
