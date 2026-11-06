@@ -241,3 +241,33 @@ def test_user_scoped_rejects_dotdot_escape(user_storage):
 def test_user_scoped_rejects_invalid_skill_name(user_storage):
     with pytest.raises(ValueError, match="hyphen-case"):
         user_storage.get_custom_skill_dir("../../escaped")
+
+
+@pytest.mark.parametrize("name", ["nul", "con", "aux", "prn", "com1", "lpt9"])
+def test_reserved_windows_device_names_are_rejected_by_validate_skill_name(storage, name):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.validate_skill_name(name)
+
+
+@pytest.mark.parametrize("name", ["nul", "con"])
+def test_reserved_windows_device_names_are_rejected_on_write(storage, name):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.write_custom_skill(name, "SKILL.md", "# hello")
+
+
+def test_archive_install_rejects_a_reserved_windows_device_name(storage, tmp_path, monkeypatch):
+    import zipfile
+
+    from deerflow.skills.security_scanner import ScanResult
+
+    archive = tmp_path / "reserved.skill"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("reserved/SKILL.md", "---\nname: nul\ndescription: Example\n---\n")
+
+    async def _allow_scan(*_args, **_kwargs):
+        return ScanResult(decision="allow", reason="test")
+
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
+
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.install_skill_from_archive(archive)
