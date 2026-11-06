@@ -1002,3 +1002,27 @@ async def test_active_search_excerpt_keeps_overlapping_fitting_occurrence(role_r
     read_arguments = {"runtime": role_runtime, "source_id": row["id"], "offset": row["excerpt_start"]}
     page = json.loads(await history_read.ainvoke(read_arguments) if async_mode else history_read.invoke(read_arguments))
     assert page["text"].startswith(row["excerpt"])
+
+
+def test_duplicate_archived_sources_do_not_consume_search_budget(scoped):
+    """One source archived in many reachable batches must not crowd out other
+    matching sources from history_search's 8-result budget (issue #7943)."""
+    repeated = HumanMessage(content="cats everywhere", id="msg-repeat")
+    state = {}
+    config = TaskContinuityConfig(enabled=True)
+
+    # Nine batches that all contain the same source, plus a filler per batch.
+    for i in range(9):
+        update = archive.capture(state, scoped, [HumanMessage(content=f"filler {i}", id=f"msg-f{i}"), repeated], config)
+        state = {**state, **{"task_history": update}}
+
+    # A different matching source in a later batch.
+    update = archive.capture(state, scoped, [HumanMessage(content="cats answer key unique", id="msg-b0")], config)
+    state = {**state, **{"task_history": update}}
+
+    result = archive.lookup(state, scoped, query="cats")
+
+    ids = {row["id"] for row in result["results"]}
+    assert len(ids) == 2, f"expected both distinct sources, got {ids}"
+    texts = " | ".join(row["text"] for row in result["results"])
+    assert "cats answer key unique" in texts

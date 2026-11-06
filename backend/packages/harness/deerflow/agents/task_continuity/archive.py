@@ -215,7 +215,11 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else []), 8]
+                    # Over-fetch so one source archived in many batches cannot
+                    # consume the whole budget before source-ID deduplication
+                    # below hides other matching sources (#7943). The reachable
+                    # batches hold at most 64*1024 rows; dedup then caps at 8.
+                    parameters = [match, *batches, *([role] if role is not None else []), len(batches) * 256]
                     rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
