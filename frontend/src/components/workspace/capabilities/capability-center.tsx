@@ -26,6 +26,20 @@ const subscribeHydration = () => () => undefined;
 const clientHydrated = () => true;
 const serverHydrated = () => false;
 
+// Scrolls only the strip. scrollIntoView would also move the page, pulling it
+// back up if the strip resizes after the user has scrolled past it.
+function revealActiveTab(strip: HTMLElement) {
+  const tab = strip.querySelector('[role="tab"][data-state="active"]');
+  if (!tab) return;
+  const tabBox = tab.getBoundingClientRect();
+  const stripBox = strip.getBoundingClientRect();
+  if (tabBox.left < stripBox.left) {
+    strip.scrollLeft -= Math.ceil(stripBox.left - tabBox.left);
+  } else if (tabBox.right > stripBox.right) {
+    strip.scrollLeft += Math.ceil(tabBox.right - stripBox.right);
+  }
+}
+
 export function CapabilityCenter() {
   const hydrated = useSyncExternalStore(
     subscribeHydration,
@@ -46,12 +60,16 @@ export function CapabilityCenter() {
   // The detail view shows one extension, so there is no directory to filter.
   const showSearch = !(tab === "extensions" && params.get("extension"));
   const [query, setQuery] = useState("");
-  // The tab strip scrolls on narrow screens; keep the active tab visible.
+  // The tab strip scrolls on narrow screens. Keep the active tab visible when
+  // the tab changes or the strip resizes, and leave manual swipes alone.
   const tabsRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    tabsRef.current
-      ?.querySelector('[role="tab"][data-state="active"]')
-      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const strip = tabsRef.current;
+    if (!strip) return;
+    // A new observation reports the current size at once, covering tab changes.
+    const observer = new ResizeObserver(() => revealActiveTab(strip));
+    observer.observe(strip);
+    return () => observer.disconnect();
   }, [tab]);
   function changeTab(value: string) {
     setQuery("");
@@ -106,7 +124,7 @@ export function CapabilityCenter() {
             ref={tabsRef}
             value={tab}
             onValueChange={changeTab}
-            className="mb-7 overflow-x-auto border-b pb-px [scrollbar-width:none]"
+            className="mb-7 overflow-x-auto border-b pb-px [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
             <TabsList variant="line" className="h-12 gap-7">
               <TabsTrigger value="plugins" className="gap-2 px-1 pb-4 text-sm">

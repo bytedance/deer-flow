@@ -4,11 +4,27 @@ import { mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { extensionCatalog } from "../../src/core/extensions/catalog";
 
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
+
+// Found by computed style, so renaming the scroller's classes cannot break it.
+function capabilityCenterScroller(page: Page) {
+  return page
+    .getByRole("heading", { name: "Capability Center" })
+    .evaluateHandle((node) => {
+      let scroller = node.parentElement;
+      while (scroller && getComputedStyle(scroller).overflowY !== "auto") {
+        scroller = scroller.parentElement;
+      }
+      if (!scroller) {
+        throw new Error("Capability Center has no scrolling ancestor");
+      }
+      return scroller;
+    });
+}
 
 let gateway: ChildProcess;
 let gatewayURL: string;
@@ -692,12 +708,10 @@ test("extension detail fits a narrow viewport with its tab in view", async ({
       exact: true,
     }),
   ).toBeVisible();
-  const heading = page.getByRole("heading", { name: "Capability Center" });
-  const overflow = await heading.evaluate((node) => {
-    const scroller = node.closest<HTMLElement>(".overflow-y-auto");
-    return scroller ? scroller.scrollWidth - scroller.clientWidth : null;
-  });
-  expect(overflow).toBe(0);
+  const scroller = await capabilityCenterScroller(page);
+  expect(
+    await scroller.evaluate((node) => node.scrollWidth - node.clientWidth),
+  ).toBe(0);
   const note = page.getByRole("note");
   const noteBox = await note.boundingBox();
   const textBox = await note
@@ -709,6 +723,71 @@ test("extension detail fits a narrow viewport with its tab in view", async ({
   expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
     noteBox!.x + noteBox!.width,
   );
+});
+
+test("capability tabs realign on resize without moving the page", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.setViewportSize({ width: 375, height: 480 });
+  await page.goto("/workspace/capabilities?tab=extensions");
+  const extensions = page.getByRole("tab", {
+    name: "Extensions",
+    exact: true,
+  });
+  const strip = page
+    .getByRole("tablist")
+    .filter({ has: extensions })
+    .locator("..");
+  const clippedBy = async (tab: Locator) => {
+    const [tabBox, stripBox] = await Promise.all([
+      tab.boundingBox(),
+      strip.boundingBox(),
+    ]);
+    return Math.max(
+      stripBox!.x - tabBox!.x,
+      tabBox!.x + tabBox!.width - stripBox!.x - stripBox!.width,
+    );
+  };
+  await expect(extensions).toBeInViewport({ ratio: 1 });
+
+  // A manual swipe stays where the user left it.
+  await strip.evaluate((node) => {
+    node.scrollLeft = 0;
+  });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  expect(await strip.evaluate((node) => node.scrollLeft)).toBe(0);
+  expect(await clippedBy(extensions)).toBeGreaterThan(0);
+
+  // Scrolled past the strip, a resize realigns it and leaves the page alone.
+  const scroller = await capabilityCenterScroller(page);
+  await scroller.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(strip).not.toBeInViewport();
+  await page.setViewportSize({ width: 320, height: 480 });
+  await expect.poll(() => clippedBy(extensions)).toBeLessThan(1);
+  await expect(strip).not.toBeInViewport();
+
+  // The same holds for a tab clipped on the other side.
+  await page.setViewportSize({ width: 375, height: 480 });
+  await page.goto("/workspace/capabilities?tab=plugins");
+  const tools = page.getByRole("tab", {
+    name: "Tools & integrations",
+    exact: true,
+  });
+  await expect(tools).toBeInViewport({ ratio: 1 });
+  await strip.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+  });
+  expect(await clippedBy(tools)).toBeGreaterThan(0);
+  await page.setViewportSize({ width: 320, height: 480 });
+  await expect.poll(() => clippedBy(tools)).toBeLessThan(1);
 });
 
 test("unregistered plugin pages stay unavailable", async ({ page }) => {
