@@ -35,6 +35,16 @@ and without rewriting storage. It also reads a stored null `description`
 route now stores an explicit null as `""`. Other config errors still
 raise, and API create/update validation remains strict.
 
+The custom-agent identifier (`AGENT_NAME_PATTERN`, `^[A-Za-z0-9-]+$`) is a
+directory component under the agent root, and `FileAgentStore.create` writes
+`config.yaml` inside it. The character class alone admits Windows reserved
+device names (`NUL`, `CON`, `COM1`, ...), and that write then fails on Windows
+with `FileNotFoundError`. `validate_agent_name()` therefore also rejects them
+through `windows_incompatible_segment()` — the same check uploads, sandbox
+writes, skill support files and thread IDs use — on every platform. Keep the
+Gateway's 422 for these names so an unusable identifier never reaches the store
+and surfaces as a 500.
+
 **Main Configuration** (`config.yaml`):
 
 Setup: Copy root `config.example.yaml` to `config.yaml`. Startup callers use

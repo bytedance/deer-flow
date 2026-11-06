@@ -18,6 +18,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstr
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -161,14 +162,34 @@ class GitHubAgentConfig(BaseModel):
         return self
 
 
-def validate_agent_name(name: str | None) -> str | None:
-    """Validate a custom agent name before using it in filesystem paths."""
+def validate_agent_name(name: str | None, *, for_creation: bool = False) -> str | None:
+    """Validate a custom agent name before using it in filesystem paths.
+
+    Args:
+        name: The identifier to check. ``None`` passes through unchanged.
+        for_creation: Also refuse names that cannot be created as a host path
+            component, i.e. Windows reserved device names such as ``NUL`` or
+            ``COM1``. A name is a directory under the agent root and
+            ``FileAgentStore.create`` writes ``config.yaml`` inside it; on
+            Windows that open resolves to the device, so creation died with
+            ``FileNotFoundError`` after ``mkdir`` had appeared to succeed. Only
+            creation and update set this: reading and deleting an agent that
+            already exists must keep working, matching the documented contract
+            of ``windows_incompatible_segment()``.
+    """
     if name is None:
         return None
     if not isinstance(name, str):
         raise ValueError("Invalid agent name. Expected a string or None.")
     if not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+    if for_creation:
+        # Reuse the canonical Windows-name check that uploads, sandbox writes,
+        # skill support files and thread IDs already go through, so every name
+        # that becomes a host path is rejected on every platform by one rule.
+        reason = windows_incompatible_segment(name)
+        if reason is not None:
+            raise ValueError(f"Invalid agent name '{name}': {reason}")
     return name
 
 
