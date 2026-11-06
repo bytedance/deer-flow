@@ -704,7 +704,9 @@ class TestChannelManager:
 
         bus = MessageBus()
         store = JsonChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
-        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://localhost:8001")
+        # An external Gateway keeps langgraph_sdk.get_client(); loopback hosts
+        # build a trust_env=False client and are covered by the run-client tests.
+        manager = ChannelManager(bus=bus, store=store, langgraph_url="http://gateway.example.com/api")
 
         with patch("langgraph_sdk.get_client") as get_client:
             get_client.return_value = object()
@@ -713,7 +715,7 @@ class TestChannelManager:
 
         get_client.assert_called_once()
         kwargs = get_client.call_args.kwargs
-        assert kwargs["url"] == "http://localhost:8001"
+        assert kwargs["url"] == "http://gateway.example.com/api"
         headers = kwargs["headers"]
         csrf_token = headers["X-CSRF-Token"]
         assert csrf_token

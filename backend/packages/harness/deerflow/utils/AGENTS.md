@@ -243,3 +243,14 @@ retries; the helper remains responsible for error classification and cadence.
 `parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
 and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
 shared delay bound. Callers retain numeric/header precedence and local backoff.
+
+### Control-plane HTTP proxy policy
+
+`http_policy.control_plane_trust_env(url)` decides whether a client inherits
+`HTTP_PROXY`: loopback, private and link-local hosts are control-plane traffic
+and bypass it; external hosts keep the environment proxy. `app.channels.manager`
+uses it for both `_make_gateway_client` and `_make_langgraph_client`.
+`langgraph_sdk.get_client()` hard-codes `trust_env=True` and exposes no transport
+override, so the `runs.wait` client for local Gateways is assembled on our own
+`httpx.AsyncClient` with `trust_env=False`; otherwise #7876 keeps reproducing.
+Importing `ChannelManager` must not pull in `deerflow.community.aio_sandbox`.
