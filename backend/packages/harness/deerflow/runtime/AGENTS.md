@@ -370,6 +370,8 @@ checkpoint/messages first. Each complete evaluator invocation keeps its own usag
 ID and observer call; one final decision updates Goal counters. Valid verdicts,
 length/safety stops, and transport/configuration errors are not format retries.
 
+Batch/job/task registration or a scheduled continuation is not Goal completion: require the requested result or artifact to exist or be delivered. This prevents asynchronous acceptance from being misread as delivery.
+
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer
 notification can fail. Critic tokens/cache reads and distinct calls belong to
