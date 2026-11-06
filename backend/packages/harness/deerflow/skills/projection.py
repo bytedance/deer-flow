@@ -422,7 +422,7 @@ def _manifest_path(scope_root: Path) -> Path:
 def _read_manifest(scope_root: Path) -> dict | None:
     try:
         value = json.loads(_manifest_path(scope_root).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
 

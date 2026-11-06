@@ -110,7 +110,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             logger.warning("Failed to read skill states file %s", self._skill_states_file)
         return {}
 
