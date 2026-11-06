@@ -102,3 +102,20 @@ class TestArchiveInstallRejectsDeviceNames:
             storage._prepare_skill_archive(archive, tmp_path / "extract", custom_dir, archive)
 
         assert not (custom_dir / "nul").is_dir()
+
+    def test_prepare_rejects_a_device_named_member_segment(self, tmp_path):
+        # Portable archive folder and portable frontmatter name: only a support
+        # file's segment is unusable, so this pins the extraction guard itself
+        # rather than the frontmatter name check.
+        storage = LocalSkillStorage(host_path=str(tmp_path / "skills"))
+        archive = tmp_path / "member-segment.skill"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("my-skill/SKILL.md", "---\nname: my-skill\ndescription: probe\n---\n")
+            zf.writestr("my-skill/references/nul.md", "support file\n")
+        custom_dir = tmp_path / "skills" / "custom"
+        custom_dir.mkdir(parents=True)
+
+        with pytest.raises(ValueError, match="Archive member path"):
+            storage._prepare_skill_archive(archive, tmp_path / "extract", custom_dir, archive)
+
+        assert not (custom_dir / "my-skill").is_dir()
