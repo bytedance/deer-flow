@@ -72,7 +72,7 @@ def probe_layout() -> tuple[str, str]:
     """The per-user manifest and per-agent facts paths, as the runtime resolves them."""
     memory_path = memory_file_path(DeerMemConfig(storage_path=PROBE_ROOT), user_id=PROBE_USER_ID)
     facts_path = agent_facts_directory(memory_path, PROBE_AGENT_NAME)
-    return str(memory_path.relative_to(PROBE_ROOT)), str(facts_path.relative_to(PROBE_ROOT))
+    return memory_path.relative_to(PROBE_ROOT).as_posix(), facts_path.relative_to(PROBE_ROOT).as_posix()
 
 
 @pytest.mark.parametrize("path", MEMORY_GUIDES, ids=str)
