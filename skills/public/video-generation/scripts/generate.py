@@ -2,6 +2,7 @@ import base64
 import os
 import sys
 import time
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
@@ -167,11 +168,36 @@ def download(url: str, output_file: str) -> None:
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is not set")
-    response = requests.get(url, headers={"x-goog-api-key": gemini_api_key}, timeout=300)
-    response.raise_for_status()
-    _ensure_output_dir(output_file)
-    with open(output_file, "wb") as f:
-        f.write(response.content)
+    invalid_url_message = "Gemini video downloads require valid HTTPS URLs without embedded credentials"
+    for _ in range(11):
+        try:
+            parsed = urlsplit(url)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(invalid_url_message) from exc
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError(invalid_url_message)
+        # Requests preserves custom API-key headers across redirects; scope them to each hop's origin.
+        trusted = parsed.hostname == "generativelanguage.googleapis.com" and port in (None, 443)
+        headers = {"x-goog-api-key": gemini_api_key} if trusted else {}
+        try:
+            response = requests.get(url, headers=headers, timeout=300, allow_redirects=False)
+        except requests.exceptions.InvalidURL as exc:
+            # Requests can parse the next redirect URL even with allow_redirects=False.
+            raise ValueError(invalid_url_message) from exc
+        response.raise_for_status()
+        if response.status_code in (301, 302, 303, 307, 308):
+            location = response.headers.get("Location")
+            response.close()
+            if not location:
+                raise ValueError("Gemini video download redirect has no Location")
+            url = urljoin(url, location)
+            continue
+        _ensure_output_dir(output_file)
+        with open(output_file, "wb") as f:
+            f.write(response.content)
+        return
+    raise requests.TooManyRedirects("Gemini video download exceeded 10 redirects")
 
 
 def _generate_video_gemini(prompt: str, reference_images: list[str], output_file: str, aspect_ratio: str = "16:9") -> str:
