@@ -303,6 +303,17 @@ def _middleware_fingerprint(middleware):
     ).fingerprint
 
 
+def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    current = TodoMiddleware()
+    previous = TodoMiddleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params.pop("completion_reminder_hard_stop_reasons") == ["loop_capped", "token_capped"]
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
 def _continuity_summarizer(config):
     from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 

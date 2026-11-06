@@ -8,8 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelRequest
+from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
@@ -306,6 +308,15 @@ class TestToolCallIntentOrError:
 
 
 class TestAfterModel:
+    @pytest.mark.parametrize("stop_reason", [None, "custom_stop", [], {}])
+    def test_unrecognized_stop_reason_keeps_completion_reminders(self, stop_reason):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+
     def test_returns_none_when_agent_still_using_tools(self):
         mw = TodoMiddleware()
         state = {
@@ -609,6 +620,76 @@ class TestWrapModelCall:
 
 
 class TestTodoMiddlewareAgentGraphIntegration:
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("guard_kind", ["loop", "token"])
+    @pytest.mark.parametrize("pending", [True, False], ids=["unfinished", "completed"])
+    def test_run_hard_stop_does_not_reengage_todos(self, invoke_async, guard_kind, pending):
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+        from deerflow.config.token_budget_config import TokenBudgetConfig
+
+        executed = []
+
+        @tool
+        def record_action(marker: str) -> str:
+            """Record a harmless action in memory."""
+            executed.append(marker)
+            return marker
+
+        def action(marker, call_id, tokens=10):
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "record_action", "args": {"marker": marker}, "id": call_id}],
+                usage_metadata={"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+            )
+
+        todos = [{"content": "Record the requested actions", "status": "pending" if pending else "completed"}]
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": todos}, "id": "todos-start"}]),
+                action("repeated", "first"),
+                action("repeated", "blocked", tokens=1000 if guard_kind == "token" else 10),
+                # A different action makes unintended post-stop execution observable.
+                action("after-stop", "after-stop"),
+                AIMessage(content="final answer"),
+                AIMessage(content="final answer"),
+                AIMessage(content="final answer"),
+            ]
+        )
+        todo_mw = TodoMiddleware()
+        guard = LoopDetectionMiddleware(warn_threshold=2, hard_limit=2) if guard_kind == "loop" else TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        # Production registers Todo before the guards; after_model runs in reverse.
+        graph = create_agent(model=model, tools=[record_action], middleware=[todo_mw, guard], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "hard-stop-thread"}, "recursion_limit": 100}
+        context = {"thread_id": "hard-stop-thread", "run_id": "hard-stop-run"}
+        state = {"messages": [("user", "Record actions and track todos.")]}
+
+        def invoke(state, context):
+            return asyncio.run(graph.ainvoke(state, context=context, config=config)) if invoke_async else graph.invoke(state, context=context, config=config)
+
+        result = invoke(state, context)
+
+        assert context["stop_reason"] == ("loop_capped" if guard_kind == "loop" else "token_capped")
+        assert executed == ["repeated"]
+        assert len(model.seen_messages) == 3
+        assert result["todos"] == todos
+        assert not result["messages"][-1].tool_calls
+        assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
+        assert todo_mw._pending_completion_reminders == {}
+        snapshot = graph.get_state(config)
+        assert snapshot.next == ()
+        assert snapshot.values["todos"] == todos
+
+        if pending:
+            # Restore the same thread from its checkpoint without resupplying Todo.
+            # The old cap must not disable the new run or recount historical usage.
+            next_context = {"thread_id": "hard-stop-thread", "run_id": "next-run"}
+            next_result = invoke({"messages": [("user", "Continue the unfinished task.")]}, next_context)
+            assert "stop_reason" not in next_context
+            assert executed == ["repeated", "after-stop"]
+            assert any(_todo_completion_reminders(messages) for messages in model.seen_messages[3:])
+            assert next_result["todos"] == todos
+
     def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
         mw = TodoMiddleware()
         model = _CapturingFakeMessagesListChatModel(
