@@ -189,10 +189,9 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 
-Replacement imports use current fact revisions for existing IDs, including
-when the backup omits a revision. Keep the current manifest, upsert, absence,
-and delete preconditions so a concurrent write still rejects the import.
-Normalize copied facts only; caller-owned backups stay unchanged.
+Replacement imports copy facts and use current revisions for existing IDs,
+even if backup revisions are absent. Keep manifest, upsert, absence and delete
+preconditions.
 
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
