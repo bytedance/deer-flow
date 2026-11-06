@@ -172,7 +172,7 @@ def open_analysis_cache(files: list[str]):
     directory.mkdir(mode=0o700)
     database = directory / "data.duckdb"
     con = None
-    publication_started = False
+    possibly_published = False
     try:
         logger.info("Loading files into a private cache generation...")
         con = duckdb.connect(str(database))
@@ -187,15 +187,22 @@ def open_analysis_cache(files: list[str]):
         con = duckdb.connect(str(database), read_only=True)
         destination = root / f"{files_hash}.json"
         with _prepare_cache_manifest(root, generation, table_map) as temporary:
-            # A reader may have its ID if replace succeeds before an interruption.
-            publication_started = True
-            os.replace(temporary, destination)
+            # Replacement may succeed before an interruption reaches Python.
+            possibly_published = True
+            try:
+                os.replace(temporary, destination)
+            except BaseException:
+                # A successful replacement consumes this unique source even
+                # if a concurrent builder has since replaced the destination.
+                if os.path.exists(temporary):
+                    possibly_published = False
+                raise
         logger.info("Loaded %s table(s): %s", len(table_map), ", ".join(table_map))
         yield con, table_map
     finally:
         if con is not None:
             con.close()
-        if not publication_started:
+        if not possibly_published:
             shutil.rmtree(directory)
 
 

@@ -35,9 +35,23 @@ def configure(cache, source):
     return scope
 
 
-def worker(cache, source, started, finish, results, hold, load_barrier=None):
+def worker(
+    cache,
+    source,
+    started,
+    finish,
+    results,
+    hold,
+    load_barrier=None,
+    *,
+    require_cache_hit=False,
+):
     try:
         scope = configure(cache, source)
+        if require_cache_hit:
+            scope["load_files"] = lambda *_: pytest.fail(
+                "reader must reuse the published cache"
+            )
         if load_barrier is not None:
             loader = scope["load_files"]
 
@@ -159,7 +173,9 @@ def test_reader_can_open_cache_at_publication_barrier(tmp_path, input_file):
         target=publication_worker, args=(cache, input_file, published, release, results)
     )
     reader = ctx.Process(
-        target=worker, args=(cache, input_file, published, release, results, False)
+        target=worker,
+        args=(cache, input_file, published, release, results, False),
+        kwargs={"require_cache_hit": True},
     )
     publisher.start()
     try:
@@ -423,6 +439,7 @@ def test_publication_failure_preserves_prior_manifest(
     data["format"] = 0  # Force repair, retaining the original publication.
     path.write_text(json.dumps(data), encoding="utf-8")
     before = path.read_bytes()
+    original_generations = set(cache.rglob("*.duckdb"))
 
     def fail(*args):
         raise OSError("publication failed")
@@ -432,8 +449,28 @@ def test_publication_failure_preserves_prior_manifest(
         with pytest.raises(OSError, match="publication failed"):
             scope["main"]()
     assert path.read_bytes() == before
+    assert set(cache.rglob("*.duckdb")) == original_generations
     assert list(cache.rglob("*.tmp")) == []
     scope["main"]()
+
+
+def test_failed_replacement_retries_remove_private_generations(tmp_path, input_file):
+    cache = tmp_path / "cache"
+    scope = configure(cache, input_file)
+    root = cache / "generations-v1"
+    manifest_path = root / f"{scope['compute_files_hash']([str(input_file)])}.json"
+    manifest_path.mkdir(parents=True)
+
+    # A directory at the destination makes the real atomic replacement fail.
+    for _ in range(3):
+        with pytest.raises(OSError) as error:
+            scope["main"]()
+        assert Path(error.value.filename2) == manifest_path
+        assert list(root.iterdir()) == [manifest_path]
+
+    manifest_path.rmdir()
+    with scope["open_analysis_cache"]([str(input_file)]) as (con, _):
+        assert con.execute("SELECT value FROM report").fetchall() == [(7,)]
 
 
 def test_interrupted_cache_validation_closes_reader(tmp_path, input_file, monkeypatch):
