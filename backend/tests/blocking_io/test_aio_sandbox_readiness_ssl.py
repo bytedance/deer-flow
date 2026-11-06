@@ -103,3 +103,40 @@ async def test_sandbox_readiness_closes_client_built_after_cancellation(monkeypa
     assert sent == [], "a cancelled construction must not send a poll"
     assert len(built) == 1
     assert built[0].is_closed, "the client built after the cancellation was leaked"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "log_fragment"),
+    [
+        ("construction", "construction failed after cancellation"),
+        ("close", "built after cancellation failed"),
+    ],
+)
+async def test_sandbox_readiness_preserves_caller_cancellation_when_owned_task_is_cancelled(monkeypatch, caplog, stage, log_fragment):
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+
+    class Client:
+        async def aclose(self):
+            raise asyncio.CancelledError("close task cancelled")
+
+    def build_client(**kwargs):
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "the constructor was never released"
+        if stage == "construction":
+            raise asyncio.CancelledError("construction task cancelled")
+        return Client()
+
+    monkeypatch.setattr(httpx, "AsyncClient", build_client)
+    pending = asyncio.create_task(wait_for_sandbox_ready_async("http://sandbox.example:8080", timeout=5))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+    finally:
+        pending.cancel("readiness caller cancelled")
+        release.set()
+
+    with pytest.raises(asyncio.CancelledError, match="readiness caller cancelled"):
+        await pending
+    assert log_fragment in caplog.text

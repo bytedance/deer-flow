@@ -126,7 +126,9 @@ async def _open_client(**kwargs: Any) -> httpx.AsyncClient:
     the worker is still inside the constructor, and then the await is abandoned
     while the thread goes on to hand back a live client that nobody closes. So
     own the construction as a task and, once cancelled, wait for it and close
-    whatever it produced before the cancellation propagates.
+    whatever it produced before the cancellation propagates. If either owned
+    task fails or is itself cancelled, log it and re-raise the caller's original
+    cancellation.
     """
     construction: asyncio.Task[httpx.AsyncClient] = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, **kwargs))
     try:
@@ -134,13 +136,13 @@ async def _open_client(**kwargs: Any) -> httpx.AsyncClient:
     except asyncio.CancelledError:
         try:
             late_client = await _settle(construction)
-        except Exception as error:
-            logger.error(f"Sandbox readiness HTTPX client construction failed after cancellation: {error!s}")
+        except (Exception, asyncio.CancelledError) as error:
+            logger.error("Sandbox readiness HTTPX client construction failed after cancellation: %r", error)
         else:
             try:
                 await _settle(asyncio.create_task(late_client.aclose()))
-            except Exception as error:
-                logger.error(f"Closing a sandbox readiness HTTPX client built after cancellation failed: {error!s}")
+            except (Exception, asyncio.CancelledError) as error:
+                logger.error("Closing a sandbox readiness HTTPX client built after cancellation failed: %r", error)
         raise
 
 
