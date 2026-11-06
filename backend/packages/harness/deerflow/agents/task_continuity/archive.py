@@ -215,11 +215,15 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else []), 8]
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
+                    parameters = [match, *batches, *([role] if role is not None else [])]
+                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
-                    found[row["id"]] = row
+                    # Repeated archives share one result slot; keep FTS order
+                    # and stop reading once eight distinct sources are selected.
+                    found.setdefault(row["id"], row)
+                    if len(found) == 8:
+                        break
                 if excerpts and query is not None and found:
                     # A source may be archived at different lengths; select its first stored version, as history_read does.
                     ids = list(found)
