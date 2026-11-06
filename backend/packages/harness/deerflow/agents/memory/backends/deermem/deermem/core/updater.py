@@ -1035,6 +1035,10 @@ class MemoryUpdater:
         raw_facts = memory_data.get("facts")
         if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
             raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        for fact in raw_facts:
+            revision = fact.get("revision", 1)
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)

@@ -84,6 +84,44 @@ def test_import_current_backup_is_idempotent(manager: DeerMem, agent_name: str |
 
 
 @pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("existing_id", [True, False], ids=["existing", "new"])
+@pytest.mark.parametrize("revision", [0, -1, True, False, 1.5, "1", None], ids=["zero", "negative", "true", "false", "float", "string", "null"])
+def test_import_rejects_invalid_backup_revision(manager: DeerMem, agent_name: str | None, existing_id: bool, revision: object) -> None:
+    scope = {"user_id": "alice", "agent_name": agent_name}
+    _, fact_id = manager.create_fact("Use PostgreSQL", **scope)
+    assert fact_id is not None
+    backup = manager.get_memory(**scope)
+    backup["facts"][0]["revision"] = revision
+    if not existing_id:
+        backup["facts"][0]["id"] = "new_fact"
+    original = copy.deepcopy(backup)
+    manager.update_fact(fact_id, content="Use SQLite", **scope)
+    manager.create_fact("Keep the post-backup fact", **scope)
+    before = manager.get_memory(**scope)
+
+    with pytest.raises(ValueError, match=r"fact\.revision must be an integer >= 1"):
+        manager.import_memory(backup, **scope)
+
+    assert manager.reload_memory(**scope) == before
+    assert backup == original
+
+
+def test_import_validates_revisions_before_capacity_selection(manager: DeerMem) -> None:
+    scope = {"user_id": "alice"}
+    _, fact_id = manager.create_fact("Keep the current preference", **scope)
+    assert fact_id is not None
+    before = manager.get_memory(**scope)
+    backup = copy.deepcopy(before)
+    backup["facts"].append({"id": "invalid", "content": "Low-confidence fact", "confidence": 0.1, "revision": 0})
+    manager._updater._config.max_facts = 1
+
+    with pytest.raises(ValueError, match=r"fact\.revision must be an integer >= 1"):
+        manager.import_memory(backup, **scope)
+
+    assert manager.reload_memory(**scope) == before
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
 def test_import_recreates_deleted_fact_and_removes_post_backup_fact(manager: DeerMem, agent_name: str | None) -> None:
     scope = {"user_id": "alice", "agent_name": agent_name}
     _, fact_id = manager.create_fact("Use PostgreSQL", **scope)

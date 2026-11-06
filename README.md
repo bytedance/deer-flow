@@ -3611,8 +3611,10 @@ Single-fact repository operations are genuinely incremental: an upsert/delete re
 
 DeerMem backup imports restore saved fact contents even after those facts have
 been edited, using the current stored revisions to protect the restore. Older
-backups may omit fact revisions. A concurrent write during import still returns
-HTTP 409 so the caller can reload and retry.
+backups may omit fact revisions. Backup revisions are validated before the
+importer substitutes current revisions. Rejected imports preserve stored memory.
+A concurrent write during import still returns HTTP 409 so the caller can reload
+and retry.
 
 Legacy facts in `memory.json` migrate automatically into the reserved `__default__` Markdown bucket on the user's first normal memory read. Operators who prefer to audit or complete the migration before serving traffic can run the optional idempotent CLI from `backend/`:
 
