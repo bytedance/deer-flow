@@ -35,6 +35,13 @@ fresh bash creation, execution, polling and cleanup. Only that private path
 skips the shared implicit-shell lock. Releasing entries reject admission and stay
 visible to close until drained; queued calls recheck identity. Keep same-scope
 ordering, fresh env sessions, cancellation ownership and closed admission.
+`scope_lock_held=True` requires ownership of the registered scope lock for the
+whole invocation, including retries. Release has no separate drain deadline;
+HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
+ownership until work drains before client detach or reuse can be safe.
+Each concurrently executing env scope adds one transient Bash session. There is
+no separate client session cap; deployments must budget server session/process
+capacity for the configured concurrency.
 Regressions: `tests/test_aio_scoped_env_concurrency.py`.
 
 ## Reuse admission

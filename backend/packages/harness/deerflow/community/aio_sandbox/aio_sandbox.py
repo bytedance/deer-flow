@@ -595,7 +595,7 @@ class AioSandbox(Sandbox):
 
         Commands within a scope remain serialized, while independent subagents
         use distinct server-side sessions and can execute concurrently. Secret-
-        bearing commands keep the existing fresh ``bash.exec`` behavior.
+        bearing commands keep the per-call fresh ``bash.exec`` session semantics.
         """
         if scope_id is None:
             return self.execute_command(command, env=env, timeout=timeout)
@@ -705,7 +705,14 @@ class AioSandbox(Sandbox):
             return f"Error: {e}"
 
     def release_command_scope(self, scope_id: str) -> None:
-        """Release execution metadata and its explicit shell session."""
+        """Fence new commands, drain in-flight work, then release the session.
+
+        Waiting for the scope lock has no separate deadline. An active command
+        can hold it for its remaining command timeout (600s by default), plus
+        session creation, transport/recovery and cleanup time. Callers holding
+        a thread-key serializer must account for this in their release budget.
+        Returning early would require retaining ownership until work is drained.
+        """
         self._command_scopes.release(scope_id)
         with self._scope_registry_lock:
             scoped = self._scoped_shell_sessions.get(scope_id)
@@ -1004,6 +1011,9 @@ class AioSandbox(Sandbox):
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
         injected commands use the ``bash.exec`` API which accepts per-command env.
+        If ``scope_lock_held`` is True, the caller must hold the registered
+        per-scope execution lock through this call, including recovery retries;
+        see ``_run_bash_exec`` for the drain contract.
         Each call creates an explicit transient session and closes it after the
         command, so injected request-scoped secrets are scoped to this command,
         never persist across calls, and do not consume the server's session
@@ -1122,7 +1132,13 @@ class AioSandbox(Sandbox):
         *,
         scope_lock_held: bool = False,
     ) -> tuple[str, str | None]:
-        """Single bash.exec invocation in an explicitly released fresh session."""
+        """Single bash.exec invocation in an explicitly released fresh session.
+
+        ``scope_lock_held=True`` requires the caller to hold its registered
+        ``_ScopedShellSession.lock`` for this entire invocation. Release/close
+        join that lock to drain work before detaching the client; the shared
+        lock is skipped only under this precondition.
+        """
         scope = current_command_scope(self)
         # Scoped callers already hold their registered execution lock, which
         # close() and release_command_scope() drain before detaching the client.
