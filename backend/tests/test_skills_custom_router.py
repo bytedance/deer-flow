@@ -2053,7 +2053,10 @@ def test_custom_skill_rollback_history_survives_concurrent_put(monkeypatch, tmp_
     original_content = _skill_content("demo-skill")
     current_content = _skill_content("demo-skill", "Current skill")
     concurrent_content = _skill_content("demo-skill", "Concurrent edit")
-    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8")
+    # Model the API's own write (``newline=""`` keeps the caller's LF): a
+    # default text write turns LF into os.linesep on Windows, so the bytes the
+    # rollback records would not match ``current_content``.
+    (custom_dir / "SKILL.md").write_text(current_content, encoding="utf-8", newline="")
 
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
