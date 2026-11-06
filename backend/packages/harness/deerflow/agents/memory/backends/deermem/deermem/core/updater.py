@@ -1050,16 +1050,17 @@ class MemoryUpdater:
                 user_id=user_id,
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
+            upsert_revisions = {fact["id"]: (int(current_by_id[fact["id"]].get("revision") or 1) if fact["id"] in current_by_id else None) for fact in incoming_facts}
             # Backup revisions describe the exported snapshot; writes use the
             # current snapshot's preconditions, including the fact payload.
             for fact in incoming_facts:
-                current_fact = current_by_id.get(str(fact["id"]))
-                if current_fact is not None:
-                    fact["revision"] = int(current_fact.get("revision") or 1)
-            incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+                current_revision = upsert_revisions[fact["id"]]
+                if current_revision is not None:
+                    fact["revision"] = current_revision
+            incoming_ids = set(upsert_revisions)
             change_set = {
                 "upserts": incoming_facts,
-                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "upsertRevisions": upsert_revisions,
                 "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
                 "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
             }
