@@ -39,19 +39,18 @@ post-start errors cannot prove absence. Restricted creation must not opt in:
 its proxy may already own the port, even if the final sandbox CLI cannot start.
 Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
 
-Restricted creation tracks the proxy's `docker create` boundary per attempt.
-Only a definite CLI spawn failure, successful proxy removal, or authoritative
-proxy absence permits returning its port. Preserve the creation error through
-ordinary rollback/probe failures; network removal can fail after the port is free.
-Register each attempt before creating resources, and compare its identity before
-every release, including after successful rollback. Active attempts keep their
-reservations during same-ID retry checks. Destroy captures failed attempts before
-I/O, and can capture an active attempt only when its port matches the metadata.
-Empty-URL replacement cleanup releases captured reservations after success;
-overlapping teardowns retain them until the last owner finishes. Fenced absent
-teardown also uses an entry snapshot so late completion preserves newer records.
-Durable uncertain-start admission needs its own
-generation-safe recovery contract. Regressions:
+Restricted creation tracks only the current call's proxy `docker create` boundary.
+A definite non-creation, confirmed proxy removal, or authoritative proxy absence
+permits returning its port. Preserve the creation error through ordinary
+rollback/probe failures and log their diagnostics. Register the reservation in
+`_unknown_cleanup_ports` before resources become discoverable; compare its token
+before release. Destroy transfers that token to its existing teardown entry so
+late startup failures cannot release a successor's port. Successful creation
+forgets only its own token without releasing the port.
+Uncertain reservations remain for the existing fenced `complete_absent_teardown`
+path or process restart. Ordinary creation does not reconcile earlier failures,
+and empty-URL destruction does not infer ports from unrelated unknown entries.
+Durable creation identity and automatic recovery are separate work. Regressions:
 `tests/test_aio_sandbox_restricted_creation_ports.py`.
 
 An implicit-shell fence is sticky for the container's lifetime, even after a

@@ -1109,11 +1109,11 @@ CLI startup returns the reserved port while reporting the original error, so
 repeated attempts do not exhaust the port range. Restricted network creation
 returns its reservation when no proxy could have been created or after confirming
 that the proxy has been removed, including when later network cleanup fails.
-An uncertain proxy keeps its reservation. Before another attempt for the same sandbox allocates a
-port, the local backend checks whether that proxy has disappeared and reclaims
-the pending reservation. These failed-creation records have the lifetime of the
-local backend instance.
-Replacement cleanup also recovers recorded ports when sandbox URLs are empty.
+An uncertain proxy keeps its reservation in the existing local cleanup ledger.
+Later creation attempts do not automatically reclaim it. The reservation remains
+until the existing ownership-fenced absent teardown completes or the backend
+process restarts. This bookkeeping does not provide durable recovery across
+backend instances.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
