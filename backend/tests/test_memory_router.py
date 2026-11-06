@@ -1120,3 +1120,25 @@ def test_read_routes_keep_working_for_windows_reserved_agent_name(tmp_path):
         response = client.get("/api/memory/export", params={"agent_name": "NUL"})
 
     assert response.status_code == 200
+
+
+def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
+    """Deletes must stay permissive so an older release's scope can still be cleared.
+
+    ``windows_incompatible_segment()`` applies when a name is created, not when an
+    existing scope is removed. A delete-only change set on a fresh scope writes
+    nothing under ``agents/``, so a legacy reserved-name scope stored by an older
+    Linux release remains clearable (200) rather than rejected with 422.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.delete("/api/memory", params={"agent_name": "NUL"})
+
+    assert response.status_code == 200
+    assert not (tmp_path / "users" / "alice" / "agents").exists()

@@ -194,6 +194,11 @@ def _management_agent_name_or_501(
     if for_creation:
         # Reuse the canonical Windows-name check that agent directories,
         # thread IDs, uploads, sandbox writes and skill support files use.
+        # Sibling PR #7939 applies the same rule inside the shared
+        # ``validate_agent_name()`` (``deerflow.config.agents_config``); this
+        # router inlines ``AGENT_NAME_PATTERN`` and preserves caller spelling for
+        # case-sensitive backends rather than delegating to it, so keep the two
+        # copies in sync if the reserved set ever changes.
         reason = windows_incompatible_segment(agent_name)
         if reason is not None:
             raise HTTPException(
