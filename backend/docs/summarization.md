@@ -22,7 +22,9 @@ tail with an explicit `[summary shortened]` marker; selected raw history is neve
 shortened this way. Unused carry capacity is available to source text. A single oversized
 message is split into contiguous fragments, including its middle. Input is
 PII-redacted before splitting, then escaped before insertion into prompt blocks.
-No human-anchor filter or successful "too long" placeholder can discard selected
+Native plain-text document blocks (`source.type=text` and `source.type=content`)
+contribute their body text in content order; opaque, base64 and remote-media
+documents remain excluded. No human-anchor filter or successful "too long" placeholder can discard selected
 source. Recent-message retention and AI/Tool partition boundaries stay unchanged.
 
 Only after all chunks succeed are hooks, the compaction event, history capture

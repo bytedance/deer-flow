@@ -49,6 +49,88 @@ _SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
 
 
+def _document_source_text(source: Any) -> str:
+    """Return native plain-text document text without decoding opaque sources."""
+    if not isinstance(source, Mapping):
+        return ""
+    source_type = source.get("type")
+    if source_type == "text":
+        data = source.get("data")
+        return data if isinstance(data, str) else ""
+    if source_type == "content":
+        return _text_from_content_blocks(source.get("content"))
+    return ""
+
+
+def _document_block_text(block: Mapping[str, Any]) -> str:
+    """Native text of a ``document`` block: title, then context, then its source body.
+
+    ``title`` and ``context`` live on the block, not on ``source``, and
+    ``subagents/context_snapshot.py::_neutralize_document_text`` treats both as native text.
+    The title is often the only signal of what an uploaded file was, so a summary should be able
+    to reference it. Joined with newlines so the parts stay distinguishable.
+    """
+    parts: list[str] = []
+    for key in ("title", "context"):
+        value = block.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    body = _document_source_text(block.get("source"))
+    if body:
+        parts.append(body)
+    return "\n".join(parts)
+
+
+def _text_from_content_blocks(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, (list, tuple)):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, Mapping):
+            block_type = block.get("type")
+            if block_type == "text" and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif block_type == "document":
+                parts.append(_document_block_text(block))
+    return "".join(parts)
+
+
+def _message_source_text(message: AnyMessage) -> str:
+    """Message text with native document bodies kept in content order."""
+    content = message.content
+    if not isinstance(content, (list, tuple)):
+        return str(message.text)
+    parts: list[str] = []
+    has_document = False
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, Mapping):
+            block_type = block.get("type")
+            if block_type == "text" and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif block_type == "document":
+                has_document = True
+                parts.append(_document_block_text(block))
+    return "".join(parts) if has_document else str(message.text)
+
+
+def _buffer_string_with_documents(messages: list[AnyMessage]) -> str:
+    """``get_buffer_string`` with native text-document bodies included."""
+    rendered: list[str] = []
+    for message in messages:
+        text = _message_source_text(message)
+        if text == message.text:
+            rendered.append(get_buffer_string([message]))
+        else:
+            rendered.append(get_buffer_string([message.model_copy(update={"content": text})]))
+    return "\n".join(rendered)
+
+
 class _ReusedSummary(str):
     """Marks a summary reused from an identical, previously no-op prompt (no LLM call)."""
 
@@ -327,7 +409,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # Redact the complete source before splitting: an identifier spanning a
         # chunk boundary must not bypass PII screening. Input remains plain text,
         # so the chat-message human-anchor filter is neither needed nor safe.
-        return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
+        return redact_text(_buffer_string_with_documents(messages), getattr(self._app_config, "pii_redaction", None))
 
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, runtime: Runtime | None = None) -> str | None:
         """Fold every selected source fragment before committing any removal.
