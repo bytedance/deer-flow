@@ -338,6 +338,20 @@ async def _publish_skills_cache_reset(user_id: str | None) -> str | None:
     return await asyncio.to_thread(publish_skills_cache_reset, user_id=user_id)
 
 
+def _assert_extensions_config_readable() -> None:
+    """Raise when the extensions config exists but cannot be read.
+
+    The storage layer fails closed on an unreadable config (every skill stays
+    listed, none is enabled), which keeps the runtime activation gate safe
+    without taking the listing down. The read surface must stay loud instead:
+    the ``enabled`` column it reports is derived from this config, so serving
+    a degraded list would present a broken deployment as a legitimately empty
+    one. The raised error reaches each handler's generic 500 branch, which
+    keeps the host path in the server log and out of the response body.
+    """
+    ExtensionsConfig.from_file()
+
+
 def _load_user_skills(config: AppConfig) -> list[Skill]:
     """Load every skill visible to the caller's storage, enabled or not.
 
@@ -347,6 +361,7 @@ def _load_user_skills(config: AppConfig) -> list[Skill]:
     each ``SKILL.md`` -- work that scales with the number of installed skills
     (#5747 moved the same call off the loop for ``get_custom_skill``).
     """
+    _assert_extensions_config_readable()
     return _get_user_skill_storage(config).load_skills(enabled_only=False)
 
 

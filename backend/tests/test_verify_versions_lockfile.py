@@ -68,6 +68,12 @@ declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', (root / "pyproject.toml"
 recorded = re.search(r'(?m)^name = "deer-flow"\\nversion = "([^"]+)"', (root / "uv.lock").read_text(encoding="utf-8"))
 if recorded is None or recorded.group(1) != declared.replace("-", ""):
     sys.exit("The lockfile at `uv.lock` needs to be updated, but `--check` was provided. To update the lockfile, run `uv lock`.")
+harness = root / "packages" / "harness" / "pyproject.toml"
+if harness.exists():
+    harness_declared = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"', harness.read_text(encoding="utf-8")).group(1)
+    harness_recorded = re.search(r'(?m)^name = "deerflow-harness"\\nversion = "([^"]+)"', (root / "uv.lock").read_text(encoding="utf-8"))
+    if harness_recorded is None or harness_recorded.group(1) != harness_declared.replace("-", ""):
+        sys.exit("The lockfile at `uv.lock` needs to be updated, but `--check` was provided. To update the lockfile, run `uv lock`.")
 print("Resolved 1 package")
 """
 
@@ -75,14 +81,15 @@ print("Resolved 1 package")
 def _write_sandbox(root: Path, *, sources: str, lock: str, lock_name: str = "deer-flow") -> Path:
     """A repo-shaped tree with every version source at ``sources`` and the lock at ``lock``."""
     (root / "scripts").mkdir(parents=True)
-    (root / "backend").mkdir()
+    (root / "backend" / "packages" / "harness").mkdir(parents=True)
     (root / "frontend").mkdir()
     (root / "deploy" / "helm" / "deer-flow").mkdir(parents=True)
     shutil.copy2(REPO_ROOT / "scripts" / "verify_versions.sh", root / "scripts" / "verify_versions.sh")
 
     (root / "backend" / "pyproject.toml").write_text(f'[project]\nname = "deer-flow"\nversion = "{sources}"\n', encoding="utf-8")
+    (root / "backend" / "packages" / "harness" / "pyproject.toml").write_text(f'[project]\nname = "deerflow-harness"\nversion = "{sources}"\n', encoding="utf-8")
     (root / "backend" / "uv.lock").write_text(
-        f'version = 1\n\n[[package]]\nname = "{lock_name}"\nversion = "{lock}"\nsource = {{ virtual = "." }}\n',
+        f'version = 1\n\n[[package]]\nname = "{lock_name}"\nversion = "{lock}"\nsource = {{ virtual = "." }}\n\n[[package]]\nname = "deerflow-harness"\nversion = "{lock}"\nsource = {{ editable = "packages/harness" }}\n',
         encoding="utf-8",
     )
     (root / "frontend" / "package.json").write_text(f'{{\n  "name": "deer-flow-frontend",\n  "version": "{sources}"\n}}\n', encoding="utf-8")
@@ -131,6 +138,7 @@ def test_gate_passes_when_the_lock_matches(tmp_path: Path, sources: str, lock: s
 
     assert result.returncode == 0, result.stderr
     assert f"backend/uv.lock:        {lock}" in result.stdout
+    assert f"harness/pyproject.toml: {sources}" in result.stdout
     assert _uv_calls(bin_dir) == [f"{(root / 'backend').resolve()} uv lock --check"]
 
 
@@ -145,6 +153,22 @@ def test_gate_rejects_a_lock_left_on_the_previous_version(tmp_path: Path, args: 
     assert result.returncode == 1
     assert "::error::'uv lock --check' failed on backend/uv.lock (output above); if the lock is stale, run scripts/bump_version.sh" in result.stderr
     assert "needs to be updated" in result.stderr, "uv's own explanation should reach the job log"
+    assert "Tip: run scripts/bump_version.sh" in result.stderr
+    assert "OK —" not in result.stdout
+
+
+@pytest.mark.parametrize("args", [("2.2.0",), ()], ids=["against-tag", "mutual"])
+def test_gate_rejects_a_harness_pyproject_left_on_the_previous_version(tmp_path: Path, args: tuple[str, ...]):
+    """The other sources were bumped; backend/packages/harness/pyproject.toml was not."""
+    root = _write_sandbox(tmp_path / "repo", sources="2.2.0", lock="2.2.0")
+    harness = root / "backend" / "packages" / "harness" / "pyproject.toml"
+    harness.write_text('[project]\nname = "deerflow-harness"\nversion = "2.1.0"\n', encoding="utf-8")
+    bin_dir = _install_fake_uv(root)
+
+    result = _run_verify(root, *args, path=_with_fake_uv(bin_dir))
+
+    assert result.returncode == 1
+    assert "::error::backend/packages/harness/pyproject.toml is '2.1.0' but expected '2.2.0'." in result.stderr
     assert "Tip: run scripts/bump_version.sh" in result.stderr
     assert "OK —" not in result.stdout
 

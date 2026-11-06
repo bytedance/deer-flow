@@ -96,7 +96,7 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
         return 0.5
     try:
         val = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.5
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
@@ -3316,7 +3316,7 @@ class MemoryUpdater:
                         existing_confidence = float(merge_target.get("confidence"))
                         if not math.isfinite(existing_confidence):
                             raise ValueError
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         existing_confidence = 0.0
                     if confidence > existing_confidence:
                         merge_target["confidence"] = confidence

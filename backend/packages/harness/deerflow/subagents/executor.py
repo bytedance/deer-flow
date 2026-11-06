@@ -66,6 +66,8 @@ from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
+    from deerflow.models.reasoning import ResolvedReasoning
+
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
@@ -770,6 +772,27 @@ def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
         return _isolated_subagent_loop
 
 
+def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
+    """Run ``callback`` on the isolated loop, or inline when it cannot run.
+
+    Used to re-order a decision against a coroutine that was already submitted
+    to the loop: only the loop itself is serialized with that coroutine's first
+    step, so a caller thread cannot tell which of the two landed first.
+
+    A loop that is missing, stopped, or closed can no longer start the
+    coroutine, so running inline is then equivalent to running on it.
+    """
+    loop = _isolated_subagent_loop
+    if loop is None or loop.is_closed() or not loop.is_running():
+        callback()
+        return
+    try:
+        loop.call_soon_threadsafe(callback)
+    except RuntimeError:
+        # Closed between the lookup and the hand-off; nothing can start on it.
+        callback()
+
+
 def _submit_to_isolated_loop_in_context(
     context: Context,
     coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
@@ -919,6 +942,7 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        input_gate: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -989,10 +1013,16 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
+        # Resolve thinking_enabled: config explicit > False
+        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
+        # Resolve reasoning_effort: config explicit > None
+        self.reasoning_effort = config.reasoning_effort
+
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
+        self.input_gate = input_gate
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1100,7 +1130,24 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        from deerflow.models.reasoning import ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
+
+        get_model_config = getattr(app_config, "get_model_config", None)
+        model_config = get_model_config(self.model_name) if callable(get_model_config) else None
+        if model_config is None:
+            model_config = next((profile for profile in getattr(app_config, "models", []) if profile.name == self.model_name), None)
+        try:
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort)
+        except ReasoningPolicyError as exc:
+            raise ValueError(f"Model {self.model_name}: {exc}") from exc
+        # Preserve the original request for the factory's validation and logs.
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.thinking_enabled,
+            reasoning_effort=self.reasoning_effort,
+            app_config=app_config,
+            attach_tracing=False,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
@@ -1143,6 +1190,11 @@ class SubagentExecutor:
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+        if self.input_gate is not None:
+            from deerflow.agents.middlewares.run_input_middleware import ChildInputContinuationMiddleware, ChildInputMiddleware
+
+            middlewares.insert(0, ChildInputMiddleware(self.input_gate))
+            middlewares.append(ChildInputContinuationMiddleware(self.input_gate))
         # Authorization Layer 1 for middleware-declared tools (e.g. extension
         # contributions): collect from the built stack, decide with the same
         # provider/principal as the ordinary pass (offloaded off the event
@@ -1218,7 +1270,8 @@ class SubagentExecutor:
         tool_node = tool_graph_node.data if tool_graph_node is not None else None
         self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
-            app_config=app_config,
+            model_config=model_config,
+            effective_reasoning=effective_reasoning,
             tools=bound_tools,
             middlewares=middlewares,
             deferred_setup=deferred_setup,
@@ -1267,7 +1320,8 @@ class SubagentExecutor:
     def _describe_assembly(
         self,
         *,
-        app_config: Any,
+        model_config: Any,
+        effective_reasoning: "ResolvedReasoning",
         tools: list[Any],
         middlewares: list[Any],
         deferred_setup: "DeferredToolSetup | None",
@@ -1289,8 +1343,6 @@ class SubagentExecutor:
         from deerflow.extensions.notify import notify_agent_assembled
 
         try:
-            get_model_config = getattr(app_config, "get_model_config", None)
-            model_config = get_model_config(self.model_name) if callable(get_model_config) else None
             if model_config is None:
                 # A name the profile table does not know still has an identity;
                 # a missing profile must not blank out the whole descriptor.
@@ -1302,12 +1354,6 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
-            # Subagents request thinking off; the model's reasoning contract
-            # decides what that means (a required-thinking model stays on), and
-            # the descriptor reports the effective policy the factory applied.
-            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
-
-            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
@@ -1641,7 +1687,8 @@ class SubagentExecutor:
         with ensure_trace_context(self.deerflow_trace_id):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
-                async with capacity.slot():
+                slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
+                async with slot:
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
@@ -1651,11 +1698,15 @@ class SubagentExecutor:
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
-                    error=str(exc),
+                    error="No worker slot is available while previous subagents are paused. Complete the priority work in the main Agent or resume the previous subagents first."
+                    if self.input_gate is not None and not self.input_gate.can_queue
+                    else str(exc),
                     admission_failure=True,
                 )
                 return result
             finally:
+                if self.input_gate is not None:
+                    self.input_gate.close()
                 result.execution_done_event.set()
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
@@ -1697,17 +1748,22 @@ class SubagentExecutor:
         task_info: TaskInfo | None = None
         if loaded_extensions.needs_task_store:
             task_store = ExtensionData(result.external_task_id or result.task_id)
-        if loaded_extensions.has_task_lifecycle and self.run_id:
-            task_info = TaskInfo(
-                task_id=result.task_id,
-                run_id=self.run_id,
-                thread_id=self.thread_id or "",
-                kind="subagent",
-                parent_task_id=lead_task_id(self.run_id),
-                agent_name=self.config.name,
-            )
-            assert task_store is not None
-        elif loaded_extensions.has_task_lifecycle:
+            if self.run_id:
+                identity = TaskInfo(
+                    task_id=result.task_id,
+                    run_id=self.run_id,
+                    thread_id=self.thread_id or "",
+                    kind="subagent",
+                    parent_task_id=lead_task_id(self.run_id),
+                    agent_name=self.config.name,
+                )
+                # Seed the identity for every hook handed this store, not only
+                # lifecycle contributors: compaction events are named from it.
+                task_store.set(identity)
+                # A lifecycle contributor always implies a task store.
+                if loaded_extensions.has_task_lifecycle:
+                    task_info = identity
+        if loaded_extensions.has_task_lifecycle and not self.run_id:
             logger.debug(
                 "[trace=%s] Subagent %s has no run_id; skipping extension task lifecycle",
                 self.trace_id,
@@ -2100,9 +2156,13 @@ class SubagentExecutor:
             async def cleanup_execution() -> None:
                 if execution_context is not None:
                     try:
-                        from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+                        from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async, release_sandbox_execution_lease_async
 
-                        await release_sandbox_execution_lease_async(execution_context)
+                        try:
+                            if result.status in (SubagentStatus.CANCELLED, SubagentStatus.FAILED, SubagentStatus.TIMED_OUT):
+                                await cancel_sandbox_execution_lease_async(execution_context)
+                        finally:
+                            await release_sandbox_execution_lease_async(execution_context)
                     except Exception:
                         logger.warning(
                             "[trace=%s] Failed to release sandbox execution lease for subagent %s",
@@ -2246,7 +2306,30 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
 
+        # Set once the coroutine body actually runs. A ``concurrent.futures``
+        # future reports ``cancelled()`` both when the cancel beat the loop and
+        # when a running coroutine was cancelled, and only the first case leaves
+        # the result without an owner able to publish a terminal status.
+        execution_started = threading.Event()
+
         async def run_with_timeout() -> SubagentResult:
+            execution_started.set()
+            # Startup half of the pre-start cancellation handshake. The
+            # canceller sets ``cancel_event`` before it decides anything, so a
+            # body that starts after that cancel must decline to create the
+            # execution task: a cancel published from the caller thread may
+            # already have opened the cleanup fence, and creating the task here
+            # would then take a capacity slot the fence promised was gone.
+            # Reading the event first makes "fence opened before this body
+            # started" safe instead of a race.
+            if result.cancel_event.is_set():
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled before the execution started",
+                    tool_receipts=result.snapshot_tool_receipts(),
+                )
+                _mark_background_execution_done(execution_id, result)
+                return result
             execution_task = asyncio.create_task(
                 self._aexecute(task, result),
                 name=f"subagent-{self.config.name}-execution",
@@ -2324,8 +2407,41 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
+        def publish_pre_start_cancel() -> None:
+            # The chained future reports ``cancelled()`` for two different
+            # outcomes: the cancel beat the loop, or it reached a started
+            # coroutine that is still winding down. Only the first leaves the
+            # result without an owner able to publish a terminal status, and a
+            # task that exists but has not taken its first step still runs its
+            # body. Deciding on the loop, after that step, keeps the cleanup
+            # fence closed while the worker can still hold its capacity slot.
+            #
+            # A body that starts after this point cannot take a slot either:
+            # ``result.cancel_event`` is always set before this callback runs,
+            # and ``run_with_timeout`` declines to create the execution task
+            # once it observes it. So "fence opened" here means "no worker will
+            # acquire capacity", not merely "no worker has yet".
+            if execution_started.is_set():
+                return
+            result.try_set_terminal(
+                SubagentStatus.CANCELLED,
+                error="Cancelled before the execution started",
+                tool_receipts=result.snapshot_tool_receipts(),
+            )
+            _mark_background_execution_done(execution_id, result)
+
         def forget_future(completed_future: Future[SubagentResult]) -> None:
-            if not completed_future.cancelled():
+            if completed_future.cancelled():
+                # ``Future.cancel()`` only wins while the loop has not picked the
+                # coroutine up yet. In that window ``run_with_timeout`` never runs,
+                # so nothing writes a terminal status and nothing opens the cleanup
+                # fence: the entry stayed PENDING and ``cleanup_background_task``
+                # refused to remove it, while the poller waited out its full budget
+                # for a result that could never arrive. Publish the cancellation
+                # here; a cancellation that reached a running coroutine is handled
+                # by its own ``CancelledError`` branch, which owns the terminal write.
+                _run_on_isolated_loop_if_live(publish_pre_start_cancel)
+            else:
                 completed_future.exception()
             with _background_tasks_lock:
                 _background_futures.pop(execution_id, None)

@@ -38,6 +38,7 @@ from app.gateway.checkpoint_lineage import (
     resolve_stamp_candidate_versions,
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
+from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -804,6 +805,9 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+    if batch_repo is not None:
+        await batch_repo.suppress_thread_continuations(thread_id)
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -965,11 +969,17 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     and an empty checkpoint (so state endpoints work immediately).
     Idempotent: returns the existing record when ``thread_id`` already exists.
     """
+    thread_id = resolve_thread_id(body.thread_id)
+    async with goal_thread_lock(thread_id):
+        return await _create_thread_locked(body, request, thread_id)
+
+
+async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thread_id: str) -> ThreadResponse:
+    """Keep the idempotency read and initial writes in one lifecycle lock."""
     from app.gateway.deps import get_thread_store
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    thread_id = resolve_thread_id(body.thread_id)
     now = now_iso()
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
@@ -1006,13 +1016,13 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
         raise HTTPException(status_code=404, detail="Thread not found") from None
     except IntegrityError:
         # The idempotency read above and this insert are not atomic: a
-        # concurrent request for the same thread_id can commit in between, so
+        # another worker's request for the same thread_id can commit in between, so
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
-        # path does — instead of surfacing the conflict as a 500. The memory
-        # store serializes same-id creates under its per-thread lock and keeps
-        # its historical overwrite behavior, so it does not reach this branch.
+        # path does — instead of surfacing the conflict as a 500. Same-process
+        # HTTP creates share the lifecycle lock; the memory store retains its
+        # historical overwrite behavior for direct callers.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
@@ -1221,9 +1231,9 @@ async def _branch_thread_with_reservation(
         # into a new thread. Preserve every valid spelling as create does.
         branch_assistant_id = None
 
-    async def _write_branch_row(project_id: str | None) -> None:
+    async def _write_branch_row(project_id: str | None) -> dict:
         try:
-            await thread_store.create(
+            return await thread_store.create(
                 new_thread_id,
                 assistant_id=branch_assistant_id,
                 display_name=display_name,
@@ -1238,13 +1248,13 @@ async def _branch_thread_with_reservation(
             raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     try:
-        await _write_branch_row(source_project_id)
+        branch_record = await _write_branch_row(source_project_id)
     except ProjectNotAssignableError:
         # The source project became unassignable (archived, or deleted in a
         # race that cleared the source row's membership after our read): keep
         # the branch usable as an unassigned thread — the pre-inheritance
         # behavior for sources without an active project.
-        await _write_branch_row(None)
+        branch_record = await _write_branch_row(None)
 
     # The thread feed (GET /messages, /messages/page) reads the run-event
     # store, not checkpoints, and a fresh branch has no run_events — so the
@@ -1254,17 +1264,20 @@ async def _branch_thread_with_reservation(
     # from. Best-effort: on failure the branch stays usable, with history
     # visible only through the checkpoint overlay until it is re-branched.
     try:
-        seed_events = build_branch_history_seed_events(
-            _checkpoint_messages(snapshot),
-            thread_id=new_thread_id,
-            run_id_prefix=f"branch-seed-{new_thread_id}",
-            parent_thread_id=thread_id,
-        )
-        if seed_events:
-            await get_run_event_store(request).put_batch(seed_events)
-            history_seed_mode = "seeded"
-        else:
-            history_seed_mode = "skipped_empty"
+        async with reserve_history_seed(request, new_thread_id) as reservation:
+            seed_events = build_branch_history_seed_events(
+                _checkpoint_messages(snapshot),
+                thread_id=new_thread_id,
+                run_id_prefix=f"branch-seed-{new_thread_id}",
+                parent_thread_id=thread_id,
+            )
+            if seed_events:
+                event_store = get_run_event_store(request)
+                if reservation is None or not await event_store.list_messages(new_thread_id, limit=1, user_id=None):
+                    await write_history_seed(request, seed_events, reservation=reservation, seed_kind="branch", thread=branch_record)
+                history_seed_mode = "seeded"
+            else:
+                history_seed_mode = "skipped_empty"
     except Exception:
         logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
         history_seed_mode = "failed"
@@ -1502,6 +1515,9 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await _ensure_thread_for_goal(thread_id, request)
             await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", create_if_missing=True)
+            batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+            if batch_repo is not None:
+                await batch_repo.suppress_thread_continuations(thread_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ConflictError:
@@ -1522,6 +1538,9 @@ async def clear_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoal
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
+            batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+            if batch_repo is not None:
+                await batch_repo.suppress_thread_continuations(thread_id)
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Clear the goal after the run finishes.") from None
     except LookupError:
@@ -1996,6 +2015,7 @@ async def get_thread_history(
                                 stamp_turn_duration_on_last_ai(
                                     serialized_msgs,
                                     checkpoint_run_durations,
+                                    thread_id=thread_id,
                                 )
                                 raise
 
@@ -2046,6 +2066,7 @@ async def get_thread_history(
                         stamp_turn_duration_on_last_ai(
                             serialized_msgs,
                             resolved_run_durations,
+                            thread_id=thread_id,
                         )
 
                     except Exception:

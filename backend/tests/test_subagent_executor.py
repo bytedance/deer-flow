@@ -31,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from packaging.version import Version
 
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
@@ -169,6 +170,8 @@ def _setup_executor_classes():
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
     sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
+    for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
+        importlib.import_module(module_name)
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -395,6 +398,105 @@ def msg(classes):
 class TestAgentConstruction:
     """Test _create_agent() wiring before execution starts."""
 
+    @pytest.mark.parametrize(
+        "thinking,effort,mode,expected_thinking,expected_effort,expected_adjustment",
+        [
+            (None, None, "optional", False, "lite", None),
+            (True, "high", "optional", True, "deep", "effort_aliased"),
+            (False, None, "required", True, "lite", "thinking_forced_on"),
+            (True, None, "unsupported", False, None, "thinking_unsupported"),
+            (True, "unknown", "optional", True, "lite", "effort_unsupported_value"),
+            (True, "high", "legacy", True, "high", None),
+            (True, None, "legacy-unsupported", False, None, None),
+        ],
+    )
+    def test_reasoning_factory_and_observer_agree(self, classes, base_config, monkeypatch, caplog, thinking, effort, mode, expected_thinking, expected_effort, expected_adjustment):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.extensions.registry import ExtensionRegistry
+        from deerflow.subagents import executor as executor_module
+
+        factory = importlib.import_module("deerflow.models.factory")
+        profile_settings = {}
+        if mode in {"legacy", "legacy-unsupported"}:
+            profile_settings = {
+                "supports_thinking": mode == "legacy",
+                "supports_reasoning_effort": True,
+                "when_thinking_enabled": {"extra_body": {"thinking": {"type": "enabled"}}},
+            }
+        else:
+            reasoning = {"thinking": mode, "dialect": "openai_extra_body"}
+            if mode != "unsupported":
+                reasoning["effort"] = {"values": ["lite", "deep"], "default": "lite", "aliases": {"high": "deep"}}
+            profile_settings["reasoning"] = reasoning
+        profile = ModelConfig(name="child-model", use="langchain_openai:ChatOpenAI", model="child-model", **profile_settings)
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        unchanged = app_config.model_dump()
+        captured = {}
+
+        class RecordingModel:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        class Observer:
+            def on_agent_assembled(self, app_store, descriptor):
+                captured["descriptor"] = descriptor
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("reasoning-test"):
+            registry.agent_assembly_observer(Observer())
+        monkeypatch.setattr(factory, "resolve_class", lambda *args: RecordingModel)
+        monkeypatch.setattr(executor_module, "create_chat_model", factory.create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module("deerflow.agents.middlewares.tool_error_handling_middleware", build_subagent_runtime_middlewares=lambda **kwargs: []),
+        )
+        base_config.thinking_enabled = thinking
+        base_config.reasoning_effort = effort
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model="child-model", extensions=registry.build())
+        if mode == "legacy-unsupported":
+            with pytest.raises(ValueError, match="Model child-model does not support thinking.*supports_thinking"):
+                asyncio.run(executor._create_agent())
+            assert not captured
+            assert app_config.model_dump() == unchanged
+            return
+
+        with caplog.at_level(logging.INFO, logger=factory.__name__):
+            asyncio.run(executor._create_agent())
+        if expected_adjustment is not None:
+            assert any(record.name == factory.__name__ and expected_adjustment in record.getMessage() for record in caplog.records)
+        descriptor = captured["descriptor"]
+        assert descriptor.thinking_enabled is expected_thinking
+        assert descriptor.reasoning_effort == expected_effort
+        assert captured.get("reasoning_effort") == expected_effort
+        assert captured["extra_body"]["thinking"]["type"] == ("enabled" if expected_thinking else "disabled")
+        assert app_config.model_dump() == unchanged
+
+    def test_required_thinking_rejection_names_model_before_creation(self, classes, base_config, monkeypatch):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.config.model_config import ModelConfig
+        from deerflow.config.sandbox_config import SandboxConfig
+        from deerflow.models.reasoning import ReasoningPolicyError
+        from deerflow.subagents import executor as executor_module
+
+        profile = ModelConfig(name="required-worker-model", use="langchain_openai:ChatOpenAI", model="test-model", reasoning={"thinking": "required", "on_disable_request": "reject"})
+        app_config = AppConfig(models=[profile], sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"))
+        model_factory = MagicMock(side_effect=AssertionError("model creation must not start"))
+        graph_factory = MagicMock(side_effect=AssertionError("graph creation must not start"))
+        monkeypatch.setattr(executor_module, "create_chat_model", model_factory)
+        monkeypatch.setattr(executor_module, "create_agent", graph_factory)
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, parent_model=profile.name)
+
+        with pytest.raises(ValueError, match=f"Model {profile.name}: model requires thinking") as error:
+            asyncio.run(executor._create_agent())
+
+        assert isinstance(error.value.__cause__, ReasoningPolicyError)
+        model_factory.assert_not_called()
+        graph_factory.assert_not_called()
+
     def test_create_agent_threads_explicit_app_config_to_model_and_middlewares(
         self,
         classes,
@@ -460,6 +562,7 @@ class TestAgentConstruction:
         assert captured["model"] == {
             "name": "parent-model",
             "thinking_enabled": False,
+            "reasoning_effort": None,
             "app_config": app_config,
             # attach_tracing=False pairs with graph-root tracing callbacks
             # injected in _aexecute (see TestSubagentTracingWiring). Without
@@ -4333,6 +4436,295 @@ class TestCooperativeCancellation:
         """Test that requesting cancellation on a nonexistent task does not raise."""
         executor_module.request_cancel_background_task("nonexistent-task")
 
+    def test_cancel_before_the_coroutine_starts_leaves_no_pending_entry(self, executor_module, classes, base_config):
+        """A cancel that wins the race against the loop must still terminalize.
+
+        ``_submit_to_isolated_loop_in_context`` hands back a Future, and while the
+        loop has not picked the coroutine up ``Future.cancel()`` succeeds — so
+        ``run_with_timeout`` never runs, nothing writes a terminal status, and
+        nothing opens the cleanup fence. The entry stayed PENDING: the poller burned
+        its whole budget waiting, and ``cleanup_background_task`` refused to remove
+        it because it only drops terminal entries.
+
+        The coroutine is submitted to the real isolated loop, so ``cancelled()``
+        here comes from the same chained future ``run_coroutine_threadsafe`` hands
+        back in production rather than from a stand-in that was never scheduled.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        body_ran = threading.Event()
+
+        async def never_started() -> None:
+            body_ran.set()
+
+        loop = executor_module._get_isolated_subagent_loop()
+        hold = threading.Event()
+
+        def hold_loop() -> None:
+            hold.wait(5)
+
+        # Keep the loop inside a callback so the submission is still queued when
+        # the cancel lands: the coroutine has been created but cannot have run.
+        loop.call_soon_threadsafe(hold_loop)
+        try:
+            execution_id = executor.execute_async("Task")
+            result = executor_module._background_tasks[execution_id]
+            assert result.status.value == "pending"
+            assert not executor_module._background_futures[execution_id].done()
+
+            executor_module.request_cancel_background_task(execution_id)
+        finally:
+            hold.set()
+
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not result.status.is_terminal:
+                time.sleep(0.01)
+
+            assert not body_ran.is_set()
+            assert result.status.value == "cancelled"
+            assert result.error == "Cancelled before the execution started"
+
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_before_the_submission_callback_never_fences_a_live_slot(
+        self,
+        executor_module,
+        classes,
+        base_config,
+        monkeypatch,
+    ):
+        """A cancel that beats the submission callback must not admit a worker.
+
+        Holding the loop in an earlier callback keeps the submission queued, so
+        ``Future.cancel()`` wins before ``run_coroutine_threadsafe`` has even
+        created the asyncio task. The done-callback then publishes the terminal
+        status and opens the cleanup fence on the loop, one turn *before* that
+        deferred task takes its first step — so the wrapper could still reach
+        ``_aexecute``, take the only capacity slot, and have its registry entry
+        removed while the slot was live.
+
+        The fix is a startup handshake rather than better ordering:
+        ``request_cancel_background_task`` sets ``cancel_event`` before it
+        cancels anything, and a wrapper that starts afterwards declines to
+        create the execution task. The invariant asserted here is the one that
+        matters — the fence never opens while a worker holds a slot.
+        """
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=capacity,
+        )
+
+        admitted = threading.Event()
+        admission_release = asyncio.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+
+        async def hold_admission(*_args, **_kwargs):
+            admitted.set()
+            await admission_release.wait()
+            return {}, [], None
+
+        monkeypatch.setattr(executor, "_build_initial_state", hold_admission)
+
+        hold = threading.Event()
+        release = threading.Event()
+
+        def hold_loop() -> None:
+            hold.set()
+            release.wait(5)
+
+        loop.call_soon_threadsafe(hold_loop)
+        assert hold.wait(5)
+        execution_id = None
+        try:
+            execution_id = executor.execute_async("Task")
+            result = executor_module._background_tasks[execution_id]
+            # The loop is still inside ``hold_loop``, so the submission callback
+            # that would create the asyncio task has not run yet.
+            assert result.status.value == "pending"
+            assert executor_module._background_futures[execution_id].cancel()
+
+            executor_module.request_cancel_background_task(execution_id)
+        finally:
+            release.set()
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not (admitted.is_set() or result.execution_done_event.is_set()):
+                time.sleep(0.01)
+
+            if admitted.is_set():
+                # A live worker owns the only slot; handing the entry to cleanup
+                # now would drop it while the release is still unfinished.
+                assert capacity.snapshot().running == 1
+                assert not result.execution_done_event.is_set()
+                loop.call_soon_threadsafe(admission_release.set)
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            assert result.execution_done_event.is_set()
+            assert result.status.value == "cancelled"
+            assert capacity.snapshot().running == 0
+            # The handshake means the wrapper never creates the execution task,
+            # so nothing can acquire a slot after the fence opened.
+            assert not admitted.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            loop.call_soon_threadsafe(admission_release.set)
+            if execution_id is not None:
+                executor_module._background_tasks.pop(execution_id, None)
+                executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_after_the_task_exists_keeps_the_fence_closed_until_teardown(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        """A cancel in the task-created window must not fence a live worker off.
+
+        ``Future.cancel()`` on the chained future succeeds while the asyncio task
+        exists but has not taken its first step, so a start-marker snapshot taken
+        from the cancelling thread reads "not started" even though the loop still
+        owns the coroutine. Deciding there published a terminal status and opened
+        the cleanup fence from the caller's thread; the decision now waits for the
+        loop, which is the only place serialized with that first step.
+
+        Which owner ends up publishing is a loop-queue coin toss from here:
+        ``Task.__init__`` queues the first step inside the factory, so the step
+        can precede the deferred decision and the coroutine's own
+        ``CancelledError`` branch wins ("Cancelled by user"); when the step loses
+        that race the deferred decision publishes instead. The invariants that
+        matter hold either way: the status is terminal ``cancelled``, the fence
+        opens only after the loop has settled the body, and cleanup removes the
+        entry.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        task_created = threading.Event()
+        execution_ran = threading.Event()
+        factory_release = threading.Event()
+        loop = executor_module._get_isolated_subagent_loop()
+        previous_factory = loop.get_task_factory()
+
+        async def slow_execution(_task, result_holder=None):
+            execution_ran.set()
+            await asyncio.sleep(30)
+            return result_holder
+
+        def hold_after_task_creation(loop_arg, coro, context=None):
+            task = asyncio.Task(coro, loop=loop_arg, context=context)
+            if not task_created.is_set():
+                # The task is queued but cannot step while the loop sits here,
+                # which is exactly the window the caller-side snapshot misreads.
+                # Block on an event rather than a timer: on a loaded worker the
+                # caller may need longer than any fixed delay to request the
+                # cancel, and the body would then start first and invalidate the
+                # window this test is about.
+                task_created.set()
+                factory_release.wait(5)
+            return task
+
+        loop.set_task_factory(hold_after_task_creation)
+        try:
+            with patch.object(executor, "_aexecute", new=slow_execution):
+                execution_id = executor.execute_async("Task")
+                assert task_created.wait(5)
+
+                result = executor_module._background_tasks[execution_id]
+                executor_module.request_cancel_background_task(execution_id)
+
+                # The loop is still holding the task, so nothing can have finished
+                # teardown: publishing here would hand the entry to cleanup while
+                # the worker could still take its slot.
+                assert not result.status.is_terminal
+                assert not result.execution_done_event.is_set()
+        finally:
+            factory_release.set()
+            loop.set_task_factory(previous_factory)
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            # Either the deferred decision publishes (the step lost the race) or
+            # the body started and its own CancelledError branch does; both own
+            # the terminal write legitimately.
+            assert not execution_ran.is_set()
+            assert result.status.value == "cancelled"
+            assert result.error in ("Cancelled before the execution started", "Cancelled by user")
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
+    def test_cancel_of_a_running_body_keeps_its_own_terminal_write(
+        self,
+        executor_module,
+        classes,
+        base_config,
+    ):
+        """A cancelled running body still owns the terminal write.
+
+        The deferred pre-start decision runs after the coroutine's first step, so a
+        body that already started must win: it reports "Cancelled by user" after its
+        own cleanup, not the pre-start message.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        execution_ran = threading.Event()
+
+        async def slow_execution(_task, result_holder=None):
+            execution_ran.set()
+            await asyncio.sleep(30)
+            return result_holder
+
+        with patch.object(executor, "_aexecute", new=slow_execution):
+            execution_id = executor.execute_async("Task")
+            assert execution_ran.wait(5)
+            result = executor_module._background_tasks[execution_id]
+
+            executor_module.request_cancel_background_task(execution_id)
+
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not result.execution_done_event.is_set():
+                time.sleep(0.01)
+
+            assert result.status.value == "cancelled"
+            assert result.error == "Cancelled by user"
+            assert result.execution_done_event.is_set()
+
+            executor_module.cleanup_background_task(execution_id)
+            assert execution_id not in executor_module._background_tasks
+        finally:
+            executor_module._background_tasks.pop(execution_id, None)
+            executor_module._background_futures.pop(execution_id, None)
+
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
         import concurrent.futures
@@ -7462,3 +7854,71 @@ class TestSubagentCancellationLifecycle:
         assert holder.execution_done_event.is_set()
         assert capacity.snapshot().running == 0
         assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.ABORTED)]
+
+
+class TestSubagentCompactionIdentity:
+    """A compaction inside a subagent names the subagent's own task.
+
+    The summarization middleware is imported at module level: this module
+    replaces ``deerflow.agents.middlewares`` with a double while the executor
+    runs, so only an already-imported module is the real one.
+    """
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "run_id,external_task_id",
+        [("parent-run", None), ("parent-run", "call-1"), (None, None)],
+        ids=["sync", "background", "no-parent-run"],
+    )
+    async def test_compaction_carries_the_seeded_task_identity(self, classes, base_config, monkeypatch, run_id, external_task_id):
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, TaskInfo
+
+        from deerflow.extensions import notify
+        from deerflow.extensions.registry import ExtensionRegistry
+
+        monkeypatch.setattr(notify, "_notify_loop", asyncio.get_running_loop())
+        received, arrived = [], asyncio.Event()
+
+        class Observer:
+            async def on_context_compacted(self, app_store, task_store, event):
+                received.append((task_store, event))
+                arrived.set()
+
+        registry = ExtensionRegistry()
+        with registry.attributed_to("identity:test"):
+            registry.context_compaction_observer(Observer())
+        extensions = registry.build()
+        model = MagicMock()
+        model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
+        model.with_config.return_value = model
+        middleware = DeerFlowSummarizationMiddleware(model=model, trigger=("messages", 4), keep=("messages", 2), token_counter=len, extensions=extensions)
+        bound = {}
+
+        class Agent:
+            async def astream(self, *args, context, **kwargs):
+                bound["store"] = context[EXTENSION_TASK_STORE_KEY]
+                messages = [classes["HumanMessage"](content="user-1"), classes["AIMessage"](content="assistant-1"), classes["HumanMessage"](content="user-2"), classes["AIMessage"](content="assistant-2")]
+                assert await middleware.abefore_model({"messages": messages}, SimpleNamespace(context=context)) is not None
+                yield {"messages": [classes["AIMessage"](content="done")]}
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="sub-thread", run_id=run_id, extensions=extensions)
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=Agent()))
+        holder = classes["SubagentResult"](task_id="exec-1", trace_id="trace", status=classes["SubagentStatus"].PENDING, external_task_id=external_task_id)
+
+        result = await executor._aexecute("Task", holder)
+
+        assert result.status is classes["SubagentStatus"].COMPLETED
+        await asyncio.wait_for(arrived.wait(), 5)
+        [(store, event)] = received
+        assert store is bound["store"]
+        # The store keeps its public scope contract: the provider correlation id
+        # when there is one, otherwise the execution id.
+        assert store.scope_id == (external_task_id or "exec-1")
+        if run_id is None:
+            assert store.get(TaskInfo) is None
+            assert (event.task_id, event.run_id, event.thread_id) == (None, None, None)
+            return
+        info = store.get(TaskInfo)
+        assert info == TaskInfo(task_id="exec-1", run_id=run_id, thread_id="sub-thread", kind="subagent", parent_task_id=run_id, agent_name=base_config.name)
+        assert (event.task_id, event.run_id, event.thread_id) == (info.task_id, info.run_id, info.thread_id)

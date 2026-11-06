@@ -35,6 +35,8 @@ class SubagentResponse(BaseModel):
     disallowed_tools: list[str] | None = None
     skills: list[str] | None = None
     model: str = "inherit"
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     max_turns: int = 50
     timeout_seconds: int = 900
     enabled: bool = True
@@ -57,6 +59,8 @@ class ManagedSubagentCreateRequest(BaseModel):
     disallowed_tools: list[str] | None = None
     skills: list[str] | None = None
     model: str = "inherit"
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     max_turns: int = Field(default=50, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
     enabled: bool = True
@@ -70,6 +74,8 @@ class ManagedSubagentUpdateRequest(BaseModel):
     disallowed_tools: list[str] | None = None
     skills: list[str] | None = None
     model: str | None = None
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
     max_turns: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
@@ -94,7 +100,7 @@ def _explicit_overrides(name: str, app_config) -> dict[str, Any]:
     if override is None:
         return {}
     result: dict[str, Any] = {}
-    for field in ("timeout_seconds", "max_turns", "model", "skills"):
+    for field in ("timeout_seconds", "max_turns", "model", "thinking_enabled", "reasoning_effort", "skills"):
         if field not in override.model_fields_set:
             continue
         value = getattr(override, field)
@@ -119,6 +125,8 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
                 disallowed_tools=definition.disallowed_tools,
                 skills=definition.skills,
                 model=definition.model,
+                thinking_enabled=definition.thinking_enabled,
+                reasoning_effort=definition.reasoning_effort,
                 max_turns=definition.max_turns,
                 timeout_seconds=definition.timeout_seconds,
                 source="builtin",
@@ -136,6 +144,8 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
                 disallowed_tools=definition.disallowed_tools,
                 skills=definition.skills,
                 model=definition.model,
+                thinking_enabled=definition.thinking_enabled,
+                reasoning_effort=definition.reasoning_effort,
                 max_turns=definition.max_turns,
                 timeout_seconds=definition.timeout_seconds,
                 source="config",

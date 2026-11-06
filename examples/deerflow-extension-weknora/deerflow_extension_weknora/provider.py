@@ -21,6 +21,7 @@ from deerflow.knowledge_scope import execution_scope
 from .config import Settings, Space, native_id
 
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+_DOCUMENT_CONCURRENCY = 4
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,23 @@ class WeKnoraProvider:
     async def search(self, query: str) -> RetrievalResult:
         raise PermissionError("WeKnora retrieval requires a trusted KnowledgeRequestContext")
 
+    async def _load_documents(self, ds: _Dataset, ids: list[str], documents: dict[tuple[str, str], dict[str, Any]]) -> None:
+        # Cache only within this search, keyed by authorized dataset and native ID.
+        missing = list(dict.fromkeys(document_id for document_id in ids if (ds.id, document_id) not in documents))
+        for start in range(0, len(missing), _DOCUMENT_CONCURRENCY):
+            batch = missing[start : start + _DOCUMENT_CONCURRENCY]
+            tasks = [asyncio.create_task(self._document(ds, document_id)) for document_id in batch]
+            try:
+                values = await asyncio.gather(*tasks)
+            except BaseException:
+                # gather alone leaves siblings running after an ordinary error.
+                # Drain them on failure/cancellation, preserving the original error.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            documents.update(((ds.id, document_id), value) for document_id, value in zip(batch, values, strict=True))
+
     async def search_scoped(self, query: str, *, context: KnowledgeRequestContext) -> RetrievalResult:
         scope = execution_scope(context.scope) if context.scope is not None else {"mode": "all"}
         if scope["mode"] == "disabled":
@@ -199,8 +217,7 @@ class WeKnoraProvider:
         # Validate every constrained resource before any search; no partial
         # success and no unfiltered retry if any selection fails.
         for dataset_id, ids in filters.items():
-            for document_id in ids:
-                documents[dataset_id, document_id] = await self._document(datasets[dataset_id], document_id)
+            await self._load_documents(datasets[dataset_id], ids, documents)
         hits = []
         for dataset_id in selected:
             if len(hits) >= 100:
@@ -217,20 +234,25 @@ class WeKnoraProvider:
             results = _items(payload["data"])
             if len(results) > 100:
                 raise RuntimeError("WeKnora response exceeds the supported result limit")
+            candidates = []
+            remaining = 100 - len(hits)
             for item in results:
-                if len(hits) >= 100:
+                if remaining == 0:
                     break
                 document_id = native_id(item.get("knowledge_id"))
                 if dataset_id in filters and document_id not in filters[dataset_id]:
                     raise PermissionError("WeKnora returned evidence outside the selected documents")
-                cache_key = (dataset_id, document_id)
-                if cache_key not in documents:
-                    documents[cache_key] = await self._document(ds, document_id)
+                text = ds.binding.text(item.get("content"), 100_000)
+                candidates.append((item, document_id, text))
+                if text:
+                    remaining -= 1
+            await self._load_documents(ds, [document_id for _, document_id, _ in candidates], documents)
+            for item, document_id, text in candidates:
                 # SearchResult has no knowledge_base_id; the authoritative detail
                 # endpoint above verifies membership even for unfiltered search.
-                text = ds.binding.text(item.get("content"), 100_000)
                 if not text:
                     continue
+                cache_key = (dataset_id, document_id)
                 title = ds.binding.text(item.get("knowledge_title") or item.get("knowledge_filename") or documents[cache_key].get("title") or documents[cache_key].get("file_name"), 500)
                 source = KnowledgeSource(provider="weknora", title=title, excerpt=text, dataset_name=ds.name) if title else None
                 # v0.8.3 gives offsets/chunk indexes, not a verified page or public
