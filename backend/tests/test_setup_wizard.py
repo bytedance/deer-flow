@@ -165,10 +165,10 @@ class TestProviders:
         """Providers without per-model overrides return their config unchanged."""
         providers = {provider.name: provider for provider in LLM_PROVIDERS}
         openai = providers["openai"]
-        assert openai.extra_config_for("gpt-5.6-sol") == openai.extra_config
+        assert openai.extra_config_for(openai.default_model) == openai.extra_config
 
     def test_openai_providers_do_not_offer_models_retiring_2026_12_11(self):
-        """OpenAI shuts down gpt-5, gpt-5-mini and gpt-5-nano on 2026-12-11, so a
+        """OpenAI shuts down gpt-5, gpt-5-mini, gpt-5-nano and gpt-5-pro on 2026-12-11, so a
         generated config must not default to (or list) them."""
         retiring = {"gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-pro"}
         providers = {provider.name: provider for provider in LLM_PROVIDERS}
