@@ -8,6 +8,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -697,6 +698,7 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 def _task_result_command(
     *,
     tool_call_id: str,
+    message_id: str | None = None,
     status: SubagentStatusValue,
     result: str | None = None,
     error: str | None = None,
@@ -728,6 +730,7 @@ def _task_result_command(
         update={
             "messages": [
                 ToolMessage(
+                    id=message_id,
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
@@ -870,8 +873,15 @@ async def task_tool(
             keep the subagent's configured/inherited model. Does not change the
             parent conversation or the saved subagent configuration.
     """
+    from deerflow.runtime.runs.input_control import run_input_control
+
+    parent_context = getattr(runtime, "context", None)
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    input_control = run_input_control(parent_context)
+    input_gate = input_control.child(tool_call_id) if input_control is not None else None
+    result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else _task_result_command
     if context_mode not in {"isolated", "snapshot"}:
-        return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
+        return result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
@@ -885,7 +895,7 @@ async def task_tool(
     if subagent_type == "bash":
         host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
         if not host_bash_allowed:
-            return _task_result_command(
+            return result_command(
                 tool_call_id=tool_call_id,
                 status="failed",
                 error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
@@ -901,7 +911,7 @@ async def task_tool(
         else:
             available = "none"
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
-        return _task_result_command(
+        return result_command(
             tool_call_id=tool_call_id,
             status="failed",
             error=error,
@@ -959,11 +969,9 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
     requested_model = parent_context.get("subagent_model_name")
     if model_name is not None and requested_model is not None and model_name != requested_model:
-        return _task_result_command(tool_call_id=tool_call_id, status="failed", error="The child model conflicts with the user's selection.")
+        return result_command(tool_call_id=tool_call_id, status="failed", error="The child model conflicts with the user's selection.")
     selected_model = model_name if model_name is not None else requested_model
     if selected_model is not None:
         resolved_config = runtime_app_config or await run_assembly(get_app_config)
@@ -972,7 +980,7 @@ async def task_tool(
                 raise ValueError("A configured model name is required.")
             await run_assembly(authorize_selected_model, selected_model, context=parent_context, app_config=resolved_config)
         except ValueError as exc:
-            return _task_result_command(tool_call_id=tool_call_id, status="failed", error=str(exc))
+            return result_command(tool_call_id=tool_call_id, status="failed", error=str(exc))
         runtime_app_config = resolved_config
         config = replace(config, model=selected_model)
     if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
@@ -1095,11 +1103,15 @@ async def task_tool(
     explicit_capacity = _explicit_execution_capacity.get()
     if explicit_capacity is not None:
         executor_kwargs["execution_capacity"] = explicit_capacity
+    if input_gate is not None:
+        executor_kwargs["input_gate"] = input_gate
     executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
     execution_id = executor.execute_async(prompt, task_id=tool_call_id)
+    if input_control is not None:
+        input_control.bind_execution(tool_call_id, execution_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -1137,7 +1149,7 @@ async def task_tool(
                 )
                 cleanup_background_task(execution_id)
                 error = f"Task {tool_call_id} disappeared from background tasks"
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=error,
@@ -1219,7 +1231,7 @@ async def task_tool(
                         )
                     except Exception:
                         logger.warning(f"[trace={trace_id}] Acceptance checklist failed for task {tool_call_id}; result flows back unchecked", exc_info=True)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
                     result=result.result,
@@ -1249,7 +1261,7 @@ async def task_tool(
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=result.error,
@@ -1273,7 +1285,7 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} cancelled: {result.error}")
                 cleanup_background_task(execution_id)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="cancelled",
                     error=result.error,
@@ -1303,7 +1315,7 @@ async def task_tool(
                     result,
                 )
                 cleanup_background_task(execution_id)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="timed_out",
                     error=result.error,
@@ -1340,7 +1352,7 @@ async def task_tool(
                 request_cancel_background_task(execution_id)
                 _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
                     error=message,

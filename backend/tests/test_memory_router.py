@@ -4,12 +4,15 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+from deerflow.config.app_config import AppConfig
+from deerflow.config.memory_config import MemoryConfig
 
 
 def _sample_memory(facts: list[dict] | None = None) -> dict:
@@ -140,6 +143,84 @@ def test_import_route_without_agent_name_persists_default_bucket_markdown(tmp_pa
     assert [fact["id"] for fact in response.json()["facts"]] == ["fact_gateway_import"]
     facts_root = tmp_path / "users" / "alice" / "agents" / "__default__" / "facts"
     assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_gateway_import"]
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("backup_revision", [1, "omitted", None, True, "1", 1.0], ids=["older", "omitted", "null", "boolean", "string", "integral-float"])
+def test_import_route_restores_edited_fact_from_backup(tmp_path, agent_name: str | None, backup_revision: object) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Use PostgreSQL", "confidence": 0.9})
+            assert created.status_code == 200
+            fact_id = created.json()["facts"][0]["id"]
+            exported = client.get("/api/memory/export", params=params)
+            assert exported.status_code == 200
+            backup = exported.json()
+            if backup_revision == "omitted":
+                backup["facts"][0].pop("revision")
+            else:
+                backup["facts"][0]["revision"] = backup_revision
+            edited = client.patch(f"/api/memory/facts/{fact_id}", params=params, json={"content": "Use SQLite"})
+            assert edited.status_code == 200
+
+            restored = client.post("/api/memory/import", params=params, json=backup)
+
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["facts"][0]["content"] == "Use PostgreSQL"
+            assert restored.json()["facts"][0]["id"] == fact_id
+            assert restored.json()["facts"][0]["revision"] == edited.json()["facts"][0]["revision"] + 1
+            reloaded = client.post("/api/memory/reload", params=params)
+            assert reloaded.status_code == 200
+            assert reloaded.json()["facts"] == restored.json()["facts"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("existing_id", [True, False], ids=["existing", "new"])
+@pytest.mark.parametrize("revision", [0, -1, False, "0"], ids=["zero", "negative", "false", "string-zero"])
+def test_import_route_rejects_invalid_revision_without_replacing_memory(tmp_path, agent_name: str | None, existing_id: bool, revision: object) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Use PostgreSQL"})
+            assert created.status_code == 200
+            fact_id = created.json()["facts"][0]["id"]
+            exported = client.get("/api/memory/export", params=params)
+            assert exported.status_code == 200
+            backup = exported.json()
+            backup["facts"][0]["revision"] = revision
+            if not existing_id:
+                backup["facts"][0]["id"] = "new_fact"
+            assert client.patch(f"/api/memory/facts/{fact_id}", params=params, json={"content": "Use SQLite"}).status_code == 200
+            assert client.post("/api/memory/facts", params=params, json={"content": "Keep the post-backup fact"}).status_code == 200
+            before = client.get("/api/memory/export", params=params)
+            assert before.status_code == 200
+
+            response = client.post("/api/memory/import", params=params, json=backup)
+
+            assert response.status_code == 400, response.text
+            assert response.json()["detail"] == "Invalid memory import: facts must be a list of objects with non-empty content."
+            reloaded = client.post("/api/memory/reload", params=params)
+            assert reloaded.status_code == 200
+            assert reloaded.json() == before.json()
+    finally:
+        manager.close()
 
 
 def test_import_memory_route_preserves_source_error() -> None:
@@ -676,6 +757,79 @@ def test_update_memory_fact_route_returns_specific_error_for_invalid_confidence(
             response = client.patch("/api/memory/facts/fact_edit", json={"content": "User prefers spaces", "confidence": 0.91})
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid confidence value; must be between 0 and 1."
+
+
+# ── config / status ────────────────────────────────────────────────────────
+
+
+def _get_config_route(route: str, config: MemoryConfig):
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = MagicMock()
+    manager.get_memory.return_value = _sample_memory()
+    with (
+        patch("app.gateway.routers.memory.get_memory_config", return_value=config),
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        TestClient(app) as client,
+    ):
+        response = client.get(route)
+    assert response.status_code == 200
+    return response
+
+
+@pytest.mark.parametrize(("route", "config_path"), [("/api/memory/config", ()), ("/api/memory/status", ("config",))])
+def test_memory_config_routes_mask_resolved_backend_secrets(monkeypatch, route: str, config_path: tuple[str, ...]) -> None:
+    """Loading resolves ``$VAR`` references, so backend keys reached these routes in plaintext."""
+    monkeypatch.setenv("TEST_MEMORY_LLM_KEY", "sk-memory-llm-secret")
+    monkeypatch.setenv("TEST_HONCHO_KEY", "hk-honcho-secret")
+    raw = {
+        "memory": {
+            "enabled": True,
+            "manager_class": "honcho",
+            "backend_config": {
+                "base_url": "https://honcho.example",
+                "api_key": "$TEST_HONCHO_KEY",
+                "model": {"provider": "openai", "model": "gpt-4o-mini", "api_key": "$TEST_MEMORY_LLM_KEY", "default_headers": {"Authorization": "Bearer header-secret"}},
+                "peers": [{"name": "deerflow", "accessToken": "list-token-secret"}],
+                "api_keys": {"prod": "plural-secret"},
+                "credentials": {"client_id": "deerflow-client", "client_secret": "container-secret"},
+            },
+        }
+    }
+    config = MemoryConfig(**AppConfig.resolve_env_variables(raw)["memory"])
+
+    response = _get_config_route(route, config)
+
+    for secret in ("sk-memory-llm-secret", "hk-honcho-secret", "header-secret", "list-token-secret", "plural-secret", "container-secret"):
+        assert secret not in response.text
+    body = response.json()
+    for key in config_path:
+        body = body[key]
+    assert body["backend_config"] == {
+        "base_url": "https://honcho.example",
+        "api_key": "***",
+        "model": {"provider": "openai", "model": "gpt-4o-mini", "api_key": "***", "default_headers": {"Authorization": "***"}},
+        "peers": [{"name": "deerflow", "accessToken": "***"}],
+        # A secret-named container is masked whole: its keys can be arbitrary names.
+        "api_keys": "***",
+        "credentials": "***",
+    }
+    assert config.backend_config["model"]["api_key"] == "sk-memory-llm-secret", "the backend itself still gets the real key"
+
+
+def test_memory_config_keeps_non_secret_and_unset_backend_values() -> None:
+    backend_config = {
+        "api_key_env": "OPENVIKING_API_KEY",
+        "token_counting": "tiktoken",
+        "max_injection_tokens": 2000,
+        "guaranteed_token_budget": 500,
+        "model": {"model": "gpt-4o-mini", "api_key": None, "base_url": ""},
+        "password": "",
+    }
+
+    response = _get_config_route("/api/memory/config", MemoryConfig(enabled=True, backend_config=backend_config))
+
+    assert response.json()["backend_config"] == backend_config
 
 
 # ── bound-owner (internal caller) ──────────────────────────────────────────

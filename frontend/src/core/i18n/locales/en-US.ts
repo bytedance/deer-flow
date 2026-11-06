@@ -12,6 +12,60 @@ import {
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
@@ -94,6 +148,11 @@ export const enUS: Translations = {
         title: "Knowledge spaces and connections",
         description:
           "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
+      },
+      knowledgeCenter: {
+        title: "Knowledge center",
+        description:
+          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
       },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
@@ -391,6 +450,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -656,6 +721,25 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
@@ -875,7 +959,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -1921,6 +2007,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",

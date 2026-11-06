@@ -3,7 +3,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
@@ -148,7 +151,7 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle(co
             tool_call_id="call-1",
         )
 
-        result = await submit_tool.coroutine(runtime=runtime, topic="MCP")
+        result = await submit_tool.coroutine(deerflow_runtime=runtime, topic="MCP")
 
         assert result == {
             "task_id": "mcp-task-local-1",
@@ -170,6 +173,53 @@ async def test_submit_wrapper_persists_before_returning_only_the_local_handle(co
             "cancel_tool": "cancel_report",
             "connection_scope": connection_scope,
         }
+    finally:
+        set_mcp_task_submitter(None)
+
+
+@pytest.mark.asyncio
+async def test_submit_wrapper_keeps_a_business_argument_named_runtime() -> None:
+    """A tool whose own schema has a ``runtime`` property must receive its value."""
+    submitter = FakeSubmitter()
+    set_mcp_task_submitter(submitter)
+    try:
+
+        async def call(**arguments):
+            return arguments
+
+        def tool(name: str) -> StructuredTool:
+            return StructuredTool(
+                name=name,
+                description=name,
+                args_schema={
+                    "type": "object",
+                    "properties": {"runtime": {"type": "string"}, "code": {"type": "string"}},
+                    "required": ["runtime", "code"],
+                },
+                coroutine=call,
+            )
+
+        configured = _configure_task_tools_for_server(
+            [tool("submit_report"), tool("get_report_status"), tool("cancel_report")],
+            server_name="reports",
+            server_config=_server_config(),
+            tool_name_prefix=False,
+        )
+        builder = StateGraph(MessagesState, context_schema=dict)
+        builder.add_node("tools", ToolNode([configured[0]]))
+        builder.add_edge(START, "tools")
+        builder.add_edge("tools", END)
+        graph = builder.compile()
+
+        await graph.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": "submit_report", "args": {"runtime": "python", "code": "print(1)"}, "id": "call-1", "type": "tool_call"}])]},
+            context={"thread_id": "thread-1", "thread_incarnation": "incarnation-1", "run_id": "run-1"},
+        )
+
+        request = submitter.calls[0]["request"]
+        assert request.arguments == {"runtime": "python", "code": "print(1)"}
+        assert request.thread_id == "thread-1"
+        assert request.tool_call_id == "call-1"
     finally:
         set_mcp_task_submitter(None)
 

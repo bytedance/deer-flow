@@ -34,6 +34,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/community/ddg_search/AGENTS.md",
     "backend/packages/harness/deerflow/community/e2b_sandbox/AGENTS.md",
     "backend/packages/harness/deerflow/community/aio_sandbox/AGENTS.md",
+    "backend/packages/harness/deerflow/community/browser_automation/AGENTS.md",
     "backend/packages/harness/deerflow/community/opensandbox/AGENTS.md",
     "backend/packages/harness/deerflow/config/AGENTS.md",
     "backend/packages/harness/deerflow/extensions/AGENTS.md",
@@ -55,9 +56,12 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/uploads/AGENTS.md",
     "backend/packages/harness/deerflow/utils/AGENTS.md",
     "frontend/src/AGENTS.md",
+    "frontend/src/components/workspace/AGENTS.md",
     "frontend/src/components/workspace/browser-view/AGENTS.md",
     "frontend/src/core/auth/AGENTS.md",
+    "frontend/src/core/background-tasks/AGENTS.md",
     "frontend/src/core/memory/AGENTS.md",
+    "frontend/src/core/models/AGENTS.md",
     "frontend/tests/e2e/AGENTS.md",
     "scripts/AGENTS.md",
     "examples/deerflow-extension-agent-teams/AGENTS.md",
@@ -65,6 +69,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "examples/deerflow-extension-weknora/AGENTS.md",
     "examples/deerflow-extension-knowledge-management/AGENTS.md",
     "examples/deerflow-extension-knowledge-platform/AGENTS.md",
+    "examples/deerflow-extension-knowledge-center/AGENTS.md",
     "examples/deerflow-extension-lightrag/AGENTS.md",
 }
 
