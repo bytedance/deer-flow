@@ -132,7 +132,7 @@
   },
   "engines": {
     "node": ">=22",
-    "pnpm": ">=10"
+    "pnpm": ">=10.26.2"
   },
   "packageManager": "pnpm@10.26.2"
 }
