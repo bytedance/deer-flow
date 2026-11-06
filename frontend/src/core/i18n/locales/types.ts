@@ -342,6 +342,12 @@ export interface Translations {
   };
 
   modelPicker: {
+    search: string;
+    provider: string;
+    allProviders: string;
+    noResults: string;
+    recent: string;
+
     title: string;
     favorites: string;
     otherModels: string;
@@ -747,6 +753,8 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    followUpPending: string;
+    followUpStopped: string;
     workerUnavailable: string;
     empty: string;
     emptyHint: string;
@@ -1664,6 +1672,30 @@ export interface Translations {
     title: string;
     description: string;
     models: {
+      connectionSettings: string;
+      importTitle: string;
+      importDescription: string;
+      savedConnection: string;
+      newConnection: string;
+      fetchModels: string;
+      searchModels: string;
+      selectVisible: string;
+      clearSelection: string;
+      alreadyConfigured: string;
+      noCatalogResults: string;
+      catalogTruncated: string;
+      discovery_unsupported: string;
+      discovery_failed: string;
+      importUncertain: string;
+      importStopped: string;
+      stopImport: string;
+      closeCatalog: string;
+      catalogCount: (
+        visible: number,
+        total: number,
+        selected: number,
+      ) => string;
+      testAndAdd: (count: number) => string;
       title: string;
       description: string;
       adminOnly: string;

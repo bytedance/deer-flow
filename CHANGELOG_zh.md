@@ -14,6 +14,9 @@
 
 ### 新增
 
+- **子智能体：** 后台批次可声明条目前置关系，并可登记一次主 Agent 接续，在批次结束后完成
+  用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+
 - **对话：** 网页端在任务运行时，可在输入框选择 Queue（排队执行）或 Steer（调整当前任务）。
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
@@ -27,6 +30,16 @@
   frame 的回复也会被发到私聊。现在群以 `chatid` 为键、每位成员一个线程，私聊线程
   保持不变。通过各自 `/connect` 绑定的群保留原有线程；覆盖该机器人所有群的旧版
   群绑定会在每个群中开始新线程。([#7794])
+  
+- **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
+  沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
+  ([#7782])
+
+- **扩展：** 上下文压缩观察者现在能知道压缩发生在哪个任务里。在 Lead 运行或子 Agent
+  内部，观察者收到的是该任务的存储，而不再是分离存储；`CompactionEvent` 新增
+  `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
+  `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
+  id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -53,6 +66,8 @@
   回收站保留期清扫不再删除仍在使用的文档原件。此前它按解析后的路径保护每个文档，
   却遍历未解析的目录树，导致没有任何文档能匹配上，所有超过 24 小时的原件都被当作
   孤立文件删除，Gateway 启动时和 `GET /api/trash/documents` 都会触发。([#7732])
+
+- **对话：** 队列分发开始后，取消某条排队输入不再阻止后续排队输入继续执行。([#7746])
 
 - **开发：** `scripts/dev_multi_instance.sh logs all` 现在除两个 Gateway 日志外也会输出
   nginx 日志；此前它只输出 Gateway 日志，与不带参数的 `logs` 相同。`logs nginx` 与
@@ -12749,8 +12764,11 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
