@@ -762,6 +762,45 @@ class TestTodoMiddlewareAgentGraphIntegration:
         assert [len(_todo_completion_reminders(messages)) for messages in model.seen_messages] == [0, 0, 1, 1, 1]
         assert result["messages"][-1].content == "premature final 3"
 
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        "content,response_metadata,additional_kwargs",
+        [
+            ("partial answer", {"finish_reason": "length"}, {}),
+            ("partial answer", {"stop_reason": "max_tokens"}, {}),
+            ([{"type": "text", "text": "partial answer"}], {"finish_reason": "MAX_TOKENS"}, {}),
+            ("partial answer", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, {}),
+            ("partial answer", {}, {"finish_reason": "length"}),
+        ],
+        ids=["openai", "anthropic", "gemini-blocks", "responses", "additional-kwargs"],
+    )
+    def test_text_only_length_cap_does_not_reengage_todos(self, invoke_async, content, response_metadata, additional_kwargs):
+        todo_mw = TodoMiddleware()
+        capped_message = AIMessage(content=content, response_metadata=response_metadata, additional_kwargs=additional_kwargs)
+        model = _CapturingFakeMessagesListChatModel(responses=[capped_message])
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[todo_mw, ModelLengthFinishReasonMiddleware()],
+            state_schema=ThreadState,
+        )
+        todos = [{"content": "Finish the report", "status": "in_progress"}]
+        state = {"messages": [("user", "write the report")], "todos": todos}
+        context = {"thread_id": "text-cap-thread", "run_id": "text-cap-run"}
+
+        result = asyncio.run(graph.ainvoke(state, context=context)) if invoke_async else graph.invoke(state, context=context)
+
+        assert len(model.seen_messages) == 1
+        final_ai = result["messages"][-1]
+        assert final_ai.content == content
+        assert final_ai.response_metadata == response_metadata
+        assert final_ai.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+        assert all(final_ai.additional_kwargs[key] == value for key, value in additional_kwargs.items())
+        assert "model_length_termination" not in capped_message.additional_kwargs
+        assert result["todos"] == todos
+        assert todo_mw._pending_completion_reminders == {}
+        assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
+
     def test_length_capped_write_file_does_not_reengage_todos(self):
         """Reproduces the incident (thread b1723286): model emits a write_file
         call with finish_reason=length, ModelLength suppresses it, and
@@ -933,3 +972,36 @@ class TestAwrapModelCall:
 
         assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
         assert mw._completion_reminder_count_for_runtime(runtime) == 1
+
+
+class TestMalformedStoredTodos:
+    """State is a boundary: a stored value need not match the write_todos shape.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite directly, so the middleware must not assume every entry is a
+    mapping. One unknown shape used to raise on every model call of the thread.
+    """
+
+    def test_before_model_ignores_entries_it_cannot_render(self):
+        mw = TodoMiddleware()
+        state = {"messages": [HumanMessage(content="hi")], "todos": ["oops", {"content": "Keep me"}]}
+        result = mw.before_model(state, _make_runtime())
+        content = result["messages"][0].content
+        assert "Keep me" in content
+        assert "oops" not in content
+
+    def test_after_model_keeps_guarding_for_the_usable_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": ["oops", {"content": "Keep me", "status": "pending"}]}
+        assert mw.after_model(state, _make_runtime()) == {"jump_to": "model"}
+
+    def test_after_model_ignores_malformed_siblings_of_completed_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
+        assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
+    def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) is None
+        assert mw.before_model({"messages": [HumanMessage(content="hi")], "todos": todos}, _make_runtime()) is None
