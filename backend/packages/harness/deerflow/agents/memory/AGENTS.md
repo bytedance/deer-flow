@@ -189,6 +189,10 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 
+Replacement imports copy facts, validate supplied revisions as positive integers,
+and use live revisions for existing IDs. Omitted revisions stay valid. Preserve
+manifest, upsert, absence and delete preconditions.
+
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
