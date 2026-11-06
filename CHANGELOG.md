@@ -24,6 +24,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** Unfinished todos no longer trigger additional model calls or
+  tool execution after a loop-detection or run token-budget hard stop. Todo
+  state is preserved so users can continue in a later run. ([#7953])
+
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
   call. Existing sandbox bindings and providers that require skill uploads
@@ -16033,3 +16037,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953

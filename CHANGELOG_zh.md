@@ -23,6 +23,9 @@
 
 ### 修复
 
+- **智能体：** 循环检测或运行 token 预算触发硬停止后，未完成的 Todo 不再触发额外的
+  模型调用或工具执行。Todo 状态仍会保留，用户可在后续运行中继续处理。([#7953])
+
 - **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
   沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
   ([#7782])
@@ -12763,3 +12766,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
