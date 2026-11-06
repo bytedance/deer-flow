@@ -29,6 +29,7 @@ from deerflow.knowledge_scope import KnowledgeScope, canonicalize_knowledge_scop
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -133,11 +134,19 @@ class AgentPackage(BaseModel):
     agent: AgentPackageAgent
 
 
-def _validate_agent_name(name: str) -> None:
+def _validate_agent_name(name: str, *, for_creation: bool = False) -> None:
     """Validate agent name against allowed pattern.
 
     Args:
         name: The agent name to validate.
+        for_creation: Also refuse names that cannot be created as a host path
+            component. The character class admits Windows reserved device names
+            (``NUL``, ``CON``, ``COM1``, ...); such a name becomes a directory
+            under the agent root and writing ``config.yaml`` inside it fails on
+            Windows hosts with ``FileNotFoundError``, which the create/update
+            handlers would otherwise surface as an opaque 500. Only creation and
+            update set this, so read and delete keep working for rows an older
+            release already created.
 
     Raises:
         HTTPException: 422 if the name is invalid.
@@ -147,6 +156,13 @@ def _validate_agent_name(name: str) -> None:
             status_code=422,
             detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
         )
+    if for_creation:
+        reason = windows_incompatible_segment(name)
+        if reason is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid agent name '{name}'. Contains a {reason}.",
+            )
 
 
 def _normalize_agent_name(name: str) -> str:
@@ -359,7 +375,7 @@ async def check_agent_name(name: str, request: Request) -> dict:
         HTTPException: 422 if the name is invalid.
     """
     _require_agents_api_enabled()
-    _validate_agent_name(name)
+    _validate_agent_name(name, for_creation=True)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
@@ -385,7 +401,7 @@ async def import_agent_package(body: AgentPackage, request: Request, name: str |
     """Import a portable definition, optionally under a different name."""
     _require_agents_api_enabled()
     target_name = name or body.agent.name
-    _validate_agent_name(target_name)
+    _validate_agent_name(target_name, for_creation=True)
     _validate_model_exists(body.agent.model)
     normalized_name = _normalize_agent_name(target_name)
     user_id = get_effective_user_id()
@@ -515,7 +531,7 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
         HTTPException: 409 if agent already exists, 422 if name is invalid.
     """
     _require_agents_api_enabled()
-    _validate_agent_name(body.name)
+    _validate_agent_name(body.name, for_creation=True)
     _validate_model_exists(body.model)
     normalized_name = _normalize_agent_name(body.name)
     user_id = get_effective_user_id()
@@ -551,7 +567,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         HTTPException: 404 if agent not found.
     """
     _require_agents_api_enabled()
-    _validate_agent_name(name)
+    _validate_agent_name(name, for_creation=True)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 
