@@ -29,6 +29,8 @@ _CLORO_GOOGLE_ENDPOINT = "https://api.cloro.dev/v1/monitor/google"
 _CLORO_MAX_RESULTS = 10
 _CLORO_TIMEOUT = 60
 _DEFAULT_COUNTRY = "US"
+# The AI Overview goes into the agent context on every call, so clip it.
+_AI_OVERVIEW_MAX_CHARS = 4096
 _api_key_warned: set[str] = set()
 
 
@@ -56,6 +58,13 @@ def _resolve_country(value: object) -> str:
         return value.strip().upper()
     logger.warning("Invalid cloro country=%r; using %r (expected an ISO 3166-1 alpha-2 code)", value, _DEFAULT_COUNTRY)
     return _DEFAULT_COUNTRY
+
+
+def _resolve_ai_overview(value: object) -> bool:
+    if value is None or isinstance(value, bool):
+        return value is True
+    logger.warning("Invalid cloro ai_overview=%r; AI Overview stays off (expected true or false)", value)
+    return False
 
 
 def _clean_query(query: str, *, max_length: int = 500) -> str:
@@ -168,7 +177,7 @@ def _ai_overview(result: dict) -> dict | None:
         url = _result_url(source.get("url"))
         if url:
             sources.append({"title": source.get("label", ""), "url": url})
-    return {"text": text.strip(), "sources": sources}
+    return {"text": text.strip()[:_AI_OVERVIEW_MAX_CHARS], "sources": sources}
 
 
 @tool("web_search", parse_docstring=True)
@@ -185,7 +194,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
         max_results = extra["max_results"]
     max_results = _count_for_request(max_results)
     country = _resolve_country(extra.get("country"))
-    include_ai_overview = extra.get("ai_overview") is True
+    include_ai_overview = _resolve_ai_overview(extra.get("ai_overview"))
     query = _clean_query(query)
 
     api_key = _get_api_key("web_search")

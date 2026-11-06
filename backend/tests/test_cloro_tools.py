@@ -146,6 +146,23 @@ class TestResolveCountry:
         assert "Invalid cloro country" in caplog.text
 
 
+class TestResolveAiOverview:
+    def test_booleans_and_none(self):
+        from deerflow.community.cloro.tools import _resolve_ai_overview
+
+        assert _resolve_ai_overview(True) is True
+        assert _resolve_ai_overview(False) is False
+        assert _resolve_ai_overview(None) is False
+
+    def test_non_boolean_value_warns_and_stays_off(self, caplog):
+        from deerflow.community.cloro.tools import _resolve_ai_overview
+
+        with caplog.at_level(logging.WARNING):
+            assert _resolve_ai_overview("true") is False
+            assert _resolve_ai_overview(1) is False
+        assert caplog.text.count("Invalid cloro ai_overview") == 2
+
+
 class TestWebSearchTool:
     def test_basic_search_returns_normalized_results(self, mock_config_with_key):
         with patch("deerflow.community.cloro.tools.httpx.Client") as mock_client:
@@ -203,6 +220,20 @@ class TestWebSearchTool:
             patcher.stop()
 
         assert result["ai_overview"] == {"text": "An overview.", "sources": [{"title": "Source A", "url": "https://a.example.com/"}]}
+
+    def test_long_ai_overview_is_clipped(self):
+        from deerflow.community.cloro.tools import _AI_OVERVIEW_MAX_CHARS
+
+        patcher, _ = _patch_config({"api_key": "k", "ai_overview": True})
+        try:
+            with patch("deerflow.community.cloro.tools.httpx.Client") as mock_client:
+                overview = {"text": "x" * (_AI_OVERVIEW_MAX_CHARS + 100), "sources": []}
+                mock_client.return_value.__enter__.return_value.post.return_value = _make_response(_google_payload(_organic_rows(1), aioverview=overview))
+                result = _run("q")
+        finally:
+            patcher.stop()
+
+        assert len(result["ai_overview"]["text"]) == _AI_OVERVIEW_MAX_CHARS
 
     def test_ai_overview_is_ignored_when_not_enabled(self, mock_config_with_key):
         with patch("deerflow.community.cloro.tools.httpx.Client") as mock_client:
