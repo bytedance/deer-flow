@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+Knowledge auth: [contract](../../docs/KNOWLEDGE.md).
+
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
 [Viewer fence](../../../docs/full-stack-plugins.md).

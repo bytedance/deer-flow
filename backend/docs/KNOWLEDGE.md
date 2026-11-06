@@ -51,6 +51,19 @@ may retain `search(query)` when it uses an operator-owned connection with a
 fixed resource visibility. User/tenant mappings and resource authorization
 remain provider responsibilities; DeerFlow does not infer tenants from client
 metadata or create a second ACL store.
+The optional `authenticated_user_id` field carries separate host authentication
+provenance and defaults to `None`. Gateway binds it only for verified sessions
+and PATs, never internal-service or auth-disabled synthetic identities. Generic
+retrieval tools and catalog routes read it from a dedicated task-local binding;
+client flags, runtime `user_id`, saved assistant configuration and storage owner
+restoration cannot create it. Child tasks, threads and isolated subagent contexts
+inherit it; a lost/fresh context denies shared access. Trusted embedding hosts
+may use `bind_authenticated_user()` from `deerflow.runtime.user_context` only
+after authenticating the end user, and must bind `None` for non-user callers.
+Providers opting into shared access must require a nonempty exact match with
+`context.user_id` and still enforce their connection/resource/Agent policy.
+The WeKnora extension's explicit `access_mode: authenticated` uses this field
+for dynamic-user shared retrieval; its default exact-user mode is unchanged.
 `agent_name` identifies the current executor: the selected assistant name,
 defaulting to `lead_agent`, or the executing subagent's configured name from
 its server runtime `agent_id`. It does not identify the parent assistant.
