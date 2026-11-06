@@ -11,6 +11,13 @@ a build or local deployment:
   per-user agent definitions and uploads, and ``.jwt_secret``.
 - ``backend/sandbox`` is the local sandbox provider's workspace root, created by
   ``backend/Makefile`` and written by agent runs.
+- ``config.yaml`` (and the ``config.yaml.bak`` that ``make config-upgrade`` writes
+  beside it), ``extensions_config.json`` and legacy ``mcp_config.json`` hold model
+  API keys and MCP credentials. The resolvers still read them from the legacy
+  ``backend/`` location, where ``COPY backend ./backend`` would ship them.
+- ``.env*.local`` files hold local overrides; ``frontend/.env.local`` is the
+  documented place for ``BETTER_AUTH_SECRET``, and ``COPY frontend ./frontend``
+  ships it into the image that ``next build`` and ``next start`` read it from.
 
 Leaving them in the context has two consequences. Anyone who builds an image on a
 host that has run DeerFlow bakes that state — including the JWT secret and the user
@@ -44,6 +51,17 @@ HOST_LOCAL_PATHS = [
     "backend/.deer-flow/.jwt_secret",
     "backend/.deer-flow/users/some-user/agents/my-agent/config.yaml",
     "backend/sandbox/some-thread/scratch.py",
+    "config.yaml",
+    "config.yaml.bak",
+    "extensions_config.json",
+    "mcp_config.json",
+    "backend/config.yaml",
+    "backend/config.yaml.bak",
+    "backend/extensions_config.json",
+    "backend/mcp_config.json",
+    "frontend/.env.local",
+    "frontend/.env.production.local",
+    "backend/.env.local",
 ]
 
 # Paths the build genuinely needs; the exclusions must not swallow them.
@@ -53,6 +71,8 @@ BUILD_INPUT_PATHS = [
     "backend/pyproject.toml",
     "backend/app/gateway/app.py",
     "backend/packages/harness/deerflow/config/extensions_config.py",
+    "backend/packages/harness/deerflow/config/app_config.py",
+    "frontend/src/env.js",
 ]
 
 
@@ -66,12 +86,12 @@ def _pattern_matches(pattern: str, path: str) -> bool:
 
     This intentionally models the pattern shapes used by this repository rather
     than reimplementing Docker's full matcher: root-relative names/globs,
-    directory prefixes, trailing ``/**``, and leading ``**/name`` patterns.
+    directory prefixes, trailing ``/**``, and leading ``**/name`` / ``**/glob`` patterns.
     """
     pattern = pattern.rstrip("/")
     if pattern.startswith("**/"):
         name = pattern[3:]
-        return name in PurePosixPath(path).parts
+        return any(fnmatchcase(part, name) for part in PurePosixPath(path).parts)
     if pattern.endswith("/**"):
         pattern = pattern[:-3].rstrip("/")
     if "/" not in pattern:

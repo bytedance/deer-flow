@@ -73,6 +73,21 @@ backend/.coverage
 # root that the build client cannot read.
 **/.deer-flow/
 backend/sandbox/
+
+# Local configuration holds model API keys, MCP credentials and frontend secrets.
+# Compose and Helm supply it at runtime. The config resolvers still read the legacy
+# backend/ copies, and `COPY backend ./backend` / `COPY frontend ./frontend` would
+# otherwise bake them into every image layer built from this checkout.
+config.yaml
+config.yaml.bak
+extensions_config.json
+mcp_config.json
+backend/config.yaml
+backend/config.yaml.bak
+backend/extensions_config.json
+backend/mcp_config.json
+**/.env*.local
+
 *.md
 !README.md
 !frontend/README.md
