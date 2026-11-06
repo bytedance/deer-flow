@@ -733,6 +733,9 @@ class FeishuChannel(Channel):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
                 replace_next_placeholder("[file]", virtual_path)
         msg.text = text
+        # Clear the descriptors so the generic URL-based _ingest_inbound_files
+        # pass does not try to re-fetch files that were downloaded by key.
+        msg.files = []
         return msg
 
     async def _receive_single_file(
