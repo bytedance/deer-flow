@@ -28,6 +28,16 @@ claiming while paused. Preserve explicit retry/resume and terminal projection;
 `tests/test_paused_batch_lease_recovery.py` covers HTTP, restart and export, and
 `test_batch_lease_lifecycle.py` covers a concurrent renewal.
 
+Explicit item retry keeps the parent-before-item lock order and uses a
+conditional UPDATE fenced on the observed failed status, completion time and
+update time before resetting execution fields. A new attempt failing again
+invalidates the old failure snapshot. Fresh requests can retry the new failure.
+Re-read the item and parent under the acquired write lock; a cancelled parent rolls the reset
+back. A losing retry returns no item (HTTP 409), preserving the current attempt,
+result and continuation claim. `tests/test_batch_retry_admission.py` exercises
+the SQLite read/write window through HTTP and the real batch service, plus
+PostgreSQL parent-row lock contention in isolated `TEST_POSTGRES_URI` schemas.
+
 ## Unique-key upserts
 
 A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.
