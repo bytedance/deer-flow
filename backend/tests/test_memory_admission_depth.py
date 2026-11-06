@@ -36,10 +36,28 @@ def _arguments(depth: int, shape: str = "dict") -> dict:
     for _ in range(depth):
         value = {"nested": value} if shape == "dict" else {"nested": [value]}
     # Keep this a valid-JSON regression, not an arbitrary Python-only state.
-    try:
-        return json.loads(json.dumps(value))
-    except RecursionError:
-        pytest.skip("This interpreter rejects the fixture at the JSON parser/encoder boundary")
+    return json.loads(json.dumps(value))
+
+
+def _json_depth_limit(maximum: int, shape: str = "dict") -> int:
+    """Find an accepted JSON depth without changing interpreter recursion limits."""
+    low, high = 0, maximum
+    while low < high:
+        middle = (low + high + 1) // 2
+        try:
+            _arguments(middle, shape)
+        except RecursionError:
+            high = middle - 1
+        else:
+            low = middle
+    return low
+
+
+@pytest.fixture(params=["shallow", "json-boundary"])
+def depth(request):
+    # A fixed 1100 may exceed JSON limits and skip on some interpreters.
+    # Probe the accepted boundary so every deep case actually runs.
+    return request.param
 
 
 def _leaf(value: dict, depth: int, shape: str = "dict") -> dict:
@@ -51,15 +69,15 @@ def _leaf(value: dict, depth: int, shape: str = "dict") -> dict:
 
 
 def _policy(policy: str) -> PiiRedactionConfig | None:
-    return None if policy == "omitted" else PiiRedactionConfig(enabled=policy == "enabled", token_secret="memory-depth-regression-secret")
+    return None if policy == "omitted" else PiiRedactionConfig(enabled=policy != "disabled", redact_email=policy != "email-disabled", token_secret="memory-depth-regression-secret")
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("depth", [10, 1100])
 @pytest.mark.parametrize("memory", [False, True])
-@pytest.mark.parametrize("policy", ["omitted", "disabled", "enabled"])
+@pytest.mark.parametrize("policy", ["omitted", "disabled", "enabled", "email-disabled"])
 @pytest.mark.asyncio
 async def test_sdk_completion_with_deep_memory_arguments(monkeypatch, mode, depth, memory, policy):
+    depth = 10 if depth == "shallow" else _json_depth_limit(10_000)
     args = _arguments(depth)
     original = json.dumps(args)
     attempt = AIMessage(content="", id="historical-ai", tool_calls=[{"name": "_consume", "args": args, "id": "old-call"}])
@@ -93,13 +111,12 @@ async def test_sdk_completion_with_deep_memory_arguments(monkeypatch, mode, dept
     assert queued.tool_calls[0]["name"] == "_consume"
     expected = {redact_text(_EMAIL, config): redact_text(_OTHER_EMAIL, config)} if policy == "enabled" else {_EMAIL: _OTHER_EMAIL}
     assert _leaf(queued.tool_calls[0]["args"], depth) == {**expected, "number": 1, "flag": False, "empty": None}
-    if policy == "enabled":
-        assert _EMAIL not in json.dumps(queued.tool_calls)
-        assert _OTHER_EMAIL not in json.dumps(queued.tool_calls)
+    assert (queued is attempt) is (policy != "enabled")
 
 
 @pytest.mark.parametrize("shape,depth", [("dict", 1100), ("mixed", 550)])
 def test_deep_arguments_are_redacted_without_mutating_messages(shape, depth):
+    depth = _json_depth_limit(depth, shape)
     args = _arguments(depth, shape)
     original = json.dumps(args)
     message = AIMessage(content="", id="ai-1", tool_calls=[{"name": "lookup", "args": args, "id": "call-1"}])
@@ -120,7 +137,7 @@ def test_deep_arguments_are_redacted_without_mutating_messages(shape, depth):
 
 @pytest.mark.parametrize("policy", ["omitted", "disabled"])
 def test_disabled_redaction_returns_an_independent_message_list(policy):
-    message = AIMessage(content="done", tool_calls=[{"name": "lookup", "args": _arguments(1100), "id": "call-1"}])
+    message = AIMessage(content="done", tool_calls=[{"name": "lookup", "args": _arguments(_json_depth_limit(1100)), "id": "call-1"}])
     messages = [message]
 
     queued = memory_middleware.redact_queued_messages(messages, _policy(policy))
@@ -160,16 +177,36 @@ def test_non_json_cycles_fail_without_an_unredacted_fallback(shape):
         memory_middleware.redact_queued_messages([message], _policy("enabled"))
 
 
-def test_deep_arguments_without_pii_keep_message_identity():
+def test_deep_arguments_without_pii_matches_keep_message_identity():
     args = {"text": "ordinary text"}
-    for _ in range(1100):
+    for _ in range(_json_depth_limit(10_000)):
         args = {"nested": args}
-    try:
-        args = json.loads(json.dumps(args))
-    except RecursionError:
-        pytest.skip("This interpreter rejects the fixture at the JSON parser/encoder boundary")
+    args = json.loads(json.dumps(args))
     message = AIMessage(content="done", tool_calls=[{"name": "lookup", "args": args, "id": "call-1"}])
 
     queued = memory_middleware.redact_queued_messages([message], _policy("enabled"))
 
     assert queued[0] is message
+
+
+@pytest.mark.parametrize("view", ["provider-raw", "legacy"])
+@pytest.mark.parametrize("redact_email", [False, True])
+def test_raw_argument_admission_at_json_depth_boundary(view, redact_email):
+    depth = _json_depth_limit(10_000)
+    args = _arguments(depth)
+    original = json.dumps(args)
+    raw_call = {"name": "lookup", "arguments": args}
+    # Restored messages can retain structured raw arguments separately from
+    # their parsed view. Both carriers must follow the same redaction policy.
+    field, raw = ("tool_calls", [{"id": "call-1", "type": "function", "function": raw_call}]) if view == "provider-raw" else ("function_call", raw_call)
+    message = AIMessage(content="done", id="raw-ai", tool_calls=[{"name": "lookup", "args": {}, "id": "call-1"}], additional_kwargs={field: raw})
+    config = PiiRedactionConfig(enabled=True, redact_email=redact_email, token_secret="memory-depth-regression-secret")
+
+    queued = memory_middleware.redact_queued_messages([message], config)[0]
+
+    result = queued.additional_kwargs[field][0]["function"]["arguments"] if view == "provider-raw" else queued.additional_kwargs[field]["arguments"]
+    expected = {redact_text(_EMAIL, config): redact_text(_OTHER_EMAIL, config)} if redact_email else {_EMAIL: _OTHER_EMAIL}
+    assert _leaf(result, depth) == {**expected, "number": 1, "flag": False, "empty": None}
+    assert queued.id == message.id and queued.tool_calls[0]["id"] == "call-1"
+    assert (queued is message) is not redact_email
+    assert json.dumps(args) == original

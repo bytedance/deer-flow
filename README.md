@@ -2723,6 +2723,7 @@ text and local fallback titles remain available for display; memory redaction
 copies messages without changing the caller's history or tool execution.
 For SDK agents without a checkpointer, deeply nested JSON tool arguments do not
 prevent memory admission, with PII redaction either enabled or disabled.
+Structured JSON content blocks still use recursive redaction and remain depth-limited.
 The hidden `/goal` continuation is redacted before it is stored.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
