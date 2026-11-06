@@ -118,9 +118,7 @@ def test_external_writes_replace_non_dict_additional_kwargs(boundary):
 @pytest.mark.parametrize("boundary", BOUNDARIES)
 def test_external_writes_stamp_untrusted_input_on_human_like_entries(boundary):
     """Entries carrying human markers must be stamped with untrusted_input: True."""
-    todo_with_marker = [
-        {"content": "task", "type": "human", "additional_kwargs": {"hide_from_ui": True}}
-    ]
+    todo_with_marker = [{"content": "task", "type": "human", "additional_kwargs": {"hide_from_ui": True}}]
     cleaned_todo = boundary({"todos": todo_with_marker})["todos"]
     assert cleaned_todo == [
         {
@@ -139,4 +137,3 @@ def test_external_writes_stamp_untrusted_input_on_human_like_entries(boundary):
         "name": "summary",
         "additional_kwargs": {"untrusted_input": True},
     }
-
