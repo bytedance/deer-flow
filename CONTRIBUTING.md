@@ -407,7 +407,11 @@ make support-bundle
 The command prints reporter next steps, writes a `*-issue-summary.md` file that
 you can paste into the issue, writes a `*-issue-draft.md` file for AI-assisted
 issue filing, and writes an optional evidence zip under
-`.deer-flow/support-bundles/`. The zip includes toolchain versions, sanitized
+`.deer-flow/support-bundles/`. Default runs keep separate timestamped ZIPs and
+matching Markdown sidecars, including runs started within the same second.
+On POSIX, the default ZIP is private to the creating OS user (mode 0600).
+An explicit `--out` path remains the exact filename and may replace an existing
+file. The zip includes toolchain versions, sanitized
 `config.yaml` and `extensions_config.json` summaries, enabled tool/skill/MCP
 structure, git metadata, and redacted `make doctor` output.
 
