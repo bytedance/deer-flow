@@ -11,9 +11,14 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import tempfile
+import uuid
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -34,7 +39,6 @@ except ImportError:
 
 # Cache directory for persistent DuckDB databases
 CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
-TABLE_MAP_SUFFIX = ".table_map.json"
 
 
 def compute_files_hash(files: list[str]) -> str:
@@ -61,34 +65,145 @@ def compute_files_hash(files: list[str]) -> str:
     return hasher.hexdigest()
 
 
-def get_cache_db_path(files_hash: str) -> str:
-    """Get the path to the cached DuckDB database file."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    return os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
-
-
-def get_table_map_path(files_hash: str) -> str:
-    """Get the path to the cached table map JSON file."""
-    return os.path.join(CACHE_DIR, f"{files_hash}{TABLE_MAP_SUFFIX}")
-
-
-def save_table_map(files_hash: str, table_map: dict[str, str]) -> None:
-    """Save table map to a JSON file alongside the cached DB."""
-    path = get_table_map_path(files_hash)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(table_map, f, ensure_ascii=False)
-
-
-def load_table_map(files_hash: str) -> dict[str, str] | None:
-    """Load table map from cache. Returns None if not found."""
-    path = get_table_map_path(files_hash)
-    if not os.path.exists(path):
-        return None
+def _open_cached_generation(root: Path, files_hash: str):
+    """Open one complete generation; invalid cache entries are ordinary misses."""
+    con = None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        manifest = json.loads((root / f"{files_hash}.json").read_text(encoding="utf-8"))
+        if (
+            not isinstance(manifest, dict)
+            or type(manifest.get("format")) is not int
+            or manifest["format"] != 1
+        ):
+            return None
+        generation = manifest.get("generation")
+        table_map = manifest.get("table_map")
+        if not isinstance(generation, str) or not re.fullmatch(
+            rf"{files_hash}\.[0-9a-f]{{32}}", generation
+        ):
+            return None
+        if (
+            not isinstance(table_map, dict)
+            or not table_map
+            or not all(
+                isinstance(k, str) and isinstance(v, str) and k and v
+                for k, v in table_map.items()
+            )
+        ):
+            return None
+        aliases = {name.casefold() for name in table_map}
+        targets = {name.casefold() for name in table_map.values()}
+        if len(aliases) != len(table_map) or len(targets) != len(table_map):
+            return None
+        if any(
+            alias.casefold() in targets and alias.casefold() != target.casefold()
+            for alias, target in table_map.items()
+        ):
+            return None
+        directory = root / generation
+        database = directory / "data.duckdb"
+        if directory.is_symlink() or database.is_symlink():
+            return None
+        con = duckdb.connect(str(database), read_only=True)
+        physical_tables = {
+            row[0].casefold()
+            for row in con.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'main' AND table_type = 'BASE TABLE' "
+                "AND table_catalog = current_database()"
+            ).fetchall()
+        }
+        if targets != physical_tables:
+            raise ValueError("Cached table map does not match its database")
+        for table in table_map.values():
+            quoted = '"' + table.replace('"', '""') + '"'
+            con.execute(f"SELECT * FROM main.{quoted} LIMIT 0")
+        return con, table_map
+    except (OSError, ValueError, duckdb.Error):
+        if con is not None:
+            con.close()
+        logger.debug("Ignoring unreadable analysis cache", exc_info=True)
         return None
+    except BaseException:
+        if con is not None:
+            con.close()
+        raise
+
+
+@contextmanager
+def _prepare_cache_manifest(
+    root: Path, generation: str, table_map: dict[str, str]
+) -> Iterator[str]:
+    """Write and flush a private manifest before its atomic publication."""
+    fd, temporary = tempfile.mkstemp(prefix=".manifest-", suffix=".tmp", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(
+                {"format": 1, "generation": generation, "table_map": table_map},
+                handle,
+                ensure_ascii=False,
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield temporary
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@contextmanager
+def open_analysis_cache(files: list[str]):
+    """Own a read-only analysis connection backed by an immutable generation."""
+    files_hash = compute_files_hash(files)
+    root = Path(CACHE_DIR) / "generations-v1"
+    root.mkdir(parents=True, exist_ok=True)
+    cached = _open_cached_generation(root, files_hash)
+    if cached is not None:
+        con, table_map = cached
+        logger.info("Cache hit! Using complete cached generation")
+        try:
+            yield con, table_map
+        finally:
+            con.close()
+        return
+
+    generation = f"{files_hash}.{uuid.uuid4().hex}"
+    directory = root / generation
+    directory.mkdir(mode=0o700)
+    database = directory / "data.duckdb"
+    con = None
+    possibly_published = False
+    try:
+        logger.info("Loading files into a private cache generation...")
+        con = duckdb.connect(str(database))
+        table_map = load_files(con, files)
+        if not table_map:
+            logger.error("No tables were loaded. Check file paths and formats.")
+            raise SystemExit(1)
+        con.close()
+        con = None
+        # Never expose a database still owned by a writer, including the first
+        # invocation's analysis action. Other processes may already be readers.
+        con = duckdb.connect(str(database), read_only=True)
+        destination = root / f"{files_hash}.json"
+        with _prepare_cache_manifest(root, generation, table_map) as temporary:
+            # Replacement may succeed before an interruption reaches Python.
+            possibly_published = True
+            try:
+                os.replace(temporary, destination)
+            except BaseException:
+                # A successful replacement consumes this unique source even
+                # if a concurrent builder has since replaced the destination.
+                if os.path.exists(temporary):
+                    possibly_published = False
+                raise
+        logger.info("Loaded %s table(s): %s", len(table_map), ", ".join(table_map))
+        yield con, table_map
+    finally:
+        if con is not None:
+            con.close()
+        if not possibly_published:
+            shutil.rmtree(directory)
 
 
 def sanitize_table_name(name: str) -> str:
@@ -564,51 +679,16 @@ def main():
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
 
-    # Compute file hash for caching
-    files_hash = compute_files_hash(args.files)
-    db_path = get_cache_db_path(files_hash)
-    cached_table_map = load_table_map(files_hash)
-
-    if cached_table_map and os.path.exists(db_path):
-        # Cache hit: connect to existing DB
-        logger.info(f"Cache hit! Using cached database: {db_path}")
-        con = duckdb.connect(db_path, read_only=True)
-        table_map = cached_table_map
-        logger.info(
-            f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
-        )
-    else:
-        # Cache miss: load files and persist to DB
-        logger.info("Loading files (first time, will cache for future use)...")
-        con = duckdb.connect(db_path)
-        table_map = load_files(con, args.files)
-
-        if not table_map:
-            logger.error("No tables were loaded. Check file paths and formats.")
-            # Clean up empty DB file
-            con.close()
-            if os.path.exists(db_path):
-                os.remove(db_path)
-            sys.exit(1)
-
-        # Save table map for future cache lookups
-        save_table_map(files_hash, table_map)
-        logger.info(
-            f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
-        )
-        logger.info(f"Cached database saved to: {db_path}")
-
     try:
-        if args.action == "inspect":
-            action_inspect(con, table_map)
-        elif args.action == "query":
-            action_query(con, args.sql, table_map, args.output_file)
-        elif args.action == "summary":
-            action_summary(con, args.table, table_map)
+        with open_analysis_cache(args.files) as (con, table_map):
+            if args.action == "inspect":
+                action_inspect(con, table_map)
+            elif args.action == "query":
+                action_query(con, args.sql, table_map, args.output_file)
+            elif args.action == "summary":
+                action_summary(con, args.table, table_map)
     except ValueError as exc:
         sys.exit(f"Error: {exc}")
-    finally:
-        con.close()
 
 
 if __name__ == "__main__":
