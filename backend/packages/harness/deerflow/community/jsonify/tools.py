@@ -111,13 +111,15 @@ async def _open_client(timeout: float) -> httpx.AsyncClient:
     except asyncio.CancelledError:
 
         async def close_after_construction() -> None:
-            client = await construction
-            await client.aclose()
+            try:
+                client = await construction
+                await client.aclose()
+            except Exception as exc:
+                logger.error("Jsonify HTTP client cleanup after cancellation failed (%s)", type(exc).__name__)
 
-        try:
-            await await_drained(close_after_construction())
-        except Exception as exc:
-            logger.error("Jsonify HTTP client cleanup after cancellation failed (%s)", type(exc).__name__)
+        # Report failures inside the owned task before a repeated cancellation
+        # makes await_drained discard its outcome.
+        await await_drained(close_after_construction())
         raise
 
 

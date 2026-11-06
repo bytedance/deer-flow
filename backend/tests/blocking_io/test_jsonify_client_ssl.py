@@ -1,8 +1,10 @@
 """Exercise Jsonify with real HTTPX initialization and no provider requests."""
 
 import asyncio
+import logging
 import ssl
 import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -103,3 +105,63 @@ async def test_jsonify_closes_client_if_cancelled_during_setup(read_rows, monkey
         for client in clients:
             if not client.is_closed:
                 await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["construction", "close"])
+async def test_jsonify_logs_failures_during_repeated_cancellation(read_rows, monkeypatch, caplog, failure_phase):
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    close_threads = []
+    secret = "synthetic-sensitive-value"
+    caplog.set_level(logging.ERROR)
+
+    async def close():
+        close_threads.append(threading.get_ident())
+        raise RuntimeError(secret)
+
+    def construct(**kwargs):
+        assert threading.get_ident() != loop_thread
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(10), "the constructor was never released"
+            if failure_phase == "construction":
+                raise RuntimeError(secret)
+            return SimpleNamespace(aclose=close)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(httpx, "AsyncClient", construct)
+    pending = asyncio.create_task(read_rows())
+    start_waiter = asyncio.create_task(started.wait())
+    try:
+        done, _ = await asyncio.wait({pending, start_waiter}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+        if pending in done:
+            await pending
+        assert start_waiter in done, "the constructor never started"
+
+        pending.cancel()
+        await asyncio.sleep(0)  # Enter cleanup while construction is still gated.
+        pending.cancel()
+        await asyncio.sleep(0)  # Cancel the drain before its worker fails.
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await asyncio.wait_for(finished.wait(), timeout=10)
+
+        assert close_threads == ([loop_thread] if failure_phase == "close" else [])
+        errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert errors[0].levelno == logging.ERROR
+        assert "RuntimeError" in errors[0].getMessage()
+        assert secret not in errors[0].getMessage()
+    finally:
+        release.set()
+        pending.cancel()
+        start_waiter.cancel()
+        await asyncio.gather(pending, start_waiter, return_exceptions=True)
+        if started.is_set():
+            await asyncio.wait_for(finished.wait(), timeout=10)
