@@ -158,3 +158,30 @@ def test_store_factory_rejects_memory_database():
     )
     with pytest.raises(ValueError, match="sqlite.*postgres"):
         make_managed_subagent_store(config)
+
+
+@pytest.mark.parametrize("name", ["nul", "NUL", "con", "prn", "aux", "com1", "lpt9"])
+def test_normalize_managed_subagent_name_rejects_windows_reserved_names(name: str):
+    from deerflow.persistence.managed_subagents.base import normalize_managed_subagent_name
+
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        normalize_managed_subagent_name(name, for_creation=True)
+
+
+@pytest.mark.parametrize("name", ["nul", "con", "com1"])
+def test_normalize_managed_subagent_name_allows_reserved_names_on_read(name: str):
+    from deerflow.persistence.managed_subagents.base import normalize_managed_subagent_name
+
+    assert normalize_managed_subagent_name(name) == name.lower()
+
+
+@pytest.mark.parametrize("name", ["planner", "code-reviewer-2", "researcher"])
+def test_normalize_managed_subagent_name_accepts_valid_names(name: str):
+    from deerflow.persistence.managed_subagents.base import normalize_managed_subagent_name
+
+    assert normalize_managed_subagent_name(name, for_creation=True) == name
+
+
+def test_file_store_rejects_windows_reserved_device_names(file_store):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        file_store.create(_definition("nul"))
