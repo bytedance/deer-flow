@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.tool_config import ToolConfig
 from deerflow.constants import CONVERSATION_TOOL_USE
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
@@ -110,7 +111,7 @@ def _clone_tool_with_description(tool: BaseTool, description: str) -> BaseTool:
     return cloned
 
 
-def _select_tool_configs(config: AppConfig, groups: list[str] | None, include_conversation_reader: bool) -> list:
+def _select_tool_configs(config: AppConfig, groups: list[str] | None, include_conversation_reader: bool) -> list[ToolConfig]:
     """Return the configured tool entries this assembly may expose, in config order.
 
     Every exclusion rule is a pure per-entry predicate, so they are evaluated in
@@ -120,7 +121,7 @@ def _select_tool_configs(config: AppConfig, groups: list[str] | None, include_co
     knowledge_enabled = bool(getattr(getattr(config, "knowledge_base", None), "enabled", False))
     host_bash_allowed = is_host_bash_allowed(config)
 
-    selected = []
+    selected: list[ToolConfig] = []
     for tool in config.tools:
         if group_filter is not None and tool.group not in group_filter:
             continue
