@@ -28,15 +28,8 @@ claiming while paused. Preserve explicit retry/resume and terminal projection;
 `tests/test_paused_batch_lease_recovery.py` covers HTTP, restart and export, and
 `test_batch_lease_lifecycle.py` covers a concurrent renewal.
 
-Explicit item retry keeps the parent-before-item lock order and uses a
-conditional UPDATE fenced on the observed failed status, completion time and
-update time before resetting execution fields. A new attempt failing again
-invalidates the old failure snapshot. Fresh requests can retry the new failure.
-Re-read the item and parent under the acquired write lock; a cancelled parent rolls the reset
-back. A losing retry returns no item (HTTP 409), preserving the current attempt,
-result and continuation claim. `tests/test_batch_retry_admission.py` exercises
-the SQLite read/write window through HTTP and the real batch service, plus
-PostgreSQL parent-row lock contention in isolated `TEST_POSTGRES_URI` schemas.
+Retry CAS checks failed status and observed completed_at/updated_at; locks stay parent-before-item.
+Tests: `tests/test_batch_retry_admission.py`.
 
 ## Unique-key upserts
 
