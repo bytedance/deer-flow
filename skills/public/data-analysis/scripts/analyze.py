@@ -292,8 +292,7 @@ def action_query(
             cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
             col_names = [c[0] for c in cols]
             error_msg += f'  "{tbl}" ({orig}): {", ".join(col_names)}\n'
-        print(error_msg)
-        return error_msg
+        raise ValueError(error_msg) from e
 
     # Format output
     if output_file:
@@ -352,8 +351,11 @@ def _markdown_cell(value: object) -> str:
 
 def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> str:
     """Export query results to a file (CSV, JSON, or Markdown)."""
-    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     ext = os.path.splitext(output_file)[1].lower()
+    if ext not in {".csv", ".json", ".md"}:
+        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
+        raise ValueError(msg)
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
 
     if ext == ".csv":
         import csv
@@ -399,11 +401,6 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             # Rows
             for row in rows:
                 f.write("| " + " | ".join(_markdown_cell(v) for v in row) + " |\n")
-    else:
-        msg = f"Unsupported output format: {ext}. Use .csv, .json, or .md"
-        print(msg)
-        return msg
-
     msg = f"Results exported to {output_file} ({len(rows)} rows)"
     print(msg)
     return msg
@@ -420,11 +417,10 @@ def action_summary(
 
     try:
         columns = con.execute(f"DESCRIBE {resolved}").fetchall()
-    except Exception:
+    except Exception as e:
         available = ", ".join(f'"{t}" ({o})' for o, t in table_map.items())
         msg = f"Table '{table_name}' not found. Available tables: {available}"
-        print(msg)
-        return msg
+        raise ValueError(msg) from e
 
     row_count = con.execute(f"SELECT COUNT(*) FROM {resolved}").fetchone()[0]
 
