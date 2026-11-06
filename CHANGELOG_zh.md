@@ -26,6 +26,14 @@
 - **智能体：** 循环检测或运行 token 预算触发硬停止后，未完成的 Todo 不再触发额外的
   模型调用或工具执行。Todo 状态仍会保留，用户可在后续运行中继续处理。([#7953])
 
+- **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
+  同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
+  `require_bound_identity: false`，以及旧版群绑定），成员的私聊和其发过言的所有群
+  共用同一个 DeerFlow 线程：群内回复可能用到该成员私聊或其他群的内容，失去原始
+  frame 的回复也会被发到私聊。现在群以 `chatid` 为键、每位成员一个线程，私聊线程
+  保持不变。通过各自 `/connect` 绑定的群保留原有线程；覆盖该机器人所有群的旧版
+  群绑定会在每个群中开始新线程。([#7794])
+  
 - **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
   沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
   ([#7782])
@@ -12764,6 +12772,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953

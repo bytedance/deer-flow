@@ -49,6 +49,46 @@ _SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
 
 
+def _document_summary_text(block: object) -> str | None:
+    """Expose document metadata and direct plaintext, without fetching media."""
+    if not isinstance(block, dict) or block.get("type") != "document":
+        return None
+    parts = []
+    for key in ("title", "context"):
+        value = block.get(key)
+        if isinstance(value, str) and value:
+            parts.append(f"{key}: {value}")
+    source = block.get("source")
+    body = None
+    if isinstance(source, dict):
+        if source.get("type") == "text":
+            body = source.get("data")
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                body = content
+            elif isinstance(content, (list, tuple)):
+                body = "\n".join(part if isinstance(part, str) else part["text"] for part in content if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)))
+    if isinstance(body, str) and body:
+        parts.append(body)
+    if not parts:
+        return None
+    return "\n" + "\n".join(["Document:", *parts]) + "\n"
+
+
+def _summary_message(message: AnyMessage) -> AnyMessage:
+    """Use request-local text blocks; keep checkpoint content and call metadata."""
+    if not isinstance(message.content, list):
+        return message
+    content = []
+    changed = False
+    for block in message.content:
+        text = _document_summary_text(block)
+        content.append({"type": "text", "text": text} if text is not None else block)
+        changed = changed or text is not None
+    return message.model_copy(update={"content": content}) if changed else message
+
+
 class _ReusedSummary(str):
     """Marks a summary reused from an identical, previously no-op prompt (no LLM call)."""
 
@@ -327,7 +367,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # Redact the complete source before splitting: an identifier spanning a
         # chunk boundary must not bypass PII screening. Input remains plain text,
         # so the chat-message human-anchor filter is neither needed nor safe.
-        return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
+        return redact_text(get_buffer_string([_summary_message(message) for message in messages]), getattr(self._app_config, "pii_redaction", None))
 
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, runtime: Runtime | None = None) -> str | None:
         """Fold every selected source fragment before committing any removal.
