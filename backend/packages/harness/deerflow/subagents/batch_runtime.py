@@ -6,11 +6,18 @@ import threading
 from dataclasses import dataclass
 from typing import Any, NotRequired, Protocol, TypedDict
 
+BATCH_CONTINUATION_NAMESPACE = "native-subagent-batches"
+
+
+def batch_continuation_key(batch_id: str) -> str:
+    return "native-batch-followup:" + batch_id
+
 
 class BatchItemInput(TypedDict):
     key: str
     prompt: str
     acceptance_criteria: NotRequired[list[str] | None]
+    depends_on: NotRequired[list[str]]
 
 
 @dataclass(frozen=True)
@@ -26,6 +33,9 @@ class BatchSubmitRequest:
     max_live_items: int | None
     max_running_items: int | None
     execution_spec: dict[str, Any]
+    continuation: str | None = None
+    continuation_authority: Any = None
+    continuation_context: dict[str, Any] | None = None
 
 
 class SubagentBatchSubmitter(Protocol):

@@ -65,6 +65,10 @@ class _FakeHonchoClient:
     def set_session_peers(self, ws: str, sid: str, pids: list[str]) -> None:
         pass
 
+    def existing_source_ids(self, ws: str, sid: str, source_ids: list[str]) -> set[str]:
+        self._writes.write([])
+        return set()
+
     def add_messages(self, ws: str, sid: str, msgs: list[dict[str, str]]) -> None:
         self._writes.write([message["content"] for message in msgs])
 

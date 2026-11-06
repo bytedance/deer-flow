@@ -74,6 +74,12 @@ receive a transient hint on the next model request.
 
 ### Sandbox System
 
+With lazy initialization, a fresh AIO run prepares its authorized Agent skill
+view without acquiring a container until a sandbox-backed tool needs one.
+Existing sandbox state still requires eager policy rebinding; upload-based
+providers still acquire and synchronize skills eagerly. Explicit sandbox
+prewarming remains a separate opt-in behavior.
+
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
@@ -148,6 +154,7 @@ to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 | Route | Purpose |
 |-------|---------|
 | `GET /api/models` | List available LLM models |
+| `GET /api/plugins/diagnostics` | Read redacted diagnostics for this Gateway process (admin only) |
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET /api/skills` | List skills visible to the caller |
@@ -155,8 +162,8 @@ to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
-| `GET /api/memory/config` | Memory configuration |
-| `GET /api/memory/status` | Combined config + data |
+| `GET /api/memory/config` | Memory configuration; credential values in `backend_config` are masked |
+| `GET /api/memory/status` | Combined config (masked the same way) + data |
 | `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
 | `POST /api/threads/{id}/uploads` | Upload files (optional PDF/PPT/Excel/Word-to-Markdown conversion, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |

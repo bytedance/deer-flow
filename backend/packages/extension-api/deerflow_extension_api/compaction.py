@@ -26,6 +26,13 @@ text later reaches a message (the ``durable_context_data`` block), but
 will not equal ``output_content_hash``. A consumer must join a compaction to what came
 after it through this event alone, never by re-hashing a later projection of the same
 text.
+
+``task_id`` / ``run_id`` / ``thread_id`` name the task the compaction happened in. The
+host copies them from the ``TaskInfo`` it seeds into the live task store — the same
+store the observer receives — so a consumer can key a compaction on
+``(thread_id, run_id)`` instead of matching hashes across sessions. They stay ``None``
+when no task identity exists: a manual ``/compact`` outside any run (observers then
+receive a detached store) or a subagent executed without a parent run.
 """
 
 from __future__ import annotations
@@ -46,6 +53,9 @@ class CompactionEvent:
     output_content_hash: str
     compacted_message_count: int
     kept_message_count: int
+    task_id: str | None = None
+    run_id: str | None = None
+    thread_id: str | None = None
 
 
 class ContextCompactionObserver(Protocol):

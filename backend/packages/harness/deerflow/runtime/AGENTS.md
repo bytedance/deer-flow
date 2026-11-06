@@ -13,6 +13,31 @@ errors preserve cache fallbacks and valid neighbors, including Redis outages/pur
 Escape literal stems for SCAN; recheck byte/string keys before UNLINK. Preserve
 namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
+### Run Admission
+
+Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
+owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
+uses ordinary AgentRuns admission after the old worker finalizes. Steer releases
+a native `task()` wait without marking the child completed; the same executor
+owns cooperative pause, timeout and cancellation. A steer withdrawn before
+delivery resumes the children it paused, except those a delivered steer still
+holds. Only direct-user input exposes
+current-work control. Preserve permissions, pool caps and token/loop stops.
+A task finishing after Steer charges usage to its dispatch `AIMessage` when its
+receipt is delivered (newest `AIMessage` if compacted); budgets read only those.
+On restart retain unapplied text for explicit retry; never replay side effects
+automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
+
+Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
+before Run admission. Do not infer cancellation from a stale read or exception
+text; other admission errors and uncertain outcomes still stop dispatch for
+explicit reconciliation. Child Run wait failures still stop the queue.
+
+Run admission and assembly publication serialize per thread across Store I/O.
+Keep registry locks short; heartbeat snapshots must not queue on an
+admission gate. Preserve same-thread publication visibility, including reads of
+preallocated run IDs. Details: [admission isolation](../../../../docs/runtime-guidance-details.md#deferred-terminal-commits-and-lease-ownership).
+
 ### Stream Bridge Heartbeats
 
 Observed Redis streams removed during replay yield `StreamGap` with empty bounds; initially empty streams still wait. After this gap, `/wait` refreshes store-only status and completes only for a terminal run with no retained stream.
@@ -47,6 +72,12 @@ successful no-op; a live owner's write retains its existing missing-buffer
 
 ### Memory Stream Replay
 
+Memory publication snapshots the payload before allocating an event ID. Each
+subscriber receives its own deep copy outside the stream Condition, so producer
+reuse and reader edits cannot rewrite retained frames. Heartbeat/END sentinels
+keep identity. `tests/test_memory_stream_payload_isolation.py` covers nested
+payloads and Worker-to-Gateway SSE/reconnect metadata, including subgraphs.
+
 Memory keeps the exact last evicted event ID as bounded per-run metadata. A
 reconnect from that known predecessor replays all retained successors and END,
 matching a live subscriber at the same position. Older or unverifiable evicted
@@ -70,7 +101,7 @@ without querying the repository or replacing the control input.
 Before changing checkpoint modes, caches, replay lookup, state replacement or
 rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-details.md#checkpoint-channel-modes-and-replay).
 
-**Message sequence placement:** Keep backend and frontend message identity rules aligned. Details: `backend/docs/runtime-guidance-details.md`.
+**Message sequence placement:** Keep backend and frontend message identity rules aligned. Tool results use their own message IDs, assigned on missing-ID callback results before persistence; provider call IDs may repeat. Restore pre-capture ID-less copies from the current lead-call result ID; reset it on a new canonical call, not a usage replay. Keep ID-less legacy rows independent. Details: `backend/docs/runtime-guidance-details.md`.
 
 **Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
 
@@ -210,6 +241,15 @@ owner, but `AUTO` resolves to the internal user's `make_safe_user_id` form, so
 Gateway thread/run reads (including run-row lookups) must pass
 `_run_scope_user_id()` explicitly.
 
+**In-memory RunEvent snapshot ownership** (`runtime/events/store/memory.py`):
+The thread- and run-keyed indexes deliberately share their internal event dicts,
+but caller-owned `content` and `metadata` must be copied at admission, and
+public put/read results must be detached snapshots. Otherwise mutating a write
+receipt or a paged read silently rewrites later RunEvent replay and every shared
+message projection. The cross-backend contract lives on `RunEventStore` in
+`runtime/events/store/base.py`; regression coverage is
+`tests/test_memory_run_event_snapshot_isolation.py`.
+
 **Event-store mutation fence** (`runtime/events/store/`): every thread mutation —
 `put`, `put_batch`, `put_if_absent`, `delete_by_thread`, `delete_by_run` — shares
 one serialization domain: the per-thread `asyncio` lock, plus (on PostgreSQL) the
@@ -235,6 +275,12 @@ Check all owners and categories; surviving rows retain the allocation floor.
 `tests/test_run_event_store.py` pins cleanup, recreation and cursor visibility.
 
 **Changed-run discovery:** Use the durable `(change_seq, run_id)` cursor and repeat history audits after admission. Details: `backend/docs/runtime-guidance-details.md`.
+
+**Memory run snapshots:** `MemoryRunStore.put` replaces existing rows like SQL.
+On a thread change, remove prior index membership only after snapshot construction
+succeeds; prune empty buckets and retain same-thread retry order. Indexed queries
+and thread cleanup follow the current row's thread. Coverage:
+`tests/test_memory_run_store_replacement_index.py` (native Manager + real SQLite).
 
 **Terminal run cleanup:** Close streams, journals, and graph references even on cancellation. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -352,6 +398,25 @@ JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
 
 ## Completed-evidence provenance
+
+SQL Run admissions return their incarnation/epoch from the committing transaction;
+Manager binds that snapshot without a later identity lookup. `run_agent` installs
+host authority in a private ContextVar, inherited by owned tasks and offloaded
+callbacks, never metadata/configurable. Strict DB admission enforces one Run per
+batch through all original write APIs. Terminal/delivery narrow the grant only
+after existing final ACK/one-shot takeover checks. Post-terminal audit grants
+name individual `audit.*` types and retain incarnation/retention fencing.
+History seeds use a separate host grant from a committed `checkpoint_write`
+reservation and captured ThreadMeta identity, permitting multiple synthetic turn
+IDs but only the three message event types. SQL admission and the strict trigger
+hold Thread fence → reservation row → ThreadMeta row through commit; validate
+owner, incarnation, epoch, state, retention revision and DB-clock lease after
+both row-lock waits. Missing legacy metadata is created under that reservation;
+never recapture a replacement incarnation after reading a checkpoint.
+Completion hooks remain legal after business terminal commit while the producer
+is open. The Worker explicitly closes after Journal drain and Subagent buffer
+completion; uncertain drains conservatively leave it open. Closure is explicit;
+elapsed time or business terminal status alone grants no recovery publication authority.
 
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 

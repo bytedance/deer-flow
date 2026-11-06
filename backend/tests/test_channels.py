@@ -7797,22 +7797,29 @@ class TestHandleChatWithArtifacts:
             manager._client = mock_client
 
             outbound_received = []
-            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+            outbound_queue: asyncio.Queue[OutboundMessage] = asyncio.Queue()
+
+            async def record_outbound(msg: OutboundMessage) -> None:
+                outbound_received.append(msg)
+                await outbound_queue.put(msg)
+
+            bus.subscribe_outbound(record_outbound)
             await manager.start()
-
-            # Send two messages with the same topic_id (same thread)
-            for text in ["make report", "add chart"]:
-                msg = InboundMessage(
-                    channel_name="test",
-                    chat_id="c1",
-                    user_id="u1",
-                    text=text,
-                    topic_id="topic-dup",
-                )
-                await bus.publish_inbound(msg)
-
-            await _wait_for(lambda: len(outbound_received) >= 2)
-            await manager.stop()
+            try:
+                # Model completed turns on one thread; concurrent worker replies
+                # can arrive in either order after off-loop artifact preparation.
+                for text in ["make report", "add chart"]:
+                    msg = InboundMessage(
+                        channel_name="test",
+                        chat_id="c1",
+                        user_id="u1",
+                        text=text,
+                        topic_id="topic-dup",
+                    )
+                    await bus.publish_inbound(msg)
+                    await asyncio.wait_for(outbound_queue.get(), timeout=5.0)
+            finally:
+                await manager.stop()
 
             assert len(outbound_received) == 2
 
@@ -13861,6 +13868,88 @@ class TestHandleGoalCommand:
             manager = self._make_manager(monkeypatch, thread_id="t-1")
             reply = await manager._handle_goal_command(self._msg("/goal do X"), "do X")
             assert reply == "Failed to set goal."
+
+        _run(go())
+
+    @pytest.mark.parametrize(("args", "method", "verb"), [("do X", "PUT", "Set"), ("clear", "DELETE", "Clear")])
+    @pytest.mark.parametrize(
+        ("locale", "status", "payload", "busy"),
+        [
+            ("en-US", 409, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, True),
+            ("zh-CN", 409, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, True),
+            ("en-US", 401, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 403, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 500, {"detail": "Thread has a run in flight. {verb} the goal after the run finishes."}, False),
+            ("en-US", 409, {"detail": "private server diagnostic"}, False),
+            ("en-US", 409, {"detail": "Thread has a run in flight. {other_verb} the goal after the run finishes."}, False),
+            ("en-US", 409, {"detail": ["private server diagnostic"]}, False),
+            ("en-US", 409, ["private server diagnostic"], False),
+            ("en-US", 409, "not JSON: private server diagnostic", False),
+        ],
+    )
+    def test_goal_mutation_error_feedback(self, monkeypatch, args, method, verb, locale, status, payload, busy):
+        """Only known in-flight conflicts get actionable text, never raw Gateway errors."""
+        from dataclasses import replace
+
+        calls = []
+        if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
+            payload = {"detail": payload["detail"].format(verb=verb, other_verb="Clear" if verb == "Set" else "Set")}
+
+        def respond(request):
+            calls.append(request)
+            return httpx.Response(status, text=payload) if isinstance(payload, str) else httpx.Response(status, json=payload)
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "app.channels.manager.httpx.AsyncClient",
+            lambda **kw: real_async_client(transport=httpx.MockTransport(respond), **kw),
+        )
+
+        async def go():
+            resolver = SimpleNamespace(locale_for=AsyncMock(return_value=locale))
+            manager = self._make_manager(monkeypatch, thread_id="t-1", reply_locale=resolver)
+            chat = AsyncMock()
+            monkeypatch.setattr(manager, "_handle_chat", chat)
+            replies = []
+            manager.bus.subscribe_outbound(AsyncMock(side_effect=replies.append))
+            msg = replace(self._msg(f"/goal {args}"), owner_user_id="owner-1", connection_id="connection-1", thread_ts="reply-1")
+
+            await manager._handle_command(msg)
+
+            assert len(replies) == 1
+            reply = replies[0]
+            expected = "Failed to clear goal." if method == "DELETE" else "Failed to set goal."
+            if busy:
+                expected = "当前任务仍在运行，请等待结束后再修改目标。" if locale == "zh-CN" else "A task is still running. Wait for it to finish before changing the goal."
+            assert reply.text == expected
+            assert (reply.channel_name, reply.chat_id, reply.thread_id, reply.thread_ts, reply.connection_id, reply.owner_user_id) == ("slack", "C1", "t-1", "reply-1", "connection-1", "owner-1")
+            assert len(calls) == 1  # No retry or follow-up run on rejection.
+            assert calls[0].method == method
+            chat.assert_not_awaited()
+            resolver.locale_for.assert_awaited_once_with("owner-1")
+
+        _run(go())
+
+    @pytest.mark.parametrize("args", ["do X", "clear"])
+    def test_goal_mutation_cancellation_is_not_reported_as_failure(self, monkeypatch, args):
+        async def cancelled(request):
+            raise asyncio.CancelledError
+
+        real_async_client = httpx.AsyncClient
+        monkeypatch.setattr(
+            "app.channels.manager.httpx.AsyncClient",
+            lambda **kw: real_async_client(transport=httpx.MockTransport(cancelled), **kw),
+        )
+
+        async def go():
+            manager = self._make_manager(monkeypatch, thread_id="t-1")
+            chat, reply = AsyncMock(), AsyncMock()
+            monkeypatch.setattr(manager, "_handle_chat", chat)
+            manager.bus.subscribe_outbound(reply)
+            with pytest.raises(asyncio.CancelledError):
+                await manager._handle_command(self._msg(f"/goal {args}"))
+            chat.assert_not_awaited()
+            reply.assert_not_awaited()
 
         _run(go())
 

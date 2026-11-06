@@ -1,3 +1,18 @@
+### Readability Fallback
+
+`readability.py` caches the optional Readability.js availability probe. If the
+Node extractor is unavailable, its probe raises, or an attempted extraction
+cannot launch Node, subsequent calls in that process use readabilipy's Python
+fallback without retrying Node. A non-zero Node exit can be document-specific,
+so it falls back only for that document and later documents retry Node. If a
+future readabilipy version removes the private availability probe, log that
+once at import and attempt extraction instead of silently disabling Node. Keep
+successful Node extraction unchanged and allow unexpected parser/programming
+exceptions to propagate. The resolved-body fallback preserves article links
+when Python extraction returns the original document wrapper. Regression
+coverage lives in `tests/test_readability.py` and
+`tests/test_web_fetch_relative_links.py`.
+
 ### Atomic Byte Publication
 
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
@@ -22,6 +37,10 @@ Shelf `stage_document_bytes` drains preparation, writes, close and failure
 cleanup before propagating cancellation. Retain the opened handle across its
 handoff, but leave waiting for incoming chunks cancellable; regressions in
 `tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
+Shelf conversion also drains its final staging discard before releasing
+single-flight ownership. Cleanup failures warn without replacing the conversion
+result, original error or cancellation; the retention sweep owns later retries.
+Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
 Local Linux/macOS text revisions opt into a short `temporary_prefix` and
 `preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
 `file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
@@ -106,14 +125,23 @@ Display summaries use `strip_leading_think_blocks` before limiting text;
 
 ### Agent / Tool Assembly Off-Load
 
-One-shot input-polish, follow-up-suggestion, and project-file-summary helpers
-build providers through `run_assembly` before awaiting inference. Provider
-construction can read local credentials; keep it off the event loop and the
-default executor while preserving request context. Cancellation during
-construction must not start inference. This contract covers callers of
-`oneshot_llm.py`; standalone skill-moderation and goal-evaluator constructors
-are separate sites and are not covered by this offload.
-Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`.
+One-shot input-polish, follow-up-suggestion, and project-file-summary helpers,
+skill moderation (`scan_skill_content`), the goal evaluator, thread title
+generation, and in-graph context compaction build providers through
+`run_assembly` before awaiting inference; the run worker calls its cached
+evaluator factory the same way. Provider construction can read local
+credentials; keep it off the event loop and the default executor while
+preserving request context. Cancellation during construction must not start
+inference. A scan without `app_config` (in-graph `skill_manage`) reads the live
+config in the same pool, and its fail-closed fallback reuses that config rather
+than reading it again on the loop. Other model construction is separate and
+not covered here: manual compaction (`compact_thread_context` builds the
+summarization middleware and its models inline) and, inside graph runs,
+subagent construction.
+Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`,
+`tests/blocking_io/test_system_model_offloop.py`,
+`tests/blocking_io/test_title_model_offloop.py` and
+`tests/blocking_io/test_summarization_model_offloop.py`.
 
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors
@@ -121,6 +149,13 @@ cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
 pins offload, executor isolation, request context, and failure ordering.
 
 Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
+
+### Document Conversion
+
+`file_conversion.convert_file_to_markdown` resolves the live PDF converter in
+its drained parsing worker. Config cache hits still stat/hash files; keep them
+off-loop with parsing. Cold/cache-hit coverage uses real temporary configs in
+`tests/blocking_io/test_file_conversion_offloop.py`.
 
 ### Uploaded Document Summaries
 

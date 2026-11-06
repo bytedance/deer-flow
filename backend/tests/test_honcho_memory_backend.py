@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -393,6 +394,7 @@ class _FakeClient:
 
     def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
+        self.message_batches: list[list[dict]] = []
         self.representation_text = "ajayr likes concise answers"
         self.raise_on: str | None = None
         # Which exception type _maybe_raise raises; default matches the real
@@ -422,6 +424,12 @@ class _FakeClient:
     def add_messages(self, ws, sid, msgs):
         self._maybe_raise("messages")
         self.calls.append(("messages", (ws, sid, tuple((m["peer_id"], m["content"]) for m in msgs))))
+        self.message_batches.append(msgs)
+
+    def existing_source_ids(self, ws, sid, source_ids):
+        self._maybe_raise("lookup")
+        self.calls.append(("lookup", (ws, sid, tuple(source_ids))))
+        return set()
 
     def working_representation(self, ws, pid, *, max_conclusions=25):
         self._maybe_raise("representation")
@@ -465,6 +473,18 @@ class TestHonchoClientTransport:
 
 
 class TestHonchoManagerWrite:
+    def test_add_with_source_id_looks_up_before_writing_metadata(self):
+        mgr, fake = _manager(workspace_overrides={"u1": "shared"}, user_peer_overrides={"u1": "alice"})
+        mgr.add("t-1", [SimpleNamespace(type="human", content=" hello ", id="h1")], user_id="u1")
+        sid = f"df-{_stable_id('t-1')}"
+        source_id = hashlib.sha256(json.dumps(["u1", "h1", "human", "alice", "hello"]).encode("utf-8")).hexdigest()
+        assert ("messages", ("shared", sid, (("alice", "hello"),))) in fake.calls
+        assert fake.calls[-2:] == [
+            ("lookup", ("shared", sid, (source_id,))),
+            ("messages", ("shared", sid, (("alice", "hello"),))),
+        ]
+        assert fake.message_batches == [[{"peer_id": "alice", "content": "hello", "metadata": {"deerflow_source_id": source_id}}]]
+
     def test_add_maps_messages_to_peers(self):
         mgr, fake = _manager(workspace_overrides={"u1": "shared"}, user_peer_overrides={"u1": "alice"})
         mgr.add("t-1", [_msg("human", "please check the deploy"), _msg("ai", "deploy is green"), _msg("tool", "ignored")], user_id="u1")

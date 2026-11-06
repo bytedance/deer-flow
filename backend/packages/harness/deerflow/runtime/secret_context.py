@@ -192,6 +192,7 @@ REDACTED_CONTEXT_KEYS = frozenset(
     {
         SECRETS_CONTEXT_KEY,
         AGENT_RUNS_CONTEXT_KEY,
+        "__run_input_control",
         ACTIVE_SECRETS_CONTEXT_KEY,
         _SLASH_SECRET_SOURCE_KEY,
         _SECRETS_BINDING_AUDIT_KEY,
