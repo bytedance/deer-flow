@@ -24,6 +24,16 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **docker:** Images built from a checkout no longer contain its local
+  configuration. `.dockerignore` did not exclude `config.yaml`,
+  `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
+  checkout that keeps them in the legacy `backend/` location baked its model
+  API keys and MCP credentials into every gateway image layer through
+  `COPY backend ./backend`. `frontend/.env.local` reached the frontend image the
+  same way. They are now excluded at the root and in `backend/`, along with
+  `.env*.local` at any depth. Published CI images were not affected; rebuild
+  local images that were pushed or shared. ([#7958])
+
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -16054,3 +16064,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958

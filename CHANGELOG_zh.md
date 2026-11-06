@@ -23,6 +23,14 @@
 
 ### 修复
 
+- **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
+  此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
+  `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
+  会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件，以及任意
+  层级的 `.env*.local` 都会被排除。CI 发布的镜像不受影响；已推送或分享过的
+  本地镜像请重新构建。([#7958])
+
 - **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
   同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
   `require_bound_identity: false`，以及旧版群绑定），成员的私聊和其发过言的所有群
@@ -12772,3 +12780,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
