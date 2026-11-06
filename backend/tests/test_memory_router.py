@@ -1049,3 +1049,74 @@ def test_import_blank_fact_returns_400_without_replacing_saved_memory(tmp_path):
         response = client.post("/api/memory/import", json=payload)
     assert response.status_code == 400
     assert manager.get_memory(user_id="alice") == before
+
+
+# ── Windows reserved agent names ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("agent_name", ["NUL", "nul", "Nul", "CON", "COM1", "LPT9"])
+def test_create_fact_rejects_windows_reserved_agent_name(tmp_path, agent_name):
+    """An agent scope is a directory under ``agents/``, so a device name cannot be written.
+
+    ``AGENT_NAME_PATTERN`` admits ``NUL``/``CON``/``COM1``. DeerMem resolves the
+    scope to ``{storage}/users/{uid}/agents/{name}/facts`` and creates it on the
+    first write; on Windows that path never appears and the write raises
+    ``FileNotFoundError``, which the endpoint's ``OSError`` branch turned into
+    ``500 Failed to create memory fact``. Reject the scope up front instead.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/facts", params={"agent_name": agent_name}, json={"content": "hello"})
+
+    assert response.status_code == 422
+    assert not (tmp_path / "users" / "alice" / "agents").exists()
+
+
+@pytest.mark.parametrize("agent_name", ["NUL", "CON"])
+def test_import_rejects_windows_reserved_agent_name(tmp_path, agent_name):
+    """The import path creates the same scope directory and needs the same guard."""
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    fact = {
+        "id": "fact-reserved",
+        "content": "Agent-scoped import",
+        "category": "context",
+        "confidence": 0.5,
+        "createdAt": "2026-07-21T00:00:00Z",
+        "source": "import",
+    }
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/import", params={"agent_name": agent_name}, json=_sample_memory(facts=[fact]))
+
+    assert response.status_code == 422
+    assert not (tmp_path / "users" / "alice" / "agents").exists()
+
+
+def test_read_routes_keep_working_for_windows_reserved_agent_name(tmp_path):
+    """Reads must stay permissive so an older release's scope can still be drained.
+
+    ``windows_incompatible_segment()`` applies when a name is created. Refusing a
+    stored scope on read would leave the owner unable to export or clear it.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.get("/api/memory/export", params={"agent_name": "NUL"})
+
+    assert response.status_code == 200
