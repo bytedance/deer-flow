@@ -1,9 +1,9 @@
 "use client";
 
-import { BlocksIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import { BlocksIcon, PuzzleIcon, SearchIcon, SparklesIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -43,7 +43,16 @@ export function CapabilityCenter() {
       : requestedTab === "extensions"
         ? "extensions"
         : "plugins";
+  // The detail view shows one extension, so there is no directory to filter.
+  const showSearch = !(tab === "extensions" && params.get("extension"));
   const [query, setQuery] = useState("");
+  // The tab strip scrolls on narrow screens; keep the active tab visible.
+  const tabsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    tabsRef.current
+      ?.querySelector('[role="tab"][data-state="active"]')
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [tab]);
   function changeTab(value: string) {
     setQuery("");
     router.replace(`${pathname}?tab=${value}`, { scroll: false });
@@ -67,31 +76,38 @@ export function CapabilityCenter() {
                 {t.capabilities.description}
               </p>
             </div>
-            <div className="relative w-full md:w-72">
-              <SearchIcon className="text-muted-foreground pointer-events-none absolute top-3 left-3 size-4" />
-              <Input
-                disabled={!hydrated}
-                className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
-                aria-label={
-                  tab === "extensions"
-                    ? t.extensions.search
-                    : tab === "skills"
-                      ? t.capabilities.searchSkills
-                      : t.capabilities.searchPlugins
-                }
-                placeholder={
-                  tab === "extensions"
-                    ? t.extensions.search
-                    : tab === "skills"
-                      ? t.capabilities.searchSkills
-                      : t.capabilities.searchPlugins
-                }
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </div>
+            {showSearch && (
+              <div className="relative w-full md:w-80">
+                <SearchIcon className="text-muted-foreground pointer-events-none absolute top-3 left-3 size-4" />
+                <Input
+                  disabled={!hydrated}
+                  className="bg-muted/30 h-10 rounded-xl pl-9 shadow-none"
+                  aria-label={
+                    tab === "extensions"
+                      ? t.extensions.search
+                      : tab === "skills"
+                        ? t.capabilities.searchSkills
+                        : t.capabilities.searchPlugins
+                  }
+                  placeholder={
+                    tab === "extensions"
+                      ? t.extensions.search
+                      : tab === "skills"
+                        ? t.capabilities.searchSkills
+                        : t.capabilities.searchPlugins
+                  }
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+            )}
           </header>
-          <Tabs value={tab} onValueChange={changeTab} className="mb-7 border-b">
+          <Tabs
+            ref={tabsRef}
+            value={tab}
+            onValueChange={changeTab}
+            className="mb-7 overflow-x-auto border-b pb-px [scrollbar-width:none]"
+          >
             <TabsList variant="line" className="h-12 gap-7">
               <TabsTrigger value="plugins" className="gap-2 px-1 pb-4 text-sm">
                 <BlocksIcon className="size-4" />
@@ -105,6 +121,7 @@ export function CapabilityCenter() {
                 value="extensions"
                 className="gap-2 px-1 pb-4 text-sm"
               >
+                <PuzzleIcon className="size-4" />
                 {t.extensions.title}
               </TabsTrigger>
             </TabsList>

@@ -579,6 +579,15 @@ for (const locale of ["en-US", "zh-CN"]) {
       ),
     ).toBeVisible();
     await expect(
+      page.getByText("deerflow-extension-agent-teams", { exact: true }),
+    ).toBeVisible();
+    // The search only filters the directory, so the detail view drops it.
+    await expect(
+      page.getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      ),
+    ).toHaveCount(0);
+    await expect(
       page.getByRole("link", {
         name: zh ? "查看安装说明" : "Installation guide",
       }),
@@ -662,6 +671,45 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
   });
 }
+
+test("extension detail fits a narrow viewport with its tab in view", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto(
+    "/workspace/capabilities?tab=extensions&extension=community.agent-teams",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Agent teams", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("tab", { name: "Extensions", exact: true }),
+  ).toBeInViewport({ ratio: 1 });
+  await expect(
+    page.getByRole("button", {
+      name: "Reload extensions (refresh page)",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const heading = page.getByRole("heading", { name: "Capability Center" });
+  const overflow = await heading.evaluate((node) => {
+    const scroller = node.closest<HTMLElement>(".overflow-y-auto");
+    return scroller ? scroller.scrollWidth - scroller.clientWidth : null;
+  });
+  expect(overflow).toBe(0);
+  const note = page.getByRole("note");
+  const noteBox = await note.boundingBox();
+  const textBox = await note
+    .getByText(
+      "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
+      { exact: true },
+    )
+    .boundingBox();
+  expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
+    noteBox!.x + noteBox!.width,
+  );
+});
 
 test("unregistered plugin pages stay unavailable", async ({ page }) => {
   mockLangGraphAPI(page);
