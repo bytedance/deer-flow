@@ -27,6 +27,13 @@
   未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
   用户可在后续运行中继续处理。([#7953])
 
+- **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
+  序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
+  最终更新及其回复兜底都会被拒绝，运行中卡片停留在最后一次流式内容或只剩 `▉`。
+  现在卡片不再转义中日韩字符，并按其在请求中占用的字节计算预算。流式更新只显示能
+  放下的部分；更长的最终回答会在同一条消息下以最多 10 张卡片按行续发，重试会从
+  已送达的卡片之后继续。([#7798])
+  
 - **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
   同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
   `require_bound_identity: false`，以及旧版群绑定），成员的私聊和其发过言的所有群
@@ -12774,6 +12781,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
