@@ -83,6 +83,11 @@ def _stub_youcom(module, url):
     return [patch.object(module, "_search", new=AsyncMock(return_value=data))], _async(module.web_search_tool)
 
 
+def _stub_outcrawl(module, url):
+    data = {"hits": [{"title": "t", "url": url, "snippet": "c", "rank": 1}]}
+    return [patch.object(module, "_resolve_tool_settings", return_value=("k", None)), patch.object(module, "_post", new=AsyncMock(return_value=data))], _async(module.web_search_tool)
+
+
 def _stub_tencent_wsa(module, url):
     data = {"Response": {"Pages": [json.dumps({"title": "t", "url": url, "content": "c"})]}}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_search", return_value=(data, None))], _sync(module.web_search_tool)
@@ -165,6 +170,7 @@ _TEXT_SEARCH_STUBS = {
     "tavily": _stub_tavily,
     "exa": _stub_exa,
     "youcom": _stub_youcom,
+    "outcrawl": _stub_outcrawl,
     "tencent_wsa": _stub_tencent_wsa,
     "serply": _stub_serply,
     "groundroute": _stub_groundroute,
