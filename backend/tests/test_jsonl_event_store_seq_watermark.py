@@ -20,6 +20,27 @@ async def write(store, run_id, method):
     return await store.put(**event(run_id))
 
 
+def windows_permissions(monkeypatch):
+    """Make read-only files undeletable and unreplaceable, as Windows does."""
+    unlink, replace = Path.unlink, Path.replace
+
+    def read_only(path):
+        return path.exists() and not path.stat().st_mode & 0o200
+
+    def guarded_unlink(path, *args, **kwargs):
+        if read_only(path):
+            raise PermissionError(13, "Access is denied", str(path))
+        return unlink(path, *args, **kwargs)
+
+    def guarded_replace(path, target):
+        if read_only(Path(target)):
+            raise PermissionError(13, "Access is denied", str(target))
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "unlink", guarded_unlink)
+    monkeypatch.setattr(Path, "replace", guarded_replace)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("method", ["put", "put_batch", "put_if_absent"])
 @pytest.mark.parametrize("reopen_before_delete", [False, True])
@@ -142,6 +163,47 @@ async def test_watermark_matches_run_permissions_before_publication(tmp_path, mo
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("run_mode", [0o400, 0o444])
+async def test_read_only_runs_keep_publishing_cursor(tmp_path, monkeypatch, run_mode):
+    """Publication must survive the restrictive modes it copies (Windows cannot replace a read-only file)."""
+    windows_permissions(monkeypatch)
+    store = JsonlRunEventStore(tmp_path)
+    runs = tmp_path / "threads" / "t1" / "runs"
+    watermark = runs / ".seq-watermark"
+    for run_id in ("r1", "r2"):
+        last = await store.put(**event(run_id))
+        (runs / f"{run_id}.jsonl").chmod(run_mode)
+        assert await store.delete_by_run("t1", run_id) == 1
+        assert watermark.read_text(encoding="utf-8") == str(last["seq"])
+        assert not watermark.stat().st_mode & 0o200
+        assert not (runs / f"{run_id}.jsonl").exists()
+    assert not list(runs.glob(".seq-*.tmp"))
+    reopened = JsonlRunEventStore(tmp_path)
+    last = await reopened.put(**event("r3"))
+    (runs / "r3.jsonl").chmod(run_mode)
+    assert last["seq"] == 3
+    assert await reopened.delete_by_run("t1", "r3") == 1
+    assert watermark.read_text(encoding="utf-8") == "3"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("run_mode", [0o400, 0o444])
+async def test_thread_deletion_removes_read_only_runs_and_watermark(tmp_path, monkeypatch, run_mode):
+    """Deleting the thread unlinks the read-only files publication preserves (Windows refuses otherwise)."""
+    windows_permissions(monkeypatch)
+    store = JsonlRunEventStore(tmp_path)
+    runs = tmp_path / "threads" / "t1" / "runs"
+    await store.put(**event("r1"))
+    await store.put(**event("r2"))
+    assert await store.delete_by_run("t1", "r2") == 1
+    watermark = runs / ".seq-watermark"
+    watermark.chmod(run_mode)
+    (runs / "r1.jsonl").chmod(run_mode)
+    assert await store.delete_by_thread("t1") == 1
+    assert list(runs.iterdir()) == []
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("replace_existing", [False, True])
 async def test_failed_watermark_permissions_keep_previous_floor_and_run(tmp_path, monkeypatch, replace_existing):
     store = JsonlRunEventStore(tmp_path)
@@ -183,3 +245,46 @@ async def test_failed_run_unlink_keeps_safe_allocation_floor(tmp_path, monkeypat
         await store.delete_by_run("t1", "r1")
     assert len(await store.list_messages("t1")) == 1
     assert (await JsonlRunEventStore(tmp_path).put(**event("r2")))["seq"] == 2
+
+
+@pytest.mark.anyio
+async def test_failed_unlink_restores_the_read_only_mode(tmp_path, monkeypatch):
+    """A run that survives a failed deletion keeps its restrictive mode instead of staying widened."""
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**event("r1"))
+    run = tmp_path / "threads" / "t1" / "runs" / "r1.jsonl"
+    run.chmod(0o400)
+    unlink = Path.unlink
+
+    def always_refuses(path, *args, **kwargs):
+        if path == run:
+            raise PermissionError(13, "The process cannot access the file", str(path))
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", always_refuses)
+    with pytest.raises(PermissionError):
+        await store.delete_by_run("t1", "r1")
+    assert not run.stat().st_mode & 0o200
+
+
+@pytest.mark.anyio
+async def test_watermark_publication_does_not_widen_the_target_first(tmp_path, monkeypatch):
+    """POSIX rename never needs the target writable, so the bit is cleared only after a refusal."""
+    store = JsonlRunEventStore(tmp_path)
+    await store.put(**event("r1"))
+    await store.delete_by_run("t1", "r1")
+    runs = tmp_path / "threads" / "t1" / "runs"
+    (runs / ".seq-watermark").chmod(0o444)
+    observed = []
+    replace = Path.replace
+
+    def record(path, target):
+        target = Path(target)
+        if target.name == ".seq-watermark":
+            observed.append(target.stat().st_mode & 0o777)
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", record)
+    await store.put(**event("r2"))
+    assert await store.delete_by_run("t1", "r2") == 1
+    assert observed[0] == 0o444

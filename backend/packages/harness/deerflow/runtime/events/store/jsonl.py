@@ -50,6 +50,35 @@ logger = logging.getLogger(__name__)
 _SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 
+def _grant_owner_write(path: Path) -> int | None:
+    """Windows cannot unlink or replace a read-only file; return the mode to restore, or None when writable."""
+    if not path.exists():
+        return None
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o200:
+        return None
+    path.chmod(mode | 0o200)
+    return mode
+
+
+def _unlink(path: Path) -> None:
+    """Delete a JSONL store file, clearing the owner write bit only when the platform refuses."""
+    try:
+        path.unlink(missing_ok=True)
+    except PermissionError:
+        previous_mode = _grant_owner_write(path)
+        if previous_mode is None:
+            raise
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            try:
+                path.chmod(previous_mode)  # The file survived, so put its access policy back.
+            except OSError:
+                logger.warning("Could not restore the JSONL store mode of %s", path, exc_info=True)
+            raise
+
+
 class JsonlRunEventStore(RunEventStore):
     def __init__(self, base_dir: str | Path | None = None):
         self._base_dir = Path(base_dir) if base_dir else Path(".deer-flow")
@@ -166,13 +195,32 @@ class JsonlRunEventStore(RunEventStore):
                 file.write(str(seq))
             # Match the run's access policy before atomically publishing the floor.
             temporary.chmod(run_mode)
-            temporary.replace(path)
+            try:
+                temporary.replace(path)
+            except PermissionError:
+                previous_mode = _grant_owner_write(path)
+                if previous_mode is None:
+                    raise
+                try:
+                    temporary.replace(path)
+                except OSError:
+                    try:
+                        path.chmod(previous_mode)  # The floor is unchanged, so keep the old mode too.
+                    except OSError:
+                        logger.warning("Could not restore the JSONL watermark mode of %s", path, exc_info=True)
+                    raise
+            path.chmod(run_mode)
         finally:
             if temporary is not None:
                 try:
                     temporary.unlink(missing_ok=True)
                 except OSError:
-                    logger.warning("Could not remove JSONL watermark temporary file %s", temporary, exc_info=True)
+                    if temporary.exists():
+                        try:
+                            temporary.chmod(0o600)  # Windows keeps a read-only temporary (it carries the run mode) undeletable.
+                            temporary.unlink(missing_ok=True)
+                        except OSError:
+                            logger.warning("Could not remove JSONL watermark temporary file %s", temporary, exc_info=True)
 
     async def _ensure_seq_loaded(self, thread_id: str) -> None:
         """Load max seq from existing files into the in-memory counter (non-blocking)."""
@@ -220,14 +268,14 @@ class JsonlRunEventStore(RunEventStore):
         thread_dir = self._thread_dir(thread_id)
         if thread_dir.exists():
             for f in thread_dir.glob("*.jsonl"):
-                f.unlink()
+                _unlink(f)
             # Reset only after every run file has been removed successfully.
-            (thread_dir / ".seq-watermark").unlink(missing_ok=True)
+            _unlink(thread_dir / ".seq-watermark")
 
     def _delete_run_file(self, thread_id: str, run_id: str) -> None:
         path = self._existing_run_file(thread_id, run_id)
         if path is not None:
-            path.unlink()
+            _unlink(path)
 
     async def put(self, *, thread_id, run_id, event_type, category, content="", metadata=None, created_at=None):
         async def mutate():
