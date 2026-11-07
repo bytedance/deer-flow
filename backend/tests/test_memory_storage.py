@@ -304,6 +304,35 @@ def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
     assert loaded["user"]["workContext"]["summary"] == "work"
 
 
+@pytest.mark.parametrize("confidence,expected", [(10**400, 1.0), (-(10**400), 0.0)], ids=["positive", "negative"])
+def test_migrate_legacy_overflow_confidence_preserves_facts_and_backup(tmp_path, confidence, expected) -> None:
+    memory_file = tmp_path / "memory.json"
+    data = create_empty_memory()
+    data["facts"] = [{"id": "legacy", "content": "legacy fact", "confidence": confidence}]
+    original = json.dumps(data).encode("utf-8")
+    memory_file.write_bytes(original)
+    storage = _storage_at(memory_file)
+
+    loaded = storage.load("__default__")
+
+    assert [(fact["id"], fact["confidence"]) for fact in loaded["facts"]] == [("legacy", expected)]
+    assert (tmp_path / "memory.json.v1.bak").read_bytes() == original
+    assert _storage_at(memory_file).load("__default__")["facts"] == loaded["facts"]
+
+
+def test_migrate_overflow_does_not_relax_invalid_content_or_change_source(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    data = create_empty_memory()
+    data["facts"] = [{"id": "valid", "content": "kept", "confidence": 10**400}, {"id": "invalid", "content": ""}]
+    original = json.dumps(data).encode("utf-8")
+    memory_file.write_bytes(original)
+
+    with pytest.raises(ValueError, match="fact.content must not be empty"):
+        _storage_at(memory_file).load("__default__")
+
+    assert memory_file.read_bytes() == original
+
+
 def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
     memory_file = tmp_path / "memory.json"
     memory_file.write_text(

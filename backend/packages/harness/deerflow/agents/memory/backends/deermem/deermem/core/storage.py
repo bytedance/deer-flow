@@ -143,6 +143,8 @@ def _normalize_legacy_import_fact(value: Any) -> dict[str, Any] | None:
     confidence = fact.get("confidence", 0.5)
     if isinstance(confidence, bool):
         numeric_confidence = 0.5
+    elif isinstance(confidence, int):
+        numeric_confidence = float(min(1, max(0, confidence)))
     else:
         try:
             numeric_confidence = float(confidence)
@@ -1511,6 +1513,13 @@ class FileMemoryStorage(MemoryStorage):
             for raw_fact in source_document.get("facts", []):
                 if not isinstance(raw_fact, dict):
                     raise MemoryStorageCorruption(f"Legacy fact in {source_path} is not an object")
+                # Recover only integer overflow; other invalid legacy fields remain strict.
+                confidence = raw_fact.get("confidence")
+                if isinstance(confidence, int) and not isinstance(confidence, bool):
+                    try:
+                        float(confidence)
+                    except OverflowError:
+                        raw_fact["confidence"] = 1.0 if confidence > 0 else 0.0
                 candidate = _normalize_fact(raw_fact, scope=_scope_dict(user_id, agent_name))
                 existing, _ = self._read_fact(path, candidate["id"], user_id=user_id, agent_name=agent_name)
                 if existing is not None:
