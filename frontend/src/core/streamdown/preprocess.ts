@@ -22,7 +22,6 @@ const DEEP_BLOCKQUOTE_HINT_RE = new RegExp(
 // Only up to 3 leading spaces can start a blockquote; 4+ (or a tab) is an
 // indented code block, where ">" runs are literal content.
 const BLOCKQUOTE_PREFIX_RE = /^ {0,3}(?:[ \t]*>)+/;
-const CODE_FENCE_RE = /^ {0,3}(?:```|~~~)/;
 
 // marked's list tokenizer recurses once per nesting level too (list ->
 // blockTokens -> list -> ...). In the browser's tighter stack a deeply nested
@@ -36,22 +35,43 @@ const CODE_FENCE_RE = /^ {0,3}(?:```|~~~)/;
 const MAX_LIST_INDENT = 200;
 const DEEP_INDENT_HINT_RE = new RegExp(`^[ \\t]{${MAX_LIST_INDENT + 1},}`, "m");
 
+function getOpeningFence(line: string): string | null {
+  const match = FENCE_MARKER_RE.exec(line);
+  if (!match) {
+    return null;
+  }
+  const marker = match[1]!;
+  // Backtick info strings cannot contain backticks; complete inline code
+  // spans at the start of a line must still be processed as prose.
+  if (marker.startsWith("`") && line.slice(match[0].length).includes("`")) {
+    return null;
+  }
+  return marker;
+}
+
 export function capBlockquoteNesting(markdown: string): string {
   if (!DEEP_BLOCKQUOTE_HINT_RE.test(markdown)) {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line)) {
-        insideFence = !insideFence;
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
+        return line;
+      }
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
         return line;
       }
       // ">" runs inside fenced or indented code blocks are literal text, not
       // nesting — rewriting them would silently corrupt code content.
-      if (insideFence || INDENTED_CODE_RE.test(line)) {
+      if (INDENTED_CODE_RE.test(line)) {
         return line;
       }
       const match = BLOCKQUOTE_PREFIX_RE.exec(line);
@@ -78,17 +98,21 @@ export function capListNesting(markdown: string): string {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line)) {
-        insideFence = !insideFence;
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
         return line;
       }
+      const openingFence = getOpeningFence(line);
       // Indentation inside fenced code is literal layout (ASCII art, pasted
       // source); collapsing it would corrupt the rendered block.
-      if (insideFence) {
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
         return line;
       }
       const whitespace = /^[ \t]*/.exec(line)![0];
@@ -208,7 +232,7 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
     return markdown;
   }
 
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   let mathState: DelimiterState = {
     openBlock: null,
     inlineCodeDelimiterLength: null,
@@ -217,14 +241,18 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
   return markdown
     .split("\n")
     .map((line) => {
-      if (CODE_FENCE_RE.test(line) && !mathState.openBlock) {
-        insideFence = !insideFence;
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
+          fenceMarker = null;
+        }
         return line;
       }
-      if (
-        insideFence ||
-        (INDENTED_CODE_RE.test(line) && !mathState.openBlock)
-      ) {
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null && !mathState.openBlock) {
+        fenceMarker = openingFence;
+        return line;
+      }
+      if (INDENTED_CODE_RE.test(line) && !mathState.openBlock) {
         return line;
       }
       const converted = convertLatexDelimitersInLine(line, mathState);
@@ -278,17 +306,25 @@ export function compactDisplayMathBlocks(markdown: string): string {
   }
 
   const output: string[] = [];
-  let insideFence = false;
+  let fenceMarker: string | null = null;
   let mathLines: string[] | null = null;
 
   for (const line of markdown.split("\n")) {
-    if (CODE_FENCE_RE.test(line) && mathLines === null) {
-      insideFence = !insideFence;
+    if (fenceMarker !== null) {
+      if (isClosingFence(line, fenceMarker)) {
+        fenceMarker = null;
+      }
+      output.push(line);
+      continue;
+    }
+    const openingFence = getOpeningFence(line);
+    if (openingFence !== null && mathLines === null) {
+      fenceMarker = openingFence;
       output.push(line);
       continue;
     }
 
-    if (insideFence || (INDENTED_CODE_RE.test(line) && mathLines === null)) {
+    if (INDENTED_CODE_RE.test(line) && mathLines === null) {
       output.push(line);
       continue;
     }
@@ -359,13 +395,8 @@ export function stripLeakedSystemTags(markdown: string): string {
 
   return lines
     .map((line) => {
-      const fenceMatch = FENCE_MARKER_RE.exec(line);
-      if (fenceMatch) {
-        const marker = fenceMatch[1]!;
-        if (fenceMarker === null) {
-          // Opening a fenced code block
-          fenceMarker = marker;
-        } else if (isClosingFence(line, fenceMarker)) {
+      if (fenceMarker !== null) {
+        if (isClosingFence(line, fenceMarker)) {
           // Closing fence: same character, at least as long, no info string
           fenceMarker = null;
         }
@@ -373,7 +404,12 @@ export function stripLeakedSystemTags(markdown: string): string {
         // (e.g. ``` inside ~~~~, or `` inside `````) — stay inside.
         return line;
       }
-      if (fenceMarker !== null || INDENTED_CODE_RE.test(line)) {
+      const openingFence = getOpeningFence(line);
+      if (openingFence !== null) {
+        fenceMarker = openingFence;
+        return line;
+      }
+      if (INDENTED_CODE_RE.test(line)) {
         return line;
       }
       return line.replace(_INTERNAL_TAG_RE, "");
