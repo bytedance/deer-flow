@@ -8,9 +8,15 @@ test.each([
   ["split surrogate pair", `${prefix}\t b😀 remaining answer`, `${prefix} b`],
   ["complete surrogate pair", `${prefix}\t😀`, `${prefix} 😀`],
   ["consecutive emoji", "😀".repeat(80), "😀".repeat(40)],
+  [
+    "unpaired surrogates",
+    "a\uD800b\uDC00c",
+    "a\uFFFDb\uFFFDc",
+    "a\uFFFDb\uFFFDc",
+  ],
 ])(
   "keeps bookmark labels within 80 UTF-16 units: %s",
-  async (_name, answer, label) => {
+  async (_name, answer, label, savedAnswer = answer) => {
     const text = `  ${answer}\n`;
     const callBackend = rs.fn();
     const action = bookmarks.conversationActions(undefined, "en").actions[0]!;
@@ -28,7 +34,7 @@ test.each([
       thread_id: "thread-1",
       message_id: "answer-1",
       label,
-      text,
+      text: `  ${savedAnswer}\n`,
     });
   },
 );

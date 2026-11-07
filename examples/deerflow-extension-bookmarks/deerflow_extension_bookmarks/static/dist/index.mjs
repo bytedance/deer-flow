@@ -44,16 +44,18 @@ export default {
               );
               return;
             }
+            // Unicode mode matches lone surrogates without touching intact pairs.
+            const text = answer.text.replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
             await services.callBackend("save", {
               thread_id: context.thread.thread_id,
               message_id: answer.id,
               // Keep the UTF-16 bound without leaving half a surrogate pair.
-              label: answer.text
+              label: text
                 .replace(/\s+/g, " ")
                 .trim()
                 .slice(0, 80)
                 .replace(/[\uD800-\uDBFF]$/u, ""),
-              text: answer.text,
+              text,
             });
             services.showMessage(
               zh

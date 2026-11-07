@@ -75,6 +75,8 @@ file above stores user bookmarks, not deployment settings.
   idempotent and do not overwrite an existing label.
   Automatic labels keep up to 80 UTF-16 code units after whitespace normalization,
   stopping before a character if the cut would split its surrogate pair.
+  Unpaired UTF-16 surrogates are replaced with U+FFFD in the saved copy and its
+  label.
 - Storage uses SQLite and blocking I/O is offloaded from the event loop. This is a
   single-host example, not a multi-node storage contract or tenant administration UI.
 - Plugin browser/Python code is trusted deployment code. Shadow DOM scopes CSS,
