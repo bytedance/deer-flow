@@ -225,7 +225,7 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": ["/mnt/user-data/outputs/report.md"],
@@ -267,7 +267,7 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
         "by_tool": {},
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": [],

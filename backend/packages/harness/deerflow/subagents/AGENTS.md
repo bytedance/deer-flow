@@ -2,6 +2,9 @@
 
 Drain cleanup; preserve terminal outcomes on cancel.
 
+Optional batch dependencies and one-shot follow-up reuse batch claims and AgentRuns.
+See [behavior and ownership](../../../../docs/BATCH_CONTINUATION.md): keep one execution lease and check conversation state before admission; never persist live capabilities.
+
 Accumulate validated ToolMessage knowledge across values frames in
 `SubagentResult.knowledge_sources`: at most 100 sources, deduplicated by evidence ID.
 Publish before terminal state; retain through compaction. Ordinary `task` forwards

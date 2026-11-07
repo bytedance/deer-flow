@@ -22,6 +22,7 @@ export interface ModelReasoningCapabilities {
 }
 
 export interface Model {
+  provider?: string | null;
   id: string;
   name: string;
   model: string;

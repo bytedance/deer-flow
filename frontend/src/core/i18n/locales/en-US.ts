@@ -450,6 +450,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -953,7 +959,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -1999,6 +2007,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",

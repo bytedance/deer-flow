@@ -427,6 +427,12 @@ export const zhCN: Translations = {
   },
 
   modelPicker: {
+    search: "搜索模型名称或 ID…",
+    provider: "渠道",
+    allProviders: "全部渠道",
+    noResults: "没有匹配的模型",
+    recent: "最近使用",
+
     title: "选择模型",
     favorites: "收藏",
     otherModels: "其他模型",
@@ -890,7 +896,9 @@ export const zhCN: Translations = {
   subagentBatches: {
     label: "批处理",
     title: "子智能体批处理",
-    description: "面向大量独立条目的持久化、可恢复执行。",
+    description: "在后台执行并保留进度的批量任务。",
+    followUpPending: "这批任务结束后，会继续完成你要求的后续工作。",
+    followUpStopped: "已停止自动接续。",
     workerUnavailable:
       "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
     empty: "暂无子智能体批处理",
@@ -1894,6 +1902,30 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     models: {
+      connectionSettings: "渠道配置",
+      importTitle: "获取并添加模型",
+      importDescription:
+        "获取渠道目录后，勾选模型并测试添加。测试可能产生接口费用，只有通过流式工具调用测试的模型才会启用。",
+      savedConnection: "使用已有渠道配置",
+      newConnection: "新建渠道配置",
+      fetchModels: "获取模型",
+      searchModels: "搜索模型…",
+      selectVisible: "选择当前结果",
+      clearSelection: "清空选择",
+      alreadyConfigured: "已配置",
+      noCatalogResults: "没有匹配的模型，请修改搜索或手动添加。",
+      catalogTruncated:
+        "目录最多显示 2,000 个模型或 20 页，其余模型可手动添加。",
+      discovery_unsupported: "此接口不支持获取模型目录，请手动填写模型 ID。",
+      discovery_failed: "获取目录失败，请检查渠道连接后重试。",
+      importUncertain: "结果未确认，重试时会检查模型是否已经保存。",
+      importStopped:
+        "已停止，已完成的模型会保留；可重试确认最后一项的保存结果。",
+      stopImport: "停止",
+      closeCatalog: "完成",
+      catalogCount: (visible, total, selected) =>
+        `显示 ${visible} / ${total} 个 · 已选 ${selected} 个`,
+      testAndAdd: (count) => `测试并添加（${count}）`,
       title: "模型",
       description: "管理供用户选择的共享模型。服务器配置中的模型为只读。",
       adminOnly: "只有管理员可以管理共享模型，演示模式不支持此功能。",

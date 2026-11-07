@@ -224,6 +224,10 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
 For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
+Tool-result recovery treats null and empty call IDs alike — including the
+`"None"` and `"missing_tool_call_id"` spellings middleware producers use when a
+provider call had no ID — preserving middleware guidance when a result can be
+uniquely paired; ambiguous partial results remain rejected.
 Both synchronous and asynchronous streams retain this compatibility: tool-enabled
 streams simulate chunks from a non-streaming response, while no-tool streams stay native.
 Newline compatibility preserves literal escapes inside backtick and tilde code
@@ -249,6 +253,8 @@ fences, including unclosed fences, in complete and streamed replies.
    The wizard also lets you configure an optional web search provider, or skip it for now.
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
+
+   Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
 
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
@@ -334,6 +340,17 @@ fences, including unclosed fences, in complete and streamed replies.
    names are generated automatically and remain stable when a model ID changes.
    Newly saved models are enabled and immediately refresh existing chat and Agent
    model selectors, without editing YAML or restarting the Gateway.
+
+   Use **Fetch and add models** to reuse a saved connection or enter a new one,
+   search its catalog, and test selected models before adding them. Existing
+   entries are retained on retries; individual failures remain available to retry.
+   Chat pickers support name/ID search, provider filtering, favorites and the
+   eight most recently selected models, scoped to your account in this browser.
+
+   The OpenAI preset routes `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+   `gpt-6-sol` and `gpt-6-luna` through the Responses API for tool calling,
+   with model-specific thinking and reasoning-effort defaults. Flash mode
+   turns off reasoning for GPT-6.1 Terra, GPT-6 Sol and GPT-6 Luna.
 
    The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
    `kimi-k3.1-pro-highspeed` with required thinking, image input and native
@@ -1087,6 +1104,16 @@ URLs. The default local provider never enables the socket overlay.
 Local AIO sandbox port allocation stops at TCP port 65535. If the remaining
 ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
+In open network mode, a missing Docker/Apple Container CLI or a permission-denied
+CLI startup returns the reserved port while reporting the original error, so
+repeated attempts do not exhaust the port range. Restricted network creation
+returns its reservation when no proxy could have been created or after confirming
+that the proxy has been removed, including when later network cleanup fails.
+An uncertain proxy keeps its reservation in the existing local cleanup ledger.
+Later creation attempts do not automatically reclaim it. The reservation remains
+until the existing ownership-fenced absent teardown completes or the backend
+process restarts. This bookkeeping does not provide durable recovery across
+backend instances.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
@@ -1190,6 +1217,7 @@ downloading a partial transcript. Public demos export their bundled messages.
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
+Personal MCP HTTP/SSE connections admitted under the public-network policy load TLS trust off the Gateway event loop, while retaining public-address checks, certificate verification and per-origin connection isolation.
 Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
 Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
@@ -1476,7 +1504,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
-5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
+5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment. A reply longer than one card (about 8,000 CJK characters) continues in further cards, up to 10 per answer.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
 
 If the SDK repeatedly logs `CERTIFICATE_VERIFY_FAILED`, see [Feishu / Lark TLS troubleshooting](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting) to check the Gateway's CA trust configuration.
@@ -1494,6 +1522,7 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. A scalar string containing commas or interior whitespace logs a warning but remains one literal ID; use a YAML list for multiple IDs. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
 8. Shutdown waits for in-flight cursor writes. On token expiry, DeerFlow persists the cursor reset and removes the saved token before completing poller cancellation.
 9. Inbound attachments keep separate staged copies even when filenames match within one message or across messages. Their original filenames are preserved for upload ingestion. Private staged copies are removed after ingestion or when a message is dropped or fails.
+10. WeChat server long-poll hints are accepted from 1 through 300 seconds. Invalid hints leave the last accepted value in use, or `polling_timeout` if no hint has been accepted. Set `respect_server_longpoll_timeout: false` to always use the configured value.
 
 **WeCom Setup**
 
@@ -1800,6 +1829,9 @@ and when a subagent performed the retrieval. Missing page numbers and public
 URLs remain absent; sources without a URL are readable as local evidence.
 Inline citations remain readable after Markdown sanitization, and supplied page
 numbers use the selected interface language.
+Shared knowledge results skip entries that exceed the remaining output budget
+and retain later fitting entries in provider order. Retained citations stay
+paired with their visible evidence.
 Copying a source reference produces a Markdown link that escapes brackets in the
 visible title and wraps a URL containing parentheses in angle brackets, so the
 copied reference stays a valid link. New providers use the shared
@@ -1853,6 +1885,11 @@ recorded in the [acceptance report](examples/deerflow-extension-knowledge-manage
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+
+For MiniMax, the [video-generation skill](skills/public/video-generation/SKILL.md)
+accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
+Unset overrides use the provider defaults. Invalid duration strings fail before
+the script submits a request.
 
 The video-generation skill derives reference-image MIME metadata from `.png`,
 `.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
@@ -1913,6 +1950,7 @@ File reads accept raw repository-relative paths and preserve spaces, Unicode,
 `#`, `?`, and literal percent signs with either HTTP client.
 Directory listings ask for the repository's own default branch, so a repository that
 uses neither `main` nor `master` reports its current tree instead of a stale branch.
+They indicate when GitHub or the local output limit truncates the listing.
 The `issues` command excludes pull requests and follows additional pages to fill
 its requested issue limit; the `prs` command remains available for pull requests.
 
@@ -1931,7 +1969,7 @@ values nested in lists or structs, before opening the destination. Filter them
 or replace them with `NULL` in SQL; the CLI reports an error and preserves any
 existing output rather than writing invalid JSON.
 
-The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Cache publication uses complete immutable generations: import writers close before their database and table map become visible together, so overlapping processes can read the same snapshot. Interrupted private builds are removed and damaged entries rebuild; legacy flat caches rebuild once. Complete generations remain available to active readers, so stop analyses before manually clearing `.data-analysis-cache/`. Automatic cache garbage collection is not provided. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
@@ -2573,8 +2611,9 @@ Backend response cleanup preserves unrelated tag names such as `<think-tank>` an
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
 Input polishing, follow-up suggestions, background project-file summaries, the
-LLM skill scanner, and the `/goal` evaluator construct their model providers off
-the Gateway event loop, so local credential reads do not stall unrelated
+LLM skill scanner, thread title generation, the `/goal` evaluator, and manual
+context compaction (`/compact`) construct their model providers off the
+Gateway event loop, so local credential reads do not stall unrelated
 requests.
 
 When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input. Accompanying answer text stays outside the execution steps panel, and answering the request keeps previously completed text in the conversation while the agent continues.
@@ -2653,6 +2692,9 @@ Automatic and manual compaction process all selected history in chronological
 chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
 input per step; generated summaries use at most half to leave room for source.
 Oversized summaries retain marked head/tail text; raw history is never clipped.
+Native document titles, context and direct plain-text bodies are included in the
+summary input. Binary documents and remote media are not decoded or fetched;
+nested document blocks are not traversed.
 A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
@@ -2678,9 +2720,18 @@ historical user messages do not grant current authorization. See
 
 Automatic and manual compaction exclude old todo reminder messages from both the
 summary input and retained context. The current todo list stays in thread state.
+Manual thread-state updates and run input must send it as a list of objects with
+string `content` and a `pending` / `in_progress` / `completed` status (a missing
+status defaults to `pending`); another shape is rejected with HTTP 400, and an
+already-stored entry of an unusable shape is ignored instead of failing the model
+call.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
+When loop detection, the run token budget, or a provider safety/output-length
+limit stops a run, unfinished todos are retained for a later user run; todo
+completion reminders do not restart model calls or tool execution after that stop.
+Safety-stopped partial text is preserved; it does not trigger a Todo retry.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, configured
@@ -2692,6 +2743,9 @@ It is off by default; enabled deployments supply a secret for stable, keyed
 value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
 text and local fallback titles remain available for display; memory redaction
 copies messages without changing the caller's history or tool execution.
+For SDK agents without a checkpointer, deeply nested JSON tool arguments do not
+prevent memory admission, with PII redaction either enabled or disabled.
+Structured JSON content blocks still use recursive redaction and remain depth-limited.
 The hidden `/goal` continuation is redacted before it is stored.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
@@ -2801,6 +2855,10 @@ losing that turn's per-run delegation count.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
+When expanded sub-agent cards load persisted steps, delayed history responses
+fill missing timeline entries without replacing complete steps already received
+from the live stream with truncated previews.
+
 Sub-agent cards keep unrecognized structured task statuses in progress. Accompanying
 result text does not turn an unknown status into success or failure.
 
@@ -2895,6 +2953,13 @@ Embedded Python uploads use the same captured content for the saved document and
 Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline while cleanup continues under supervision. Durable batch workers wait up to 60 seconds for cleanup before recording the published outcome and applying the configured retry policy. Unfinished executions retain capacity and sandbox leases until teardown finishes; keep work idempotent because retries may overlap late cleanup.
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
+
+Batch items can declare `depends_on` using other keys in the same batch. Ready
+items run without waiting for unrelated work; waiting items consume no execution
+slot. For a user-requested summary or delivery after background work, the optional
+`continuation` argument registers one lead-Agent follow-up. The existing Goal
+keeps ownership when active. See [batch dependencies and follow-up](backend/docs/BATCH_CONTINUATION.md)
+for authorization, cancellation, recovery and result semantics.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
@@ -3189,6 +3254,8 @@ If a file disappears while being hashed, the scan omits that file and continues
 recording the others. A concurrent scratch-file removal therefore does not
 discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
+
+`present_shared_artifact` publishes another conversation's persisted output using `origin_thread_id + path + sha256`. Same-user, runtime-home-confined reads and writes reject path traversal, symlinks and changed content; an existing destination with different content is retained, while identical concurrent handoffs succeed. Successful handoffs count as run delivery and archive receipts. The current POSIX implementation does not acquire a source sandbox or cross user boundaries.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
@@ -3574,6 +3641,13 @@ Memory injection follows the configured operation mode. In `middleware` mode, De
 An individual Custom Agent can opt out of memory without changing the global setting. Add `memory_enabled: false` to that agent's `users/{user_id}/agents/{name}/config.yaml`. The agent still receives the current-date reminder, but DeerFlow does not inject recalled memory, queue passive or summarization-driven memory updates (including manual `/compact`), expose memory tools, or add memory-tool instructions for that agent. If an existing agent is switched off, its previously injected memory block is removed from checkpoint state before the next model call while its date reminder and conversation remain. Omitting the field (or setting it to `true`) preserves the existing global `memory` behavior.
 
 Single-fact repository operations are genuinely incremental: an upsert/delete reads, journals, writes, and re-indexes only the addressed fact files, and returns an explicit incomplete delta rather than a cache-dependent fake full document. Summary change sets merge the supplied `user`/`history` child keys over the persisted sections so a partial update cannot erase omitted siblings; full imports normalize both sections to the complete compatibility schema before applying replacement values. Imports reject malformed fact lists or blank/non-text content with HTTP 400 before changing stored memory; recoverable legacy metadata still receives defaults. An explicit empty fact list remains an intentional clear. Manager/API compatibility methods materialize a fresh full document only when their public response contract requires one. Fact-level point operations use separate expected user-memory and fact revisions and may explicitly rebase when every addressed fact precondition still holds. Snapshot-derived operations such as scoped clear, capped create, consolidation, and trimming never replay stale delete/trim sets: a manifest conflict reloads the complete document and recomputes the operation, with a bounded retry. Fact paths use the first two hexadecimal characters of `SHA-256(fact_id)` so generated `fact_*` IDs distribute across shards. The cache token combines the shared JSON's nanosecond mtime, size, and persisted revision; this prevents coarse-mtime same-size writes from returning stale data without scanning fact files. Direct out-of-band Markdown edits require an explicit reload. Storage-specific conflicts and corruption are translated at the MemoryManager boundary; the Gateway returns conflict as HTTP 409 and a stable, non-sensitive corruption error as HTTP 500. Full-document `save()` remains a compatibility API and computes a diff before writing; malformed or missing `facts` can no longer silently erase an agent's Markdown files. Legacy migration preserves non-empty `user`/`history` before deleting an agent `memory.json`; conflicting summaries keep the legacy file and fail loudly instead of choosing a winner.
+
+DeerMem backup imports restore saved fact contents even after those facts have
+been edited, using the current stored revisions to protect the restore. Older
+backups may omit fact revisions. Backup revisions are validated before the
+importer substitutes current revisions. Rejected imports preserve stored memory.
+A concurrent write during import still returns HTTP 409 so the caller can reload
+and retry.
 
 Legacy facts in `memory.json` migrate automatically into the reserved `__default__` Markdown bucket on the user's first normal memory read. Operators who prefer to audit or complete the migration before serving traffic can run the optional idempotent CLI from `backend/`:
 

@@ -28,6 +28,11 @@ receipt is delivered (newest `AIMessage` if compacted); budgets read only those.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
 
+Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
+before Run admission. Do not infer cancellation from a stale read or exception
+text; other admission errors and uncertain outcomes still stop dispatch for
+explicit reconciliation. Child Run wait failures still stop the queue.
+
 Run admission and assembly publication serialize per thread across Store I/O.
 Keep registry locks short; heartbeat snapshots must not queue on an
 admission gate. Preserve same-thread publication visibility, including reads of
@@ -148,7 +153,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** `present_files` and `present_shared_artifact` count as verified presentation. Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -364,6 +369,8 @@ once, with the original evidence. Recheck cancellation, Goal identity and
 checkpoint/messages first. Each complete evaluator invocation keeps its own usage
 ID and observer call; one final decision updates Goal counters. Valid verdicts,
 length/safety stops, and transport/configuration errors are not format retries.
+
+Batch/job/task registration or a scheduled continuation is not Goal completion: require the requested result or artifact to exist or be delivered. This prevents asynchronous acceptance from being misread as delivery.
 
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer

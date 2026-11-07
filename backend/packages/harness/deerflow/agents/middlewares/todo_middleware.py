@@ -15,16 +15,17 @@ of being persisted into graph state as a normal user-visible message.
 The completion guard defers to ``model_length_termination``: when a length-capped
 turn has already been terminalized by ``ModelLengthFinishReasonMiddleware``,
 re-engaging would only re-emit the same oversized tool call into the same cap.
+Run-level loop, token, provider-safety and model-length stops also suppress
+completion reminders, leaving unfinished todos available for a later user run.
 """
 
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, override
 
 from langchain.agents.middleware import TodoListMiddleware
-from langchain.agents.middleware.todo import Todo
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
@@ -32,6 +33,9 @@ from langgraph.runtime import Runtime
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+# Runtime Goal continuation has a narrower policy; keep this local to Todo.
+# Source-inventory and graph tests pin these values to the actual guard stamps.
+_COMPLETION_REMINDER_HARD_STOP_REASONS = ("loop_capped", "token_capped", "safety_capped", "model_length_capped")
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -52,7 +56,22 @@ def _reminder_in_messages(messages: list[Any]) -> bool:
     return False
 
 
-def _format_todos(todos: list[Todo]) -> str:
+def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
+    """Return the stored todo entries this middleware can render.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite with any shape, so a stored value is not guaranteed to be the
+    list of mappings ``write_todos`` produces. Entries of any other shape are
+    dropped: one of them would otherwise raise on every model call of the thread,
+    because both hooks read this channel before the model runs.
+    """
+    todos = state.get("todos")
+    if not isinstance(todos, list):
+        return []
+    return [todo for todo in todos if isinstance(todo, Mapping)]
+
+
+def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a list of Todo items into a human-readable string."""
     lines: list[str] = []
     for todo in todos:
@@ -62,7 +81,7 @@ def _format_todos(todos: list[Todo]) -> str:
     return "\n".join(lines)
 
 
-def _format_completion_reminder(todos: list[Todo]) -> str:
+def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
     """Format a completion reminder for incomplete todo items."""
     incomplete = [t for t in todos if t.get("status") != "completed"]
     incomplete_text = "\n".join(f"- [{t.get('status', 'pending')}] {t.get('content', '')}" for t in incomplete)
@@ -140,6 +159,8 @@ class TodoMiddleware(TodoListMiddleware):
             "tool_description_hash": canonical_hash(self.tool_description),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
+            "skip_completion_reminder_on_safety_cap": True,
+            "completion_reminder_hard_stop_reasons": list(_COMPLETION_REMINDER_HARD_STOP_REASONS),
         }
 
     @override
@@ -153,7 +174,7 @@ class TodoMiddleware(TodoListMiddleware):
             # write_todos was denied for this build; context-loss detection only
             # exists to protect todo state the model cannot update anyway.
             return None
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        todos = _usable_todos(state)
         if not todos:
             return None
 
@@ -333,6 +354,13 @@ class TodoMiddleware(TodoListMiddleware):
             # no jump_to — the model cannot update todos through an unbound tool.
             return None
 
+        # Guards run before this reversed after_model hook. They strip tool
+        # calls and stamp loop/token/safety/model-length stops. Check before
+        # the parent hook so its parallel-write retry cannot override a stop.
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict) and context.get("stop_reason") in _COMPLETION_REMINDER_HARD_STOP_REASONS:
+            return None
+
         # 1. Preserve base class logic (parallel write_todos detection).
         base_result = super().after_model(state, runtime)
         if base_result is not None:
@@ -349,15 +377,14 @@ class TodoMiddleware(TodoListMiddleware):
         if (last_ai.additional_kwargs or {}).get("deerflow_error_fallback"):
             return None
 
-        # A length-capped turn was already terminalized by
-        # ModelLengthFinishReasonMiddleware (tool calls suppressed, notice
-        # appended); re-engaging would only re-emit the same oversized tool
-        # call into the same cap.
-        if (last_ai.additional_kwargs or {}).get("model_length_termination"):
+        # Provider caps also mark the message: preserve this fallback when
+        # runtime context is unavailable or another reason already occupies it.
+        termination_metadata = last_ai.additional_kwargs or {}
+        if termination_metadata.get("model_length_termination") or termination_metadata.get("safety_termination"):
             return None
 
         # 3. Allow exit when all todos are completed or there are no todos.
-        todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
+        todos = _usable_todos(state)
         if not todos or all(t.get("status") == "completed" for t in todos):
             return None
 
