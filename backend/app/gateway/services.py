@@ -2909,10 +2909,14 @@ async def start_run(
                 worker = run_after_metadata(record)
                 try:
                     if command and command.get("resume") is not None:
-                        from app.gateway.hitl_approval import mark_approval_answered
+                        from app.gateway.hitl_approval import _responses_of, mark_approval_answered
 
-                        await mark_approval_answered(request, thread_id)
-
+                        answered = await mark_approval_answered(request, thread_id)
+                        if not answered and _responses_of(command) is not None:
+                            # Validation predates the per-thread admission lock. A
+                            # competing resume may have consumed the pause while this
+                            # caller waited, so only the transition winner may attach.
+                            raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
                     # await-free so cancellation cannot strand a pending row.

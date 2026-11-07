@@ -1828,7 +1828,7 @@ export const zhCN: Translations = {
     approval: {
       title: "工具调用需要审批",
       description:
-        "继续前请检查每个操作。批准后将尝试执行工具，其他执行检查仍然有效。",
+        "继续前请检查每个操作。较长的值可能在显示时被截断，但省略的内容仍会完整参与执行。批准后将尝试执行工具，其他执行检查仍然有效。",
       waiting: "等待审批",
       loading: "正在加载审批详情...",
       loadFailed:

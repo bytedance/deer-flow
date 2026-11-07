@@ -118,8 +118,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         metadata = get_config().get("metadata") or {}
         kind = origin_kind_of(metadata)
         # Only Web/SDK runs (no origin) can submit command.resume via the run API.
-        # IM / github / schedule cannot; extension and mcp_notification default to
-        # non-interactive unless a host explicitly opts in (not offered in Phase 1).
+        # With non_interactive="allow", all other origin kinds auto-execute except
+        # subagents and runtimes assembled without resume support.
         return kind is None
 
     # -- main hook -------------------------------------------------------

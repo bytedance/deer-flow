@@ -1080,6 +1080,8 @@ async def run_agent(
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
+    pending_pause = False
+    streamed_interrupts: list[Any] = []
     input_control = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
@@ -1619,6 +1621,47 @@ async def run_agent(
         # re-enter the stream and would otherwise discard the resolved seqs.
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
+        def observe_stream_pause(mode: str, chunk: Any, namespace: tuple[str, ...]) -> None:
+            if namespace or mode not in {"values", "updates"} or not isinstance(chunk, Mapping):
+                return
+            if mode == "values":
+                streamed_interrupts.clear()
+            interrupts = chunk.get("__interrupt__")
+            if not interrupts:
+                return
+            streamed_interrupts.extend(interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])
+
+        def remember_approval(interrupts: Any) -> None:
+            for pending_interrupt in interrupts:
+                value = pending_interrupt.get("value") if isinstance(pending_interrupt, Mapping) else getattr(pending_interrupt, "value", None)
+                if isinstance(value, dict) and value.get("kind") == "hitl_approval":
+                    record.metadata["hitl_approval"] = value
+                    return
+
+        async def detect_pending_pause() -> None:
+            nonlocal pending_pause
+            if pending_pause or record.abort_event.is_set():
+                return
+            if streamed_interrupts:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+                return
+            # Values/update frames expose interrupts directly, so disabled HITL
+            # keeps the old hot path there. Message-only streams need the snapshot
+            # fallback for generic (non-HITL) interrupts as well.
+            hitl_enabled = bool(hitl_config is not None and hitl_config.enabled)
+            if not hitl_enabled and {"values", "updates"} & requested_modes:
+                return
+            snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
+            if not snapshot_capable:
+                return
+            snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+            snapshot_tasks = getattr(snapshot, "tasks", None) or ()
+            pending_pause = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
+            if pending_pause:
+                for task in snapshot_tasks:
+                    remember_approval(getattr(task, "interrupts", ()) or ())
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             if input_control is not None:
@@ -1648,6 +1691,7 @@ async def run_agent(
                                 await bridge.publish(run_id, sse_event, single_payload)
                                 if single_mode == "messages" and partial_assistant_response is not None:
                                     partial_assistant_response.observe(chunk)
+                                observe_stream_pause(single_mode, chunk, ())
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1696,6 +1740,7 @@ async def run_agent(
                                 # includes the child messages task_running custom events
                                 # carry, which are root frames too.
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            observe_stream_pause(mode, chunk, namespace)
                             await _publish_stream_item(
                                 bridge=bridge,
                                 run_id=run_id,
@@ -1763,7 +1808,8 @@ async def run_agent(
         await _stream_once(graph_input, initial_runnable_config)
         if input_control is not None:
             await input_control.confirm_checkpoint()
-        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+        await detect_pending_pause()
+        while not pending_pause and not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
                 accessor=accessor,
@@ -1790,6 +1836,7 @@ async def run_agent(
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
+            await detect_pending_pause()
 
         record.goal_verdict = final_goal_verdict
 
@@ -1832,36 +1879,23 @@ async def run_agent(
                 from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
 
                 await cancel_sandbox_execution_lease_async(runtime_ctx)
-            produced_output_paths = await _produced_output_paths(
-                pre_run_workspace_snapshot,
-                thread_id=thread_id,
-                user_id=workspace_changes_user_id,
-                extra_excluded_dir_names=workspace_excluded_dir_names,
-            )
-            delivery_content = _delivery_content_with_outputs(
-                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
-                produced_output_paths,
-                pre_run_snapshot=pre_run_workspace_snapshot,
-            )
-            delivery_error = _delivery_error(delivery_content)
-            pending_approval = False
-            snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
-            if snapshot_capable and not record.abort_event.is_set() and not delivery_error:
-                snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
-                snapshot_tasks = getattr(snapshot, "tasks", None) or ()
-                pending_approval = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
-                if pending_approval:
-                    for task in snapshot_tasks:
-                        for pending_interrupt in getattr(task, "interrupts", ()) or ():
-                            if isinstance(pending_interrupt.value, dict) and pending_interrupt.value.get("kind") == "hitl_approval":
-                                record.metadata["hitl_approval"] = pending_interrupt.value
-                                break
-                        else:
-                            continue
-                        break
+            delivery_error = None
+            if not pending_pause:
+                produced_output_paths = await _produced_output_paths(
+                    pre_run_workspace_snapshot,
+                    thread_id=thread_id,
+                    user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                )
+                delivery_content = _delivery_content_with_outputs(
+                    journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                    produced_output_paths,
+                    pre_run_snapshot=pre_run_workspace_snapshot,
+                )
+                delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
-                RunStatus.error if delivery_error else (RunStatus.waiting_for_input if pending_approval else RunStatus.success),
+                RunStatus.error if delivery_error else (RunStatus.waiting_for_input if pending_pause else RunStatus.success),
                 error=delivery_error,
                 stop_reason=stop_reason,
                 goal_verdict=record.goal_verdict,
@@ -1869,8 +1903,6 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
-            elif pending_approval and not record.ownership_lost:
-                await run_manager.persist_metadata(run_id)
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2112,6 +2144,11 @@ async def run_agent(
                                 await run_manager.persist_current_status(run_id)
                     except Exception:
                         logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+                if record.status == RunStatus.waiting_for_input and not record.ownership_lost:
+                    # A full metadata snapshot also carries the status. Write it
+                    # only after the explicit terminal transition above, otherwise
+                    # the same-status row short-circuits terminal event attribution.
+                    await run_manager.persist_metadata(run_id)
                 # Only a confirmed terminal write or ownership loss releases the
                 # renewal barrier in multi-worker mode. A returned/aborted call is
                 # not evidence that this worker committed its terminal outcome.
@@ -2197,7 +2234,7 @@ async def run_agent(
                     except Exception:
                         logger.warning("Failed to confirm terminal status for run %s before completion hook", run_id, exc_info=True)
 
-                if not record.ownership_lost and getattr(record, "terminal_status_persisted", True) and ctx.on_run_completed is not None:
+                if not record.ownership_lost and record.status != RunStatus.waiting_for_input and getattr(record, "terminal_status_persisted", True) and ctx.on_run_completed is not None:
                     try:
                         # Preserve hook liveness without forwarding cancellation
                         # to the finalizer's durable writes or resource cleanup.

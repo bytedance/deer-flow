@@ -300,6 +300,16 @@ multi-step tasks: one `in_progress` task, real-time updates. See
 ### Run Interaction Policy
 
 Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
+Opt-in `hitl_approval` pauses selected lead-agent tools with durable
+`waiting_for_input` runs. This is a paused state, not terminal success/failure:
+detect it before Goal and artifact-delivery completion checks, and preserve
+requested batch follow-ups. Native subagents install the same policy with
+`supports_resume=False` and fail closed. Resume admission is owner-bound and
+single-winner through `RunStore.answer_approval()`'s conditional
+`waiting_for_input` transition, never an unconditional snapshot upsert; validate
+both `request_id` and `tool_call_id` against the current approval. Keep the
+disabled-HITL values/updates completion path free of approval-only full state
+snapshots. Configuration and lifetime semantics: [HITL Tool Approval](docs/CONFIGURATION.md#hitl-tool-approval).
 
 ### Context Summarization
 

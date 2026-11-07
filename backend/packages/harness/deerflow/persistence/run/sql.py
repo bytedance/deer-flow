@@ -480,6 +480,18 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def answer_approval(self, run_id, *, metadata) -> bool:
+        async with self._sf() as session:
+            values = {
+                "status": "success",
+                "metadata_json": self._safe_json(metadata) or {},
+                "updated_at": datetime.now(UTC),
+                "change_seq": await self._next_change_seq(session),
+            }
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "waiting_for_input").values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
     async def start_run(self, run_id: str) -> bool:
         """Start only a still-pending run; cancelled rows must not be resurrected."""
         async with self._sf() as session:

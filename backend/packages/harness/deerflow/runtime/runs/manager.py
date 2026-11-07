@@ -1523,7 +1523,7 @@ class RunManager:
         return persisted
 
     async def mark_approval_answered(self, thread_id: str) -> bool:
-        """Complete the newest paused approval through the retried snapshot path."""
+        """Atomically answer the newest paused run; return False after another winner."""
         records = await self.list_by_thread(thread_id, limit=5)
         record = next((item for item in records if item.status == RunStatus.waiting_for_input), None)
         if record is None:
@@ -1576,7 +1576,19 @@ class RunManager:
                     record.terminal_commit_pending = previous_terminal_commit_pending
 
         try:
-            persisted = await self._persist_snapshot_with_reconciliation(record.run_id, payload)
+            if self._store is not None:
+                answered = await self._call_store_with_retry(
+                    "answer_approval",
+                    record.run_id,
+                    lambda: self._store.answer_approval(record.run_id, metadata=metadata),
+                )
+                if not answered:
+                    await restore_local_record()
+                    return False
+            persisted = True if record.store_only else await self._persist_snapshot_with_reconciliation(record.run_id, payload)
+        except Exception as exc:
+            await restore_local_record()
+            raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered") from exc
         except BaseException:
             await restore_local_record()
             raise

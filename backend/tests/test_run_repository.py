@@ -244,6 +244,23 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_answer_approval_is_single_winner_and_replaces_metadata(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "paused-run",
+            thread_id="t1",
+            status="waiting_for_input",
+            metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True},
+        )
+
+        assert await repo.answer_approval("paused-run", metadata={"retained": True}) is True
+        assert await repo.answer_approval("paused-run", metadata={"retained": True}) is False
+        row = await repo.get("paused-run")
+        assert row["status"] == "success"
+        assert row["metadata"] == {"retained": True}
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_status_returns_false_for_missing_row(self, tmp_path):
         repo = await _make_repo(tmp_path)
         updated = await repo.update_status("missing", "error", error="lost")

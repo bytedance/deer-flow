@@ -82,7 +82,7 @@ async def has_waiting_for_input_run(request: Any, thread_id: str) -> bool:
     return any(run.get("status") == "waiting_for_input" for run in runs)
 
 
-async def mark_approval_answered(request: Any, thread_id: str) -> None:
+async def mark_approval_answered(request: Any, thread_id: str) -> bool:
     """Mark the paused run as answered so a duplicate resume is rejected."""
     from app.gateway.deps import get_run_manager, get_run_store
 
@@ -99,9 +99,9 @@ async def mark_approval_answered(request: Any, thread_id: str) -> None:
             run_manager = RunManager(store=get_run_store(request))
         except (HTTPException, AttributeError) as store_exc:
             if isinstance(store_exc, AttributeError) or store_exc.status_code == 503:
-                return
+                return False
             raise
-    await run_manager.mark_approval_answered(thread_id)
+    return await run_manager.mark_approval_answered(thread_id)
 
 
 async def _interrupt_from_checkpoint_history(accessor: Any, read_config: dict[str, Any], payload: dict[str, Any]) -> tuple[str, Any] | None:
@@ -213,9 +213,23 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
     expected_ids = payloads[0].get("pending_tool_call_ids")
     if not isinstance(expected_ids, list) or any(not isinstance(call_id, str) for call_id in expected_ids) or len(set(expected_ids)) != len(expected_ids):
         raise _error(422, "invalid_approval_response", "pending approval has invalid tool_call_ids")
+    expected_set = set(expected_ids)
+    actions = payloads[0].get("actions")
+    if not isinstance(actions, list):
+        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+    expected_request_ids: dict[str, str] = {}
+    for action in actions:
+        if not isinstance(action, Mapping):
+            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+        call_id = action.get("tool_call_id")
+        request_id = action.get("request_id")
+        if not isinstance(call_id, str) or call_id not in expected_set or call_id in expected_request_ids or not isinstance(request_id, str) or not request_id:
+            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+        expected_request_ids[call_id] = request_id
+    if set(expected_request_ids) != expected_set:
+        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
     if len(responses) != len(expected_ids):
         raise _error(422, "invalid_approval_response", f"expected {len(expected_ids)} responses, got {len(responses)}")
-    expected_set = set(expected_ids)
     seen_ids: set[str] = set()
     for response in responses:
         if not isinstance(response, Mapping):
@@ -223,6 +237,8 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
         response_id = response.get("tool_call_id")
         if not isinstance(response_id, str) or response_id not in expected_set:
             raise _error(422, "invalid_approval_response", "unknown tool_call_id")
+        if response.get("request_id") != expected_request_ids[response_id]:
+            raise _error(422, "invalid_approval_response", "stale or mismatched request_id")
         if response_id in seen_ids:
             raise _error(422, "invalid_approval_response", "duplicate tool_call_id")
         seen_ids.add(response_id)

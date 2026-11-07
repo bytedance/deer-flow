@@ -138,6 +138,41 @@ async def test_mark_approval_answered_retries_and_updates_memory_and_store():
 
 
 @pytest.mark.anyio
+async def test_mark_approval_answered_has_single_cross_manager_winner():
+    store = MemoryRunStore()
+    first = RunManager(store=store, worker_id="worker-a")
+    second = RunManager(store=store, worker_id="worker-b")
+    paused = await first.create_or_reject(
+        "thread",
+        metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True},
+    )
+    await first.set_status(paused.run_id, RunStatus.waiting_for_input)
+    original_answer = store.answer_approval
+    both_answer_attempts = asyncio.Event()
+    attempts = 0
+
+    async def synchronized_answer(run_id, *, metadata):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            both_answer_attempts.set()
+        await asyncio.wait_for(both_answer_attempts.wait(), 1)
+        return await original_answer(run_id, metadata=metadata)
+
+    store.answer_approval = synchronized_answer
+
+    results = await asyncio.gather(
+        first.mark_approval_answered("thread"),
+        second.mark_approval_answered("thread"),
+    )
+
+    assert sorted(results) == [False, True]
+    answered = await store.get(paused.run_id)
+    assert answered["status"] == "success"
+    assert answered["metadata"] == {"retained": True}
+
+
+@pytest.mark.anyio
 async def test_mark_approval_answered_acknowledges_worker_finalization_before_store_io():
     store = MemoryRunStore()
     manager = manager_for(store)

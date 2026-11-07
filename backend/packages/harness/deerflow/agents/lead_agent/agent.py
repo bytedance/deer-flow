@@ -829,28 +829,29 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
 
 
 def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool) -> None:
-    if not app_config.hitl_approval.enabled:
+    hitl_config = getattr(app_config, "hitl_approval", None)
+    if hitl_config is None or not hitl_config.enabled:
         return
     from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
 
     known_tool_names = {tool.name for tool in final_tools}
-    unknown_names = set(app_config.hitl_approval.tools) - known_tool_names
+    unknown_names = set(hitl_config.tools) - known_tool_names
     if unknown_names:
         logger.warning("hitl_approval.tools contains names not present in this build's tool set: %s", sorted(unknown_names))
     logger.info(
         "hitl_approval enabled: tools=%s non_interactive=%s max_actions=%s",
-        app_config.hitl_approval.tools,
-        app_config.hitl_approval.non_interactive,
-        app_config.hitl_approval.max_actions,
+        hitl_config.tools,
+        hitl_config.non_interactive,
+        hitl_config.max_actions,
     )
     middlewares.insert(
         0,
         HitlApprovalMiddleware(
-            tool_names=set(app_config.hitl_approval.tools),
-            non_interactive=app_config.hitl_approval.non_interactive,
-            max_actions=app_config.hitl_approval.max_actions,
+            tool_names=set(hitl_config.tools),
+            non_interactive=hitl_config.non_interactive,
+            max_actions=hitl_config.max_actions,
             supports_resume=supports_resume,
-            pii_config=app_config.pii_redaction,
+            pii_config=getattr(app_config, "pii_redaction", None),
         ),
     )
 

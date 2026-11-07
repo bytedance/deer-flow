@@ -34,3 +34,20 @@ remain runtime-only and are never copied into checkpoint-persisted
 `configurable`. Public run requests cannot use these keys to disable
 clarification, impersonate a webhook channel, or override a scheduled run back
 to interactive behavior.
+
+## HITL tool approval
+
+`hitl_approval` is an operator-controlled, opt-in gate around selected tools,
+not a way for a non-interactive run to wait for clarification. Interactive
+Web/SDK runs pause through LangGraph `interrupt()` and enter
+`waiting_for_input`; only a matching approval response can resume the current
+checkpoint. Scheduled, webhook, autonomous, IM, extension, and MCP notification
+runs follow `hitl_approval.non_interactive`. Subagents and graphs without resume
+support always fail closed, including when that setting is `allow`.
+
+`waiting_for_input` is not a terminal success or failure. Goal checks, final
+artifact delivery checks, and batch continuation cancellation must not treat a
+pending approval as a completed source run. Pending approvals do not expire and
+block new runs on the same thread until resolved. See
+[HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for configuration and
+argument-summary visibility limits.

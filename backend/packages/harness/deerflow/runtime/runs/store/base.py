@@ -267,6 +267,15 @@ class RunStore(abc.ABC):
         """
         pass
 
+    async def answer_approval(self, run_id: str, *, metadata: dict[str, Any]) -> bool:
+        """Atomically answer one ``waiting_for_input`` run.
+
+        Implementations must condition the write on the row still being paused,
+        remove the consumed approval through *metadata*, and return ``True`` only
+        for the single winning transition. Legacy stores fail closed.
+        """
+        raise NotImplementedError("Store must implement atomic approval answering")
+
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:
         """Atomically transition a pending run to running.

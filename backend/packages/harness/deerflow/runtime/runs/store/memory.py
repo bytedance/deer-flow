@@ -263,6 +263,16 @@ class MemoryRunStore(RunStore):
         self._mark_changed(run)
         return True
 
+    async def answer_approval(self, run_id, *, metadata):
+        run = self._runs.get(run_id)
+        if run is None or run["status"] != "waiting_for_input":
+            return False
+        run["status"] = "success"
+        run["metadata"] = copy.deepcopy(metadata)
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
+        return True
+
     async def start_run(self, run_id) -> bool:
         run = self._runs.get(run_id)
         if run is None or run["status"] != "pending":

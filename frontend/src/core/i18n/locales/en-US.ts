@@ -1929,7 +1929,7 @@ export const enUS: Translations = {
     approval: {
       title: "Tool approval required",
       description:
-        "Review every action before continuing. Approving will attempt to execute the tool; other execution checks still apply.",
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
       waiting: "Waiting for approval",
       loading: "Loading approval details...",
       loadFailed:

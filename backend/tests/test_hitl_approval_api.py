@@ -64,6 +64,8 @@ class _StateAwareModel(FakeMessagesListChatModel):
 
 
 class _TwoStepStateAwareModel(_StateAwareModel):
+    reuse_tool_call_id: bool = False
+
     def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
         tool_message_count = sum(isinstance(message, ToolMessage) for message in messages)
         if tool_message_count >= 2:
@@ -75,7 +77,7 @@ class _TwoStepStateAwareModel(_StateAwareModel):
                     {
                         "name": "write_file",
                         "args": {"path": f"/mnt/user-data/workspace/hitl-test-{tool_message_count + 1}.txt", "content": "ok"},
-                        "id": f"call_hitl_{tool_message_count + 1}",
+                        "id": "call_hitl_1" if self.reuse_tool_call_id else f"call_hitl_{tool_message_count + 1}",
                     }
                 ],
             )
@@ -84,6 +86,10 @@ class _TwoStepStateAwareModel(_StateAwareModel):
 
 def _fake_two_step_model(*args, **kwargs):
     return _TwoStepStateAwareModel(responses=[])
+
+
+def _fake_reused_call_id_model(*args, **kwargs):
+    return _TwoStepStateAwareModel(responses=[], reuse_tool_call_id=True)
 
 
 def _fake_model(*args, **kwargs):
@@ -163,8 +169,18 @@ def _wait_run_terminal(client, tid, rid, timeout=20.0):
     raise AssertionError(f"run did not finish: {run}")
 
 
-def _resume(client, csrf, tid, option_id, value=None):
-    response = {"option_id": option_id, "tool_call_id": "call_hitl_1"}
+def _approval_request_id(client, tid, tool_call_id):
+    state = _wait_for_approval(client, tid)
+    payload = next(item for group in state["interrupts"].values() for item in group)["value"]
+    return next(action["request_id"] for action in payload["actions"] if action["tool_call_id"] == tool_call_id)
+
+
+def _resume(client, csrf, tid, option_id, value=None, *, tool_call_id="call_hitl_1", request_id=None):
+    response = {
+        "option_id": option_id,
+        "tool_call_id": tool_call_id,
+        "request_id": request_id or _approval_request_id(client, tid, tool_call_id),
+    }
     if value is not None:
         response["value"] = value
     return _run(client, csrf, tid, {"command": {"resume": {"responses": [response]}}})
@@ -199,7 +215,7 @@ def test_approval_pause_then_approve_executes(isolated_app):
         assert "OK" in contents
         assert state["status"] == "idle"
 
-        duplicate = _resume(client, csrf, tid, "approve")
+        duplicate = _resume(client, csrf, tid, "approve", request_id=payloads[0]["value"]["request_id"])
         assert duplicate.status_code == 409
         assert duplicate.json()["detail"]["code"] == "no_pending_approval"
 
@@ -228,12 +244,56 @@ def test_invalid_resume_is_422_and_does_not_create_run(isolated_app):
         rid = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]})).json()["run_id"]
         _wait_run_status(client, tid, rid, "waiting_for_input")
         # Wrong id → 422 without admitting a run; a valid approval still works.
-        bad = _run(client, csrf, tid, {"command": {"resume": {"responses": [{"option_id": "approve", "tool_call_id": "wrong"}]}}})
+        bad = _run(client, csrf, tid, {"command": {"resume": {"responses": [{"option_id": "approve", "tool_call_id": "wrong", "request_id": "unused"}]}}})
         assert bad.status_code == 422, bad.text
         assert bad.json()["detail"]["code"] == "invalid_approval_response"
         assert {run["run_id"] for run in client.get(f"/api/threads/{tid}/runs").json()} == {rid}
         good = _resume(client, csrf, tid, "approve")
         assert good.status_code == 200, good.text
+
+
+def test_stale_request_id_cannot_approve_reused_tool_call(isolated_app):
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_reused_call_id_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        first_run_id = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write twice"}]})).json()["run_id"]
+        first_pause = _wait_for_approval(client, tid)
+        first_payload = next(item for group in first_pause["interrupts"].values() for item in group)["value"]
+        first_request_id = first_payload["request_id"]
+        _wait_run_status(client, tid, first_run_id, "waiting_for_input")
+
+        rejected = _resume(client, csrf, tid, "reject", value="reject the first arguments")
+        assert rejected.status_code == 200, rejected.text
+        second_run_id = rejected.json()["run_id"]
+        _wait_run_status(client, tid, second_run_id, "waiting_for_input")
+        second_pause = _wait_for_approval(client, tid)
+        second_payload = next(item for group in second_pause["interrupts"].values() for item in group)["value"]
+        assert second_payload["pending_tool_call_ids"] == first_payload["pending_tool_call_ids"] == ["call_hitl_1"]
+        assert second_payload["request_id"] != first_request_id
+
+        stale = _run(
+            client,
+            csrf,
+            tid,
+            {"command": {"resume": {"responses": [{"option_id": "approve", "tool_call_id": "call_hitl_1", "request_id": first_request_id}]}}},
+        )
+        assert stale.status_code == 422, stale.text
+        assert stale.json()["detail"]["code"] == "invalid_approval_response"
+        assert {run["run_id"] for run in client.get(f"/api/threads/{tid}/runs").json()} == {first_run_id, second_run_id}
+        state = client.get(f"/api/threads/{tid}").json()
+        tool_messages = [message for message in state["values"]["messages"] if message.get("type") == "tool"]
+        assert len(tool_messages) == 1
+        assert "OK" not in [message.get("content") for message in tool_messages]
+
+        approved = _resume(client, csrf, tid, "approve")
+        assert approved.status_code == 200, approved.text
+        terminal = _wait_run_terminal(client, tid, approved.json()["run_id"])
+        assert terminal["status"] == "success"
+        state = client.get(f"/api/threads/{tid}").json()
+        tool_messages = [message for message in state["values"]["messages"] if message.get("type") == "tool"]
+        assert len(tool_messages) == 2
+        assert sum(message.get("content") == "OK" for message in tool_messages) == 1
 
 
 def test_duplicate_resume_ids_are_422_without_creating_a_run(isolated_app):
@@ -251,8 +311,8 @@ def test_duplicate_resume_ids_are_422_without_creating_a_run(isolated_app):
                 "command": {
                     "resume": {
                         "responses": [
-                            {"option_id": "reject", "tool_call_id": "call_hitl_1"},
-                            {"option_id": "reject", "tool_call_id": "call_hitl_1"},
+                            {"option_id": "reject", "tool_call_id": "call_hitl_1", "request_id": _approval_request_id(client, tid, "call_hitl_1")},
+                            {"option_id": "reject", "tool_call_id": "call_hitl_1", "request_id": _approval_request_id(client, tid, "call_hitl_1")},
                         ]
                     }
                 }
@@ -270,8 +330,8 @@ def test_duplicate_resume_ids_are_422_without_creating_a_run(isolated_app):
                 "command": {
                     "resume": {
                         "responses": [
-                            {"option_id": "approve", "tool_call_id": "call_hitl_1"},
-                            {"option_id": "reject", "tool_call_id": "call_hitl_2", "value": "second rejected"},
+                            {"option_id": "approve", "tool_call_id": "call_hitl_1", "request_id": _approval_request_id(client, tid, "call_hitl_1")},
+                            {"option_id": "reject", "tool_call_id": "call_hitl_2", "value": "second rejected", "request_id": _approval_request_id(client, tid, "call_hitl_2")},
                         ]
                     }
                 }
@@ -331,12 +391,7 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert tool_messages[0]["status"] == "error"
         assert "OK" not in [message.get("content") for message in tool_messages]
 
-        second_escape = _run(
-            client,
-            csrf,
-            tid,
-            {"command": {"resume": {"responses": [{"option_id": "reject", "tool_call_id": "call_hitl_2"}]}}},
-        )
+        second_escape = _resume(client, csrf, tid, "reject", tool_call_id="call_hitl_2")
         assert second_escape.status_code == 200, second_escape.text
         terminal = _wait_run_terminal(client, tid, second_escape.json()["run_id"])
         assert terminal["status"] == "success"

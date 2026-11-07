@@ -2275,6 +2275,19 @@ the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
 follow `non_interactive`; subagents and runtimes without resume support always
 fail closed.
 
+Argument summaries are display-only. Fields other than `path`, `command`, `url`,
+`old_str`, and `new_str` are truncated when they exceed the display budget; the
+summary includes a `chars omitted` marker. Approving executes the original,
+complete arguments, including content hidden by that marker. The payload-size
+limit bounds the approval summary, not the tool arguments.
+
+Pending approvals do not expire. While the thread remains paused at the current
+checkpoint, its approval stays resumable and blocks new runs on that thread,
+including scheduled runs, until every action is approved or rejected. Operators
+must resolve stale approvals explicitly. Disabling HITL while paused still
+allows the all-reject response as a safe escape hatch; other configuration
+changes fail closed.
+
 
 ## Best Practices
 

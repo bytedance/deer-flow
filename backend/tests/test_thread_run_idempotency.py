@@ -1299,6 +1299,99 @@ async def test_cancelled_resume_marks_admitted_run_failed_without_attaching_work
 
 
 @pytest.mark.anyio
+async def test_concurrent_resume_only_attaches_transition_winner(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    paused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        metadata={
+            "hitl_approval": {
+                "kind": "hitl_approval",
+                "request_id": "approval-1",
+                "pending_tool_call_ids": ["call-1"],
+                "actions": [{"tool_call_id": "call-1", "request_id": "approval-1"}],
+            }
+        },
+        kwargs={"input": None, "config": None},
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+
+    body = RunCreateRequest(command={"resume": {"responses": [{"option_id": "approve", "tool_call_id": "call-1", "request_id": "approval-1"}]}})
+    both_validated = asyncio.Event()
+    worker_finished = asyncio.Event()
+    validated = 0
+    mark_results = []
+    executions = []
+
+    async def validate_after_both_arrive(*args, **kwargs):
+        nonlocal validated
+        validated += 1
+        arrival = validated
+        if arrival == 2:
+            both_validated.set()
+        await asyncio.wait_for(both_validated.wait(), 1)
+        if arrival == 2:
+            # Both requests validated against the stale pause. Let the first
+            # finish before the second enters the per-thread admission lock.
+            await asyncio.wait_for(worker_finished.wait(), 5)
+
+    original_mark = manager.mark_approval_answered
+
+    async def record_mark_result(thread_id):
+        result = await original_mark(thread_id)
+        mark_results.append(result)
+        return result
+
+    manager.mark_approval_answered = record_mark_result
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        executions.append(record.run_id)
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        worker_finished.set()
+
+    async def invoke(key):
+        try:
+            outcome = await start_run(body, "thread-1", request, idempotency_key=key)
+        except HTTPException as exc:
+            outcome = exc
+        return key, outcome
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", side_effect=validate_after_both_arrive),
+        patch("app.gateway.services.run_agent", new=fake_run_agent),
+    ):
+        results = dict(await asyncio.gather(invoke("http-run:race-a"), invoke("http-run:race-b")))
+        winners = [(key, outcome) for key, outcome in results.items() if isinstance(outcome, RunRecord)]
+        conflicts = [outcome for outcome in results.values() if isinstance(outcome, HTTPException)]
+
+        assert len(winners) == 1
+        assert len(conflicts) == 1
+        assert conflicts[0].status_code == 409
+        assert conflicts[0].detail["code"] == "no_pending_approval"
+        winner_key, winner = winners[0]
+        assert winner.task is not None
+        await winner.task
+
+        # The accepted request remains reusable under its original key.
+        reused = await start_run(body, "thread-1", request, idempotency_key=winner_key)
+        assert reused.run_id == winner.run_id
+        assert reused.idempotency_reused is True
+
+    assert sorted(mark_results) == [False, True]
+    assert executions == [winner.run_id]
+    assert paused.status == RunStatus.success
+    failed = next(record for record in await manager.list_by_thread("thread-1") if record.run_id not in {paused.run_id, winner.run_id})
+    assert failed.status == RunStatus.error
+    assert failed.task is None
+    assert (await store.get(failed.run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
 async def test_resume_persistence_failure_allows_same_key_retry_to_resume(_stub_app_config):
     import sqlite3
 
@@ -1318,17 +1411,17 @@ async def test_resume_persistence_failure_allows_same_key_retry_to_resume(_stub_
         kwargs={"input": None, "config": None},
     )
     await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
-    original_put = store.put
+    original_answer = store.answer_approval
     paused_writes = 0
 
-    async def fail_paused_write(run_id, **kwargs):
+    async def fail_paused_write(run_id, *, metadata):
         nonlocal paused_writes
         if run_id == paused.run_id:
             paused_writes += 1
             raise sqlite3.OperationalError("database is locked")
-        return await original_put(run_id, **kwargs)
+        return await original_answer(run_id, metadata=metadata)
 
-    store.put = fail_paused_write
+    store.answer_approval = fail_paused_write
     body = RunCreateRequest(command={"resume": {"answer": "approve"}})
     request = _make_start_run_request(manager)
     request.app.state.run_store = store
@@ -1359,7 +1452,7 @@ async def test_resume_persistence_failure_allows_same_key_retry_to_resume(_stub_
     assert (await store.get(admitted.run_id))["status"] == "error"
 
     failed_run_id = admitted.run_id
-    store.put = original_put
+    store.answer_approval = original_answer
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.hitl_approval.validate_resume_request", new_callable=AsyncMock) as validate,
