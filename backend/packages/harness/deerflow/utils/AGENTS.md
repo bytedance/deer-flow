@@ -133,9 +133,11 @@ construction must not start inference. A scan without `app_config`
 fail-closed fallback reuses that config rather than reading it again on the
 loop. Manual compaction without `app_config` (the `/compact` route) reads
 the live config in that pool as well. A subagent builds its chat model there
-too: `SubagentExecutor._create_agent` is awaited from `_aexecute` on the shared
-loop, so its `create_chat_model` call goes through `run_assembly`; the rest of
-its middleware and graph assembly is a separate boundary.
+too: `SubagentExecutor._create_agent` is awaited from `_aexecute` on the
+persistent isolated subagent loop every concurrent delegated task shares (not
+the Gateway request loop), so its `create_chat_model` call goes through
+`run_assembly`; the rest of its middleware and graph assembly is a separate
+boundary.
 Coverage includes `tests/blocking_io/test_oneshot_llm_offloop.py`,
 `tests/blocking_io/test_system_model_offloop.py`,
 `tests/blocking_io/test_title_model_offloop.py`,

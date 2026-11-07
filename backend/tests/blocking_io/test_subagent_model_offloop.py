@@ -1,10 +1,11 @@
-"""A subagent must build its chat model off the event loop.
+"""A subagent must build its chat model off the loop it is executed on.
 
-``SubagentExecutor._create_agent`` runs on the shared event loop: the async
-path awaits it from ``_aexecute``. It constructed the chat model inline, and
+``SubagentExecutor._create_agent`` is awaited from ``_aexecute`` on the
+persistent isolated subagent loop that every concurrent delegated task shares --
+not the Gateway request loop. It constructed the chat model inline, and
 provider construction can read local credentials -- the Codex provider loads the
 Codex CLI ``auth.json`` while it is built -- so every delegated task did
-synchronous file IO on the loop before its first model call. The real Codex
+synchronous file IO on that loop before its first model call. The real Codex
 provider is built here so that IO stays inside the strict gate; inference never
 runs.
 """
@@ -117,4 +118,4 @@ async def test_subagent_builds_its_chat_model_off_the_loop(credential_reads, mon
         await executor._create_agent(tools=[])
 
     assert credential_reads, "the Codex provider was never constructed"
-    assert all(ident != loop_thread for ident in credential_reads), "provider construction blocks the event loop"
+    assert all(ident != loop_thread for ident in credential_reads), "provider construction blocks the subagent loop"
