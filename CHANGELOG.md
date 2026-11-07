@@ -25,8 +25,9 @@ This section accumulates work toward the **2.3.0** milestone
 ### Fixed
 
 - **agents:** Unfinished todos no longer trigger additional model calls or
-  tool execution after a loop-detection or run token-budget hard stop. Todo
-  state is preserved so users can continue in a later run. ([#7953])
+  tool execution after a loop-detection, run token-budget, provider-safety, or
+  model output-length stop. Todo state is preserved so users can continue in a
+  later run. ([#7953])
 
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
