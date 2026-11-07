@@ -147,7 +147,8 @@ def test_official_entrypoints_route_pnpm_through_shared_runner():
     support_bundle_script = (REPO_ROOT / "scripts" / "support_bundle.py").read_text(encoding="utf-8")
 
     assert "cd frontend && $(FRONTEND_PNPM) install" in root_makefile
-    assert "PNPM = $(PYTHON) ../scripts/pnpm.py" in frontend_makefile
+    assert 'FRONTEND_PNPM = "$(PYTHON)" ../scripts/pnpm.py' in root_makefile
+    assert 'PNPM = "$(PYTHON)" ../scripts/pnpm.py' in frontend_makefile
     assert '"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent' in serve_script
     assert 'DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"' in serve_script
     assert 'FRONTEND_CMD=\'env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev --hostname 127.0.0.1\'' in serve_script
