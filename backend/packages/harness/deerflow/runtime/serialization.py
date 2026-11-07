@@ -11,6 +11,7 @@ Consumers: ``deerflow.runtime.runs.worker`` (SSE publishing) and
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from typing import Any
 
 
@@ -28,7 +29,39 @@ def serialize_lc_object(obj: Any) -> Any:
     ``allow_nan=False`` and raises, turning a thread read into HTTP 500). This is
     a display/wire normalization only; persisted checkpoint state is never routed
     through here.
+
+    Nesting depth is not bounded by the interpreter recursion limit. A value
+    nested deeper than ``_RECURSIVE_WALK_DEPTH`` is re-walked from the root with
+    an explicit stack, which replaces a reference back to an enclosing
+    container (a cycle) and any container nested deeper than
+    ``_MAX_NESTING_DEPTH`` with ``None``. Model-authored data such as tool-call
+    ``args`` can nest arbitrarily deep; it previously raised ``RecursionError``
+    (failing the stream publish) or, inside a ``model_dump()`` result, degraded
+    the whole message to its ``str()`` repr.
     """
+    try:
+        return _serialize_recursive(obj, 0)
+    except _NestingTooDeep:
+        return _serialize_iterative(obj)
+
+
+#: Nesting at which the recursive walk hands the value to the iterative one.
+#: Ordinary wire payloads (messages, tool calls, state channels) stay well below
+#: it, so they keep the cheaper recursive walk.
+_RECURSIVE_WALK_DEPTH = 100
+
+#: Maximum nesting of the serialized output; deeper containers become ``None``.
+#: This keeps the result encodable by the wire's ``json.dumps`` (whose C
+#: recursion guard trips near 10,000 levels) and guarantees termination for an
+#: object whose ``model_dump()`` / ``dict()`` keeps building fresh containers.
+_MAX_NESTING_DEPTH = 1000
+
+
+class _NestingTooDeep(Exception):
+    """Aborts the recursive walk so the value is re-walked iteratively."""
+
+
+def _serialize_recursive(obj: Any, depth: int) -> Any:
     if obj is None:
         return None
     # ``bool`` is a subclass of ``int``, so it passes through unchanged here.
@@ -36,21 +69,86 @@ def serialize_lc_object(obj: Any) -> Any:
         return obj
     if isinstance(obj, float):
         return obj if math.isfinite(obj) else None
+    # Converting an object counts as a level too, so a ``model_dump()`` that
+    # returns another object (or itself) cannot recurse without bound.
+    if depth >= _RECURSIVE_WALK_DEPTH:
+        raise _NestingTooDeep
     if isinstance(obj, dict):
-        return {k: serialize_lc_object(v) for k, v in obj.items()}
+        return {k: _serialize_recursive(v, depth + 1) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
-        return [serialize_lc_object(item) for item in obj]
-    # Pydantic v2 — recurse so non-finite floats nested in the dump (e.g. a
-    # message's ``response_metadata``) are normalized too, not returned raw.
+        return [_serialize_recursive(item, depth + 1) for item in obj]
+    return _serialize_recursive(_to_plain(obj), depth + 1)
+
+
+def _serialize_iterative(obj: Any) -> Any:
+    """Serialize *obj* with an explicit stack instead of recursion."""
+    root, children = _stage(obj)
+    if children is None:
+        return root
+    # A frame is (output container, iterator over its source's (key, child)
+    # pairs, source object). Holding the source in its frame keeps it alive for
+    # the whole visit, so an id in ``active`` is never reused by a freshly built
+    # object (e.g. a ``model_dump()`` result) and misread as a cycle.
+    stack = [(root, children, obj)]
+    active = {id(obj)}
+    while stack:
+        container, children, source = stack[-1]
+        for key, child in children:
+            value, grandchildren = _stage(child)
+            if grandchildren is None:
+                container[key] = value
+            elif id(child) in active or len(stack) >= _MAX_NESTING_DEPTH:
+                container[key] = None
+            else:
+                container[key] = value
+                active.add(id(child))
+                stack.append((value, grandchildren, child))
+                break
+        else:
+            stack.pop()
+            active.discard(id(source))
+    return root
+
+
+def _stage(obj: Any) -> tuple[Any, Iterator[tuple[Any, Any]] | None]:
+    """Normalize one level of *obj* for the iterative walk.
+
+    Returns ``(value, None)`` for a leaf, otherwise an empty output container
+    and an iterator over the ``(key, child)`` pairs that fill it.
+    """
+    # Bounded like the nesting: a ``model_dump()`` that keeps returning objects
+    # (or itself) ends as ``None`` instead of looping forever.
+    for _ in range(_MAX_NESTING_DEPTH):
+        if obj is None:
+            return None, None
+        if isinstance(obj, (str, int)):
+            return obj, None
+        if isinstance(obj, float):
+            return (obj if math.isfinite(obj) else None), None
+        if isinstance(obj, dict):
+            return {}, iter(obj.items())
+        if isinstance(obj, (list, tuple)):
+            # Pre-sized so each child is written back by index.
+            return [None] * len(obj), enumerate(obj)
+        obj = _to_plain(obj)
+    return None, None
+
+
+def _to_plain(obj: Any) -> Any:
+    """Return the value to serialize in place of a non-JSON object."""
+    # Pydantic v2 — the dump is walked too, so non-finite floats nested in it
+    # (e.g. a message's ``response_metadata``) are normalized, not returned raw.
+    # Only a failing ``model_dump()`` call falls back: an error while walking
+    # its result must not degrade the whole object to its ``str()`` repr.
     if hasattr(obj, "model_dump"):
         try:
-            return serialize_lc_object(obj.model_dump())
+            return obj.model_dump()
         except Exception:
             pass
     # Pydantic v1 / older objects
     if hasattr(obj, "dict"):
         try:
-            return serialize_lc_object(obj.dict())
+            return obj.dict()
         except Exception:
             pass
     # Interrupt is a __slots__ class — no model_dump/dict/__dict__, so it
@@ -61,12 +159,7 @@ def serialize_lc_object(obj: Any) -> Any:
         pass
     else:
         if isinstance(obj, Interrupt):
-            return serialize_lc_object(
-                {
-                    "value": obj.value,
-                    "id": getattr(obj, "id", None),
-                }
-            )
+            return {"value": obj.value, "id": getattr(obj, "id", None)}
     # Last resort
     try:
         return str(obj)

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +15,59 @@ from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, END_SENTINEL, HEARTBEAT_SE
 
 logger = logging.getLogger(__name__)
 _MEMORY_STREAM_ID_RE = re.compile(r"[0-9]+-([0-9]+)")
+_SNAPSHOT_SCALAR_TYPES = frozenset((type(None), bool, int, float, str))
+
+
+def _snapshot_payload(data: Any) -> Any:
+    """Copy wire containers without recursing through their dict/list depth.
+
+    Keep deepcopy's aliases, cycles and custom-type behavior. The canonical
+    serializer emits plain dicts/lists; other objects retain deepcopy's own
+    handling, including subclass hooks.
+    """
+    if type(data) not in (dict, list):
+        return deepcopy(data)
+
+    root = {} if type(data) is dict else []
+    memo = {id(data): root}
+    # A custom leaf's deepcopy may mutate its source container. Keep every
+    # recorded source alive so an id in the memo cannot be reused.
+    sources = [data]
+    # Source, copy, children, parent copy, parent key. Attach a fresh child only
+    # after visiting it, preserving deepcopy's value-before-key order.
+    stack = [(data, root, _snapshot_children(data), None, None)]
+    while stack:
+        _source, target, children, parent, parent_key = stack[-1]
+        for key, child in children:
+            if type(child) in (dict, list):
+                if id(child) in memo:
+                    value = memo[id(child)]
+                else:
+                    value = {} if type(child) is dict else []
+                    memo[id(child)] = value
+                    sources.append(child)
+                    stack.append((child, value, _snapshot_children(child), target, key))
+                    break
+            else:
+                value = memo.get(id(child), child) if type(child) in _SNAPSHOT_SCALAR_TYPES else deepcopy(child, memo)
+            _attach_snapshot(target, key, value, memo)
+        else:
+            stack.pop()
+            memo[id(_source)] = target
+            if parent is not None:
+                _attach_snapshot(parent, parent_key, target, memo)
+    return root
+
+
+def _snapshot_children(source: dict | list) -> Iterator[tuple[Any, Any]]:
+    return iter(source.items()) if type(source) is dict else enumerate(source)
+
+
+def _attach_snapshot(target: dict | list, key: Any, value: Any, memo: dict[int, Any]) -> None:
+    if type(target) is dict:
+        target[memo.get(id(key), key) if type(key) in _SNAPSHOT_SCALAR_TYPES else deepcopy(key, memo)] = value
+    else:
+        target.append(value)
 
 
 @dataclass
@@ -117,7 +170,7 @@ class MemoryStreamBridge(StreamBridge):
     # -- StreamBridge API ------------------------------------------------------
 
     async def publish(self, run_id: str, event: str, data: Any) -> None:
-        data = deepcopy(data)
+        data = _snapshot_payload(data)
         stream = self._get_or_create_stream(run_id)
         entry = StreamEvent(id=self._next_id(run_id), event=event, data=data)
         async with stream.condition:
@@ -194,7 +247,11 @@ class MemoryStreamBridge(StreamBridge):
                 yield END_SENTINEL
                 return
             # Consumers identify sentinels with `is`; never deep-copy them.
-            yield deepcopy(entry) if isinstance(entry, StreamEvent) and entry is not HEARTBEAT_SENTINEL else entry
+            if isinstance(entry, StreamEvent) and entry is not HEARTBEAT_SENTINEL:
+                data = _snapshot_payload(entry.data)
+                yield deepcopy(entry, {id(entry.data): data})
+            else:
+                yield entry
             if should_stop:
                 return
 
