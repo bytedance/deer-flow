@@ -31,6 +31,7 @@ from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
 from deerflow.community.image_search import tools as image_search_tools
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.searchapi import tools as searchapi_tools
 from deerflow.community.serper import tools as serper_tools
 from deerflow.community.youcom import tools as youcom_tools
 
@@ -47,6 +48,7 @@ SHARED_OWNER_PROVIDERS = {
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
+    "searchapi": ("SearchApi", searchapi_tools),
 }
 
 # Providers that still normalize locally, including Exa's generic helper and
