@@ -24,6 +24,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **community:** A search or fetch API key that ends in a newline no longer
+  leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
+  Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
+  header as read, so a key from a file (a Kubernetes Secret created with
+  `--from-file`) made the transport fail with `Illegal header value b'Bearer
+  <key>\n'`. That message, key included, became the tool result the model and
+  the conversation history kept, and four of them also logged it. Keys now go
+  through `provider_credentials.resolve_api_key` like the other providers', and
+  a blank configured key falls back to the environment for Tavily, Exa,
+  Firecrawl and fastCRW. ([#7981])
+
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
   the card request exceed Feishu's 30 KB limit (`230025`); the final patch and
@@ -16065,3 +16076,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981

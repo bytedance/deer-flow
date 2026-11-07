@@ -23,6 +23,15 @@
 
 ### 修复
 
+- **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
+  （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
+  Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
+  `--from-file` 创建的 Kubernetes Secret）会让传输层报出 `Illegal header value
+  b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
+  其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
+  `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
+  的配置密钥为空时会回退到环境变量。([#7981])
+
 - **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
   序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
   最终更新及其回复兜底都会被拒绝，运行中卡片停留在最后一次流式内容或只剩 `▉`。
@@ -12780,3 +12789,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
