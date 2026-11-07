@@ -28,6 +28,29 @@ This section accumulates work toward the **2.3.0** milestone
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
 
+
+- **channels:** Long Feishu/Lark answers are no longer lost. Card text was
+  unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
+  the card request exceed Feishu's 30 KB limit (`230025`); the final patch and
+  its reply fallback were both rejected, and the running card stayed on its
+  last streamed text or a bare `▉`. Cards now send CJK unescaped and are
+  budgeted by the bytes they add to the request. A streamed update shows what
+  fits, and a longer final answer continues in up to 10 cards replied to the
+  same message, split at line breaks; a retry resumes after the cards already
+  delivered. ([#7798])
+
+- **channels:** WeCom group messages now have their own conversation. Every
+  message used the sender's userid as both chat and topic ID, so a member's
+  private chat and every group they wrote in shared one DeerFlow thread
+  wherever no group binding kept them apart: in auth-disabled mode, with
+  `require_bound_identity: false`, and under legacy group bindings. A group
+  reply could then draw on the member's private chat or another group, and a
+  reply sent without its frame went to the private chat. Groups are now keyed
+  by `chatid` with one thread per member, and private chats keep their
+  threads. A group bound with its own `/connect` keeps its thread; a legacy
+  group binding, which covers every group of the bot, starts a new one in
+  each group. ([#7794])
+
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
   call. Existing sandbox bindings and providers that require skill uploads
@@ -64,7 +87,7 @@ This section accumulates work toward the **2.3.0** milestone
   returns as if it succeeded, so neither the text running reply nor the
   `sampleMarkdown` fallback for the final answer ever ran. The channel now
   sends card requests itself and falls back when one fails. ([#7781])
-  
+
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -85,7 +108,7 @@ This section accumulates work toward the **2.3.0** milestone
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
   earlier turns remain running. ([#7772])
-  
+
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named
@@ -4825,7 +4848,9 @@ This release closes that milestone with **1068 merged pull requests**.
 - **sandbox:** Remote sandbox providers number `read_file` line ranges the
   same way `LocalSandbox` does. The E2B, BoxLite, Tenki and OpenSandbox
   providers sliced ranged reads with `str.splitlines()`, which also ends
-  lines at a bare `\r`, `\f`, `\v`, `\x85`, ` `/` ` and other
+  lines at a bare `\r`, `\f`, `\v`, `\x85`, `
+`/`
+` and other
   control separators, so line N was a different line than on the local
   sandbox: a progress log whose updates end in a bare `\r` reads
   truncated with a marker naming `start_line=30`, and
@@ -16042,6 +16067,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
