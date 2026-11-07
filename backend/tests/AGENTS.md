@@ -92,6 +92,9 @@ Config-upgrade checkout fixtures clear inherited `DEER_FLOW_CONFIG_PATH`,
 `DEER_FLOW_PROJECT_ROOT` and `DEER_FLOW_ENV_FILE` before applying explicit test
 overrides. Exercise selector leaks through the real script with temporary
 configs; assert that the simulated developer config and its backup stay untouched.
+Capture config-upgrade subprocess output with explicit UTF-8 decoding. The
+no-config regression executes the real script, checks its exact Unicode
+diagnostic, and verifies the generated config byte for byte.
 
 Image-context budget regressions use real PNG files through `view_image`, the
 state reducer, and both model-call wrappers. Check decoded payloads, cumulative
