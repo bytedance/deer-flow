@@ -170,8 +170,8 @@ root directory, not the existing manifest file. Legacy v1 reads still migrate
 and advance the revision. Invalid UTF-8 bytes and unparseable summary text are
 quarantined before rebuild. Summary read `OSError`s raise `MemoryStorageCorruption`
 and preserve the file; `save()` returns false until access recovers.
-Summary and canonical fact reads strip a leading UTF-8 BOM; writes use UTF-8.
-Fact BOM regressions use public save/reload and preserve content and scope.
+Summary/fact reads strip a UTF-8 BOM; writes use UTF-8. Fact Markdown splits on LF.
+`test_memory_storage_markdown.py` pins BOM, Unicode, content and scope via public APIs.
 
 `FileMemoryStorage` owns canonical storage and the retrieval adapter.
 Do not reach into its private adapter state from higher layers.
