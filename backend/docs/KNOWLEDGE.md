@@ -200,9 +200,13 @@ Inline shared references accept both the raw `#knowledge-source-ID` and the
 sanitized `#user-content-knowledge-source-ID`; the sanitizer's DOM-clobbering
 protection stays enabled. Missing or malformed references render inert labels.
 
-`format_result` budgets chunk text and source evidence together: a cited hit
-that cannot fit is omitted as a whole. Results display at most 100 hits, matching
-the bounded artifact readers. Only displayed excerpts enter artifacts.
+`format_result` budgets chunk text and source evidence together: a hit
+that cannot fit is omitted as a whole, and later fitting hits remain eligible.
+It examines only the first 100 input hits in provider order, including skipped
+hits. Per-chunk truncation precedes packing; the remaining total budget does
+not shorten a retained excerpt or change its source ID. Only displayed excerpts
+enter artifacts. Omission notices use leftover space rather than displacing
+complete evidence that fits.
 The global tool-output budget prunes evidence removed by truncation or
 externalization and replaces complete orphan citations with their labels.
 Subagents accumulate at most 100 validated sources across values frames before

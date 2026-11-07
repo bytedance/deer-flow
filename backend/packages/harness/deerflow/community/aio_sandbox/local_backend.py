@@ -42,6 +42,13 @@ class _ExistingRestrictedSandbox(RuntimeError):
         self.info = info
 
 
+@dataclass(eq=False)
+class _RestrictedProxyState:
+    """Track this call's proxy boundary, also identifying its cleanup entry."""
+
+    proxy_may_exist: bool = False
+
+
 @dataclass(frozen=True)
 class _ContainerInspection:
     created_at: float
@@ -647,11 +654,12 @@ class LocalContainerBackend(SandboxBackend):
         # generations have independent entries; process restart also resets
         # the process-local PortAllocator, so these need no durable storage.
         self._pending_cleanup_ports: dict[str, tuple[str, int]] = {}
-        # Native Apple / legacy metadata may lack a runtime generation. This
-        # ledger tracks only our local reservations, never container identity;
+        # Native Apple / legacy metadata and incomplete startup may lack a
+        # runtime generation. Tokens distinguish ownership of local reservations,
+        # never container identity;
         # present-resource inspection must not inherit it. Name vacancy under
         # the provider's teardown fences is its sole fallback release proof.
-        self._unknown_cleanup_ports: dict[str, set[int]] = {}
+        self._unknown_cleanup_ports: dict[str, dict[int, object]] = {}
         self._pending_cleanup_ports_lock = threading.Lock()
         self._runtime = self._detect_runtime()
 
@@ -986,6 +994,11 @@ class LocalContainerBackend(SandboxBackend):
         port: int = 0
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
+            proxy_state = _RestrictedProxyState() if self._network_mode != "open" else None
+            if proxy_state is not None:
+                # Register before discovery can expose resources to teardown.
+                with self._pending_cleanup_ports_lock:
+                    self._unknown_cleanup_ports.setdefault(sandbox_id, {})[port] = proxy_state
             try:
                 if self._network_mode == "open":
                     container_id = self._start_container(
@@ -1005,13 +1018,27 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         relay_token=relay_token,
+                        proxy_state=proxy_state,
                     )
+                    with self._pending_cleanup_ports_lock:
+                        if self._unknown_cleanup_ports.get(sandbox_id, {}).get(port) is proxy_state:
+                            self._forget_unknown_cleanup_port(sandbox_id, port)
                 break
             except _ExistingRestrictedSandbox as exc:
-                release_port(port)
+                if proxy_state is not None:
+                    self._release_failed_restricted_port(sandbox_id, port, proxy_state)
+                else:
+                    release_port(port)
                 return exc.info
-            except RuntimeError as exc:
-                release_port(port)
+            except BaseException as exc:
+                if proxy_state is not None:
+                    released = self._release_failed_restricted_port(sandbox_id, port, proxy_state)
+                    if not released:
+                        raise
+                elif isinstance(exc, RuntimeError):
+                    release_port(port)
+                if not isinstance(exc, RuntimeError):
+                    raise
                 err = str(exc)
                 err_lower = err.lower()
                 # Port already bound: skip this port and retry with the next one.
@@ -1024,7 +1051,13 @@ class LocalContainerBackend(SandboxBackend):
                 # discover and adopt the existing container instead of failing.
                 if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
-                    existing = self.discover(sandbox_id)
+                    try:
+                        existing = self.discover(sandbox_id)
+                    except Exception:
+                        logger.warning("Could not probe conflicting sandbox %s", sandbox_id, exc_info=True)
+                        if proxy_state is None:
+                            raise
+                        raise exc
                     if existing is not None and not existing.requires_replacement:
                         return existing
                 raise
@@ -1042,6 +1075,27 @@ class LocalContainerBackend(SandboxBackend):
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
         )
 
+    def _release_failed_restricted_port(self, sandbox_id: str, port: int, proxy_state: _RestrictedProxyState) -> bool:
+        """Return this reservation only with absence evidence and release ownership.
+
+        Uncertain ports stay in the existing cleanup ledger until fenced absent
+        teardown. Ordinary create calls do not reconcile earlier failures.
+        """
+        if proxy_state.proxy_may_exist:
+            proxy_name, _ = self._resource_names(sandbox_id)
+            try:
+                if proxy_name in self._inspect_container_entries([proxy_name], timeout=5):
+                    return False
+            except Exception:
+                logger.warning("Could not confirm proxy absence for sandbox %s; retaining its port", sandbox_id, exc_info=True)
+                return False
+        with self._pending_cleanup_ports_lock:
+            if self._unknown_cleanup_ports.get(sandbox_id, {}).get(port) is not proxy_state:
+                return False
+            self._forget_unknown_cleanup_port(sandbox_id, port)
+            release_port(port)
+        return True
+
     def _start_restricted_sandbox(
         self,
         sandbox_id: str,
@@ -1051,6 +1105,7 @@ class LocalContainerBackend(SandboxBackend):
         *,
         config_mount_exclusion_root: str | None,
         relay_token: str,
+        proxy_state: _RestrictedProxyState | None = None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -1070,7 +1125,7 @@ class LocalContainerBackend(SandboxBackend):
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token, proxy_state)
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -1098,15 +1153,25 @@ class LocalContainerBackend(SandboxBackend):
         except BaseException as exc:
             message = str(exc).lower()
             if "is already in use by container" in message or "conflict. the container name" in message:
-                existing = self.discover(sandbox_id)
+                try:
+                    existing = self.discover(sandbox_id)
+                    resource_status = "compatible" if existing is not None and not existing.requires_replacement else self._restricted_resources_status(sandbox_id)
+                except Exception:
+                    # An unavailable peer probe cannot authorize rollback or
+                    # replace the error that caused creation to fail.
+                    logger.warning("Could not probe conflicting sandbox %s", sandbox_id, exc_info=True)
+                    raise exc
                 if existing is not None and not existing.requires_replacement:
                     raise _ExistingRestrictedSandbox(existing) from exc
                 # A peer may still be provisioning the deterministic resource
                 # set. Never roll it back just because its readiness check has
                 # not completed yet.
-                if self._restricted_resources_status(sandbox_id) != "missing":
+                if resource_status != "missing":
                     raise
-            self._cleanup_restricted_resources(sandbox_id)
+            try:
+                self._cleanup_restricted_resources(sandbox_id, proxy_state=proxy_state)
+            except Exception:
+                logger.warning("Restricted sandbox rollback failed for %s", sandbox_id, exc_info=True)
             raise
 
     def _create_internal_network(self, network_name: str, sandbox_id: str) -> None:
@@ -1177,6 +1242,7 @@ class LocalContainerBackend(SandboxBackend):
         port: int,
         sandbox_id: str,
         relay_token: str,
+        proxy_state: _RestrictedProxyState | None = None,
     ) -> None:
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
@@ -1226,15 +1292,25 @@ class LocalContainerBackend(SandboxBackend):
         ]
         # First use may pull the sidecar image. Match the sandbox create path's
         # tolerance for an image download instead of killing Docker mid-pull.
-        created = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-        )
+        if proxy_state is not None:
+            proxy_state.proxy_may_exist = True
+        try:
+            created = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+        except (FileNotFoundError, PermissionError):
+            if proxy_state is not None:
+                proxy_state.proxy_may_exist = False
+            raise
         if created.returncode != 0:
+            message = created.stderr.lower()
+            if proxy_state is not None and ("is already in use by container" in message or "conflict. the container name" in message):
+                proxy_state.proxy_may_exist = False
             raise RuntimeError(f"Failed to create sandbox network proxy: {created.stderr.strip()}")
         connected = subprocess.run(
             ["docker", "network", "connect", network_name, proxy_name],
@@ -1288,10 +1364,17 @@ class LocalContainerBackend(SandboxBackend):
                 pending = self._pending_cleanup_ports.get(generation)
                 port = pending[1] if pending is not None else port
                 if port:
-                    self._pending_cleanup_ports[generation] = (info.sandbox_id, port)
+                    pending = (info.sandbox_id, port)
+                    self._pending_cleanup_ports[generation] = pending
+                    # Teardown now owns the release. Retire the startup token
+                    # before I/O so a late creation failure cannot release twice.
+                    self._forget_unknown_cleanup_port(info.sandbox_id, port)
         elif port:
             with self._pending_cleanup_ports_lock:
-                self._unknown_cleanup_ports.setdefault(info.sandbox_id, set()).add(port)
+                pending = None
+                if (info.sandbox_id, port) not in self._pending_cleanup_ports.values():
+                    pending = object()
+                    self._unknown_cleanup_ports.setdefault(info.sandbox_id, {})[port] = pending
         restricted_cleanup = self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement)
         # Keep the main generation inspectable if proxy teardown fails. Once
         # its proxy is removed, a failed main stop retains the known reservation
@@ -1308,15 +1391,14 @@ class LocalContainerBackend(SandboxBackend):
         # strand its reservation after the main generation disappears.
         if generation:
             with self._pending_cleanup_ports_lock:
-                pending = self._pending_cleanup_ports.get(generation)
-                if pending is not None:
+                if pending is not None and self._pending_cleanup_ports.get(generation) is pending:
                     release_port(pending[1])
                     self._pending_cleanup_ports.pop(generation)
-                    self._forget_unknown_cleanup_port(info.sandbox_id, pending[1])
         elif port:
             with self._pending_cleanup_ports_lock:
-                release_port(port)
-                self._forget_unknown_cleanup_port(info.sandbox_id, port)
+                if pending is not None and self._unknown_cleanup_ports.get(info.sandbox_id, {}).get(port) is pending:
+                    release_port(port)
+                    self._forget_unknown_cleanup_port(info.sandbox_id, port)
         if restricted_cleanup:
             self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False, remove_proxy=False)
 
@@ -1324,7 +1406,7 @@ class LocalContainerBackend(SandboxBackend):
         """Remove a released reservation; caller holds the cleanup ledger lock."""
         pending = self._unknown_cleanup_ports.get(sandbox_id)
         if pending is not None:
-            pending.discard(port)
+            pending.pop(port, None)
             if not pending:
                 self._unknown_cleanup_ports.pop(sandbox_id)
 
@@ -1344,7 +1426,7 @@ class LocalContainerBackend(SandboxBackend):
             self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False, strict=True)
         with self._pending_cleanup_ports_lock:
             ports = {port for owner_id, port in self._pending_cleanup_ports.values() if owner_id == sandbox_id}
-            ports.update(self._unknown_cleanup_ports.pop(sandbox_id, set()))
+            ports.update(self._unknown_cleanup_ports.pop(sandbox_id, {}))
             # Drop every reservation owned by this logical ID from both ledgers
             # in one pass. The set union releases each port at most once even if
             # a reservation ever exists in both ledgers.
@@ -1693,12 +1775,21 @@ class LocalContainerBackend(SandboxBackend):
         if removed.returncode != 0 and not _is_no_such_container_error(removed.stderr or "", proxy_name):
             raise RuntimeError(f"Failed to remove sandbox network proxy {proxy_name}: {(removed.stderr or '').strip()}")
 
-    def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True, remove_proxy: bool = True, strict: bool = False) -> None:
+    def _cleanup_restricted_resources(
+        self,
+        sandbox_id: str,
+        *,
+        stop_sandbox: bool = True,
+        remove_proxy: bool = True,
+        strict: bool = False,
+        proxy_state: _RestrictedProxyState | None = None,
+    ) -> None:
         """Tear down the restricted sidecar set.
 
         ``strict=True`` makes any stage failure raise so the caller retains the
-        quarantine fence; ``strict=False`` is the best-effort rollback contract:
-        every stage is attempted and failures are logged, never propagated.
+        quarantine fence. Best-effort rollback logs stop/remove failures;
+        network CLI exceptions can still interrupt it. ``proxy_state`` records
+        confirmed proxy removal independently of subsequent network failures.
         """
         _, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -1716,6 +1807,8 @@ class LocalContainerBackend(SandboxBackend):
         if remove_proxy:
             try:
                 self._remove_restricted_proxy(sandbox_id)
+                if proxy_state is not None:
+                    proxy_state.proxy_may_exist = False
             except Exception:
                 if strict:
                     raise

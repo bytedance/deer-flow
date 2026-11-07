@@ -38,6 +38,16 @@ This section accumulates work toward the **2.3.0** milestone
   them. Published CI images were not affected; rebuild local images that were
   pushed or shared. ([#7958])
 
+- **channels:** Long Feishu/Lark answers are no longer lost. Card text was
+  unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
+  the card request exceed Feishu's 30 KB limit (`230025`); the final patch and
+  its reply fallback were both rejected, and the running card stayed on its
+  last streamed text or a bare `▉`. Cards now send CJK unescaped and are
+  budgeted by the bytes they add to the request. A streamed update shows what
+  fits, and a longer final answer continues in up to 10 cards replied to the
+  same message, split at line breaks; a retry resumes after the cards already
+  delivered. ([#7798])
+  
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -16065,6 +16075,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
