@@ -30,6 +30,13 @@ receipts fence reuse through existing quarantine. New output from a running
 command needs its next offset; empty polls retain the previous offsets.
 Markers support cooperative cleanup, not hostile-code isolation.
 
+## Readiness polling
+
+Build the async readiness client off the event loop. Drain construction and
+close a late client on caller cancellation. If construction or close is
+itself cancelled, log it and preserve the caller's original cancellation.
+Regression: `tests/blocking_io/test_aio_sandbox_readiness_ssl.py`.
+
 ## Reuse admission
 
 Open-mode creation returns its port reservation when the Docker or Apple
