@@ -1,6 +1,6 @@
 [project]
 name = "deerflow-extension-weknora"
-version = "0.1.0"
+version = "0.1.1"
 description = "Read-only WeKnora retrieval and scope provider for DeerFlow"
 readme = "README.md"
 requires-python = ">=3.12"
