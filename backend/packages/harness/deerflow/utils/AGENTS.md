@@ -76,6 +76,20 @@ when all remaining ports are reserved or occupied, without probing invalid
 TCP ports. Keep the last valid port allocatable and preserve `max_range`.
 Regression coverage lives in `tests/test_port_allocator_bounds.py`.
 
+### Control-Plane Proxy Policy
+
+`http_policy.py::control_plane_trust_env` is the single answer to "should this
+client inherit `HTTP_PROXY`?" for DeerFlow's own hops. Loopback, private,
+link-local, `.localhost`, Docker/Podman-internal and cluster-local hostnames are
+control-plane traffic and must bypass the environment proxy; external FQDNs and
+public IPs keep it. The module stays dependency-free (no `httpx`, no sandbox
+imports) precisely so `app/channels/manager.py` and `app/gateway/health.py` can
+import it at module scope without loading the sandbox provider stack.
+`community/aio_sandbox/backend.py` re-exports it as `sandbox_http_trust_env` for
+existing sandbox call sites. Policy parity with the original sandbox-local
+implementation is covered by `tests/test_aio_sandbox_readiness.py`; the
+import-graph guard lives in `tests/test_channels.py`.
+
 ### Goal Objective Validation
 
 `goal_objective.py` owns the dependency-free normalized 4000-character objective
@@ -233,3 +247,14 @@ retries; the helper remains responsible for error classification and cadence.
 `parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
 and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
 shared delay bound. Callers retain numeric/header precedence and local backoff.
+
+### Control-plane HTTP proxy policy
+
+`http_policy.control_plane_trust_env(url)` decides whether a client inherits
+`HTTP_PROXY`: loopback, private and link-local hosts are control-plane traffic
+and bypass it; external hosts keep the environment proxy. `app.channels.manager`
+uses it for both `_make_gateway_client` and `_make_langgraph_client`.
+`langgraph_sdk.get_client()` hard-codes `trust_env=True` and exposes no transport
+override, so the `runs.wait` client for local Gateways is assembled on our own
+`httpx.AsyncClient` with `trust_env=False`; otherwise #7876 keeps reproducing.
+Importing `ChannelManager` must not pull in `deerflow.community.aio_sandbox`.
