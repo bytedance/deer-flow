@@ -94,6 +94,31 @@ It also clears deterministic local proxy/network leftovers before recreation;
 unknown cleanup errors retain the quarantine record.
 Explicit stop failures use that same generation-bound quarantine before dropping
 tracking. Failed record writes retain metadata and fence cached lookups in memory.
+Snapshot quarantine receipts before presence/identity probes; both full retirement
+and replacement pruning may delete only unchanged receipts from that snapshot.
+Each mark first publishes a uniquely named pending fence for its generation,
+including `unknown`, then atomically replaces its receipt. Failed writes retain
+the pending fence even beside older receipts; retirement versions both kinds.
+Pending names stay within the 16-character Windows path budget and store the
+generation in their body; incomplete contents fence every generation.
+Legacy empty records remain supported. A short sidecar lock serializes storage
+mutations, never backend IO. Keep its inode stable and write its mutation token
+through the locking descriptor (CIFS rejects another handle); timestamps are not
+versions. Retry destruction requires an identified generation whose pre-probe
+receipt snapshot still matches; unknown identity defers until confirmed absence.
+Pass the yielded lease check through initial quarantined stops, replacement,
+snapshot waits, retirement, and each backend operation. Recheck storage completion
+and heartbeat exit before clearing retry state; preserve the original exception.
+Failed stops persist their fence before releasing the lease or detaching metadata.
+Warm stops pass the lease check to the backend and retain checked recovery after
+backend errors or uncertain heartbeat completion. `_cleanup_retries` maps logical
+IDs to a copy of the failed generation; `None` schedules inspection only. Re-mark
+only that saved target, never newly discovered metadata. Quarantined orphan and
+warm cleanup use the same snapshot/identity checks as explicit retry. Unknown fences refuse
+reuse without granting deletion. Orphan admission may end a retry only when its
+generation is known and unfenced; a saved failure target must also identify a
+different generation. Recheck the saved target under the metadata lock and keep
+its durable receipts, including when earlier inspection could not finish.
 Warm-to-active promotion clears an obsolete in-memory fence under the metadata
 lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,

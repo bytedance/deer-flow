@@ -21,6 +21,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1274,10 +1275,13 @@ class LocalContainerBackend(SandboxBackend):
         if copied.returncode != 0:
             raise RuntimeError(f"Failed to install sandbox network proxy: {(copied.stderr or b'').decode(errors='replace').strip()}")
 
-    def destroy(self, info: SandboxInfo) -> None:
+    def destroy(self, info: SandboxInfo, *, check: Callable[[], None] | None = None) -> None:
         """Stop the container and release its port."""
         from urllib.parse import urlparse
 
+        if check is not None:
+            check()
+        check_kwargs = {"check": check} if check is not None else {}
         try:
             port = urlparse(info.sandbox_url).port
         except (TypeError, ValueError):
@@ -1297,28 +1301,36 @@ class LocalContainerBackend(SandboxBackend):
         # its proxy is removed, a failed main stop retains the known reservation
         # above for a subsequent generation-fenced retry.
         if restricted_cleanup:
-            self._remove_restricted_proxy(info.sandbox_id)
+            self._remove_restricted_proxy(info.sandbox_id, **check_kwargs)
         # Prefer Docker's generation ID; names also support older metadata and
         # Apple Container's caller-selected identity.
         stop_target = info.container_id or info.container_name
         if stop_target:
+            if check is not None:
+                check()
             self._stop_container(stop_target)
         # The proxy has been removed and the main stop succeeded. Network
         # cleanup cannot retain this host port, and a timeout there must not
         # strand its reservation after the main generation disappears.
+        if check is not None:
+            check()
         if generation:
             with self._pending_cleanup_ports_lock:
                 pending = self._pending_cleanup_ports.get(generation)
                 if pending is not None:
+                    if check is not None:
+                        check()
                     release_port(pending[1])
                     self._pending_cleanup_ports.pop(generation)
                     self._forget_unknown_cleanup_port(info.sandbox_id, pending[1])
         elif port:
             with self._pending_cleanup_ports_lock:
+                if check is not None:
+                    check()
                 release_port(port)
                 self._forget_unknown_cleanup_port(info.sandbox_id, port)
         if restricted_cleanup:
-            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False, remove_proxy=False)
+            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False, remove_proxy=False, **check_kwargs)
 
     def _forget_unknown_cleanup_port(self, sandbox_id: str, port: int) -> None:
         """Remove a released reservation; caller holds the cleanup ledger lock."""
@@ -1328,7 +1340,7 @@ class LocalContainerBackend(SandboxBackend):
             if not pending:
                 self._unknown_cleanup_ports.pop(sandbox_id)
 
-    def complete_absent_teardown(self, sandbox_id: str) -> None:
+    def complete_absent_teardown(self, sandbox_id: str, *, check: Callable[[], None] | None = None) -> None:
         """Release local reservations after fenced, authoritative name vacancy.
 
         A timed-out stop can still remove its container. The provider calls this
@@ -1341,18 +1353,22 @@ class LocalContainerBackend(SandboxBackend):
             # where the local reservation ledger is empty. Unknown cleanup
             # failures must retain quarantine instead of stranding new creation
             # behind the existing-resource mismatch guard.
-            self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False, strict=True)
+            self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False, strict=True, check=check)
         with self._pending_cleanup_ports_lock:
+            if check is not None:
+                check()
             ports = {port for owner_id, port in self._pending_cleanup_ports.values() if owner_id == sandbox_id}
-            ports.update(self._unknown_cleanup_ports.pop(sandbox_id, set()))
-            # Drop every reservation owned by this logical ID from both ledgers
-            # in one pass. The set union releases each port at most once even if
-            # a reservation ever exists in both ledgers.
-            retained = {generation: entry for generation, entry in self._pending_cleanup_ports.items() if entry[0] != sandbox_id}
-            self._pending_cleanup_ports.clear()
-            self._pending_cleanup_ports.update(retained)
+            ports.update(self._unknown_cleanup_ports.get(sandbox_id, set()))
             for port in ports:
+                if check is not None:
+                    check()
                 release_port(port)
+                # Acknowledge only completed releases. A later lease loss or
+                # release error must leave the remaining reservations retryable.
+                retained = {generation: entry for generation, entry in self._pending_cleanup_ports.items() if entry != (sandbox_id, port)}
+                self._pending_cleanup_ports.clear()
+                self._pending_cleanup_ports.update(retained)
+                self._forget_unknown_cleanup_port(sandbox_id, port)
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""
@@ -1675,13 +1691,17 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Found {len(infos)} running sandbox container(s)")
         return infos
 
-    def _remove_restricted_proxy(self, sandbox_id: str) -> None:
+    def _remove_restricted_proxy(self, sandbox_id: str, *, check: Callable[[], None] | None = None) -> None:
         proxy_name, _ = self._resource_names(sandbox_id)
+        if check is not None:
+            check()
         self._stop_container(proxy_name)
         # ``--rm`` removes a container after it has run and then stopped, but
         # not one left in Docker's Created state by a failure before start.
         # An explicit remove closes that lifecycle gap and is harmless after a
         # normal stop (Docker reports the already-removed name as not found).
+        if check is not None:
+            check()
         removed = subprocess.run(
             ["docker", "rm", "-f", proxy_name],
             capture_output=True,
@@ -1693,19 +1713,23 @@ class LocalContainerBackend(SandboxBackend):
         if removed.returncode != 0 and not _is_no_such_container_error(removed.stderr or "", proxy_name):
             raise RuntimeError(f"Failed to remove sandbox network proxy {proxy_name}: {(removed.stderr or '').strip()}")
 
-    def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True, remove_proxy: bool = True, strict: bool = False) -> None:
+    def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True, remove_proxy: bool = True, strict: bool = False, check: Callable[[], None] | None = None) -> None:
         """Tear down the restricted sidecar set.
 
         ``strict=True`` makes any stage failure raise so the caller retains the
         quarantine fence; ``strict=False`` is the best-effort rollback contract:
-        every stage is attempted and failures are logged, never propagated.
+        IO failures are logged. A supplied lease check always aborts further IO.
         """
         _, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
         if stop_sandbox:
+            if check is not None:
+                check()
             try:
                 self._stop_container(f"{self._container_prefix}-{sandbox_id}")
             except Exception:
+                if check is not None:
+                    check()
                 if strict:
                     raise
                 logger.warning(
@@ -1714,9 +1738,13 @@ class LocalContainerBackend(SandboxBackend):
                     exc_info=True,
                 )
         if remove_proxy:
+            if check is not None:
+                check()
             try:
-                self._remove_restricted_proxy(sandbox_id)
+                self._remove_restricted_proxy(sandbox_id, check=check)
             except Exception:
+                if check is not None:
+                    check()
                 if strict:
                     raise
                 logger.warning(
@@ -1725,6 +1753,8 @@ class LocalContainerBackend(SandboxBackend):
                     exc_info=True,
                 )
         for current_network_name in (network_name, egress_network_name):
+            if check is not None:
+                check()
             result = subprocess.run(
                 ["docker", "network", "rm", current_network_name],
                 capture_output=True,

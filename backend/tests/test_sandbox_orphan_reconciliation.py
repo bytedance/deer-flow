@@ -14,7 +14,7 @@ import signal
 import threading
 import time
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -24,6 +24,15 @@ from deerflow.community.aio_sandbox.aio_sandbox_provider import (
 )
 from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+
+
+@pytest.fixture(autouse=True)
+def _isolate_quarantine_home(tmp_path, monkeypatch):
+    from deerflow.community.aio_sandbox import aio_sandbox_provider
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr(aio_sandbox_provider, "get_paths", lambda: Paths(base_dir=tmp_path / "state"))
+
 
 # ── SandboxBackend.list_running() default ────────────────────────────────────
 
@@ -657,7 +666,7 @@ def test_reconcile_replaces_mismatched_policy_after_orphan_grace_and_destroy_cla
     ):
         worker._reconcile_orphans()
 
-    worker._backend.destroy.assert_called_once_with(info)
+    worker._backend.destroy.assert_called_once_with(info, check=ANY)
     assert claims == [True]
     assert info.sandbox_id not in worker._warm_pool
 
@@ -770,7 +779,9 @@ def test_multi_worker_release_then_peer_reconcile_cannot_kill():
     def list_running():
         return list(running.values())
 
-    def destroy(info: SandboxInfo):
+    def destroy(info: SandboxInfo, *, check=None):
+        if check is not None:
+            check()
         destroyed.append(info.sandbox_id)
         running.pop(info.sandbox_id, None)
 
@@ -1195,7 +1206,9 @@ def test_renewal_does_not_forget_a_warm_entry_mid_teardown():
     stop_started = threading.Event()
     let_stop_fail = threading.Event()
 
-    def failing_stop(_entry):
+    def failing_stop(_entry, *, check=None):
+        if check is not None:
+            check()
         stop_started.set()
         assert let_stop_fail.wait(timeout=5), "the test never released the backend stop"
         raise RuntimeError("stop failed")
@@ -1578,7 +1591,9 @@ def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
     stop_entered = threading.Event()
     release_stop = threading.Event()
 
-    def slow_destroy(entry):
+    def slow_destroy(entry, *, check=None):
+        if check is not None:
+            check()
         stop_entered.set()
         release_stop.wait(timeout=5)
 
@@ -1637,7 +1652,9 @@ def test_unhealthy_drop_holds_the_teardown_marker_for_its_stop():
     stop_entered = threading.Event()
     release_stop = threading.Event()
 
-    def slow_destroy(entry):
+    def slow_destroy(entry, *, check=None):
+        if check is not None:
+            check()
         stop_entered.set()
         release_stop.wait(timeout=5)
 
@@ -1689,7 +1706,9 @@ def test_destroy_holds_the_teardown_marker_for_its_stop():
     stop_entered = threading.Event()
     release_stop = threading.Event()
 
-    def slow_destroy(entry):
+    def slow_destroy(entry, *, check=None):
+        if check is not None:
+            check()
         stop_entered.set()
         release_stop.wait(timeout=5)
 
@@ -1851,7 +1870,9 @@ def test_teardown_release_waits_for_the_heartbeat_to_exit():
         created_at=time.time(),
     )
 
-    def slow_destroy(entry):
+    def slow_destroy(entry, *, check=None):
+        if check is not None:
+            check()
         # Return only once the heartbeat has entered (and blocked in) a refresh,
         # so the context exit runs its bounded join against an in-flight claim.
         assert blocking.heartbeat_blocked.wait(timeout=5), "the heartbeat never issued a refresh claim"
@@ -2420,7 +2441,7 @@ def test_reuse_does_not_return_a_sandbox_reserved_during_its_health_check():
 
     assert not reaper.is_alive(), "the idle reaper never finished"
     assert handed_out is None, "reuse returned a sandbox whose local teardown reservation had already won"
-    provider._backend.destroy.assert_called_once_with(info)
+    provider._backend.destroy.assert_called_once_with(info, check=ANY)
     assert provider.get("idlerace") is None
 
 
@@ -2871,7 +2892,14 @@ def test_reclaim_does_not_hand_out_a_container_a_reaper_is_stopping():
     # Reaper reserves and enters the stop, then parks there -- so when reclaim
     # resumes the entry is still in `_warm_pool` and the reservation is held.
     in_stop, let_stop_finish = threading.Event(), threading.Event()
-    provider._backend.destroy = MagicMock(side_effect=lambda entry: (in_stop.set(), let_stop_finish.wait(timeout=5)))
+
+    def stop(entry, *, check=None):
+        if check is not None:
+            check()
+        in_stop.set()
+        assert let_stop_finish.wait(timeout=5)
+
+    provider._backend.destroy = MagicMock(side_effect=stop)
     reaper = threading.Thread(target=lambda: provider._reap_expired_warm(600), daemon=True)
     reaper.start()
     try:

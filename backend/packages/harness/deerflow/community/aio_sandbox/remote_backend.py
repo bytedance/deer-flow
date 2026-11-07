@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import posixpath
+from collections.abc import Callable
 from pathlib import PurePosixPath
 
 import requests
@@ -224,8 +225,10 @@ class RemoteSandboxBackend(SandboxBackend):
             provision_lark_cli_broker=provision_lark_cli_broker,
         )
 
-    def destroy(self, info: SandboxInfo) -> None:
+    def destroy(self, info: SandboxInfo, *, check: Callable[[], None] | None = None) -> None:
         """Destroy a sandbox Pod + Service via the provisioner."""
+        if check is not None:
+            check()
         self._provisioner_destroy(info.sandbox_id)
 
     def is_alive(self, info: SandboxInfo) -> bool:

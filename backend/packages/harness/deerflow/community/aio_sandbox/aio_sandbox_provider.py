@@ -290,7 +290,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._shutdown_called = False
         # Unlike `_shutdown_called`, a failed teardown never reopens admission.
         self._admission_closed = False
-        self._cleanup_retry_ids: set[str] = set()
+        # None schedules inspection; only a saved failed generation can
+        # authorize retrying publication of its quarantine receipt.
+        self._cleanup_retries: dict[str, SandboxInfo | None] = {}
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
@@ -678,6 +680,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         destroyer that crashes mid-stop still releases the container one TTL later
         instead of marking it undestroyable forever.
 
+        The yielded check stops quarantined cleanup from issuing further IO after
+        the heartbeat observes a peer takeover. An already-issued stop cannot be
+        recalled; receipt snapshots separately protect marks made before that
+        loss is observed.
+
         The final release is the heartbeat's own last act, not the caller's. A
         refresh ``claim`` still in flight when the context exits (the socket
         timeout bounds it, but it can be mid-call) would otherwise land *after* a
@@ -688,6 +695,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         refresh, so no claim can follow it.
         """
         stop = threading.Event()
+        lease_lost = threading.Event()
 
         def beat() -> None:
             interval = self._ownership_config.renewal_interval_seconds
@@ -695,6 +703,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 while not stop.wait(interval):
                     try:
                         if not self._ownership.claim(sandbox_id, for_destroy=True):
+                            lease_lost.set()
                             # Only reachable if the store lost our marker *and* a
                             # peer took it (e.g. a flush mid-stop). The stop is
                             # already in flight and cannot be recalled, so say so
@@ -719,8 +728,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         beater = threading.Thread(target=beat, name="sandbox-teardown-lease", daemon=True)
         beater.start()
+
+        def check_lease() -> None:
+            if lease_lost.is_set():
+                raise SandboxPolicyReplacementDeferredError(
+                    sandbox_id,
+                    reason="lost its teardown lease; cleanup is deferred and its quarantine is retained",
+                )
+
         try:
-            yield
+            yield check_lease
         finally:
             stop.set()
             beater.join(timeout=self._TEARDOWN_JOIN_TIMEOUT_SECONDS)
@@ -735,6 +752,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     sandbox_id,
                     self._TEARDOWN_JOIN_TIMEOUT_SECONDS,
                 )
+        # Observe termination before the verdict: a pending refresh may report
+        # loss between these reads. Body errors skip both checks unchanged.
+        if beater.is_alive():
+            raise SandboxPolicyReplacementDeferredError(
+                sandbox_id,
+                reason="has an unfinished teardown heartbeat; cleanup completion is deferred",
+            )
+        check_lease()
 
     # ── Startup reconciliation ────────────────────────────────────────────
 
@@ -806,13 +831,32 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         try:
             if not self._claim_ownership(info.sandbox_id, for_destroy=True):
                 return False
+            stop_completed = False
             try:
-                with self._held_teardown_lease(info.sandbox_id):
-                    self._backend.destroy(info)
+                with self._held_teardown_lease(info.sandbox_id) as check_lease:
+                    store = self._quarantine_store()
+                    if store.contains(info):
+                        # A reuse fence, including an unknown pending record,
+                        # cannot itself authorize deletion of this runtime.
+                        with self._lock:
+                            self._cleanup_retries = {info.sandbox_id: None} | getattr(self, "_cleanup_retries", {})
+                        if not self._complete_quarantined_teardown(info.sandbox_id, store, retire_replaced=True, check_lease=check_lease):
+                            return False
+                    else:
+                        try:
+                            self._backend.destroy(info, check=check_lease)
+                        except Exception:
+                            self._remember_failed_teardown(info.sandbox_id, info)
+                            raise
+                    stop_completed = True
             except Exception as e:
+                if stop_completed:
+                    self._remember_failed_teardown(info.sandbox_id, info)
                 logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, e)
                 return False
             self._unowned_since.pop(info.sandbox_id, None)
+            with self._lock:
+                getattr(self, "_cleanup_retries", {}).pop(info.sandbox_id, None)
             logger.info("Removed orphaned sandbox %s with incompatible provisioning policy", info.sandbox_id)
             return True
         finally:
@@ -886,9 +930,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.debug("Skipping container %s during reconciliation: owned by another instance", info.sandbox_id)
                 continue
 
-            # Single lock acquisition per container: atomic check-and-insert.
-            # Avoids a TOCTOU window between the "already tracked?" check and the
-            # warm-pool insert.
+            with self._lock:
+                retries = getattr(self, "_cleanup_retries", {})
+                retry_pending = info.sandbox_id in retries
+                failed_target = retries.get(info.sandbox_id)
+            retry_resolved = False
+            if retry_pending and info.container_id:
+                if failed_target is None or (failed_target.container_id and failed_target.container_id != info.container_id):
+                    retry_resolved = not self._quarantine_store().contains(info)
+            # Check tracking and install the warm entry atomically.
             with self._lock:
                 if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
                     continue
@@ -907,6 +957,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     continue
                 self._warm_pool[info.sandbox_id] = (info, time.monotonic())
                 self._warm_pool_identity[info.sandbox_id] = None
+                retries = getattr(self, "_cleanup_retries", {})
+                if retry_resolved and retries.get(info.sandbox_id) is failed_target:
+                    # This admission starts a different, verified lifecycle.
+                    # Keep its predecessor's durable fences for later cleanup.
+                    retries.pop(info.sandbox_id, None)
             self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
@@ -1914,7 +1969,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             )
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
-            getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
+            getattr(self, "_cleanup_retries", {}).pop(sandbox_id, None)
             self._active_sandbox_identity[sandbox_id] = key
             self._last_activity[sandbox_id] = time.monotonic()
             self._thread_sandboxes[key] = sandbox_id
@@ -1995,7 +2050,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._warm_pool_identity.pop(info.sandbox_id, None)
                 self._sandboxes[info.sandbox_id] = sandbox
                 self._sandbox_infos[info.sandbox_id] = info
-                getattr(self, "_cleanup_retry_ids", set()).discard(info.sandbox_id)
+                getattr(self, "_cleanup_retries", {}).pop(info.sandbox_id, None)
                 self._active_sandbox_identity[info.sandbox_id] = key
                 self._last_activity[info.sandbox_id] = time.monotonic()
                 self._thread_sandboxes[key] = info.sandbox_id
@@ -2044,7 +2099,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._warm_pool_identity.pop(sandbox_id, None)
                 self._sandboxes[sandbox_id] = sandbox
                 self._sandbox_infos[sandbox_id] = info
-                getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
+                getattr(self, "_cleanup_retries", {}).pop(sandbox_id, None)
                 self._active_sandbox_identity[sandbox_id] = key
                 self._last_activity[sandbox_id] = time.monotonic()
                 if key is not None:
@@ -2196,30 +2251,42 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
 
         try:
-            if not self._claim_ownership(sandbox_id, for_destroy=True):
-                logger.info("Refusing to destroy warm-pool sandbox %s for %s: owned by another instance", sandbox_id, reason)
-                return False
-
+            stop_completed = False
             try:
+                with self._lock:
+                    retry_cleanup = sandbox_id in getattr(self, "_cleanup_retries", {})
+                if retry_cleanup or self._quarantine_store().contains(entry):
+                    # A failed fence write leaves metadata tracked, but every
+                    # retry must inspect the current generation before DELETE.
+                    return self._destroy_reserved(sandbox_id)
+                if not self._claim_ownership(sandbox_id, for_destroy=True):
+                    logger.info("Refusing to destroy warm-pool sandbox %s for %s: owned by another instance", sandbox_id, reason)
+                    return False
                 # The marker must outlast the stop, not the TTL it was written with,
                 # and is released by the heartbeat on exit. On a failed stop that
                 # release matters just as much — the container is probably still up,
                 # so a marker left behind would block its thread from re-acquiring it.
-                with self._held_teardown_lease(sandbox_id):
+                with self._held_teardown_lease(sandbox_id) as check_lease:
                     try:
-                        self._backend.destroy(entry)
+                        self._backend.destroy(entry, check=check_lease)
                     except Exception:
+                        self._remember_failed_teardown(sandbox_id, entry)
                         if reason == "shutdown":
                             # Shutdown has no later idle tick. Persist before
                             # releasing the ownership fence or dropping metadata.
-                            self._remember_failed_teardown(sandbox_id, entry)
                             with self._lock:
                                 current = self._warm_pool.get(sandbox_id)
                                 if current is not None and current[0] is entry:
                                     self._warm_pool.pop(sandbox_id, None)
                                     self._warm_pool_identity.pop(sandbox_id, None)
                         raise
+                    stop_completed = True
             except Exception as e:
+                if stop_completed:
+                    # DELETE may already have removed this generation. Retain
+                    # a checked retry, never stale metadata in the warm pool.
+                    self._remember_failed_teardown(sandbox_id, entry)
+                    self._remove_tracked_sandbox(sandbox_id, expected_info=entry)
                 if reason == "idle_timeout":
                     logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
                 elif reason == "replica_enforcement":
@@ -2553,25 +2620,34 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     sandbox_id,
                     reason="is quarantined and owned by a peer; its cleanup is deferred until that owner releases it",
                 )
-            with self._held_teardown_lease(sandbox_id):
-                self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=True)
+            with self._held_teardown_lease(sandbox_id) as check_lease:
+                self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=True, check_lease=check_lease)
+            with self._lock:
+                getattr(self, "_cleanup_retries", {}).pop(sandbox_id, None)
         finally:
             self._finish_local_teardown(sandbox_id)
 
     def _remember_failed_teardown(self, sandbox_id: str, info: SandboxInfo) -> None:
         """Fence an uncertain stop before dropping its retry metadata."""
         with self._lock:
-            self._cleanup_retry_ids = getattr(self, "_cleanup_retry_ids", set()) | {sandbox_id}
+            target = SandboxInfo(sandbox_id, "", container_id=info.container_id)
+            self._cleanup_retries = getattr(self, "_cleanup_retries", {}) | {sandbox_id: target}
         info.requires_replacement = True
         self._quarantine_store().mark(info)
 
-    def _complete_quarantined_teardown(self, sandbox_id: str, store: SandboxQuarantine, *, retire_replaced: bool) -> bool:
+    def _complete_quarantined_teardown(self, sandbox_id: str, store: SandboxQuarantine, *, retire_replaced: bool, check_lease: Callable[[], None]) -> bool:
         """Retry under the caller's local reservation and ownership heartbeat."""
+        check_lease()
+        info = SandboxInfo(sandbox_id, "")
+        snapshot = store.snapshot(info, check=check_lease)
+        check_lease()
         if self._backend.is_absent(sandbox_id) is not True:
+            check_lease()
             inspect_runtime = getattr(self._backend, "inspect_runtime", None)
             if not callable(inspect_runtime):
                 raise RuntimeError(f"Runtime inspection is unavailable for sandbox {sandbox_id}")
             current = inspect_runtime(sandbox_id)
+            check_lease()
             if current is not None:
                 if not isinstance(current, SandboxInfo) or current.sandbox_id != sandbox_id:
                     raise RuntimeError(f"Runtime inspection returned invalid identity for sandbox {sandbox_id}")
@@ -2585,14 +2661,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # just written for this live generation.
                 if not store.contains(current):
                     if retire_replaced:
-                        store.retire_replaced_generations(current)
-                        with self._lock:
-                            getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
+                        check_lease()
+                        store.retire_replaced_generations(current, snapshot=snapshot, check=check_lease)
                     return False
+                if not store.matches(current, snapshot=snapshot, check=check_lease):
+                    raise SandboxPolicyReplacementDeferredError(
+                        sandbox_id,
+                        reason="has no unchanged quarantine receipt for its current generation; cleanup is deferred",
+                    )
                 # Inspection recovers runtime identity, but replacement
                 # cleanup must also remove its previous policy resources.
                 current.requires_replacement = True
-                self._backend.destroy(current)
+                check_lease()
+                self._backend.destroy(current, check=check_lease)
+            check_lease()
             # DELETE acceptance cannot prove the Pod/container vanished.
             # Also recheck when it disappeared between our observations.
             if self._backend.is_absent(sandbox_id) is not True:
@@ -2600,10 +2682,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     sandbox_id,
                     reason="is quarantined and its previous runtime is still present; the fence is retained",
                 )
-        self._backend.complete_absent_teardown(sandbox_id)
-        store.retire(SandboxInfo(sandbox_id, ""))
-        with self._lock:
-            getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
+        check_lease()
+        self._backend.complete_absent_teardown(sandbox_id, check=check_lease)
+        check_lease()
+        store.retire(info, snapshot=snapshot, check=check_lease)
         return True
 
     def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
@@ -2742,7 +2824,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             The sandbox instance if found, None otherwise.
         """
         with self._lock:
-            if sandbox_id in getattr(self, "_cleanup_retry_ids", set()):
+            if sandbox_id in getattr(self, "_cleanup_retries", {}):
                 return None
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
@@ -2759,7 +2841,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Return a cached client only for its recorded user/thread identity."""
         key = self._thread_key(thread_id, user_id)
         with self._lock:
-            if sandbox_id in getattr(self, "_cleanup_retry_ids", set()):
+            if sandbox_id in getattr(self, "_cleanup_retries", {}):
                 return None
             if self._thread_sandboxes.get(key) != sandbox_id:
                 return None
@@ -2909,9 +2991,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 info = warm[0]
         store = self._quarantine_store()
         with self._lock:
-            retry_cleanup = sandbox_id in getattr(self, "_cleanup_retry_ids", set())
-        retry_cleanup = retry_cleanup or (info is None and store.contains(SandboxInfo(sandbox_id, "")))
-        if getattr(sandbox, "has_pending_session_creates", False) is True or getattr(sandbox, "requires_container_recycle", False) is True or (retry_cleanup and info is not None):
+            retries = getattr(self, "_cleanup_retries", {})
+            retry_cleanup = sandbox_id in retries
+            failed_target = retries.get(sandbox_id)
+        retry_cleanup = retry_cleanup or store.contains(info if info is not None else SandboxInfo(sandbox_id, ""))
+        if getattr(sandbox, "has_pending_session_creates", False) is True or getattr(sandbox, "requires_container_recycle", False) is True:
             if info is None:
                 raise RuntimeError(f"Cannot quarantine sandbox {sandbox_id} without its runtime metadata")
             # All destroy paths must persist before claiming/untracking. If
@@ -2919,6 +3003,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # a later idle/shutdown/explicit destroy retries this same fence.
             info.requires_replacement = True
             store.mark(info)
+        elif failed_target is not None:
+            # The logical retry may now refer to a tracked replacement. Only
+            # the saved failure target may acquire a new generation receipt.
+            store.mark(failed_target)
 
         # Keep both the local reservation and ownership fence through the stop.
         # A failed stop must preserve a generation-bound cleanup target before
@@ -2930,7 +3018,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if retry_cleanup:
             # A previous failed stop may have lost its endpoint or been replaced
             # under the same logical ID. Use the existing authoritative probes.
-            with self._held_teardown_lease(sandbox_id):
+            with self._held_teardown_lease(sandbox_id) as check_lease:
                 if info is not None:
                     self._remove_tracked_sandbox(sandbox_id, expected_info=info)
                 if sandbox is not None:
@@ -2938,7 +3026,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         sandbox.close()
                     except Exception as e:
                         logger.warning(f"Error closing sandbox {sandbox_id} during destroy: {e}")
-                return self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=False)
+                completed = self._complete_quarantined_teardown(sandbox_id, store, retire_replaced=False, check_lease=check_lease)
+            if completed:
+                with self._lock:
+                    getattr(self, "_cleanup_retries", {}).pop(sandbox_id, None)
+            return completed
 
         if info:
             # The marker must outlast the stop, not the TTL it was written with,
@@ -2947,11 +3039,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # behind would refuse its own thread's `take()` until the TTL lapses;
             # the error still propagates out of the `with` (`shutdown()` logs per
             # sandbox off it), it is just no longer this method's job to release.
-            with self._held_teardown_lease(sandbox_id):
-                try:
-                    self._backend.destroy(info)
-                except Exception:
+            stop_completed = failure_fenced = False
+            try:
+                with self._held_teardown_lease(sandbox_id) as check_lease:
+                    try:
+                        self._backend.destroy(info, check=check_lease)
+                    except Exception:
+                        # Persist while the teardown lease is still held. A
+                        # storage error must leave the tracked client intact.
+                        self._remember_failed_teardown(sandbox_id, info)
+                        failure_fenced = True
+                        raise
+                    stop_completed = True
+            except Exception:
+                # Includes a loss first confirmed during heartbeat shutdown.
+                if stop_completed:
                     self._remember_failed_teardown(sandbox_id, info)
+                    failure_fenced = True
+                if failure_fenced:
                     self._remove_tracked_sandbox(sandbox_id, expected_info=info)
                     if sandbox is not None:
                         try:
@@ -2959,9 +3064,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         except Exception as e:
                             logger.warning(f"Error closing sandbox {sandbox_id} after failed destroy: {e}")
                         sandbox = None
-                    raise
-                # A stale completion must not remove a replacement generation.
-                self._remove_tracked_sandbox(sandbox_id, expected_info=info)
+                raise
+            # Commit success only after the heartbeat's final verdict.
+            self._remove_tracked_sandbox(sandbox_id, expected_info=info)
             logger.info(f"Destroyed sandbox {sandbox_id}")
         else:
             self._remove_tracked_sandbox(sandbox_id)
@@ -3008,8 +3113,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # known stopped. If either bounded join fails, a retry must still own
         # every active and warm entry.
         with self._lock:
-            pending = getattr(self, "_cleanup_retry_ids", set())
-            sandbox_ids = list(set(self._sandboxes) | pending)
+            pending = getattr(self, "_cleanup_retries", {})
+            sandbox_ids = list(set(self._sandboxes) | set(pending))
             warm_items = [(sid, item) for sid, item in self._warm_pool.items() if sid not in pending]
 
         logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
@@ -3051,12 +3156,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 with self._lock:
                     if sandbox_id not in self._sandboxes and sandbox_id not in self._warm_pool:
                         failed.remove(sandbox_id)
-                        getattr(self, "_cleanup_retry_ids", set()).discard(sandbox_id)
+                        getattr(self, "_cleanup_retries", {}).pop(sandbox_id, None)
 
         if failed:
             with self._lock:
                 self._shutdown_called = False
-                self._cleanup_retry_ids = getattr(self, "_cleanup_retry_ids", set()) | failed
+                self._cleanup_retries = dict.fromkeys(failed) | getattr(self, "_cleanup_retries", {})
             raise RuntimeError(f"Failed to destroy {len(failed)} sandbox(es) during AIO shutdown; retry shutdown")
 
         try:

@@ -10,9 +10,24 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
+import uuid
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
+
+from deerflow.utils.file_lock import retry_until_locked
 
 from .sandbox_info import SandboxInfo
+
+
+@dataclass(frozen=True)
+class QuarantineSnapshot:
+    directory_identity: tuple[int, int] | None
+    mutation_token: bytes
+    records: Mapping[str, bytes]
 
 
 class SandboxQuarantine:
@@ -31,6 +46,52 @@ class SandboxQuarantine:
 
     def _directory(self, info: SandboxInfo) -> Path:
         return self._root / self._key(info.sandbox_id)
+
+    @contextmanager
+    def _mutation_lock(self, info: SandboxInfo, check: Callable[[], None] | None = None) -> Iterator[BinaryIO]:
+        """Serialize receipt replacement with compare-and-delete, never runtime IO.
+
+        Keep this sidecar outside the removable generation directory and never
+        unlink it: otherwise a waiter and a new writer could lock different inodes.
+        """
+        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        lock_path = self._root / f".{self._key(info.sandbox_id)}.lock"
+        # O_CREAT without O_TRUNC/O_APPEND preserves the inode and lets token
+        # writes use the lock-owning descriptor, including CIFS mandatory locks.
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+        with os.fdopen(descriptor, "r+b") as lock_file:
+            if os.name == "nt":
+                import msvcrt
+
+                def acquire() -> None:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                def acquire() -> None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            retry_until_locked(acquire, check=check)
+            try:
+                if check is not None:
+                    check()
+                # Windows permits locking beyond EOF. Initialize the lock byte
+                # only after acquiring it, so bootstrap writers cannot race.
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                yield lock_file
+            finally:
+                if os.name == "nt":
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            # Covers early returns and lease loss during the final storage IO.
+            # An exception from the body skips this check and keeps its cause.
+            if check is not None:
+                check()
 
     @staticmethod
     def _exists(path: Path) -> bool:
@@ -63,14 +124,100 @@ class SandboxQuarantine:
         except FileNotFoundError:
             pass
 
+    @staticmethod
+    def _receipt(record: Path) -> bytes | None:
+        try:
+            return record.read_bytes()
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _directory_identity(directory: Path) -> tuple[int, int] | None:
+        try:
+            stat = directory.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino
+
+    @staticmethod
+    def _record_generation(name: str, receipt: bytes | None) -> str:
+        if not name.startswith("p"):
+            return name  # Canonical receipts use the generation key as name.
+        # Pending files keep the short path budget and carry their generation
+        # in the body. A crash during writing leaves an unknown fence. A file
+        # that vanished during contains() may have just published its receipt.
+        if receipt is not None and len(receipt) == 16 and all(byte in b"0123456789abcdef" for byte in receipt):
+            return receipt.decode("ascii")
+        return "unknown"
+
+    @staticmethod
+    def _mutation_token(lock_file: BinaryIO) -> bytes:
+        lock_file.seek(1)
+        return lock_file.read(16)
+
+    def snapshot(self, info: SandboxInfo, *, check: Callable[[], None] | None = None) -> QuarantineSnapshot:
+        """Capture cleanup targets before proving absence, including legacy empty records."""
+        with self._mutation_lock(info, check) as lock_file:
+            directory = self._directory(info)
+            identity = self._directory_identity(directory)
+            if check is not None:
+                check()
+            token = self._mutation_token(lock_file)
+            records = {}
+            for record in self._records(directory):
+                if check is not None:
+                    check()
+                receipt = self._receipt(record)
+                if receipt is not None:
+                    records[record.name] = receipt
+            if check is not None:
+                check()
+            return QuarantineSnapshot(identity, token, records)
+
+    def matches(self, info: SandboxInfo, *, snapshot: QuarantineSnapshot, check: Callable[[], None] | None = None) -> bool:
+        """Authorize retry only for an identified generation in an unchanged snapshot."""
+        if not info.container_id:
+            return False
+        generation = self._key(info.container_id)
+        if not any(self._record_generation(name, receipt) == generation for name, receipt in snapshot.records.items()):
+            return False
+        return self.snapshot(info, check=check) == snapshot
+
     def mark(self, info: SandboxInfo) -> None:
-        directory = self._directory(info)
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        generation = self._key(info.container_id) if info.container_id else "unknown"
-        # Empty records are atomic and idempotent: a process dying during the
-        # write still leaves a fence, never partially parsed metadata.
-        with (directory / generation).open("ab") as record:
-            os.fsync(record.fileno())
+        with self._mutation_lock(info) as lock_file:
+            token = uuid.uuid4().bytes
+            directory = self._directory(info)
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            generation = self._key(info.container_id) if info.container_id else "unknown"
+            # Fence this attempt before any fsync or receipt publication can
+            # fail. The unique name survives both crashes and old snapshots,
+            # including when other generations already occupy the directory.
+            # Non-hex prefix separates pending files from canonical keys;
+            # 60 random bits fit the existing 16-character component budget.
+            pending = directory / f"p{token.hex()[-15:]}"
+            with pending.open("xb") as record:
+                record.write(generation.encode("ascii"))
+                record.flush()
+                os.fsync(record.fileno())
+            lock_file.seek(1)
+            lock_file.write(token)
+            lock_file.truncate(17)
+            lock_file.flush()
+            os.fsync(lock_file.fileno())
+            # A fresh opaque receipt distinguishes a re-mark of the same name,
+            # especially "unknown", from the version an old cleanup observed.
+            # An interrupted publication leaves its pending fence for a later
+            # cleanup with a new absence proof; never remove it on failure.
+            descriptor, temporary = tempfile.mkstemp(dir=self._root, prefix=".mark-")
+            try:
+                with os.fdopen(descriptor, "wb") as record:
+                    record.write(token)
+                    record.flush()
+                    os.fsync(record.fileno())
+                os.replace(temporary, directory / generation)
+            finally:
+                Path(temporary).unlink(missing_ok=True)
+            pending.unlink()
 
     def contains(self, info: SandboxInfo) -> bool:
         directory = self._directory(info)
@@ -81,17 +228,17 @@ class SandboxQuarantine:
             return True
         if self._exists(directory / "unknown") or self._exists(directory / self._key(info.container_id)):
             return True
-        # Crash residue: mark() died between mkdir and record creation, so the
-        # queried generation may be the unrecorded one. Fail closed. A directory
-        # already holding other generations proves this is a different one.
+        # Pending attempts fence their generation even beside older records.
+        # An empty directory is legacy crash residue and fences every generation.
         try:
-            return not any(directory.iterdir())
+            records = list(directory.iterdir())
+            return not records or any(self._record_generation(record.name, self._receipt(record) if record.name.startswith("p") else None) in {"unknown", self._key(info.container_id)} for record in records)
         except FileNotFoundError:
             # A concurrent retire() removed the directory between the existence
             # check and the listing: the fence is gone, exactly as _exists reports.
             return False
 
-    def retire_replaced_generations(self, current: SandboxInfo) -> None:
+    def retire_replaced_generations(self, current: SandboxInfo, *, snapshot: QuarantineSnapshot, check: Callable[[], None] | None = None) -> None:
         """Drop fences a live replacement proves absent; never the live one.
 
         An observed runtime under the same logical ID with a *different*
@@ -102,59 +249,48 @@ class SandboxQuarantine:
         unversioned ``unknown`` crash fence — are kept: deleting those could
         silently drop a fence a peer has just written.
         """
-        directory = self._directory(current)
-        if not self._exists(directory):
-            return
-        keep = self._key(current.container_id) if current.container_id else None
-        for record in self._records(directory):
-            if record.name == "unknown" or (keep is not None and record.name == keep):
-                continue
-            self._drop(record)
-        try:
-            directory.rmdir()
-        except OSError:
-            # A live or freshly fenced generation still has its record.
-            pass
+        keep = {"unknown"}
+        if current.container_id:
+            keep.add(self._key(current.container_id))
+        self._retire(current, snapshot, keep=keep, check=check)
 
-    def retire(self, info: SandboxInfo) -> None:
-        """Remove fences only after the caller proves the logical ID is absent.
+    def retire(self, info: SandboxInfo, *, snapshot: QuarantineSnapshot, check: Callable[[], None] | None = None) -> None:
+        """Retire only the receipt versions captured before the absence proof.
 
         The provider must hold its local reservation and the cross-worker
-        teardown lease throughout that proof and this removal. A successful
-        delete request or failed health check alone does not prove absence.
-
-        A peer may fence the same logical ID between the listing below and the
-        ``rmdir``. The teardown lease is keyed by that ID, and a replacement
-        shares it, so while the ``del:`` marker is held a peer's claim — and an
-        acquire-side ``take()`` for the replacement — are excluded. What is not
-        guaranteed is that the exclusion is still held when ``rmdir`` runs: it
-        is a TTL lease, not a lock, so the heartbeat can lose it mid-teardown
-        (the documented "Lost the teardown exclusion" path stops refreshing
-        while the stop continues) and the config schema permits TTLs below a
-        normal stop. A record written in that lapse proves the directory holds a
-        live generation, so the ``rmdir`` failure is swallowed and the directory
-        is kept — exactly as :meth:`retire_replaced_generations` keeps a live
-        generation's record: teardown must not abort on a fence a peer just
-        wrote.
-
-        This is best-effort, not full fence preservation: it closes the listing
-        → ``rmdir`` window only. A peer record landing before the listing is
-        still unlinked along with the rest. Both the listing and each unlink
-        tolerate a peer that removed the directory or the record first, matching
-        the ``FileNotFoundError`` handling in :meth:`contains`, so a teardown
-        that finds its work already done returns instead of raising out of
-        ``_retire_absent_quarantine``. What stays unclosed on purpose: on Windows
-        a peer's ``mark()`` still holding the fresh record open for its
-        ``fsync`` raises ``PermissionError``, which is a real storage failure
-        rather than an absent fence.
+        teardown lease; ``check`` propagates an observed lease loss even while
+        waiting for the mutation lock. A new generation or a re-marked unknown
+        generation survives even if the heartbeat has not noticed that loss yet.
         """
+        self._retire(info, snapshot, keep=set(), check=check)
+
+    def _retire(self, info: SandboxInfo, snapshot: QuarantineSnapshot, *, keep: set[str], check: Callable[[], None] | None) -> None:
         directory = self._directory(info)
-        if not self._exists(directory):
-            return
-        for record in self._records(directory):
-            self._drop(record)
-        try:
-            directory.rmdir()
-        except OSError:
-            # A live or freshly fenced generation still has its record.
-            pass
+        with self._mutation_lock(info, check) as lock_file:
+            identity = self._directory_identity(directory)
+            if identity is None or snapshot.directory_identity is None or identity != snapshot.directory_identity:
+                return
+            if check is not None:
+                check()
+            unchanged_directory = self._mutation_token(lock_file) == snapshot.mutation_token
+            for name, receipt in snapshot.records.items():
+                if check is not None:
+                    check()
+                record = directory / name
+                if not receipt and not name.startswith("p") and not unchanged_directory:
+                    # Legacy empty records cannot attest a re-marked version.
+                    continue
+                if self._record_generation(name, receipt) not in keep and self._receipt(record) == receipt:
+                    if check is not None:
+                        check()
+                    self._drop(record)
+            if check is not None:
+                check()
+            if not unchanged_directory:
+                # A new empty directory is itself a crash-residue fence.
+                return
+            try:
+                directory.rmdir()
+            except OSError:
+                # A live/fresh record or a peer's completed cleanup is normal.
+                pass

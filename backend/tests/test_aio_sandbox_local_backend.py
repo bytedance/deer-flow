@@ -317,6 +317,85 @@ def _restricted_backend() -> LocalContainerBackend:
     return backend
 
 
+@pytest.mark.parametrize("stop_after", [0, 1, 2, 3, 4], ids=["before-stop", "after-stop", "after-proxy-rm", "after-first-network", "after-last-network"])
+def test_absent_cleanup_stops_new_operations_after_lease_loss(monkeypatch, stop_after):
+    backend = _restricted_backend()
+    backend._pending_cleanup_ports["old-generation"] = ("existing", 18080)
+    proxy, network = backend._resource_names("existing")
+    expected = [
+        ["docker", "stop", proxy],
+        ["docker", "rm", "-f", proxy],
+        ["docker", "network", "rm", network],
+        ["docker", "network", "rm", backend._egress_network_name("existing")],
+    ]
+    commands, released = [], []
+
+    def runtime(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def check():
+        if len(commands) >= stop_after:
+            raise RuntimeError("teardown lease lost")
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    with pytest.raises(RuntimeError, match="teardown lease lost"):
+        backend.complete_absent_teardown("existing", check=check)
+
+    assert commands == expected[:stop_after]
+    assert released == []
+    assert backend._pending_cleanup_ports == {"old-generation": ("existing", 18080)}
+
+
+@pytest.mark.parametrize("stop_after", [0, 1, 2, 3], ids=["before-proxy", "after-proxy-stop", "after-proxy-rm", "after-main-stop"])
+def test_guarded_destroy_stops_new_operations_after_lease_loss(monkeypatch, stop_after):
+    backend = _restricted_backend()
+    info = SandboxInfo("existing", "http://localhost:18080", container_id="old-generation")
+    proxy, _ = backend._resource_names(info.sandbox_id)
+    expected = [["docker", "stop", proxy], ["docker", "rm", "-f", proxy], ["docker", "stop", info.container_id]]
+    commands, released = [], []
+
+    def runtime(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def check():
+        if len(commands) >= stop_after:
+            raise RuntimeError("teardown lease lost")
+
+    monkeypatch.setattr("subprocess.run", runtime)
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+    with pytest.raises(RuntimeError, match="teardown lease lost"):
+        backend.destroy(info, check=check)
+    assert commands == expected[:stop_after]
+    assert released == []
+
+
+def test_absent_cleanup_keeps_unreleased_ports_when_lease_is_lost(monkeypatch):
+    backend = _restricted_backend()
+    backend._runtime = "container"
+    backend._pending_cleanup_ports = {"first": ("existing", 18080), "second": ("existing", 18081)}
+    backend._unknown_cleanup_ports = {"existing": {18080, 18081}}
+    released = []
+    monkeypatch.setattr(local_backend_module, "release_port", released.append)
+
+    def check():
+        if released:
+            raise RuntimeError("teardown lease lost")
+
+    with pytest.raises(RuntimeError, match="teardown lease lost"):
+        backend.complete_absent_teardown("existing", check=check)
+
+    assert len(released) == 1
+    remaining = {18080, 18081} - set(released)
+    assert {entry[1] for entry in backend._pending_cleanup_ports.values()} == remaining
+    assert backend._unknown_cleanup_ports["existing"] == remaining
+    backend.complete_absent_teardown("existing")
+    assert sorted(released) == [18080, 18081]
+    assert not backend._pending_cleanup_ports and not backend._unknown_cleanup_ports
+
+
 def test_network_policy_digest_is_canonical_and_covers_effective_policy():
     backend = _restricted_backend()
     original = backend._network_policy_digest()
