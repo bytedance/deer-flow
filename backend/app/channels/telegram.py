@@ -967,6 +967,23 @@ class TelegramChannel(Channel):
             "last_text": last_text,
         }
 
+    def _outbound_retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Wait out a Bot API flood hint before retrying a new send.
+
+        Fresh ``sendMessage`` / ``sendRichMessage`` calls share
+        ``Channel._send_with_retry``. That helper sleeps ``2**attempt``, so a
+        429 whose ``retry_after`` is longer than the remaining budget gives up
+        while Telegram is still refusing the message. Take the longer of the
+        local backoff and the server hint. A shorter hint keeps the backoff.
+        Final edits already sleep the hint on their own path.
+        """
+        delay = 2**attempt
+        if self._is_retry_after(exc):
+            hint = self._retry_after_seconds(exc)
+            if hint > delay:
+                return hint
+        return delay
+
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
         return getattr(exc, "retry_after", None) is not None
