@@ -79,6 +79,7 @@ class WeKnoraProvider:
             if space.access_mode == "users":
                 user_allowed = context.user_id in (space.user_ids or ())
             else:
+                # Older harness contexts lack this field; deny shared access instead of raising AttributeError.
                 user_allowed = bool(context.user_id) and getattr(context, "authenticated_user_id", None) == context.user_id
             if not user_allowed or (space.agent_names is not None and context.agent_name not in space.agent_names):
                 continue

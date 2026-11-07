@@ -115,7 +115,9 @@ This mode requires a Gateway host that supplies the optional
 `KnowledgeRequestContext.authenticated_user_id` provenance field. Older hosts
 and standalone callers without that proof fail closed. Anonymous requests,
 auth-disabled synthetic users, internal-service identities and client-provided
-authentication flags never qualify. A valid session is still accepted when the
+authentication flags never qualify. Scheduled-task and IM-channel runs currently
+cannot use this shared mode: their owner `user_id` does not supply the required
+authentication proof. A valid session is still accepted when the
 local auth-disabled switch is present. Ordinary and batch subagents inherit
 the verified identity within the current process and retain their own Agent
 restrictions. If a worker loses that context, access is denied; it is not

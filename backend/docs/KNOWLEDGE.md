@@ -60,6 +60,14 @@ restoration cannot create it. Child tasks, threads and isolated subagent context
 inherit it; a lost/fresh context denies shared access. Trusted embedding hosts
 may use `bind_authenticated_user()` from `deerflow.runtime.user_context` only
 after authenticating the end user, and must bind `None` for non-user callers.
+The bound value must be exactly the same nonempty string that
+`resolve_runtime_user_id()` returns for the execution. LangGraph Server
+identities from `runtime.server_info.user.identity` or
+`configurable.langgraph_auth_user_id` take precedence over runtime context and
+are normalized with `make_safe_user_id()`. A trusted embedding host must bind
+that same resolved ID after authentication, rather than a raw identity such as
+an email address. Binding a different representation denies shared access;
+providers must not normalize the two values independently to bypass the mismatch.
 Providers opting into shared access must require a nonempty exact match with
 `context.user_id` and still enforce their connection/resource/Agent policy.
 The WeKnora extension's explicit `access_mode: authenticated` uses this field
