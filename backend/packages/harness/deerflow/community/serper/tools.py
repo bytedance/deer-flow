@@ -12,7 +12,9 @@ import os
 import random
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from ipaddress import IPv4Address, ip_address
@@ -38,6 +40,47 @@ _SERPER_TBS_BY_TIME_RANGE: dict[SearchTimeRange, str] = {
     "year": "qdr:y",
 }
 _api_key_warned: set[str] = set()
+
+
+@dataclass
+class _Completion:
+    """Call-local counters; never retain request, response or exception data."""
+
+    attempts: int = 0
+    backoff_seconds: float = 0.0
+    outcome: str = "failure"
+    stop_reason: str = "invalid_config"
+
+    def success(self) -> None:
+        self.outcome = "success"
+        self.stop_reason = "recovered" if self.attempts > 1 else "completed"
+
+    def empty(self) -> None:
+        self.outcome = "empty"
+        self.stop_reason = "no_results"
+
+
+@contextmanager
+def _completion(tool_kind: str) -> Iterator[_Completion]:
+    started = time.monotonic()
+    completion = _Completion()
+    try:
+        yield completion
+    finally:
+        # Logging filters/handlers/formatters are outside the tool's contract.
+        # Do not let a broken diagnostic replace a result or an active exception.
+        try:
+            logger.debug(
+                "Serper completion tool=%s attempts=%d elapsed_seconds=%.6f backoff_seconds=%.6f outcome=%s stop_reason=%s",
+                tool_kind,
+                completion.attempts,
+                time.monotonic() - started,
+                completion.backoff_seconds,
+                completion.outcome,
+                completion.stop_reason,
+            )
+        except Exception:
+            pass
 
 
 def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) -> str | None:
@@ -289,6 +332,7 @@ def _serper_post(
     base_url: object | None = None,
     max_retries: int = 0,
     retry_budget_seconds: float = 30,
+    completion: _Completion | None = None,
 ) -> tuple[dict | None, str | None]:
     """Send a POST request to a Serper endpoint.
 
@@ -305,6 +349,7 @@ def _serper_post(
     JSON response and ``error_json`` is ``None``; on failure ``data`` is ``None``
     and ``error_json`` is a serialized structured error ready to return.
     """
+    completion = completion if completion is not None else _Completion()
     headers = {
         "X-API-KEY": api_key,
         "Content-Type": "application/json",
@@ -341,32 +386,44 @@ def _serper_post(
                 parsed_endpoint.netloc.rsplit("@", 1)[-1],
                 parsed_endpoint.path,
             )
+        completion.stop_reason = "request_error"
         with httpx.Client(timeout=30) as client:
             for attempt in range(max_retries + 1):
                 try:
+                    completion.stop_reason = "request_error"
+                    completion.attempts += 1
                     response = client.post(endpoint, headers=headers, json=payload)
                     response.raise_for_status()
                     break
                 except (httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPStatusError) as exc:
-                    if attempt >= max_retries:
-                        raise
                     hint = None
                     if isinstance(exc, httpx.HTTPStatusError):
                         status = exc.response.status_code
                         if status in (429, 503):
                             hint = _retry_after(exc.response)
                         if status not in (502, 503, 504) and not (status == 429 and hint is not None):
+                            completion.stop_reason = "non_retryable"
                             raise
+                    if attempt >= max_retries:
+                        completion.stop_reason = "attempts_exhausted"
+                        raise
                     # Equal jitter retains exponential pacing even for Retry-After: 0.
                     backoff = min(0.5 * 2**attempt, 2.0)
                     delay = max(random.uniform(backoff / 2, backoff), hint or 0.0)
                     if delay >= deadline - time.monotonic():
+                        completion.stop_reason = "budget_before_backoff"
                         logger.warning("Serper retry time budget exhausted before backoff after %d attempt(s)", attempt + 1)
                         raise
-                    time.sleep(delay)
+                    wait_started = time.monotonic()
+                    try:
+                        time.sleep(delay)
+                    finally:
+                        completion.backoff_seconds += time.monotonic() - wait_started
                     if time.monotonic() >= deadline:
+                        completion.stop_reason = "budget_after_backoff"
                         logger.warning("Serper retry time budget exhausted after backoff after %d attempt(s)", attempt + 1)
                         raise
+        completion.stop_reason = "malformed_response"
         data = response.json()
         if not isinstance(data, dict):
             logger.error("Serper returned an unexpected payload type: %s", type(data).__name__)
@@ -393,59 +450,65 @@ def web_search_tool(query: str, max_results: int = 5, time_range: SearchTimeRang
         max_results: Maximum number of search results to return. Default is 5, capped at 10.
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
-    config = get_app_config().get_tool_config("web_search")
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results", max_results)
-    max_results = _count_for_request(max_results)
-    query = _clean_query(query)
+    with _completion("web_search") as completion:
+        config = get_app_config().get_tool_config("web_search")
+        if config is not None and "max_results" in config.model_extra:
+            max_results = config.model_extra.get("max_results", max_results)
+        max_results = _count_for_request(max_results)
+        query = _clean_query(query)
 
-    try:
-        extra = config.model_extra if config is not None else {}
-        include = _domain_list(extra, "include_domains")
-        exclude = _domain_list(extra, "exclude_domains")
-        search_query = _domain_query(query, include, exclude)
-    except ValueError as exc:
-        logger.error("Invalid Serper domain filters: %s", exc)
-        return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
+        try:
+            extra = config.model_extra if config is not None else {}
+            include = _domain_list(extra, "include_domains")
+            exclude = _domain_list(extra, "exclude_domains")
+            search_query = _domain_query(query, include, exclude)
+        except ValueError as exc:
+            logger.error("Invalid Serper domain filters: %s", exc)
+            return json.dumps({"error": str(exc), "query": query}, ensure_ascii=False)
 
-    api_key = _get_api_key("web_search", extras=extra)
-    if not api_key:
-        return _missing_key_error(query, "web_search")
+        api_key = _get_api_key("web_search", extras=extra)
+        if not api_key:
+            completion.stop_reason = "missing_key"
+            return _missing_key_error(query, "web_search")
 
-    base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, **_retry_options(config))
-    if error_json is not None:
-        error = json.loads(error_json)
-        error["query"] = query
-        return json.dumps(error, ensure_ascii=False)
+        base_url = extra.get("base_url")
+        data, error_json = _serper_post(_SERPER_SEARCH_ENDPOINT, api_key, search_query, max_results, time_range=time_range, base_url=base_url, completion=completion, **_retry_options(config))
+        if error_json is not None:
+            error = json.loads(error_json)
+            error["query"] = query
+            return json.dumps(error, ensure_ascii=False)
 
-    organic, error_json = _response_items(data, "organic", query)
-    if error_json is not None:
-        return error_json
-    if not organic and not (include or exclude):
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        completion.stop_reason = "malformed_response"
+        organic, error_json = _response_items(data, "organic", query)
+        if error_json is not None:
+            return error_json
+        if not organic and not (include or exclude):
+            completion.empty()
+            return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
-    if include or exclude:
-        organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
+        if include or exclude:
+            organic = [result for result in organic if _matches_domain_scope(result.get("link"), include, exclude)]
 
-    # Search result links go through _safe_public_url like image URLs, so a
-    # loopback or metadata-service address never reaches the model as a
-    # citation, even though this tool does not fetch it (#7036).
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "url": _safe_public_url(r.get("link")),
-            "content": r.get("snippet", ""),
+        # Search result links go through _safe_public_url like image URLs, so a
+        # loopback or metadata-service address never reaches the model as a
+        # citation, even though this tool does not fetch it (#7036).
+        normalized_results = [
+            {
+                "title": r.get("title", ""),
+                "url": _safe_public_url(r.get("link")),
+                "content": r.get("snippet", ""),
+            }
+            for r in organic[:max_results]
+        ]
+
+        output = {
+            "query": query,
+            "total_results": len(normalized_results),
+            "results": normalized_results,
         }
-        for r in organic[:max_results]
-    ]
-
-    output = {
-        "query": query,
-        "total_results": len(normalized_results),
-        "results": normalized_results,
-    }
-    return json.dumps(output, indent=2, ensure_ascii=False)
+        result = json.dumps(output, indent=2, ensure_ascii=False)
+        completion.success()
+        return result
 
 
 @tool("image_search", parse_docstring=True)
@@ -458,62 +521,69 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
         max_results: Maximum number of images to return. Default is 5, capped at 10.
     """
-    config = get_app_config().get_tool_config("image_search")
-    if config is not None and "max_results" in config.model_extra:
-        max_results = config.model_extra.get("max_results", max_results)
-    max_results = _count_for_request(max_results)
-    query = _clean_query(query)
+    with _completion("image_search") as completion:
+        config = get_app_config().get_tool_config("image_search")
+        if config is not None and "max_results" in config.model_extra:
+            max_results = config.model_extra.get("max_results", max_results)
+        max_results = _count_for_request(max_results)
+        query = _clean_query(query)
 
-    extra = config.model_extra if config is not None else {}
-    api_key = _get_api_key("image_search", extras=extra)
-    if not api_key:
-        return _missing_key_error(query, "image_search")
+        extra = config.model_extra if config is not None else {}
+        api_key = _get_api_key("image_search", extras=extra)
+        if not api_key:
+            completion.stop_reason = "missing_key"
+            return _missing_key_error(query, "image_search")
 
-    base_url = extra.get("base_url")
-    data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, **_retry_options(config))
-    if error_json is not None:
-        return error_json
+        base_url = extra.get("base_url")
+        data, error_json = _serper_post(_SERPER_IMAGES_ENDPOINT, api_key, query, max_results, base_url=base_url, completion=completion, **_retry_options(config))
+        if error_json is not None:
+            return error_json
 
-    images, error_json = _response_items(data, "images", query)
-    if error_json is not None:
-        return error_json
-    if not images:
-        return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
+        completion.stop_reason = "malformed_response"
+        images, error_json = _response_items(data, "images", query)
+        if error_json is not None:
+            return error_json
+        if not images:
+            completion.empty()
+            return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
 
-    normalized_results = []
-    for r in images:
-        raw_image = r.get("imageUrl")
-        raw_thumb = r.get("thumbnailUrl")
-        # Evaluate the (non-trivial) SSRF guard once per field instead of twice.
-        safe_image = _safe_public_url(raw_image)
-        safe_thumb = _safe_public_url(raw_thumb)
-        # Cross-fall back only when the other field was *absent*. A field that
-        # was present but failed the SSRF filter is left empty rather than
-        # collapsed onto its counterpart, so a dropped high-res URL never
-        # silently masquerades as the preview (and vice versa), preserving the
-        # high-res/preview contract callers rely on.
-        image_url = safe_image or (safe_thumb if not _is_url_present(raw_image) else "")
-        thumbnail_url = safe_thumb or (safe_image if not _is_url_present(raw_thumb) else "")
-        if not image_url and not thumbnail_url:
-            continue
-        normalized_results.append(
-            {
-                "title": r.get("title", ""),
-                "image_url": image_url,
-                "thumbnail_url": thumbnail_url,
-                "source_url": _safe_public_url(r.get("link")),
-            }
-        )
-        if len(normalized_results) >= max_results:
-            break
+        normalized_results = []
+        for r in images:
+            raw_image = r.get("imageUrl")
+            raw_thumb = r.get("thumbnailUrl")
+            # Evaluate the (non-trivial) SSRF guard once per field instead of twice.
+            safe_image = _safe_public_url(raw_image)
+            safe_thumb = _safe_public_url(raw_thumb)
+            # Cross-fall back only when the other field was *absent*. A field that
+            # was present but failed the SSRF filter is left empty rather than
+            # collapsed onto its counterpart, so a dropped high-res URL never
+            # silently masquerades as the preview (and vice versa), preserving the
+            # high-res/preview contract callers rely on.
+            image_url = safe_image or (safe_thumb if not _is_url_present(raw_image) else "")
+            thumbnail_url = safe_thumb or (safe_image if not _is_url_present(raw_thumb) else "")
+            if not image_url and not thumbnail_url:
+                continue
+            normalized_results.append(
+                {
+                    "title": r.get("title", ""),
+                    "image_url": image_url,
+                    "thumbnail_url": thumbnail_url,
+                    "source_url": _safe_public_url(r.get("link")),
+                }
+            )
+            if len(normalized_results) >= max_results:
+                break
 
-    if not normalized_results:
-        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
+        if not normalized_results:
+            completion.empty()
+            return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
 
-    output = {
-        "query": query,
-        "total_results": len(normalized_results),
-        "results": normalized_results,
-        "usage_hint": "Use the 'image_url' values as reference images in image generation. Download them first if needed.",
-    }
-    return json.dumps(output, indent=2, ensure_ascii=False)
+        output = {
+            "query": query,
+            "total_results": len(normalized_results),
+            "results": normalized_results,
+            "usage_hint": "Use the 'image_url' values as reference images in image generation. Download them first if needed.",
+        }
+        result = json.dumps(output, indent=2, ensure_ascii=False)
+        completion.success()
+        return result
