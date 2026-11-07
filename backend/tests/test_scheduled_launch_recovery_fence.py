@@ -105,6 +105,89 @@ async def test_expired_scan_cannot_requeue_a_fresh_claim(repositories, monkeypat
         await asyncio.gather(recovering, return_exceptions=True)
 
 
+async def test_late_launch_bookkeeping_cannot_release_a_reclaimed_claim(repositories):
+    tasks, recovery, launcher = repositories
+    now = datetime.now(UTC)
+    await seed_occurrence(tasks, launcher, now=now)
+    first = await launcher.claim_queued_run(
+        "occurrence-1",
+        lease_owner="same-worker",
+        now=now,
+        lease_seconds=5,
+        global_max_concurrent_runs=1,
+    )
+    assert first is not None
+    assert first["attempt_count"] == 1
+
+    assert await recovery.recover_expired_launch_claims(error="expired", now=now + timedelta(seconds=6)) == 1
+    fresh = await launcher.claim_queued_run(
+        "occurrence-1",
+        lease_owner="same-worker",
+        now=now + timedelta(seconds=6),
+        lease_seconds=120,
+        global_max_concurrent_runs=1,
+    )
+    assert fresh is not None
+    assert fresh["attempt_count"] == 2
+    before = (await launcher.list_by_task("task-1"))[0]
+
+    # The original attempt's late bookkeeping carries attempt 1. Neither the
+    # busy-thread requeue nor the launch-failure path may touch the fresh
+    # attempt-2 claim, even though both use the same process lease owner.
+    assert (
+        await launcher.requeue_claimed_run(
+            "occurrence-1",
+            lease_owner="same-worker",
+            error="thread busy",
+            expected_attempt_count=first["attempt_count"],
+        )
+        is False
+    )
+    assert (
+        await launcher.fail_launching_run(
+            "occurrence-1",
+            task_id="task-1",
+            lease_owner="same-worker",
+            error="launch failed",
+            now=now + timedelta(seconds=7),
+            expected_attempt_count=first["attempt_count"],
+        )
+        is False
+    )
+    assert (await launcher.list_by_task("task-1"))[0] == before
+
+    # The fresh claim still holds the only global execution slot.
+    await seed_occurrence(tasks, launcher, now=now, suffix="2")
+    assert (
+        await launcher.claim_queued_run(
+            "occurrence-2",
+            lease_owner="third-worker",
+            now=now + timedelta(seconds=7),
+            lease_seconds=120,
+            global_max_concurrent_runs=1,
+        )
+        is None
+    )
+
+    # The current generation can still release its own claim.
+    assert await launcher.requeue_claimed_run(
+        "occurrence-1",
+        lease_owner="same-worker",
+        error="thread busy",
+        expected_attempt_count=fresh["attempt_count"],
+    )
+    assert (
+        await launcher.claim_queued_run(
+            "occurrence-2",
+            lease_owner="third-worker",
+            now=now + timedelta(seconds=8),
+            lease_seconds=120,
+            global_max_concurrent_runs=1,
+        )
+        is not None
+    )
+
+
 @pytest.mark.parametrize("lease_age", [5, 6])
 async def test_recovery_keeps_boundary_lease_and_requeues_expired_claim(repositories, lease_age):
     tasks, recovery, launcher = repositories
