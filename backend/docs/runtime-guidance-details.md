@@ -45,7 +45,7 @@ once the feed's loaded page window no longer reaches back to it.
 store already assigned, keyed by
 `runtime/events/message_identity.py::message_identity` — the backend half of
 the identity rule `frontend/src/core/threads/hooks.ts::messageIdentity` applies
-(tool messages by `tool_call_id`; `X` / `X__user` human copies collapse to
+(tool results by their own message ID; `X` / `X__user` human copies collapse to
 one). The two halves must stay in sync: a mismatch is silent, degrading
 placement rather than raising. `runs/worker.py::_MessageSeqStamper` attaches
 the result as `additional_kwargs.deerflow_seq` on root `values` frames only —
@@ -74,6 +74,26 @@ fetch-and-decode of every message row's tool outputs on long threads.
 client input, because a welded-in seq goes stale when a fork re-seeds the feed
 (#4380).
 
+`RunJournal` assigns missing ToolMessage IDs on the returned message object
+before serializing callback results, including `Command` message updates, so
+the graph checkpoint and feed retain the same ID. Middleware results receive
+the same treatment when reconciled. Provider `tool_call_id` values may repeat
+within a run and across runs; they remain protocol correlation data, never
+thread-global result identities. Legacy results without message IDs have no
+dedupe identity or seq lookup rather than aliasing unrelated invocations.
+For a registered lead-agent call, the journal remembers the captured result ID
+until a new canonical assistant response emits that call ID again. Reconciliation
+restores the remembered ID on a copy serialized before its first capture, so
+the copy does not append another result or consume a sequence. An explicit
+message ID is preserved. A later invocation starts fresh even if its provider
+ID and output content are identical; duplicate callbacks for the same LLM run
+do not reset this bookkeeping. Callbacks without a registered lead call still
+assign distinct IDs to their returned objects. This cache is journal-local and
+is cleared on detach, not a fallback identity for historical rows.
+The web execution timeline and write-file preview resolve a provider call ID
+only inside its originating assistant-message occurrence; UI keys include that
+occurrence while outgoing protocol IDs remain unchanged.
+
 **Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
 `RunJournal` records each non-empty artifact update once per tool `Command` for
 the terminal `run.delivery` event. When a command contains multiple messages, a
@@ -96,7 +116,7 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
+covered by a path attributed by the journal to `present_files` or `present_shared_artifact`; presenting only
 an unrelated pre-existing path does not satisfy delivery. Receipts for such
 runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
 `stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching

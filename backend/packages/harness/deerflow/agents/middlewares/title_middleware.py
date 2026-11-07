@@ -17,6 +17,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_co
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_texts
 from deerflow.config.title_config import get_title_config
 from deerflow.models import create_chat_model
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text
 
 if TYPE_CHECKING:
@@ -346,7 +347,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
-            model = create_chat_model(name=config.model_name, **model_kwargs)
+            # Provider construction can read local CLI credentials (Codex
+            # auth.json, Claude Code credential files). This hook runs on the
+            # Gateway event loop, so build the provider on the assembly pool
+            # (utils/AGENTS.md) instead of stalling every other request.
+            model = await run_assembly(create_chat_model, name=config.model_name, **model_kwargs)
             invoke_config = self._get_runnable_config()
 
             from deerflow_extension_api import SystemOperationKind

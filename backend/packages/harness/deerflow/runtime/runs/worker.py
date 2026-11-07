@@ -44,7 +44,7 @@ from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, DELIVERY_PRESENTATION_TOOL_NAMES, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
@@ -69,6 +69,7 @@ from deerflow.runtime.context_keys import (
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
+from deerflow.runtime.events.producer import current_producer, publisher_scope, run_producer_context
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -90,10 +91,13 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     should_continue_goal,
     visible_conversation_signature,
+    wake_goal_after_external_wait,
     write_thread_goal,
 )
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import origin_kind_of
+from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
@@ -110,6 +114,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
+from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
 
@@ -236,6 +241,7 @@ def _release_run_scoped_references(
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
         "__run_journal",
+        "__run_input_control",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -317,13 +323,14 @@ async def _persist_delivery_receipt(
     attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         try:
-            await event_store.put_if_absent(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content=content,
-            )
+            with publisher_scope("run.delivery"):
+                await event_store.put_if_absent(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    event_type="run.delivery",
+                    category="outputs",
+                    content=content,
+                )
             return True
         except Exception:
             if attempt == attempts - 1:
@@ -393,14 +400,15 @@ def _delivery_content_with_outputs(
             return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
         return content
 
-    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    by_tool = content.get("by_tool", {})
+    presented_paths = [path for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool_name, [])]
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
     return {
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
         "presented_paths": presented_paths,
@@ -615,6 +623,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            "__run_input_control",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -740,6 +749,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -986,6 +997,7 @@ async def _drain_run_finalization(task: asyncio.Task[None], *, on_host_cancel: C
         raise deferred
 
 
+@run_producer_context
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -1065,6 +1077,7 @@ async def run_agent(
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
+    input_control = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
@@ -1109,6 +1122,14 @@ async def run_agent(
         nonlocal checkpoint_rollback_completed
         if record.ownership_lost:
             return
+        from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+        cleanup_error = None
+        try:
+            await cancel_sandbox_execution_lease_async(runtime_ctx)
+        except Exception:
+            cleanup_error = "Sandbox process cleanup could not be confirmed"
+            logger.warning("Run %s: %s", run_id, cleanup_error, exc_info=True)
         await _ensure_stream_producer_lease()
         await run_manager.set_finalizing(run_id, True)
         if record.ownership_lost:
@@ -1118,7 +1139,7 @@ async def run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
-                error="Rolled back by user",
+                error=f"Rolled back by user; {cleanup_error}" if cleanup_error else "Rolled back by user",
                 **({"persist": False} if record.rollback_finalization_pending else terminal_status_kwargs),
             )
             if record.ownership_lost:
@@ -1149,6 +1170,7 @@ async def run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
+                error=cleanup_error,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -1213,6 +1235,14 @@ async def run_agent(
             return
         started = True
 
+        goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
+        if goal_wakeup is not None:
+            if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
+                await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
+                return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
+
         if ctx.on_run_admitted is not None:
             try:
                 await ctx.on_run_admitted(record, config)
@@ -1221,23 +1251,26 @@ async def run_agent(
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
-            task_store = ExtensionData(task_id)
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
+            identity = TaskInfo(
                 task_id=task_id,
                 run_id=run_id,
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
             )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
+            task_store = ExtensionData(task_id)
+            # Seed the identity for every hook handed this store, not only
+            # lifecycle contributors: compaction events are named from it.
+            task_store.set(identity)
+            # A lifecycle contributor always implies a task store.
+            if extensions.has_task_lifecycle:
+                task_info = identity
+                await notify_task_start(
+                    extensions,
+                    task_store,
+                    task_info,
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
 
         if not record.ownership_lost and thread_store is not None:
             try:
@@ -1349,6 +1382,27 @@ async def run_agent(
         # runtime-internal channel; user code must not depend on the key name.
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
+        if ctx.agent_runs is not None and run_manager.input_store is not None and not runtime_ctx.get("non_interactive"):
+            from .input_control import RunInputControl
+            from .inputs import INPUT_CONTEXT_KEY, RunInputs
+
+            def record_deferred_result(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_deferred_task_result(message)
+
+            def record_steered_response(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_steered_response(message)
+
+            input_control = RunInputControl(
+                RunInputs(run_manager.input_store, run_id, record.user_id, run_manager.worker_id),
+                agent_runs=ctx.agent_runs,
+                thread_id=thread_id,
+                checkpointer=checkpointer,
+                on_result=record_deferred_result,
+                on_replan=record_steered_response,
+            )
+            runtime_ctx[INPUT_CONTEXT_KEY] = input_control
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1544,6 +1598,8 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
+            if input_control is not None:
+                await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
@@ -1682,6 +1738,8 @@ async def run_agent(
 
         evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
+        if input_control is not None:
+            await input_control.confirm_checkpoint()
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
@@ -1747,6 +1805,10 @@ async def run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            if stop_reason in GOAL_RUN_HARD_STOP_REASONS:
+                from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+                await cancel_sandbox_execution_lease_async(runtime_ctx)
             produced_output_paths = await _produced_output_paths(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
@@ -1774,6 +1836,12 @@ async def run_agent(
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
+        try:
+            from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+            await cancel_sandbox_execution_lease_async(runtime_ctx)
+        except Exception:
+            logger.warning("Failed to stop commands after run failure", exc_info=True)
         checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
         error_msg = f"{exc}"
         stop_status_kwargs: dict[str, Any] = {}
@@ -1861,6 +1929,15 @@ async def run_agent(
             nonlocal runtime_ctx, subagent_events, task_info, task_store, terminal_error_frame
 
             try:
+                if input_control is not None:
+                    try:
+                        await input_control.close()
+                        if not record.ownership_lost:
+                            await input_control.confirm_checkpoint()
+                            if record.status != RunStatus.success or record.stop_reason:
+                                await input_control.inputs.pause()
+                    except Exception:
+                        logger.warning("Could not finalize Run input receipts for %s", run_id, exc_info=True)
                 if record.ownership_lost:
                     logger.warning(
                         "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -2171,6 +2248,12 @@ async def run_agent(
                                 raise RuntimeError(evidence_failure)
 
                         evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
+                        if evidence_receipt is not None and (subagent_events is None or not subagent_events._pending):
+                            from deerflow.runtime.events.store.db import DbRunEventStore
+
+                            if isinstance(event_store, DbRunEventStore) and current_producer() is not None:
+                                if not await event_store.close_producer(current_producer()):
+                                    raise RuntimeError("Run evidence producer could not be closed")
                         if evidence_receipt is not None:
                             if not evidence_execution_started:
                                 evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
@@ -2302,7 +2385,7 @@ async def run_agent(
 # Helpers
 # ---------------------------------------------------------------------------
 
-_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+
 # Stops that end the run with an error before the turn has a final reply: the
 # goal stands down without an evaluator call, since there is nothing to judge.
 _GOAL_RUN_ERROR_STOP_REASONS = frozenset({_RECURSION_CAPPED_STOP_REASON})
@@ -2767,7 +2850,9 @@ async def _prepare_goal_continuation_input(
         return None
 
     try:
-        evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
+        # The factory builds the evaluator on first use, which can read local
+        # credentials; keep that off the event loop (see utils/AGENTS.md).
+        evaluator_model = await run_assembly(evaluator_model_factory) if evaluator_model_factory is not None else None
         for attempt in range(2):
             try:
                 evaluation = await evaluate_goal_completion(

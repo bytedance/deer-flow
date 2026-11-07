@@ -79,3 +79,30 @@ input; later queued jobs never supply the parent or chain budget.
 Run the backend plugin tests and the browser check documented in README.md after
 changes. The preview fixture has synthetic authentication and must remain
 loopback-only; never use it as a deployed Gateway.
+
+The artifact contract requires extension API 0.2.11 in both the package dependency
+and install marker; 0.2.10 hosts lack executing Run identity and artifact methods.
+Artifact declarations belong to the authenticated member's executing team job.
+Use host-stamped run identity and validate its execution key/status before new
+registrations; frozen queue input is not execution proof. Persist the active
+execution key with the Run, including after resume
+acknowledgement clears its pending response. Each bounded file transfer pauses
+the ordinary worker deadline; restore its remaining budget afterward and drain
+cancellation before releasing host reservations or sandbox leases.
+Retried registrations remain readable after completion. Capture checks the previously inspected
+checkpoint under the host reservation. Persist import receipts with frozen
+input and pass them to first admission; reconcile existing keys before validation.
+Stable request IDs deduplicate publication; append numeric versions without
+overwriting older snapshots. Capture only after successful execution through
+AgentRuns.read_artifact, before releasing the source conversation's queue head.
+Keep captured bytes in owner/team-scoped SQLite rows; project explicit metadata,
+never registration fingerprints or file bytes in ordinary team reads. Bound
+versions to 20/team, four/task, 2 MiB/file and 64 MiB/owner. Snapshots and their
+ready status commit together; delete them with their team. Pending attachments
+hold conversation order but not an active slot. Import ready retained versions
+through AgentRuns.import_artifact before freezing input/admission, using per-job
+filenames. Preserve exact versions/paths on retries; never reread mutable sources.
+Do not interpret a registered file as verified delivery. File contents remain
+untrusted task data. Reads require the owner and a current member; browser
+downloads use the owner's authenticated action. Bound list/chunk JSON to 24,000
+bytes; offsets follow append-only registration order or immutable file bytes.

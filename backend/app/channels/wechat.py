@@ -32,6 +32,7 @@ from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.credential_staging import cleanup_stale_credential_staging, credential_staging_prefix
 from app.channels.message_bus import INBOUND_FILE_CLEANUP_KEY, InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment, cleanup_inbound_files
+from deerflow.utils.atomic_write import publish_bytes_atomically
 from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
@@ -1083,16 +1084,9 @@ class WechatChannel(Channel):
     def _update_longpoll_timeout(self, data: Mapping[str, Any]) -> None:
         if not self._respect_server_longpoll_timeout:
             return
-        raw_timeout = data.get("longpolling_timeout_ms")
-        if raw_timeout is None:
-            return
-        try:
-            timeout_ms = float(raw_timeout)
-        except (TypeError, ValueError):
-            return
-        if timeout_ms <= 0:
-            return
-        self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
+        timeout_ms = self._coerce_float(data.get("longpolling_timeout_ms"), 0.0)
+        if 1_000 <= timeout_ms <= 300_000:
+            self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
 
     def _base_info(self) -> dict[str, str]:
         return {"channel_version": self._channel_version}
@@ -1707,7 +1701,10 @@ class WechatChannel(Channel):
             return
         try:
             self._cursor_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cursor_path.write_text(json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2), encoding="utf-8", newline="")
+            # Publish through the shared helper: it fsyncs the staged bytes
+            # before the rename (so a machine crash cannot leave a truncated
+            # cursor behind) and re-applies an existing file's mode.
+            publish_bytes_atomically(self._cursor_path, json.dumps({"get_updates_buf": self._get_updates_buf}, ensure_ascii=False, indent=2).encode("utf-8"))
         except OSError:
             logger.warning("[WeChat] failed to persist cursor state to %s", self._cursor_path)
 

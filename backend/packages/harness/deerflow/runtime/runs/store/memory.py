@@ -21,6 +21,34 @@ from deerflow.runtime.runs.store.base import (
 
 
 class MemoryRunStore(RunStore):
+    supports_run_inputs = True
+
+    async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
+        from deerflow.runtime.runs.inputs import InputConflict, empty_input_state
+
+        row = self._runs.get(run_id)
+        if row is None or (user_id is not None and row.get("user_id") != user_id):
+            raise InputConflict("Run not found")
+        if owner_worker_id is not None:
+            lease = row.get("lease_expires_at")
+            if row.get("owner_worker_id") != owner_worker_id or (lease and datetime.fromisoformat(lease).replace(tzinfo=UTC) <= datetime.now(UTC)):
+                raise InputConflict("Run ownership changed")
+        state = copy.deepcopy(row.get("run_inputs") or empty_input_state())
+        change(state, row)
+        row["run_inputs"] = state
+        return copy.deepcopy(state)
+
+    async def list_input_runs(self, thread_id, *, user_id=None, limit=10):
+        rows = [x for x in await self.list_by_thread(thread_id, user_id=user_id, limit=len(self._runs_by_thread.get(thread_id, {}))) if (x.get("run_inputs") or {}).get("items")]
+        return copy.deepcopy(rows[:limit])
+
+    async def active_input_run(self, thread_id, *, user_id=None):
+        for run_id in reversed(self._runs_by_thread.get(thread_id, {})):
+            row = self._runs[run_id]
+            if (user_id is None or row.get("user_id") == user_id) and row.get("status") in ("pending", "running") and row.get("run_inputs") is not None and not row["run_inputs"]["closed"] and not row.get("cancel_action"):
+                return run_id
+        return None
+
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
         self._change_seq = 0
@@ -101,6 +129,7 @@ class MemoryRunStore(RunStore):
             # request that may have raced a retry of an earlier snapshot.
             "cancel_action": existing.get("cancel_action") if existing else None,
             "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
+            "run_inputs": copy.deepcopy(existing.get("run_inputs")) if existing else None,
         }
         # Move membership only after the replacement snapshot was built; a
         # failed copy must leave the prior row and its index intact.

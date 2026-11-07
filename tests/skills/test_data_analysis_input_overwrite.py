@@ -1,7 +1,6 @@
 """CLI exports must preserve every input, including filesystem aliases."""
 
 import csv
-import json
 import os
 import runpy
 import subprocess
@@ -10,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-duckdb = pytest.importorskip("duckdb")
+pytest.importorskip("duckdb")
 pytest.importorskip("openpyxl")
 SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -19,22 +18,26 @@ SCRIPT = (
 
 
 @pytest.fixture
-def cached_inputs(tmp_path):
-    analysis = runpy.run_path(str(SCRIPT))
+def inputs(tmp_path):
     sources = [tmp_path / "first.csv", tmp_path / "second.csv"]
     for source, value in zip(sources, [10, 20]):
         source.write_text(f"amount\n{value}\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
-    cache = runtime / ".data-analysis-cache"
-    cache.mkdir(parents=True)
-    key = analysis["compute_files_hash"]([str(source) for source in sources])
-    table_map = {}
-    with duckdb.connect(str(cache / f"{key}.duckdb")) as con:
-        for source in sources:
-            analysis["_load_csv"](con, str(source), table_map)
-    (cache / f"{key}.table_map.json").write_text(
-        json.dumps(table_map), encoding="utf-8"
-    )
+    runtime.mkdir()
+    # Use the real cache publisher and CSV loader without installing spatial.
+    analysis = runpy.run_path(str(SCRIPT))
+    scope = analysis["main"].__globals__
+    scope["CACHE_DIR"] = str(runtime / ".data-analysis-cache")
+
+    def load_csv(con, files):
+        table_map = {}
+        for path in files:
+            analysis["_load_csv"](con, path, table_map)
+        return table_map
+
+    scope["load_files"] = load_csv
+    with analysis["open_analysis_cache"]([str(source) for source in sources]):
+        pass
     return sources, runtime
 
 
@@ -72,8 +75,8 @@ def run_export(sources, runtime, output, cwd):
     "path_kind",
     ["absolute", "relative", "parent", "second", "hardlink", "symlink"],
 )
-def test_cli_rejects_export_over_an_input(cached_inputs, tmp_path, path_kind):
-    sources, runtime = cached_inputs
+def test_cli_rejects_export_over_an_input(inputs, tmp_path, path_kind):
+    sources, runtime = inputs
     original = [source.read_bytes() for source in sources]
     output = sources[0]
     if path_kind == "relative":
@@ -105,8 +108,8 @@ def test_cli_rejects_export_over_an_input(cached_inputs, tmp_path, path_kind):
     assert "Results exported" not in completed.stdout
 
 
-def test_cli_still_overwrites_a_separate_result(cached_inputs, tmp_path):
-    sources, runtime = cached_inputs
+def test_cli_still_overwrites_a_separate_result(inputs, tmp_path):
+    sources, runtime = inputs
     original = [source.read_bytes() for source in sources]
     output = tmp_path / "result.csv"
     output.write_text("previous result\n", encoding="utf-8")

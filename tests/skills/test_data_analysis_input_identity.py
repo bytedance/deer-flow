@@ -61,22 +61,27 @@ def test_each_input_keeps_a_distinct_queryable_table(
 
 def test_cache_reopen_keeps_all_duplicate_inputs(analysis, tmp_path):
     files = [csv_file(tmp_path / str(i), "report.csv", i) for i in (1, 2)]
-    db = tmp_path / "loaded.duckdb"
-    table_map = {}
-    with duckdb.connect(str(db)) as con:
-        for file in files:
+    scope = analysis["main"].__globals__
+    scope["CACHE_DIR"] = str(tmp_path / "cache")
+
+    def load_csv(con, paths):
+        table_map = {}
+        for file in paths:
             analysis["_load_csv"](con, file, table_map)
-    # Exercise the actual JSON persistence used on a cache hit.
-    analysis["save_table_map"].__globals__["CACHE_DIR"] = str(tmp_path)
-    key = analysis["compute_files_hash"](files)
-    analysis["save_table_map"](key, table_map)
-    restored = analysis["load_table_map"](key)
-    assert restored == {"report": "report", "report_1": "report_1"}
-    with duckdb.connect(str(db), read_only=True) as con:
-        output = analysis["action_query"](
-            con, "SELECT a.value, b.value FROM report a CROSS JOIN report_1 b", restored
-        )
-        assert output.splitlines()[2].replace(" ", "") == "1|2"
+        return table_map
+
+    # Exercise the production generation manifest and read-only reopening.
+    scope["load_files"] = load_csv
+    for _ in range(2):
+        with analysis["open_analysis_cache"](files) as (con, restored):
+            assert restored == {"report": "report", "report_1": "report_1"}
+            output = analysis["action_query"](
+                con,
+                "SELECT a.value, b.value FROM report a CROSS JOIN report_1 b",
+                restored,
+            )
+            assert output.splitlines()[2].replace(" ", "") == "1|2"
+        scope["load_files"] = lambda *_: pytest.fail("published map must be reused")
 
 
 def test_cache_identity_changes_with_duplicate_input_order(analysis, tmp_path):
