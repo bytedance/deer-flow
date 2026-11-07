@@ -33,3 +33,15 @@ candidate budget but must not prevent valid outputs from being mirrored.
 Portable reserved-name checks include COM/LPT superscript digits and console
 device names without `PureWindowsPath.is_reserved`. Catch only the serializer's
 typed closure exception after verifying the client has been untracked.
+
+### Lifecycle
+
+Separate closed SDK transports from confirmed termination. Retain failed deletes
+by adapter identity; retry only remote-ID management DELETE with a fresh bounded
+client bound to the original endpoint/auth. Only success or API 404/410 confirms
+termination. Transfer pending ownership atomically with deregistration; stale
+callbacks must not retire replacements. Pending remotes count toward capacity.
+Reset/shutdown fence admission; started acquire/output-sync workers keep ownership.
+Keep shutdown retryable without reopening admission. At exit, log only the typed
+incomplete-cleanup error; unexpected errors still propagate. SDK failures before create
+returns a handle and crash recovery remain outside this contract. Details: README.
