@@ -35,7 +35,20 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
-  
+
+- **skills:** A custom skill name that is a Windows reserved device name
+  (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
+  `skill_manage` `create` and `.skill` archive install — on every platform. The
+  hyphen-case grammar admitted such names, and the skill name becomes a
+  directory under `custom/`, so creating one "succeeded" on Windows without
+  producing a directory and the first write inside it failed with
+  `FileNotFoundError`; on Linux the install succeeded but could never be
+  copied, mounted or exported to a Windows host. The archive path also refuses
+  member path segments that cannot be created on every host, matching support
+  file writes. Reading and deleting an existing skill stay permissive, so a
+  skill an older release created on a Linux host can still be inspected and
+  removed. ([#7945])
+
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
   call. Existing sandbox bindings and providers that require skill uploads
@@ -16054,3 +16067,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7945]: https://github.com/bytedance/deer-flow/issues/7945
