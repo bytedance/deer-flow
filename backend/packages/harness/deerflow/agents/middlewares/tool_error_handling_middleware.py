@@ -128,7 +128,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
         message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
-        return stamp_exception_meta(message, structured_error)
+        return stamp_exception_meta(message, exc)
 
     def _stamp_skill_read_metadata(
         self,

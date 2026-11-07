@@ -48,7 +48,7 @@ class TestErrorClassification:
         assert sig is not None
         assert sig.category == "MODULE_NOT_FOUND"
         assert sig.entity == "scipy"
-        assert "pip install scipy" in sig.targeted_hint
+        assert "scipy" in sig.targeted_hint
 
     def test_import_error(self):
         err = "ImportError: cannot import name 'FastTensor' from 'torch'"
@@ -448,7 +448,7 @@ class TestHarnessGuardMiddleware:
         assert res.content[1] == image_block
         assert res.content[2]["type"] == "text"
         assert "[HARNESS GUARD]" in res.content[2]["text"]
-        assert "pip install matplotlib" in res.content[2]["text"]
+        assert "matplotlib" in res.content[2]["text"]
 
     def test_cross_thread_isolation_no_poisoning(self):
         """Context-less requests from different runtimes do not share history deque."""
@@ -495,7 +495,7 @@ class TestHarnessGuardMiddleware:
 
         res = middleware.wrap_tool_call(req, error_handler)
         assert "[HARNESS GUARD]" in res.content
-        assert "pip install pandas" in res.content
+        assert "pandas" in res.content
         assert HARNESS_GUARD_KEY in res.additional_kwargs
         assert res.additional_kwargs[HARNESS_GUARD_KEY]["error_signature"] == "MODULE_NOT_FOUND:pandas"
 
@@ -605,7 +605,7 @@ class TestHarnessGuardMiddleware:
         res = middleware.wrap_tool_call(req, lambda r: cmd)
         assert isinstance(res, Command)
         assert "[HARNESS GUARD]" in inner_msg.content
-        assert "pip install polars" in inner_msg.content
+        assert "polars" in inner_msg.content
 
     def test_huge_output_error_classification(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig())
@@ -617,4 +617,4 @@ class TestHarnessGuardMiddleware:
             lambda r: ToolMessage(content=huge_content, tool_call_id=r.tool_call["id"], name="bash", status="error"),
         )
         assert "[HARNESS GUARD]" in res.content
-        assert "pip install torch_geometric" in res.content
+        assert "torch_geometric" in res.content

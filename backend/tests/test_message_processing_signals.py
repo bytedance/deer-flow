@@ -69,12 +69,10 @@ def test_detect_signals_multiple_classes_in_one_turn() -> None:
 # ── filter_trivial ─────────────────────────────────────────────────────────
 
 
-def test_filter_trivial_drops_pure_ack_and_its_reply() -> None:
+def test_filter_trivial_retains_short_reply_context() -> None:
     msgs = [_human("嗯"), _ai("thanks"), _human("what next"), _ai("let's see")]
     result = filter_trivial(msgs)
-    # "嗯" + its AI "thanks" dropped; the substantive pair is kept.
-    assert len(result) == 2
-    assert extract_message_text(result[0]) == "what next"
+    assert result == msgs  # Short responses need their conversational context.
 
 
 def test_filter_trivial_keeps_substantive_message_containing_ok() -> None:
@@ -83,14 +81,14 @@ def test_filter_trivial_keeps_substantive_message_containing_ok() -> None:
     assert len(result) == 2  # not dropped: not a whole-message ack
 
 
-def test_filter_trivial_all_trivial_returns_empty() -> None:
+def test_filter_trivial_keeps_short_turns() -> None:
     msgs = [_human("好的"), _ai("嗯")]
-    assert filter_trivial(msgs) == []
+    assert filter_trivial(msgs) == msgs
 
 
 def test_filter_trivial_tolerates_trailing_punctuation() -> None:
     msgs = [_human("ok."), _ai("ok!")]
-    assert filter_trivial(msgs) == []
+    assert filter_trivial(msgs) == msgs
 
 
 def test_filter_trivial_no_patterns_keeps_all() -> None:
@@ -107,9 +105,11 @@ def _make_deermem(tmp_path, **overrides) -> DeerMem:
     return DeerMem(backend_config=cfg)
 
 
-def test_prepare_update_all_trivial_returns_none(tmp_path) -> None:
+def test_prepare_update_keeps_short_turns(tmp_path) -> None:
     m = _make_deermem(tmp_path)
-    assert m._prepare_update([_human("好的"), _ai("嗯")]) is None
+    messages = [_human("好的"), _ai("嗯")]
+    prepared = m._prepare_update(messages)
+    assert prepared is not None and prepared[0] == messages
 
 
 def test_prepare_update_returns_correction_signal(tmp_path) -> None:

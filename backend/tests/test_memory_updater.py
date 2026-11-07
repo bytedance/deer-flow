@@ -195,8 +195,8 @@ def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> N
     )
 
     assert "lastConfirmedAt" not in without_signal["facts"][0]
-    assert with_signal["facts"][0]["lastConfirmedAt"].endswith("Z")
-    assert with_signal["facts"][0]["confirmationCount"] == 1
+    assert "lastConfirmedAt" not in with_signal["facts"][0]
+    assert "confirmationCount" not in with_signal["facts"][0]
 
     confidence_only = _make_updater()
     without_hybrid_tracking = confidence_only._apply_updates(
@@ -210,14 +210,14 @@ def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> N
 @pytest.mark.parametrize(
     ("prior_count", "expected_count"),
     [
-        (3, 4),
-        (0, 1),
-        (True, 1),
-        (-1, 1),
-        ("3", 1),
+        (3, 3),
+        (0, 0),
+        (True, True),
+        (-1, -1),
+        ("3", "3"),
     ],
 )
-def test_apply_updates_normalizes_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
+def test_lexical_signal_does_not_mutate_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
     updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
     current_memory = _make_memory(
         facts=[
@@ -1348,7 +1348,7 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
 
     def test_correction_hint_empty_when_not_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1365,7 +1365,7 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" not in prompt
+        assert "They are not evidence of user intent" not in prompt
 
     def test_sync_update_memory_wrapper_works_in_running_loop(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1545,7 +1545,7 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Positive reinforcement signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
 
     def test_reinforcement_hint_absent_when_not_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1562,7 +1562,7 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Positive reinforcement signals were detected" not in prompt
+        assert "They are not evidence of user intent" not in prompt
 
     def test_both_hints_present_when_both_detected(self):
         valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
@@ -1579,8 +1579,8 @@ class TestReinforcementHint:
 
         assert result is True
         prompt = _prompt_text(model.invoke.call_args.args[0])
-        assert "Explicit correction signals were detected" in prompt
-        assert "Positive reinforcement signals were detected" in prompt
+        assert "They are not evidence of user intent" in prompt
+        assert "They are not evidence of user intent" in prompt
 
 
 class TestFinalizeCacheIsolation:

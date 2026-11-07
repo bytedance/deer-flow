@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -33,7 +35,7 @@ def test_read_file_json_error_field_is_document_data(error):
         "error_type": None,
         "recoverable_by_model": True,
         "recommended_next_action": "continue",
-        "source": "content_analysis",
+        "source": "tool_return",
     }
 
 
@@ -44,9 +46,9 @@ def test_actual_tool_json_errors_are_still_classified(name, status):
     meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
 
     assert meta["status"] == "error"
-    assert meta["error_type"] == "auth"
-    assert meta["recoverable_by_model"] is False
-    assert meta["recommended_next_action"] == "stop"
+    assert meta["error_type"] == "unknown"
+    assert meta["recoverable_by_model"] is True
+    assert meta["recommended_next_action"] == "try_alternative"
 
 
 @pytest.mark.parametrize("source", ["exception", "tool_return", "custom"])
@@ -64,7 +66,7 @@ class _ScriptedModel(GenericFakeChatModel):
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("progress_enabled", [False, True])
-@pytest.mark.parametrize("first_kind", ["json_error", "success", "missing", "truncated"])
+@pytest.mark.parametrize("first_kind", ["json_error", "error_prose", "marker_prose", "success", "missing", "truncated"])
 @pytest.mark.asyncio
 async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeypatch, mode, progress_enabled, first_kind):
     from deerflow.sandbox import tools as sandbox_tools
@@ -75,6 +77,10 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
     first_content = '{"error": {"code": 401, "message": "Unauthorized"}}\n'
     if first_kind == "success":
         first_content = '{"result": "OK"}\n'
+    elif first_kind == "error_prose":
+        first_content = "Error: Permission denied is the example message in this manual.\n"
+    elif first_kind == "marker_prose":
+        first_content = "A truncation example: ... [truncated: showing 1 of 10 chars] ...\n"
     elif first_kind == "truncated":
         first_content = json.dumps({"error": "Unauthorized", "details": "sample line\n" * 10000})
     if first_kind != "missing":
@@ -124,3 +130,23 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
         assert "truncated" in first.content.lower()
     else:
         assert first.content == first_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,category", [(FileNotFoundError("missing provider"), "not_found"), (PermissionError("denied"), "permission"), (TimeoutError("slow"), "transient"), (RuntimeError("403 forbidden"), "unknown")])
+async def test_read_file_async_initialization_failure_has_producer_state(monkeypatch, exc, category):
+    from deerflow.sandbox import tools as sandbox_tools
+
+    @asynccontextmanager
+    async def authorized(_runtime):
+        yield
+
+    monkeypatch.setattr(sandbox_tools, "sandbox_authorization_scope_async", authorized)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized_async", AsyncMock(side_effect=exc))
+    runtime = SimpleNamespace(tool_call_id="read-init", context={}, state={})
+    message = await sandbox_tools._read_file_tool_async(runtime, "/mnt/user-data/outputs/notes.txt")
+    assert isinstance(message, ToolMessage)
+    assert message.status == "error"
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+    assert message.additional_kwargs[TOOL_META_KEY]["error_type"] == category
+    assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"
