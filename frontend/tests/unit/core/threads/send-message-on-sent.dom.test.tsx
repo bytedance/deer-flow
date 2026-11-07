@@ -211,4 +211,8 @@ test("reports a text-only send before the run is submitted", async () => {
   });
 
   expect(mocks.events).toEqual(["onSent", "submit"]);
+  const submitCall = mocks.submit.mock.calls.at(-1) as unknown as
+    | [unknown, Record<string, unknown>]
+    | undefined;
+  expect(submitCall?.[1]).not.toHaveProperty("config");
 });
