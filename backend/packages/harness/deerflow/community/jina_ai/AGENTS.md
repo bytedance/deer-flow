@@ -23,3 +23,9 @@ measure monotonic elapsed/backoff time (including cancelled waits). Classify
 branches, never error text; emit only enums/numbers in the message for existing
 formatters/trace filters. Logging failure must preserve results/cancellation.
 Offline coverage: `tests/test_jina_diagnostics.py`.
+
+The optional Run Web attempt budget is distinct from concurrency admission and
+the diagnostic HTTPX API-attempt count. Its request hook reserves each physical
+dispatch, including redirects; a local denial is `web_attempt_budget_exhausted`.
+The counter is shared with Serper in one worker; cross-process calls fail closed.
+Tests: `test_web_attempt_budget.py`, `test_web_attempt_budget_diagnostics.py`.

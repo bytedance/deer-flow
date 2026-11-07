@@ -50,3 +50,9 @@ Image result URLs use `community.url_safety.safe_public_result_url` (imported
 as `_safe_public_url`); do not add a provider-local copy. It checks strings
 without DNS and shares the non-public address predicate with fetch validation.
 Tests: `tests/test_image_result_url_safety.py` plus the existing provider suite.
+
+When the optional `web_attempt_budget` is enabled, the HTTPX request hook in
+`_serper_post` reserves one shared Run attempt before every transport dispatch,
+including retries. Both Serper tools pass the server-owned Run identity through
+injected `RunnableConfig`; never add it to the model schema. The common
+process-local counter lives in `community/web_attempt_budget.py`.

@@ -1,8 +1,10 @@
 import asyncio
 
 from langchain.tools import tool
+from langchain_core.runnables import RunnableConfig
 
 from deerflow.community.jina_ai.jina_client import JinaClient
+from deerflow.community.web_attempt_budget import counter_for_config
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
 
@@ -42,7 +44,7 @@ def _coerce_proxy(value: object) -> str | None:
 
 
 @tool("web_fetch", parse_docstring=True)
-async def web_fetch_tool(url: str) -> str:
+async def web_fetch_tool(url: str, runnable_config: RunnableConfig = None) -> str:
     """Fetch the contents of a web page at a given URL.
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -64,6 +66,9 @@ async def web_fetch_tool(url: str) -> str:
         proxy = _coerce_proxy(config.model_extra.get("proxy"))
         trust_env = _coerce_bool(config.model_extra.get("trust_env"), trust_env)
         request_options = {key: config.model_extra[key] for key in ("max_retries", "retry_budget_seconds", "max_response_bytes", "request_admission") if key in config.model_extra}
+    attempt_budget = counter_for_config(runnable_config)
+    if attempt_budget is not None:
+        request_options["attempt_budget"] = attempt_budget
     html_content = await jina_client.crawl(url, return_format="html", timeout=timeout, proxy=proxy, trust_env=trust_env, **request_options)
     if isinstance(html_content, str) and html_content.startswith("Error:"):
         return html_content

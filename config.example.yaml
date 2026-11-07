@@ -111,6 +111,16 @@ token_budget:
   warn_threshold: 0.8           # Warn at 80% of the budget
   hard_stop_threshold: 1.0      # Force stop at 100% of the budget
 
+# Process-local first-party Web HTTP attempt budget (default off).
+# Counts physical Serper web/image search and Jina web_fetch requests, including
+# retries and redirect hops. Concurrent lead/subagent calls in one worker share
+# one atomic counter. Other providers, MCP tools, and background requests are
+# outside this cap. A child executing in another process cannot access the
+# parent's counter and its covered requests fail closed while this is enabled.
+# This is not a deployment-wide cost ceiling; use one worker for covered runs.
+web_attempt_budget:
+  max_attempts: null             # Set a positive integer to opt in; null disables
+
 # ============================================================================
 # Recursion Limits
 # ============================================================================
