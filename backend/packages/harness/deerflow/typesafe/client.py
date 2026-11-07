@@ -290,7 +290,8 @@ class TypeSafeClient:
             async with asyncio.timeout(self._connection.deadline_seconds):
                 deadline_at = time.monotonic() + self._connection.deadline_seconds
                 transport = None if self._transport_factory is None else self._transport_factory()
-                async with httpx.AsyncClient(timeout=self._connection.timeout, transport=transport) as client:
+                # Client construction loads TLS trust synchronously; keep it off the loop.
+                async with await asyncio.to_thread(httpx.AsyncClient, timeout=self._connection.timeout, transport=transport) as client:
                     for attempt in range(1, self._connection.max_attempts + 1):
                         self._check_budget(deadline_at)
                         try:
