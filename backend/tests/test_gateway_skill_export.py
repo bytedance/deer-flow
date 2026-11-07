@@ -243,12 +243,20 @@ def test_export_upload_roundtrip_uses_existing_scanner_and_rejects_conflict(app,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("suffix", ["export-manifest", "export?expected_revision=" + "a" * 64])
-async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suffix):
+async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, caplog, suffix):
     started = threading.Event()
 
     def work(*args):
         started.set()
         assert args[-1].wait(3)
+        if suffix.startswith("export?"):
+
+            class FailedClose(BytesIO):
+                def close(self):
+                    super().close()
+                    raise AttributeError("injected non-I/O close failure")
+
+            return SkillExportArchive(FailedClose(b"zip"), 3)
         raise RuntimeError("worker cancelled")
 
     async def receive():
@@ -274,6 +282,11 @@ async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suff
 
     await plain_app(scope, receive, send)
     assert messages[0]["status"] == 204
+    if suffix.startswith("export?"):
+        records = [record for record in caplog.records if record.name == service.__name__]
+        assert len(records) == 1
+        assert "'demo'" in records[0].getMessage()
+        assert isinstance(records[0].exc_info[1], AttributeError)
     leases = [service.ExportLease.acquire(), service.ExportLease.acquire()]
     for lease in leases:
         lease.release()
