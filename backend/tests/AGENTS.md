@@ -1,5 +1,10 @@
 # Backend Tests
 
+`test_telegram_rate_limit.py` uses real Telegram SDK serialization with offline
+Bot API responses and a virtual sleep clock. New sends honor `RetryAfter` seconds
+or timedelta without shortening backoff. Preserve attempt limits, cancellation,
+reply chaining and each delivered chunk exactly once, including preview overflow.
+
 `test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.
 

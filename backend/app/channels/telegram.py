@@ -967,6 +967,12 @@ class TelegramChannel(Channel):
             "last_text": last_text,
         }
 
+    def _send_retry_delay(self, exc: Exception, attempt: int) -> float:
+        delay = super()._send_retry_delay(exc, attempt)
+        if self._is_retry_after(exc):
+            return max(delay, self._retry_after_seconds(exc))
+        return delay
+
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
         return getattr(exc, "retry_after", None) is not None

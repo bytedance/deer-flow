@@ -259,9 +259,9 @@ class Channel(ABC):
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries - 1:
-                    delay = 2**attempt
+                    delay = self._send_retry_delay(exc, attempt)
                     logger.warning(
-                        "%s %s failed (attempt %d/%d), retrying in %ds: %s",
+                        "%s %s failed (attempt %d/%d), retrying in %gs: %s",
                         prefix,
                         operation_name,
                         attempt + 1,
@@ -275,6 +275,10 @@ class Channel(ABC):
         if last_exc is None:
             raise RuntimeError(f"{self.name} {operation_name} failed without an exception from any attempt")
         raise last_exc
+
+    def _send_retry_delay(self, exc: Exception, attempt: int) -> float:
+        """Allow adapters to honor provider delays while retaining local backoff."""
+        return 2**attempt
 
     def _log_future_error(self, fut: Any, name: str, msg_id: Any) -> None:
         """Callback for concurrent futures scheduled from channel worker threads."""
