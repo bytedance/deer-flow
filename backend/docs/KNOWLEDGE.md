@@ -56,10 +56,15 @@ provenance and defaults to `None`. Gateway binds it only for verified sessions
 and PATs, never internal-service or auth-disabled synthetic identities. Generic
 retrieval tools and catalog routes read it from a dedicated task-local binding;
 client flags, runtime `user_id`, saved assistant configuration and storage owner
-restoration cannot create it. Child tasks, threads and isolated subagent contexts
-inherit it; a lost/fresh context denies shared access. Trusted embedding hosts
-may use `bind_authenticated_user()` from `deerflow.runtime.user_context` only
-after authenticating the end user, and must bind `None` for non-user callers.
+restoration cannot create it. Child tasks, threads and ordinary isolated
+subagents launched from an authenticated execution inherit its proof; a
+lost/fresh context denies shared access. Durable batch items are launched from
+the Gateway's startup poller and do not inherit the submitting request's proof,
+even within the same process. Like scheduled-task and IM-channel runs, they
+cannot use authenticated shared retrieval merely by carrying an owner `user_id`.
+Trusted embedding hosts may use `bind_authenticated_user()` from
+`deerflow.runtime.user_context` only after authenticating the end user, and must
+bind `None` for non-user callers.
 The bound value must be exactly the same nonempty string that
 `resolve_runtime_user_id()` returns for the execution. LangGraph Server
 identities from `runtime.server_info.user.identity` or
