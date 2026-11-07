@@ -11,6 +11,7 @@ import socket
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -71,8 +72,12 @@ def _operations(indices, *, prefix="call", text="Work remains", status="success"
     return messages
 
 
-@pytest.fixture(autouse=True)
-def _no_models_or_network(monkeypatch):
+# Async on purpose: the guard has to be installed inside the test's event loop. On
+# Windows the Proactor loop builds its self-pipe from a loopback socketpair while the
+# loop is being created, so a sync fixture would block that connect and error every
+# test at setup with the network message.
+@pytest_asyncio.fixture(autouse=True)
+async def _no_models_or_network(monkeypatch):
     def denied(*_args, **_kwargs):
         raise AssertionError("Goal worker regression attempted a provider/network call")
 
