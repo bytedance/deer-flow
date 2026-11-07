@@ -32,6 +32,10 @@
   被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
   值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
   镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
+  
+- **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
+  未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
+  用户可在后续运行中继续处理。([#7953])
 
 - **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
   序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
@@ -12790,4 +12794,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958

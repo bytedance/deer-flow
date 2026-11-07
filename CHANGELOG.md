@@ -37,6 +37,11 @@ This section accumulates work toward the **2.3.0** milestone
   `frontend/.env.local`; the Docker stack's single nginx origin needs none of
   them. Published CI images were not affected; rebuild local images that were
   pushed or shared. ([#7958])
+  
+- **agents:** Unfinished todos no longer trigger additional model calls or
+  tool execution after a loop-detection, run token-budget, provider-safety, or
+  model output-length stop. Todo state is preserved so users can continue in a
+  later run. ([#7953])
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
@@ -16079,4 +16084,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
