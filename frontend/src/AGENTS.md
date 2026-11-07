@@ -76,23 +76,22 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    `/api/mcp/config` endpoints remain admin-only and are used by the Platform provided editor. Delete names are
    percent-encoded, including legacy empty and slash-containing names; every
    successful mutation invalidates `["mcpConfig"]` only after the response.
-   Current-chat MCP background tasks use `core/background-tasks`: the header
-   trigger is hidden for new/mock/static-demo threads and unless `/api/features`
-   reports the startup-scoped `mcp_tasks` capability; the list query is disabled
-   while that capability is unavailable, so default-disabled and memory-backend
-   deployments never poll an endpoint that cannot serve tasks. It lists at most
-   20 local task records, refreshes every 3 seconds while any task is active
-   (15 seconds otherwise), fetches bounded task details only while a user expands
-   a card, and cancels through the thread-scoped local-ID endpoint. The expanded view
-   shows result/preview, artifact metadata, input requests, and the latest poll,
-   notification-delivery, or cancellation error without exposing the persisted remote handle. A
-   persisted cancel request remains "Cancelling…" only while the task status is
-   still active; if remote cancellation keeps failing, the active card remains
-   expandable and shows the attempt count plus the latest bounded error while
-   the backend continues retrying. Notification delivery failures expose their
-   bounded error and attempt count; retryable failures use backend backoff,
-   while a permanent rejection or exhausted five-attempt budget is shown as
-   stopped rather than implying that retries will continue.
+   Current-chat MCP tasks use `core/background-tasks`. Hide the header trigger
+   for new/mock/static-demo threads and disable list queries unless `/api/features`
+   reports startup-scoped `mcp_tasks` support. Default-disabled and memory-backend
+   deployments therefore send no task requests. List at most 20 local records.
+   Refresh every 3 seconds while any task is active, otherwise every 15 seconds.
+   Fetch bounded details only for expanded cards and cancel via thread-scoped
+   local IDs. Show results/previews, artifact metadata, input requests and bounded
+   poll, notification and cancellation errors. Keep remote handles private.
+   Persisted cancel requests show "Cancelling…" only while active. Failed remote
+   cancellation remains expandable with attempt count/error as backend retries.
+   Notification failures show error/count, using backend backoff for retryable
+   failures and a stopped state for permanent rejection or five failed attempts.
+   Cancel success awaits the exact list and target-detail query cancellations
+   before caching both results, then invalidates only the list. Both GETs consume
+   AbortSignals and preserve sibling detail loads. Real-hook/HTTP regressions live
+   in `tests/unit/core/background-tasks/cancellation-http.dom.test.tsx`.
    `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
    `/api/features` separates SQL availability from startup worker state.
    Show the trigger on default/Custom Agent chats with a running worker, or
