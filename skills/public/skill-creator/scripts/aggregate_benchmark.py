@@ -85,7 +85,9 @@ def load_run_results(benchmark_dir: Path) -> dict:
     Load all run results from a benchmark directory.
 
     Returns dict keyed by config name (e.g. "with_skill"/"without_skill",
-    or "new_skill"/"old_skill"), each containing a list of run results.
+    or "with_skill"/"old_skill"), each containing a list of run results.
+    Only "with_skill" is guaranteed to be first; other configuration names
+    retain their discovery order.
     """
     # Support both layouts: eval dirs directly under benchmark_dir, or under runs/
     runs_dir = benchmark_dir / "runs"
@@ -192,7 +194,10 @@ def load_run_results(benchmark_dir: Path) -> dict:
 
                 results[config].append(result)
 
-    return results
+    # The improved skill is the primary configuration, even when an old_skill
+    # baseline sorts first or the earliest eval only has a baseline result.
+    # Preserve the remaining order for custom configuration names.
+    return dict(sorted(results.items(), key=lambda item: item[0] != "with_skill"))
 
 
 def aggregate_results(results: dict) -> dict:
