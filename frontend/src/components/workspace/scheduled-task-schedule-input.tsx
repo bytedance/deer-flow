@@ -72,19 +72,28 @@ const FALLBACK_TIMEZONES = [
   "America/Los_Angeles",
 ];
 
-function timezoneOptions(): string[] {
+function timezoneOptions(timezone: string): string[] {
   const supported = (
     Intl as unknown as {
       supportedValuesOf?: (key: string) => string[] | undefined;
     }
   ).supportedValuesOf?.("timeZone");
-  if (Array.isArray(supported) && supported.length > 0) {
-    return supported;
+  const options = new Set([
+    "UTC",
+    ...(Array.isArray(supported) && supported.length > 0
+      ? supported
+      : FALLBACK_TIMEZONES),
+  ]);
+  if (!options.has(timezone)) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+      options.add(timezone);
+    } catch {
+      // Do not offer an invalid saved timezone.
+    }
   }
-  return FALLBACK_TIMEZONES;
+  return [...options];
 }
-
-const TIMEZONE_OPTIONS = timezoneOptions();
 
 export function ScheduledTaskScheduleInput({
   initial,
@@ -114,6 +123,8 @@ export function ScheduledTaskScheduleInput({
   const [timezone, setTimezone] = useState<string>(
     () => initial.timezone || browserTimeZone(),
   );
+  // Keep the saved alias available after selecting another timezone.
+  const [timezones] = useState(() => timezoneOptions(timezone));
   const [runAtLocal, setRunAtLocal] = useState<string>(
     initial.schedule_type === "once" && initial.schedule_spec.run_at
       ? utcToZonedLocalInput(
@@ -477,7 +488,7 @@ export function ScheduledTaskScheduleInput({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {TIMEZONE_OPTIONS.map((tzOption) => (
+          {timezones.map((tzOption) => (
             <SelectItem key={tzOption} value={tzOption}>
               {tzOption}
             </SelectItem>
