@@ -697,16 +697,48 @@ class TestWrapModelCall:
         assert mw._completion_reminder_counts == {}
 
 
+@pytest.fixture
+def production_chain_config(tmp_path, monkeypatch):
+    from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config
+    from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    # A missing ambient config must not be masked by a developer's checkout.
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
+    monkeypatch.setattr("deerflow.sandbox.local.local_sandbox_provider._singleton", None)
+    app_config = AppConfig.model_validate(
+        {
+            "models": [{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline"}],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "allow_host_bash": False},
+            "skills": {"path": str(tmp_path / "skills")},
+            "memory": {"enabled": False},
+            "title": {"enabled": False},
+            "summarization": {"enabled": False},
+        }
+    )
+    # Sandbox lifecycle hooks resolve get_app_config() at invocation time,
+    # independently of the explicit config passed to build_middlewares().
+    # The runtime binding propagates through both graph and worker-thread calls.
+    push_current_app_config(app_config)
+    try:
+        yield app_config
+    finally:
+        try:
+            shutdown_sandbox_provider()
+        finally:
+            pop_current_app_config()
+
+
 class TestTodoMiddlewareAgentGraphIntegration:
     @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
     @pytest.mark.parametrize("response_kind", ["tool", "blank", "partial_text"])
-    def test_production_chain_stops_after_safety_response(self, tmp_path, monkeypatch, invoke_async, response_kind):
+    def test_production_chain_stops_after_safety_response(self, production_chain_config, invoke_async, response_kind):
         from deerflow.agents.lead_agent.agent import build_middlewares
-        from deerflow.config.app_config import AppConfig
 
-        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
-        monkeypatch.setenv("LANGSMITH_TRACING", "false")
-        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
         executed = []
 
         @tool
@@ -728,16 +760,7 @@ class TestTodoMiddlewareAgentGraphIntegration:
                 AIMessage(content="final"),
             ]
         )
-        app_config = AppConfig.model_validate(
-            {
-                "models": [{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline"}],
-                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-                "memory": {"enabled": False},
-                "title": {"enabled": False},
-                "summarization": {"enabled": False},
-            }
-        )
-        middlewares = build_middlewares({"configurable": {"is_plan_mode": True}}, model_name="offline", app_config=app_config, memory_enabled=False, available_skills=set())
+        middlewares = build_middlewares({"configurable": {"is_plan_mode": True}}, model_name="offline", app_config=production_chain_config, memory_enabled=False, available_skills=set())
         graph = create_agent(model=model, tools=[record_action], middleware=middlewares, state_schema=ThreadState)
         todos = _incomplete_todos()
         context = {"thread_id": "production-safety-thread", "run_id": "production-safety-run"}
