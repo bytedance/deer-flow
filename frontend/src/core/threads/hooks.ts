@@ -1534,55 +1534,67 @@ function getMessagesAfterBaseline(
 }
 
 /**
- * Human-message baseline for a prepared replay (regenerate / edit).
- *
- * A replay masks the turn it supersedes, so those messages leave the live
- * message list the moment the mask is applied. Baselining on the pre-mask count
- * means the replacement only ever restores the count instead of exceeding it,
- * and the optimistic copy is never recognised as confirmed. That matters for
- * the first turn of a thread, where the runtime re-keys the replacement message
- * so identity comparison cannot stand in for the count either.
+ * Render-path gate mirroring the optimistic-clear effect: the optimistic
+ * bubble is withdrawn from the merged view exactly when the render snapshot
+ * itself holds the visible copy that confirms it (positioned while streaming),
+ * so confirmation and replacement land in the same frame the user sees (#7332).
  */
-export function countHumanMessagesExcludingSuperseded(
-  messages: Message[],
-  supersededMessageIds: readonly string[],
-): number {
-  const superseded = new Set(supersededMessageIds);
-  return messages.filter(
-    (message) =>
-      message.type === "human" && (!message.id || !superseded.has(message.id)),
-  ).length;
-}
-
 export function getVisibleOptimisticMessages(
   optimisticMessages: Message[],
-  previousHumanMessageCount: number,
-  currentHumanMessageCount: number,
+  renderMessages: Message[],
+  streamSettled = false,
 ): Message[] {
   if (
     optimisticMessages.some((message) => message.type === "human") &&
-    currentHumanMessageCount > previousHumanMessageCount
+    areOptimisticMessagesConfirmed(optimisticMessages, renderMessages, {
+      streamSettled,
+    })
   ) {
     return [];
   }
   return optimisticMessages;
 }
 
+/**
+ * A render-snapshot copy confirms an optimistic message only when it is both
+ * visible and, while streaming, positioned. DynamicContextMiddleware re-keys
+ * the submitted human into a hidden SystemMessage(id=X) plus the visible
+ * HumanMessage(id=X__user);
+ * both normalize onto the optimistic identity, but the hidden control copy is
+ * never rendered, so it must never withdraw the input (#7332). And a visible
+ * copy without a trusted `deerflow_seq` has no guaranteed turn position: a
+ * checkpoint window can drop it again before the REST page confirms the turn,
+ * which used to leave the answer streaming under the previous question while
+ * the user's own input was gone (#7332).
+ */
 export function areOptimisticMessagesConfirmed(
   optimisticMessages: Message[],
   persistedMessages: Message[],
+  options?: { streamSettled?: boolean },
 ): boolean {
-  const optimisticIdentities = optimisticMessages
+  const optimisticHumanIdentities = optimisticMessages
+    .filter((message) => message.type === "human")
     .map(messageIdentity)
     .filter(isNonEmptyString);
-  if (optimisticIdentities.length === 0) {
+  if (optimisticHumanIdentities.length === 0) {
     return false;
   }
-  const persistedIdentities = new Set(
-    persistedMessages.map(messageIdentity).filter(isNonEmptyString),
+  // Once the run has settled the snapshot can no longer roll the copy away,
+  // so any visible copy confirms; while streaming, only a positioned copy
+  // (server-stamped `deerflow_seq`) does.
+  const requireTrustedSeq = options?.streamSettled !== true;
+  const confirmedIdentities = new Set(
+    persistedMessages
+      .filter(
+        (message) =>
+          !isHiddenFromUIMessage(message) &&
+          (!requireTrustedSeq || trustedMessageSeq(message) !== undefined),
+      )
+      .map(messageIdentity)
+      .filter(isNonEmptyString),
   );
-  return optimisticIdentities.every((identity) =>
-    persistedIdentities.has(identity),
+  return optimisticHumanIdentities.every((identity) =>
+    confirmedIdentities.has(identity),
   );
 }
 
@@ -2644,10 +2656,6 @@ export function useThreadStream({
     persistedMessages,
     thread.isLoading,
   );
-  const humanMessageCount = renderMessages.filter(
-    (m) => m.type === "human",
-  ).length;
-  const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
   // Non-null only after a turn submitted by this mounted client. Keep it after
@@ -2679,13 +2687,7 @@ export function useThreadStream({
     order: EMPTY_MESSAGE_IDENTITIES,
   });
   const summarizedRef = useRef<Set<string>>(null);
-  // Track human message count before sending to prevent clearing optimistic
-  // messages before the server's human message arrives (e.g. when AI messages
-  // from "messages-tuple" events arrive before the input human message from
-  // "values" events).
-  const prevHumanMsgCountRef = useRef(humanMessageCount);
 
-  latestMessageCountsRef.current = { humanMessageCount };
   summarizedRef.current ??= new Set<string>();
 
   // Reset thread-local pending UI state when switching between threads so
@@ -2707,8 +2709,6 @@ export function useThreadStream({
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
-    prevHumanMsgCountRef.current =
-      latestMessageCountsRef.current.humanMessageCount;
   }, [threadId]);
 
   // Confirming a new thread only assigns its SDK id; the displayed
@@ -2757,35 +2757,38 @@ export function useThreadStream({
     }
   }, [persistedMessages, thread.isLoading]);
 
-  // Clear optimistic when server messages arrive.
-  // For messages with a human optimistic message, wait until the server's
-  // human message has arrived in the RENDER SNAPSHOT — identity match first,
-  // human-count growth of the rendered frames as fallback for runtime-re-keyed
-  // first turns — never in the unthrottled per-chunk array, which would
-  // withdraw the local input one coalesce interval before the user can see
-  // its confirmed copy.
+  // Clear optimistic state once the server confirms the submitted input.
+  // A human optimistic message is withdrawn only when the RENDER SNAPSHOT
+  // holds its confirmed copy and that copy is both visible and positioned
+  // (server-stamped `deerflow_seq`). Identity-sharing hidden control copies
+  // and bare human-count growth of the rendered frames must never withdraw
+  // the local input: an unpositioned copy can be dropped again by a rolling
+  // checkpoint window before the REST page confirms the turn, which used to
+  // leave the user's question gone while the answer kept streaming under the
+  // previous turn (#7332). Never judge from the unthrottled per-chunk array —
+  // that would withdraw the local input one coalesce interval before the user
+  // can see its confirmed copy.
   const optimisticMessageCount = optimisticMessages.length;
   const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
 
-    const newHumanMsgArrived = humanMessageCount > prevHumanMsgCountRef.current;
-
-    if (!hasHumanOptimistic || newHumanMsgArrived) {
-      setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-    }
-  }, [hasHumanOptimistic, humanMessageCount, optimisticMessageCount]);
-
-  useEffect(() => {
     if (
-      optimisticMessageCount > 0 &&
-      areOptimisticMessagesConfirmed(optimisticMessages, renderMessages)
+      !hasHumanOptimistic ||
+      areOptimisticMessagesConfirmed(optimisticMessages, renderMessages, {
+        streamSettled: !thread.isLoading,
+      })
     ) {
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
-  }, [optimisticMessageCount, optimisticMessages, renderMessages]);
+  }, [
+    hasHumanOptimistic,
+    optimisticMessageCount,
+    optimisticMessages,
+    renderMessages,
+    thread.isLoading,
+  ]);
 
   const sendMessage = useCallback(
     async (
@@ -2801,9 +2804,6 @@ export function useThreadStream({
 
       const text = message.text.trim();
 
-      // Capture the current human message count before showing optimistic
-      // messages so we can wait for the server's copy of the user input.
-      prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         persistedMessages
           .map(messageIdentity)
@@ -2847,6 +2847,7 @@ export function useThreadStream({
       );
 
       const newOptimistic: Message[] = [];
+      const uploadStatusMessageId = `opt-ai-${humanMessageId}`;
       if (!hideFromUI) {
         newOptimistic.push({
           type: "human",
@@ -2863,7 +2864,7 @@ export function useThreadStream({
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
-          id: `opt-ai-${Date.now()}`,
+          id: uploadStatusMessageId,
           content: t.uploads.uploadingFiles,
           additional_kwargs: { element: "task" },
         });
@@ -2912,23 +2913,23 @@ export function useThreadStream({
                 status: "uploaded" as const,
               }));
 
-              // Update optimistic human message with uploaded status + paths
-              setOptimisticMessages((messages) => {
-                if (messages.length > 1 && messages[0]) {
-                  const humanMessage: Message = messages[0];
-                  return [
-                    {
-                      ...humanMessage,
-                      additional_kwargs: buildHumanMessageAdditionalKwargs(
-                        options?.additionalKwargs,
-                        uploadedFiles,
-                      ),
-                    },
-                    ...messages.slice(1),
-                  ];
-                }
-                return messages;
-              });
+              // Upload status ends independently of the human echo. Match this
+              // send's IDs so a late upload cannot rewrite another turn.
+              setOptimisticMessages((messages) =>
+                messages
+                  .filter((message) => message.id !== uploadStatusMessageId)
+                  .map((message) =>
+                    message.id === humanMessageId
+                      ? {
+                          ...message,
+                          additional_kwargs: buildHumanMessageAdditionalKwargs(
+                            options?.additionalKwargs,
+                            uploadedFiles,
+                          ),
+                        }
+                      : message,
+                  ),
+              );
             }
           } catch (error) {
             const errorMessage =
@@ -2998,7 +2999,6 @@ export function useThreadStream({
       locale,
       context,
       queryClient,
-      humanMessageCount,
       persistedMessages,
       visibleHistory,
     ],
@@ -3020,7 +3020,6 @@ export function useThreadStream({
         return false;
       }
       sendInFlightRef.current = true;
-      prevHumanMsgCountRef.current = humanMessageCount;
       pendingUsageBaselineMessageIdsRef.current = new Set(
         persistedMessages
           .map(messageIdentity)
@@ -3056,10 +3055,6 @@ export function useThreadStream({
         const prepared = await prepare();
         preparedSupersededRunId = prepared.target_run_id;
         preparedSupersededMessageIds = getSupersededMessageIds(prepared);
-        prevHumanMsgCountRef.current = countHumanMessagesExcludingSuperseded(
-          persistedMessages,
-          preparedSupersededMessageIds,
-        );
         const replacementHumanMessageId =
           "replacement_human_message_id" in prepared &&
           typeof prepared.replacement_human_message_id === "string"
@@ -3147,15 +3142,7 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [
-      context,
-      locale,
-      humanMessageCount,
-      persistedMessages,
-      queryClient,
-      thread,
-      visibleHistory,
-    ],
+    [context, locale, persistedMessages, queryClient, thread, visibleHistory],
   );
 
   const regenerateMessage = useCallback(
@@ -3261,8 +3248,8 @@ export function useThreadStream({
 
   const rawVisibleOptimisticMessages = getVisibleOptimisticMessages(
     optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
-    prevHumanMsgCountRef.current,
-    humanMessageCount,
+    renderMessages,
+    !thread.isLoading,
   );
   const visibleOptimisticMessages =
     rawVisibleOptimisticMessages.length === 0

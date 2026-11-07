@@ -8,7 +8,6 @@ import {
   buildVisibleHistoryMessages,
   areOptimisticMessagesConfirmed,
   computeSummarizationTransientMessages,
-  countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
   getCurrentTurnRunIds,
   getSummarizationMiddlewareMessages,
@@ -377,31 +376,41 @@ test("getSummarizationMiddlewareMessages ignores unrelated suffix-sharing update
   ).toBeUndefined();
 });
 
-test("getVisibleOptimisticMessages hides optimistic user input after server human arrives", () => {
+test("getVisibleOptimisticMessages hides optimistic user input once a positioned visible copy arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
     type: "human",
     content: "hello",
   } as Message;
+  const confirmedCopy = {
+    id: "opt-human-1__user",
+    type: "human",
+    content: "hello",
+    additional_kwargs: { deerflow_seq: 7 },
+  } as Message;
 
-  expect(getVisibleOptimisticMessages([optimisticHuman], 0, 1)).toEqual([]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [confirmedCopy]),
+  ).toEqual([]);
 });
 
 test("mergeMessages shows server human instead of optimistic duplicate after first response", () => {
+  // The submitted input shares one client-generated id with the optimistic
+  // bubble; the server copy either keeps it or re-keys it to `<id>__user`.
   const serverHuman = {
-    id: "server-human-1",
+    id: "human-1__user",
     type: "human",
     content: "hello",
+    additional_kwargs: { deerflow_seq: 1 },
   } as Message;
   const optimisticHuman = {
-    id: "opt-human-1",
+    id: "human-1",
     type: "human",
     content: "hello",
   } as Message;
   const visibleOptimistic = getVisibleOptimisticMessages(
     [optimisticHuman],
-    0,
-    1,
+    [serverHuman],
   );
 
   expect(mergeMessages([], [serverHuman], visibleOptimistic)).toEqual([
@@ -410,14 +419,8 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
 });
 
 test("edit replay of the only turn hides the optimistic copy once the server human arrives", () => {
-  // The runtime re-keys the first user message of a thread, so the persisted
-  // replacement never matches the optimistic id and only the count can confirm
-  // it. Masking the superseded turn drops the live count to zero first.
-  const supersededHuman = {
-    id: "human-1__user",
-    type: "human",
-    content: "introduce Li Bai",
-  } as Message;
+  // The runtime re-keys the first user message of a thread, so the visible
+  // replacement confirms the optimistic bubble by its normalized identity.
   const optimisticHuman = {
     id: "replacement-1",
     type: "human",
@@ -427,50 +430,57 @@ test("edit replay of the only turn hides the optimistic copy once the server hum
     id: "replacement-1__user",
     type: "human",
     content: "introduce Du Fu",
+    additional_kwargs: { deerflow_seq: 1 },
   } as Message;
 
-  const baseline = countHumanMessagesExcludingSuperseded(
-    [supersededHuman],
-    ["human-1__user", "ai-1"],
-  );
-  expect(baseline).toBe(0);
-
-  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 0)).toEqual([
+  expect(getVisibleOptimisticMessages([optimisticHuman], [])).toEqual([
     optimisticHuman,
   ]);
-  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 1)).toEqual(
-    [],
-  );
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [serverHuman]),
+  ).toEqual([]);
   expect(mergeMessages([], [serverHuman], [])).toEqual([serverHuman]);
 });
 
-test("countHumanMessagesExcludingSuperseded keeps turns the replay does not supersede", () => {
-  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
-  const supersededHuman = {
-    id: "human-2",
-    type: "human",
-    content: "two",
-  } as Message;
-  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
-
-  expect(
-    countHumanMessagesExcludingSuperseded(
-      [keptHuman, ai, supersededHuman],
-      ["human-2", "ai-2"],
-    ),
-  ).toBe(1);
-});
-
-test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
+test("getVisibleOptimisticMessages requires positioning only while streaming", () => {
   const optimisticHuman = {
     id: "opt-human-1",
     type: "human",
     content: "hello",
   } as Message;
+  // No copy yet, a visible copy without a trusted seq (no guaranteed turn
+  // position — a checkpoint window can drop it again), and a hidden control
+  // copy sharing the identity must all keep the local input on screen (#7332).
+  const unpositionedCopy = {
+    id: "opt-human-1__user",
+    type: "human",
+    content: "hello",
+  } as Message;
+  const hiddenControlCopy = {
+    id: "opt-human-1",
+    type: "system",
+    content: "reminder",
+    additional_kwargs: { hide_from_ui: true, deerflow_seq: 3 },
+  } as Message;
 
-  expect(getVisibleOptimisticMessages([optimisticHuman], 0, 0)).toEqual([
+  expect(getVisibleOptimisticMessages([optimisticHuman], [])).toEqual([
     optimisticHuman,
   ]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [unpositionedCopy]),
+  ).toEqual([optimisticHuman]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [hiddenControlCopy]),
+  ).toEqual([optimisticHuman]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [unpositionedCopy], true),
+  ).toEqual([]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], [], true)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [hiddenControlCopy], true),
+  ).toEqual([optimisticHuman]);
 });
 
 test("getVisibleOptimisticMessages keeps non-human optimistic status messages", () => {
@@ -479,8 +489,14 @@ test("getVisibleOptimisticMessages keeps non-human optimistic status messages", 
     type: "ai",
     content: "Uploading files...",
   } as Message;
+  const serverHuman = {
+    id: "server-human-1",
+    type: "human",
+    content: "hello",
+    additional_kwargs: { deerflow_seq: 1 },
+  } as Message;
 
-  expect(getVisibleOptimisticMessages([optimisticAi], 0, 1)).toEqual([
+  expect(getVisibleOptimisticMessages([optimisticAi], [serverHuman])).toEqual([
     optimisticAi,
   ]);
 });
@@ -496,12 +512,17 @@ test("getVisibleOptimisticMessages hides the upload optimistic pair after server
     type: "ai",
     content: "Uploading files...",
   } as Message;
+  const confirmedCopy = {
+    id: "opt-human-1__user",
+    type: "human",
+    content: "upload this",
+    additional_kwargs: { deerflow_seq: 4 },
+  } as Message;
 
   expect(
     getVisibleOptimisticMessages(
       [optimisticHuman, optimisticUploadingAi],
-      0,
-      1,
+      [confirmedCopy],
     ),
   ).toEqual([]);
 });
@@ -512,33 +533,98 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
     type: "human",
     content: "follow up",
   } as Message;
+  const laterTurnCopy = {
+    id: "another-human",
+    type: "human",
+    content: "someone else's later turn",
+    additional_kwargs: { deerflow_seq: 9 },
+  } as Message;
 
-  expect(getVisibleOptimisticMessages([optimisticHuman], 3, 4)).toEqual([]);
-  expect(getVisibleOptimisticMessages([optimisticHuman], 3, 3)).toEqual([
-    optimisticHuman,
-  ]);
+  // Another client's later turn must not withdraw THIS input; only the
+  // positioned copy of the optimistic identity itself may.
+  expect(
+    getVisibleOptimisticMessages([optimisticHuman], [laterTurnCopy]),
+  ).toEqual([optimisticHuman]);
+  const ownCopy = {
+    id: "opt-human-2__user",
+    type: "human",
+    content: "follow up",
+    additional_kwargs: { deerflow_seq: 9 },
+  } as Message;
+  expect(getVisibleOptimisticMessages([optimisticHuman], [ownCopy])).toEqual(
+    [],
+  );
 });
 
-test("areOptimisticMessagesConfirmed returns true when server messages contain every optimistic id", () => {
+test("areOptimisticMessagesConfirmed returns true when a positioned visible copy exists for every optimistic human", () => {
   const optimisticHuman = {
     id: "replacement-human-1",
     type: "human",
     content: "edited question",
   } as Message;
   const serverHuman = {
-    id: "replacement-human-1",
+    id: "replacement-human-1__user",
     type: "human",
     content: "edited question",
+    additional_kwargs: { deerflow_seq: 2 },
   } as Message;
   const serverAi = {
     id: "replacement-ai-1",
     type: "ai",
     content: "new answer",
+    additional_kwargs: { deerflow_seq: 3 },
   } as Message;
 
   expect(
     areOptimisticMessagesConfirmed([optimisticHuman], [serverHuman, serverAi]),
   ).toBe(true);
+});
+
+test("areOptimisticMessagesConfirmed requires a visible copy, positioned while streaming", () => {
+  const optimisticHuman = {
+    id: "local-human-1",
+    type: "human",
+    content: "question",
+  } as Message;
+  // DynamicContextMiddleware re-keys the submitted human into a hidden
+  // SystemMessage(id=X) plus the visible HumanMessage(id=X__user): the hidden
+  // copy shares the optimistic identity but is never rendered, so it must
+  // never withdraw the input (#7332).
+  const hiddenControl = {
+    id: "local-human-1",
+    type: "system",
+    content: "reminder",
+    additional_kwargs: { hide_from_ui: true, deerflow_seq: 5 },
+  } as Message;
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [hiddenControl]),
+  ).toBe(false);
+
+  // A visible copy without a trusted seq has no guaranteed position yet.
+  const unpositioned = {
+    id: "local-human-1__user",
+    type: "human",
+    content: "question",
+  } as Message;
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [unpositioned]),
+  ).toBe(false);
+  expect(areOptimisticMessagesConfirmed([optimisticHuman], [])).toBe(false);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [unpositioned], {
+      streamSettled: true,
+    }),
+  ).toBe(true);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [], {
+      streamSettled: true,
+    }),
+  ).toBe(false);
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [hiddenControl], {
+      streamSettled: true,
+    }),
+  ).toBe(false);
 });
 
 test("areOptimisticMessagesConfirmed ignores optimistic messages without stable ids", () => {
