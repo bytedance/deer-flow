@@ -161,7 +161,42 @@ export function getLocalSettings(): LocalSettings {
   const json = safeLocalStorage.getItem(LOCAL_SETTINGS_KEY);
   try {
     if (json) {
-      const settings = JSON.parse(json) as Partial<LocalSettings>;
+      const settings = JSON.parse(json) as Partial<LocalSettings> & {
+        context?: Record<string, unknown>;
+      };
+      // Legacy localStorage shape (pre-mode migration) may carry
+      // `thinking_enabled` / `is_plan_mode` directly under `context` instead of
+      // the consolidated `mode: "flash" | "thinking" | "pro" | "ultra"` field.
+      // Without this one-shot migration the threads hooks would silently leave
+      // `mode` undefined and pick the wrong reasoning_effort branch.
+      const context = settings.context ?? {};
+      if (
+        typeof context.mode !== "string" &&
+        (typeof context.thinking_enabled === "boolean" ||
+          typeof context.is_plan_mode === "boolean")
+      ) {
+        const thinking = context.thinking_enabled === true;
+        const plan = context.is_plan_mode === true;
+        // Priority: is_plan_mode (most explicit) > thinking_enabled > flash.
+        const derivedMode: "flash" | "thinking" | "pro" = plan
+          ? "pro"
+          : thinking
+            ? "thinking"
+            : "flash";
+        delete context.thinking_enabled;
+        delete context.is_plan_mode;
+        context.mode = derivedMode;
+        settings.context = context;
+        // Persist the cleaned shape so we only pay the migration cost once.
+        try {
+          safeLocalStorage.setItem(
+            LOCAL_SETTINGS_KEY,
+            JSON.stringify(settings),
+          );
+        } catch {
+          /* fall back silently; mergeLocalSettings still produces a sane value */
+        }
+      }
       return mergeLocalSettings(settings);
     }
   } catch {}
