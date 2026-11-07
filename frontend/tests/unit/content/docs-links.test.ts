@@ -2,13 +2,15 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 import { describe, expect, it } from "@rstest/core";
+import GithubSlugger from "github-slugger";
+
+import { localizeDocsHref } from "@/components/docs/localized-links";
 
 const CONTENT_ROOT = join(process.cwd(), "src/content");
 const DOC_LANGUAGES = ["en", "zh"] as const;
 const DOCS_ORIGIN = "https://docs.example";
 const LINK_PATTERN =
   /(?<!!)\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\s*\)|\bhref\s*=\s*(?:\{\s*)?["']([^"']+)["'](?:\s*\})?/g;
-const UNLOCALIZED_DOCS_PATH = /^\/docs(?=\/|[?#]|$)/;
 
 function findMdxFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -37,14 +39,37 @@ function extractLinks(source: string): Array<{ href: string; line: number }> {
   }));
 }
 
-function resolveDocsPath(
+function extractHeadingIds(source: string): Set<string> {
+  const slugger = new GithubSlugger();
+  const ids = new Set<string>();
+  let fence = "";
+
+  for (const line of source.split(/\r?\n/)) {
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      const delimiter = marker[1]!;
+      if (!fence) {
+        fence = delimiter;
+      } else if (delimiter.startsWith(fence) && !marker[2]!.trim()) {
+        fence = "";
+      }
+      continue;
+    }
+    if (fence) continue;
+
+    // Section links currently target ATX headings, not MDX component anchors.
+    const heading = /^ {0,3}#{2,6}[\t ]+(.+?)(?:[\t ]+#+)?[\t ]*$/.exec(line);
+    if (heading) ids.add(slugger.slug(heading[1]!));
+  }
+  return ids;
+}
+
+function resolveDocsURL(
   href: string,
   lang: string,
   sourceRoute: string,
-): string | undefined {
-  const localizedHref = UNLOCALIZED_DOCS_PATH.test(href)
-    ? `/${lang}${href}`
-    : href;
+): URL | undefined {
+  const localizedHref = localizeDocsHref(href, lang);
   const url = new URL(localizedHref, `${DOCS_ORIGIN}${sourceRoute}`);
   if (
     url.origin !== DOCS_ORIGIN ||
@@ -52,19 +77,46 @@ function resolveDocsPath(
   ) {
     return undefined;
   }
-  return url.pathname.replace(/\/$/, "");
+  return url;
 }
 
 describe("documentation content links", () => {
-  it("only links to documentation routes backed by MDX pages", () => {
+  it("extracts section IDs outside code fences", () => {
+    const source = [
+      "# Title",
+      "## Overview",
+      "```md",
+      "## Overview",
+      "````",
+      "~~~",
+      "## 示例",
+      "~~~",
+      "## Overview",
+      "### 故障隔离 ###",
+    ].join("\n");
+
+    expect([...extractHeadingIds(source)]).toEqual([
+      "overview",
+      "overview-1",
+      "故障隔离",
+    ]);
+  });
+
+  it("only links to existing documentation pages and sections", () => {
     const mdxFiles = DOC_LANGUAGES.flatMap((lang) =>
       findMdxFiles(join(CONTENT_ROOT, lang)),
     );
-    const routes = new Set(
+    const routes = new Map(
       DOC_LANGUAGES.flatMap((lang) =>
         mdxFiles
           .filter((path) => path.startsWith(join(CONTENT_ROOT, lang)))
-          .map((path) => routeForMdx(path, lang)),
+          .map(
+            (path) =>
+              [
+                routeForMdx(path, lang),
+                extractHeadingIds(readFileSync(path, "utf8")),
+              ] as const,
+          ),
       ),
     );
 
@@ -73,12 +125,19 @@ describe("documentation content links", () => {
         const source = readFileSync(path, "utf8");
         const sourceRoute = routeForMdx(path, lang);
         return extractLinks(source).flatMap(({ href, line }) => {
-          const targetRoute = resolveDocsPath(href, lang, sourceRoute);
-          if (!targetRoute || routes.has(targetRoute)) {
+          const target = resolveDocsURL(href, lang, sourceRoute);
+          if (!target) return [];
+          const targetRoute = target.pathname.replace(/\/$/, "");
+          const headings = routes.get(targetRoute);
+          if (
+            headings &&
+            (!target.hash ||
+              headings.has(decodeURIComponent(target.hash.slice(1))))
+          ) {
             return [];
           }
           return [
-            `${relative(CONTENT_ROOT, path).split(sep).join("/")}:${line} -> ${href} (${targetRoute})`,
+            `${relative(CONTENT_ROOT, path).split(sep).join("/")}:${line} -> ${href} (${targetRoute}${target.hash})`,
           ];
         });
       }),
