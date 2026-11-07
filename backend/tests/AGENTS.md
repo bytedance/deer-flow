@@ -1,5 +1,10 @@
 # Backend Tests
 
+`test_client_async.py` forces assembly overlap with events and an observed real
+lock. Removing the ensure/capture critical section must mix the compiled graphs
+and fail; off-loop execution and trace isolation are separate contracts. Release
+worker gates and drain both callers on failure; do not rely on scheduling sleeps.
+
 `test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.
 

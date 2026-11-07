@@ -6,7 +6,7 @@
 
 ## TL;DR
 
-- DeerFlow 有**两条并行**的流式路径：**Gateway 路径**（async / HTTP SSE / JSON 序列化）服务浏览器和 IM 渠道；**DeerFlowClient 路径**（sync / in-process / 原生 LangChain 对象）服务 Jupyter、脚本、测试。它们**无法合并**——消费者模型不同。
+- DeerFlow 有**两条并行**的流式路径：**Gateway 路径**（async / HTTP SSE / JSON 序列化）服务浏览器和 IM 渠道；**DeerFlowClient 路径**（sync 或 async / in-process / 原生 LangChain 对象）服务 Jupyter、脚本、测试。
 - 两条路径都从 `create_agent()` 工厂出发，核心都是订阅 LangGraph 的 `stream_mode=["values", "messages", "custom"]`。`values` 是节点级 state 快照，`messages` 是 LLM token 级 delta，`custom` 是显式 `StreamWriter` 事件。DeerFlow 内置 custom 事件同时通过 callback dispatch 暴露为 `astream_events(version="v2")` 的 `on_custom_event`，供 AG-UI 等 callback 型消费者使用。**这些接口不是详细程度的梯度，而是独立事件源**，消费者必须订阅自己需要的接口。
 - 嵌入式 client 按消息 id 分别跟踪 values 去重、已流式发送的文本、已核算的完整用量和历史消息；`streamed_usage_by_id` 累加尚未核算完整消息的 chunk 用量。
 
@@ -18,9 +18,9 @@
 
 | 维度 | Gateway 路径 | DeerFlowClient 路径 |
 |---|---|---|
-| 入口 | FastAPI `/runs/stream` endpoint | `DeerFlowClient.stream(message)` |
+| 入口 | FastAPI `/runs/stream` endpoint | `DeerFlowClient.stream(message)` / `astream(message)` |
 | 触发层 | `runtime/runs/worker.py::run_agent` | `packages/harness/deerflow/client.py::DeerFlowClient.stream` |
-| 执行模型 | `async def` + `agent.astream()` | sync generator + `agent.stream()` |
+| 执行模型 | `async def` + `agent.astream()` | sync generator + `agent.stream()`，或 async generator + `agent.astream()` |
 | 事件传输 | `StreamBridge`（asyncio Queue）+ `sse_consumer` | 直接 `yield` |
 | 序列化 | `serialize(chunk)` → 纯 JSON dict，匹配 LangGraph Platform wire 格式 | `StreamEvent.data`，携带原生 LangChain 对象 |
 | 消费者 | 前端 `useStream` React hook、飞书/Slack/Telegram channel、LangGraph SDK 客户端 | Jupyter notebook、集成测试、内部 Python 脚本 |
@@ -42,7 +42,45 @@
 3. **让 `run_agent` 自己兼容 sync mode**  
    给 Gateway 加一条用不到的死分支，污染 worker.py 的焦点。
 
-所以两条路径的事件处理逻辑会**相似但不共享**。这是刻意设计，不是疏忽。
+Gateway 与嵌入式路径保持独立。嵌入式的同步与异步 API 则共享 `client_stream.py` 中的事件编码、消息去重和 token 核算。
+
+## Native async embedded client
+
+`astream()` invokes the compiled graph's native `astream()` and returns the same
+`StreamEvent` types as `stream()`. `achat()` accumulates the last content-bearing
+AI message using the same rule as `chat()`.
+
+```python
+import asyncio
+from contextlib import aclosing
+
+from deerflow.client import DeerFlowClient
+from langgraph.checkpoint.memory import InMemorySaver
+
+
+async def main():
+    client = DeerFlowClient(checkpointer=InMemorySaver())
+    async with aclosing(client.astream("Hello", thread_id="example")) as events:
+        async for event in events:
+            print(event)
+    print(await client.achat("Continue", thread_id="example"))
+
+
+asyncio.run(main())
+```
+
+Model configuration is the same as for the synchronous client. For persistent
+SQLite, pass an `AsyncSqliteSaver` inside its caller-owned async context; the
+synchronous `SqliteSaver` does not implement LangGraph's asynchronous methods.
+Checkpoint-mode compatibility is checked before graph execution.
+
+Assembly and configuration reads run in the dedicated assembly executor. Each
+turn captures its own graph before another call can replace the client's graph
+cache. Trace bindings are restored between yielded events. Explicit `aclose()`,
+graph failures, and cancellation close the native iterator and drain asynchronous
+sandbox lease cleanup. Use `aclosing` when stopping iteration early. Concurrent
+turns should use different thread IDs; these methods do not add Gateway admission
+or same-thread scheduling. Other configuration/file APIs remain synchronous.
 
 ---
 
