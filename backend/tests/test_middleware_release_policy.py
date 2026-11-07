@@ -309,7 +309,9 @@ def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
     current = TodoMiddleware()
     previous = TodoMiddleware()
     previous_params = previous.release_policy_parameters()
-    assert previous_params.pop("completion_reminder_hard_stop_reasons") == ["loop_capped", "token_capped"]
+    assert previous_params["completion_reminder_hard_stop_reasons"] == ["loop_capped", "token_capped", "safety_capped", "model_length_capped"]
+    previous_params["completion_reminder_hard_stop_reasons"] = ["loop_capped", "token_capped"]
+    assert previous_params.pop("skip_completion_reminder_on_safety_cap") is True
     monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
     assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
 

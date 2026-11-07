@@ -1,12 +1,15 @@
 """Tests for TodoMiddleware context-loss detection."""
 
+import ast
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -17,6 +20,7 @@ from pydantic import PrivateAttr
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
     ModelLengthFinishReasonMiddleware,
 )
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.todo_middleware import (
     TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
@@ -308,7 +312,81 @@ class TestToolCallIntentOrError:
 
 
 class TestAfterModel:
-    @pytest.mark.parametrize("stop_reason", [None, "custom_stop", [], {}])
+    def test_all_middleware_stop_reason_writes_have_an_explicit_todo_policy(self):
+        middleware_dir = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/agents/middlewares"
+        stamped_reasons = set()
+        for source in sorted(middleware_dir.glob("*.py")):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if not isinstance(target, ast.Subscript) or not isinstance(target.slice, ast.Constant) or target.slice.value != "stop_reason":
+                        continue
+                    # This copies a child result into a ledger entry; it does
+                    # not stamp the current run's runtime.context.
+                    if source.name == "delegation_ledger.py" and isinstance(target.value, ast.Name) and target.value.id == "entry":
+                        continue
+                    value = constants.get(node.value.id) if isinstance(node.value, ast.Name) else node.value
+                    assert isinstance(value, ast.Constant) and isinstance(value.value, str), f"Classify stop_reason writer at {source.name}:{node.lineno}"
+                    stamped_reasons.add(value.value)
+
+        # The subagent budget only removes task calls; the lead may still
+        # complete its work using other tools. Every other writer is terminal.
+        nonterminal_reasons = {"subagent_limit_capped"}
+        assert nonterminal_reasons <= stamped_reasons
+        policy = TodoMiddleware().release_policy_parameters()
+        assert set(policy["completion_reminder_hard_stop_reasons"]) == stamped_reasons - nonterminal_reasons
+
+    @pytest.mark.parametrize("marker", ["safety_termination", "model_length_termination"])
+    @pytest.mark.parametrize("context", [None, {}, {"stop_reason": "custom_stop"}])
+    def test_termination_marker_suppresses_reminders_without_recognized_context(self, marker, context):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context = context
+        state = {"messages": [AIMessage(content="partial response", additional_kwargs={marker: {"suppressed_tool_call_count": 0}})], "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) is None
+        assert mw._pending_completion_reminders == {}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["loop_capped", "token_capped", "safety_capped", "model_length_capped"])
+    def test_recognized_stop_reason_suppresses_completion_reminders(self, invoke_async, stop_reason):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result is None
+        assert mw._pending_completion_reminders == {}
+        assert mw._completion_reminder_counts == {}
+        assert state["todos"] == _incomplete_todos()
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["loop_capped", "token_capped", "safety_capped", "model_length_capped"])
+    def test_hard_stop_takes_precedence_over_base_jump(self, monkeypatch, invoke_async, stop_reason):
+        base_hook = MagicMock(return_value={"jump_to": "model"})
+        monkeypatch.setattr(TodoListMiddleware, "after_model", base_hook)
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        # Preserve normal parent behavior, but never let it override a hard stop.
+        def after_model():
+            return asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert after_model() == {"jump_to": "model"}
+        base_hook.assert_called_once()
+        base_hook.reset_mock()
+        runtime.context["stop_reason"] = stop_reason
+        assert after_model() is None
+        base_hook.assert_not_called()
+
+    @pytest.mark.parametrize("stop_reason", [None, "custom_stop", "subagent_limit_capped", [], {}])
     def test_unrecognized_stop_reason_keeps_completion_reminders(self, stop_reason):
         mw = TodoMiddleware()
         runtime = _make_runtime()
@@ -621,7 +699,68 @@ class TestWrapModelCall:
 
 class TestTodoMiddlewareAgentGraphIntegration:
     @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
-    @pytest.mark.parametrize("guard_kind", ["loop", "token"])
+    @pytest.mark.parametrize("response_kind", ["tool", "blank", "partial_text"])
+    def test_production_chain_stops_after_safety_response(self, tmp_path, monkeypatch, invoke_async, response_kind):
+        from deerflow.agents.lead_agent.agent import build_middlewares
+        from deerflow.config.app_config import AppConfig
+
+        monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+        monkeypatch.setenv("LANGSMITH_TRACING", "false")
+        monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+        executed = []
+
+        @tool
+        def record_action(marker: str) -> str:
+            """Record a harmless action in memory."""
+            executed.append(marker)
+            return marker
+
+        filtered = AIMessage(
+            id="filtered-response",
+            content="Partial report." if response_kind == "partial_text" else "",
+            response_metadata={"finish_reason": "content_filter"},
+            tool_calls=[{"name": "record_action", "args": {"marker": "filtered"}, "id": "filtered-call"}] if response_kind == "tool" else [],
+        )
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                filtered,
+                AIMessage(content="", tool_calls=[{"name": "record_action", "args": {"marker": "after-stop"}, "id": "later-call"}]),
+                AIMessage(content="final"),
+            ]
+        )
+        app_config = AppConfig.model_validate(
+            {
+                "models": [{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline"}],
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "memory": {"enabled": False},
+                "title": {"enabled": False},
+                "summarization": {"enabled": False},
+            }
+        )
+        middlewares = build_middlewares({"configurable": {"is_plan_mode": True}}, model_name="offline", app_config=app_config, memory_enabled=False, available_skills=set())
+        graph = create_agent(model=model, tools=[record_action], middleware=middlewares, state_schema=ThreadState)
+        todos = _incomplete_todos()
+        context = {"thread_id": "production-safety-thread", "run_id": "production-safety-run"}
+        state = {"messages": [("user", "Finish the report.")], "todos": todos}
+
+        result = asyncio.run(graph.ainvoke(state, context=context)) if invoke_async else graph.invoke(state, context=context)
+
+        assert len(model.seen_messages) == 1
+        assert executed == []
+        assert context["stop_reason"] == "safety_capped"
+        final = result["messages"][-1]
+        assert final.additional_kwargs["safety_termination"]
+        assert final.content
+        assert not final.tool_calls
+        assert result["todos"] == todos
+        if response_kind == "partial_text":
+            assert final.content == filtered.content
+        todo_mw = next(mw for mw in middlewares if isinstance(mw, TodoMiddleware))
+        assert todo_mw._pending_completion_reminders == {}
+        assert todo_mw._completion_reminder_counts == {}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("guard_kind", ["loop", "token", "safety", "model_length"])
     @pytest.mark.parametrize("pending", [True, False], ids=["unfinished", "completed"])
     def test_run_hard_stop_does_not_reengage_todos(self, invoke_async, guard_kind, pending):
         from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
@@ -644,11 +783,14 @@ class TestTodoMiddlewareAgentGraphIntegration:
             )
 
         todos = [{"content": "Record the requested actions", "status": "pending" if pending else "completed"}]
+        blocked_action = action("repeated", "blocked", tokens=1000 if guard_kind == "token" else 10)
+        if guard_kind in ("safety", "model_length"):
+            blocked_action.response_metadata = {"finish_reason": "content_filter" if guard_kind == "safety" else "length"}
         model = _CapturingFakeMessagesListChatModel(
             responses=[
                 AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": todos}, "id": "todos-start"}]),
                 action("repeated", "first"),
-                action("repeated", "blocked", tokens=1000 if guard_kind == "token" else 10),
+                blocked_action,
                 # A different action makes unintended post-stop execution observable.
                 action("after-stop", "after-stop"),
                 AIMessage(content="final answer"),
@@ -657,7 +799,13 @@ class TestTodoMiddlewareAgentGraphIntegration:
             ]
         )
         todo_mw = TodoMiddleware()
-        guard = LoopDetectionMiddleware(warn_threshold=2, hard_limit=2) if guard_kind == "loop" else TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        guards = {
+            "loop": LoopDetectionMiddleware(warn_threshold=2, hard_limit=2),
+            "token": TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000)),
+            "safety": SafetyFinishReasonMiddleware(),
+            "model_length": ModelLengthFinishReasonMiddleware(),
+        }
+        guard = guards[guard_kind]
         # Production registers Todo before the guards; after_model runs in reverse.
         graph = create_agent(model=model, tools=[record_action], middleware=[todo_mw, guard], state_schema=ThreadState, checkpointer=InMemorySaver())
         config = {"configurable": {"thread_id": "hard-stop-thread"}, "recursion_limit": 100}
@@ -669,9 +817,12 @@ class TestTodoMiddlewareAgentGraphIntegration:
 
         result = invoke(state, context)
 
-        assert context["stop_reason"] == ("loop_capped" if guard_kind == "loop" else "token_capped")
+        assert context["stop_reason"] == f"{guard_kind}_capped"
         assert executed == ["repeated"]
         assert len(model.seen_messages) == 3
+        # Pin the real producers to Todo's declared policy, without importing
+        # runtime Goal policy (which currently covers only loop/token).
+        assert context["stop_reason"] in todo_mw.release_policy_parameters()["completion_reminder_hard_stop_reasons"]
         assert result["todos"] == todos
         assert not result["messages"][-1].tool_calls
         assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
