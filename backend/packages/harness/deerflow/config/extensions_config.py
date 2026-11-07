@@ -24,6 +24,13 @@ from deerflow.constants import (
     MCP_TASK_NAME_MAX_LENGTH,
     MCP_TASK_SERVER_NAME_MAX_LENGTH,
 )
+from deerflow.utils.file_lock import retry_until_locked
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    import msvcrt
 
 logger = logging.getLogger(__name__)
 
@@ -972,28 +979,34 @@ def extensions_config_file_lock(path: Path) -> Iterator[None]:
     lock_path = target_path.parent / f".{target_path.name}.lock"
 
     with open(lock_path, "a+b") as lock_file:
-        if os.name == "nt":
-            import msvcrt
-
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows fallback
             lock_file.seek(0, os.SEEK_END)
             if lock_file.tell() == 0:
                 lock_file.write(b"\0")
                 lock_file.flush()
             lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
 
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            # Windows' blocking lock mode (``msvcrt.LK_LOCK``) gives up after
+            # roughly ten seconds and surfaces contention as Permission denied,
+            # while the guarded read-merge-write-reload cycle can legitimately
+            # take longer. Retry the non-blocking acquisition until the region
+            # frees, mirroring the indefinite POSIX ``flock(LOCK_EX)`` above.
+            def acquire_region() -> None:
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+
+            retry_until_locked(acquire_region)
 
         try:
             yield
         finally:
-            if os.name == "nt":
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
+            lock_file.seek(0)
+            if fcntl is not None:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            else:  # pragma: no cover - Windows fallback
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
