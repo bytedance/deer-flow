@@ -1823,6 +1823,9 @@ and when a subagent performed the retrieval. Missing page numbers and public
 URLs remain absent; sources without a URL are readable as local evidence.
 Inline citations remain readable after Markdown sanitization, and supplied page
 numbers use the selected interface language.
+Shared knowledge results skip entries that exceed the remaining output budget
+and retain later fitting entries in provider order. Retained citations stay
+paired with their visible evidence.
 Copying a source reference produces a Markdown link that escapes brackets in the
 visible title and wraps a URL containing parentheses in angle brackets, so the
 copied reference stays a valid link. New providers use the shared
