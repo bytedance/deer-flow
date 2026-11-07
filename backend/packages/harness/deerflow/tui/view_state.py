@@ -149,6 +149,9 @@ class ViewState:
     # id-less too. This index instead pins "this turn's" anonymous row by
     # position, reset alongside `streaming_id` at the start/end of every turn.
     streaming_anonymous_row_index: int | None = None
+    # Provider tool-call ids may repeat in a later run. Only cards created
+    # since RunStarted can receive this run's start chunks and results.
+    tool_rows_start: int = 0
 
 
 def initial_state(rows: tuple[Row, ...] = ()) -> ViewState:
@@ -172,7 +175,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
 
     if isinstance(action, RunStarted):
         # New turn: no message is actively streaming until its first delta.
-        return replace(state, streaming=True, streaming_id=None, streaming_anonymous_row_index=None)
+        return replace(state, streaming=True, streaming_id=None, streaming_anonymous_row_index=None, tool_rows_start=len(state.rows))
 
     if isinstance(action, RunEnded):
         return replace(
@@ -202,7 +205,7 @@ def reduce(state: ViewState, action: Action) -> ViewState:
         return replace(state, title=action.title)
 
     if isinstance(action, ClearRows):
-        return replace(state, rows=(), streaming_id=None, streaming_anonymous_row_index=None)
+        return replace(state, rows=(), streaming_id=None, streaming_anonymous_row_index=None, tool_rows_start=0)
 
     return state
 
@@ -316,7 +319,8 @@ def _apply_tool_started(state: ViewState, action: ToolStarted) -> ViewState:
         return state
 
     rows = list(state.rows)
-    for i, row in enumerate(rows):
+    for i in range(state.tool_rows_start, len(rows)):
+        row = rows[i]
         if isinstance(row, ToolRow) and row.tool_call_id == action.tool_call_id:
             name = action.tool_name or row.tool_name
             detail = format_tool_detail(name, action.args) or row.detail
@@ -340,7 +344,8 @@ def _apply_tool_result(state: ViewState, action: ToolResult) -> ViewState:
         return state
 
     rows = list(state.rows)
-    for i, row in enumerate(rows):
+    for i in range(state.tool_rows_start, len(rows)):
+        row = rows[i]
         if isinstance(row, ToolRow) and row.tool_call_id == action.tool_call_id:
             rows[i] = replace(
                 row,
