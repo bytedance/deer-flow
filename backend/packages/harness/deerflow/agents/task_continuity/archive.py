@@ -189,6 +189,25 @@ async def acapture(*args) -> dict:
         raise
 
 
+def _dedupe_by_source_id(rows, *, limit: int):
+    """Yield rows in the given order, skipping source IDs already yielded.
+
+    One source may be archived in many reachable batches, so a rank-limited
+    prefix can be all duplicates and hide other matching sources (#7943).
+    Streaming with dedup keeps the original ordering semantics while spending
+    the result budget on distinct sources.
+    """
+    seen: set[str] = set()
+    for (payload,) in rows:
+        source_id = json.loads(payload).get("id")
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        yield (payload,)
+        if len(seen) >= limit:
+            return
+
+
 def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | None = None, role: str | None = None, excerpts: bool = False) -> dict:
     path, owner = scope(runtime)
     batches = reachable(state, owner)
@@ -215,8 +234,16 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 else:
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else []), 8]
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank LIMIT ?", parameters)
+                    # One source may be archived in many reachable batches, so
+                    # a rank-limited prefix can be all duplicates and hide other
+                    # matching sources (#7943). Stream matches in rank order and
+                    # deduplicate by source id while iterating, stopping once the
+                    # 8-result budget is filled with distinct sources. Ordering
+                    # semantics (rank, then scan order on ties) are unchanged.
+                    rows = _dedupe_by_source_id(
+                        db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", [match, *batches, *([role] if role is not None else [])]),
+                        limit=8,
+                    )
                 for (payload,) in rows:
                     row = json.loads(payload)
                     found[row["id"]] = row
