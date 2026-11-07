@@ -14,6 +14,7 @@ from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.scheduler.runtime import SchedulerRunCapability, is_scheduler_capability, scheduler_tools_enabled
 from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+from deerflow.tools.artifact_handoff import present_shared_artifact
 from deerflow.tools.builtins import (
     ask_clarification_tool,
     build_inspect_run_status_tool,
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = [
     present_file_tool,
+    present_shared_artifact,
     ask_clarification_tool,
     review_skill_package,
 ]

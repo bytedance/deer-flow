@@ -13,6 +13,7 @@ import yaml
 
 from app.gateway.routers.console import _ModelPricing, _run_cost
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY
+from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
 
 ROOT = Path(__file__).resolve().parent
 PROTOCOL = "scheduled-tasks-synthetic-v1"
@@ -179,7 +180,13 @@ def host_delivery_evidence(events: list[dict[str, Any]], filepath: str) -> dict[
     from deerflow.runtime.runs.worker import _presented_path_covers_output
 
     receipts = [event["content"] for event in events if event.get("event_type") == "run.delivery" and isinstance(event.get("content"), dict)]
-    delivered = any(receipt.get("satisfied") is True and any(isinstance(path, str) and _presented_path_covers_output(path, filepath) for path in (receipt.get("by_tool") or {}).get("present_files", [])) for receipt in receipts)
+    delivered = False
+    for receipt in receipts:
+        by_tool = receipt.get("by_tool") or {}
+        presented_paths = [path for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool_name, [])]
+        if receipt.get("satisfied") is True and any(isinstance(path, str) and _presented_path_covers_output(path, filepath) for path in presented_paths):
+            delivered = True
+            break
     return {"delivered": delivered, "host_delivery_receipts": receipts}
 
 
