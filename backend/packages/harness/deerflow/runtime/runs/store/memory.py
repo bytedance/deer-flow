@@ -114,8 +114,8 @@ class MemoryRunStore(RunStore):
             "status": status,
             "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
-            "metadata": metadata or {},
-            "kwargs": kwargs or {},
+            "metadata": copy.deepcopy(metadata or {}),
+            "kwargs": copy.deepcopy(kwargs or {}),
             "error": error,
             "stop_reason": stop_reason,
             "goal_verdict": copy.deepcopy(goal_verdict),
@@ -144,7 +144,7 @@ class MemoryRunStore(RunStore):
             return None
         if user_id is not None and run.get("user_id") != user_id:
             return None
-        return run
+        return copy.deepcopy(run)
 
     async def list_changed(
         self,
@@ -157,7 +157,7 @@ class MemoryRunStore(RunStore):
         cursor = (after_change_seq, after_run_id)
         results = [run for run in self._runs.values() if run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id) and (int(run.get("change_seq") or 0), run["run_id"]) > cursor]
         results.sort(key=lambda run: (int(run.get("change_seq") or 0), run["run_id"]))
-        return results[:limit]
+        return copy.deepcopy(results[:limit])
 
     async def list_by_thread(
         self,
@@ -188,7 +188,7 @@ class MemoryRunStore(RunStore):
             )
         ]
         results.sort(key=lambda r: run_sort_key(r.get("created_at"), r["run_id"]), reverse=True)
-        return results[:limit]
+        return copy.deepcopy(results[:limit])
 
     async def list_by_thread_created_at(self, thread_id, *, user_id, created_at):
         target = canonical_run_created_at(created_at)
@@ -202,7 +202,7 @@ class MemoryRunStore(RunStore):
                     matches.append(row)
             except (TypeError, ValueError):
                 continue
-        return matches
+        return copy.deepcopy(matches)
 
     async def list_successful_regenerate_sources(self, thread_id, *, user_id=None):
         run_ids = self._runs_by_thread.get(thread_id) or ()
@@ -232,11 +232,13 @@ class MemoryRunStore(RunStore):
             if metadata.get("replay_kind") == "edit" and isinstance(source, str) and source:
                 results.append(run)
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def get_many_by_thread(self, thread_id, run_ids, *, user_id=None):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
-        return {run_id: run for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)}
+        return {
+            run_id: copy.deepcopy(run) for run_id in thread_run_ids if run_id in run_ids and (run := self._runs.get(run_id)) is not None and run.get("operation_kind", "run") == "run" and (user_id is None or run.get("user_id") == user_id)
+        }
 
     async def update_status(self, run_id, status, *, error=None, stop_reason=None, goal_verdict=None, owner_worker_id=None):
         run = self._runs.get(run_id)
@@ -314,34 +316,29 @@ class MemoryRunStore(RunStore):
             allowed_sources.add("interrupted")
         if current_status not in allowed_sources:
             return False
+        updates = copy.deepcopy({key: value for key, value in kwargs.items() if value is not None and not (require_terminal and key in ("error", "stop_reason", "goal_verdict"))})
         run["status"] = status
-        for key, value in kwargs.items():
-            if require_terminal and key in ("error", "stop_reason", "goal_verdict"):
-                continue
-            if value is not None:
-                run[key] = copy.deepcopy(value) if key == "goal_verdict" else value
+        run.update(updates)
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
         return True
 
     async def update_run_progress(self, run_id, **kwargs):
         if run_id in self._runs and self._runs[run_id].get("status") == "running":
-            for key, value in kwargs.items():
-                if value is not None:
-                    self._runs[run_id][key] = value
+            self._runs[run_id].update(copy.deepcopy({key: value for key, value in kwargs.items() if value is not None}))
             self._runs[run_id]["updated_at"] = datetime.now(UTC).isoformat()
 
     async def list_pending(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
         results = [r for r in self._runs.values() if r.get("operation_kind", "run") == "run" and r["status"] == "pending" and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def list_inflight(self, *, before=None):
         now = before or datetime.now(UTC).isoformat()
         results = [r for r in self._runs.values() if r["status"] in ("pending", "running") and r["created_at"] <= now]
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False, user_id: str | None = None) -> dict[str, Any]:
         statuses = ("success", "error", "running") if include_active else ("success", "error")
@@ -547,7 +544,7 @@ class MemoryRunStore(RunStore):
                 except (ValueError, TypeError):
                     results.append(r)
         results.sort(key=lambda r: r["created_at"])
-        return results
+        return copy.deepcopy(results)
 
     async def create_thread_operation_atomic(
         self,
@@ -578,13 +575,18 @@ class MemoryRunStore(RunStore):
         if idempotency_key is not None:
             for existing in self._runs.values():
                 if existing.get("idempotency_key") == idempotency_key:
-                    raise RunIdempotencyConflict(existing)
+                    raise RunIdempotencyConflict(copy.deepcopy(existing))
 
         # For reject: check if any active run exists
         if multitask_strategy == "reject":
             for r in self._runs.values():
                 if r["thread_id"] == thread_id and r["status"] in ("pending", "running"):
                     raise ConflictError(f"Thread {thread_id} already has an active run")
+
+        # Prepare caller-owned payloads before changing any interrupted rows.
+        metadata = copy.deepcopy(metadata or {})
+        kwargs = copy.deepcopy(kwargs or {})
+        idempotency_request = copy.deepcopy(idempotency_request)
 
         # For interrupt/rollback: claim inflight runs.
         # Two-pass so the memory path mirrors the SQL store's transactional
@@ -653,13 +655,13 @@ class MemoryRunStore(RunStore):
             "status": "pending",
             "operation_kind": operation_kind,
             "multitask_strategy": multitask_strategy,
-            "metadata": metadata or {},
-            "kwargs": kwargs or {},
+            "metadata": metadata,
+            "kwargs": kwargs,
             "error": None,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
             "idempotency_key": idempotency_key,
-            "idempotency_request": copy.deepcopy(idempotency_request),
+            "idempotency_request": idempotency_request,
             "cancel_action": None,
             "cancel_requested_at": None,
             "created_at": created_at or now,
