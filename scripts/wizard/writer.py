@@ -6,11 +6,15 @@ without wiping existing user customisations where possible.
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import dotenv_values
+from dotenv.parser import parse_stream
 
 CHANNEL_CONNECTION_PROVIDERS: tuple[str, ...] = (
     "telegram",
@@ -29,19 +33,27 @@ def _project_root() -> Path:
 
 # ── .env helpers ──────────────────────────────────────────────────────────────
 
+
 def read_env_file(env_path: Path) -> dict[str, str]:
     """Parse a .env file into a dict (ignores comments and blank lines)."""
-    result: dict[str, str] = {}
     if not env_path.exists():
-        return result
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" in line:
-            key, _, value = line.partition("=")
-            result[key.strip()] = value.strip()
-    return result
+        return {}
+    return {key: value for key, value in dotenv_values(env_path, interpolate=False, encoding="utf-8-sig").items() if value is not None}
+
+
+def _env_assignment(key: str, value: str) -> str:
+    if any(char in value for char in "\r\n\0") or "${" in value:
+        raise ValueError(f"{key} cannot be stored literally in .env. Configure this credential outside the setup wizard.")
+    if re.fullmatch(r"[A-Za-z0-9_.:/+=@\\-]*", value):
+        return f"{key}={value}"
+    # The local launcher's quoted-value parser cannot preserve a trailing
+    # backslash before a later quoted assignment. Do not write an ambiguous value.
+    if value.endswith("\\") or ("$" in value and "\\" in value):
+        raise ValueError(f"{key} cannot be stored literally in .env. Configure this credential outside the setup wizard.")
+    if "$" in value:
+        return f"{key}='" + value.replace("'", "\\'") + "'"
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
 
 
 def write_env_file(env_path: Path, pairs: dict[str, str]) -> None:
@@ -50,30 +62,38 @@ def write_env_file(env_path: Path, pairs: dict[str, str]) -> None:
     Existing keys are updated in place; new keys are appended.
     Lines with comments and other formatting are preserved.
     """
-    lines: list[str] = []
+    if not pairs:
+        return
+    assignments = {key: _env_assignment(key, value) for key, value in pairs.items()}
+    text = ""
     if env_path.exists():
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        with env_path.open(encoding="utf-8", newline="") as stream:
+            text = stream.read()
+    bom = "\ufeff" if text.startswith("\ufeff") else ""
+    newline = "\r\n" if "\r\n" in text else "\n"
 
     updated: set[str] = set()
     new_lines: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            key = stripped.split("=", 1)[0].strip()
-            if key in pairs:
-                new_lines.append(f"{key}={pairs[key]}")
-                updated.add(key)
-                continue
-        new_lines.append(line)
+    for binding in parse_stream(StringIO(text.removeprefix(bom) if bom else text)):
+        original = binding.original.string
+        if binding.key in assignments:
+            whitespace = original[: len(original) - len(original.lstrip())]
+            new_lines.append(whitespace + assignments[binding.key] + newline)
+            updated.add(binding.key)
+        else:
+            new_lines.append(original)
 
-    for key, value in pairs.items():
+    for key, assignment in assignments.items():
         if key not in updated:
-            new_lines.append(f"{key}={value}")
+            if new_lines and not new_lines[-1].endswith(("\r", "\n")):
+                new_lines.append(newline)
+            new_lines.append(assignment + newline)
 
-    env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    env_path.write_text(bom + "".join(new_lines), encoding="utf-8", newline="")
 
 
 # ── config.yaml helpers ───────────────────────────────────────────────────────
+
 
 def _yaml_dump(data: Any) -> str:
     return yaml.safe_dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
@@ -105,11 +125,7 @@ def _build_tools(
     include_write_tools: bool,
 ) -> list[dict[str, Any]]:
     tools = deepcopy(base_tools if base_tools is not None else _default_tools())
-    tools = [
-        tool
-        for tool in tools
-        if tool.get("name") not in {search_tool_name, web_fetch_tool_name, "write_file", "str_replace", "bash"}
-    ]
+    tools = [tool for tool in tools if tool.get("name") not in {search_tool_name, web_fetch_tool_name, "write_file", "str_replace", "bash"}]
 
     web_group = "web"
 
@@ -245,12 +261,7 @@ def build_minimal_config(
     if channel_connection_providers is not None:
         data["channel_connections"] = _build_channel_connections_config(channel_connection_providers)
 
-    header = (
-        f"# DeerFlow Configuration\n"
-        f"# Generated by 'make setup' on {today}\n"
-        f"# Run 'make setup' to reconfigure, or edit this file for advanced options.\n"
-        f"# Full reference: config.example.yaml\n\n"
-    )
+    header = f"# DeerFlow Configuration\n# Generated by 'make setup' on {today}\n# Run 'make setup' to reconfigure, or edit this file for advanced options.\n# Full reference: config.example.yaml\n\n"
 
     return header + _yaml_dump(data)
 
@@ -284,6 +295,7 @@ def write_config_yaml(
     if example_path.exists():
         try:
             import yaml as _yaml
+
             raw = _yaml.safe_load(example_path.read_text(encoding="utf-8")) or {}
             config_version = int(raw.get("config_version", 5))
             example_defaults = raw
