@@ -218,6 +218,25 @@ async def test_recovered_stream_end_retries_after_producer_lease_delay():
 
 
 @pytest.mark.anyio
+async def test_recovered_stream_end_retry_does_not_recreate_stream_cleaned_during_delay():
+    stream_bridge = _RetryingRecoveredStreamBridge()
+
+    cleanups = await gateway_deps._publish_recovered_run_stream_end(
+        stream_bridge,
+        [SimpleNamespace(run_id="run-1", thread_id="thread-1")],
+        cleanup_delay=0,
+    )
+    # Model another owner/retention cleanup winning before the delayed retry.
+    stream_bridge._existing_streams.clear()
+    await asyncio.gather(*(task for _run_id, task in cleanups))
+
+    assert stream_bridge.publish_attempts == 1
+    assert stream_bridge.publish_end_calls == []
+    assert stream_bridge.cleanup_calls == []
+    assert stream_bridge.expired_producer_cleanup_calls == ["run-1"]
+
+
+@pytest.mark.anyio
 async def test_missing_recovered_stream_retries_while_producer_is_active():
     stream_bridge = _MissingActiveRecoveredStreamBridge()
 
