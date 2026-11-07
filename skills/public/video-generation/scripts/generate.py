@@ -154,9 +154,13 @@ def _generate_video_minimax(prompt: str, reference_images: list[str], output_fil
         body["resolution"] = resolution
     duration = os.getenv("MINIMAX_VIDEO_DURATION", "").strip()
     if duration:
-        if not duration.isdigit():
-            raise ValueError(f"MINIMAX_VIDEO_DURATION must be an integer number of seconds (e.g. 6 or 10), got {duration!r}")
-        body["duration"] = int(duration)
+        error = f"MINIMAX_VIDEO_DURATION must be an integer number of seconds (e.g. 6 or 10), got {duration!r}"
+        if not duration.isdecimal():
+            raise ValueError(error)
+        try:
+            body["duration"] = int(duration)
+        except ValueError as exc:
+            raise ValueError(error) from exc
     if reference_images:
         body["first_frame_image"] = _to_data_url(reference_images[0])
     response = requests.post(
