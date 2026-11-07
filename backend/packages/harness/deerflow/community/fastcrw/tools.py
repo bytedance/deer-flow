@@ -5,6 +5,7 @@ import os
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
@@ -33,11 +34,11 @@ def _get_fastcrw_client(
     """
     if cfg is None:
         cfg = _get_tool_config_extra(tool_name)
-    api_key = cfg.get("api_key")
+    api_key = resolve_api_key(cfg.get("api_key"))
     if base_url is None:
         base_url = cfg.get("base_url")
     if api_key is None:
-        api_key = os.getenv("CRW_API_KEY")
+        api_key = resolve_api_key(os.getenv("CRW_API_KEY"))
     if base_url is None:
         base_url = os.getenv("CRW_API_URL", DEFAULT_BASE_URL)
     return FirecrawlApp(api_key=api_key, api_url=base_url)  # type: ignore[arg-type]
