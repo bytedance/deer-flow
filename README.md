@@ -4152,6 +4152,13 @@ the TUI requests cancellation of the pending update; already committed writes ar
 
 See [backend/docs/TUI.md](backend/docs/TUI.md) for the full guide.
 
+### Jsonify dataset completeness
+
+The `jsonify_dataset_rows` tool marks results as `truncated: true` when its row
+limit is reached or a response advertises more rows but an empty page or invalid
+cursor prevents further reading. Treat those results as partial data, including
+when zero rows have been returned; they do not establish a complete dataset.
+
 ## Documentation
 
 - [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
