@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 
 from langchain.tools import tool
 
@@ -28,19 +29,25 @@ def _get_tool_config(tool_name: str) -> dict | None:
 def _coerce_timeout(value: object, default: int) -> float:
     """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``jina_ai._coerce_timeout``: booleans and non-numeric strings fall
-    back to the default so e.g. ``timeout: off`` (YAML ``False``) does not become
-    ``0.0`` and time out every request against a healthy server.
+    Booleans and non-numeric strings fall back to the default, and so does any number
+    that gives ``httpx`` no usable deadline: the result is handed straight to
+    ``httpx.AsyncClient(timeout=...)``, where ``0`` or a negative value fails every fetch
+    with ``ConnectTimeout`` against a healthy backend, and ``inf``/``nan`` leave the
+    request with no deadline at all, so it never completes. Silently disabling the
+    provider is worse than using the documented default.
+
+    ``jina_ai._coerce_timeout`` still forwards non-positive values, so this provider is
+    deliberately stricter than the sibling it used to mirror.
     """
-    if isinstance(value, bool):
-        return float(default)
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if not isinstance(value, bool) and isinstance(value, (int, float, str)):
         try:
-            return float(value)
-        except ValueError:
-            logger.warning("Crawl4AI web_fetch: invalid timeout %r in config; using %ss", value, default)
+            timeout = float(value)
+        except (ValueError, OverflowError):
+            pass
+        else:
+            if math.isfinite(timeout) and timeout > 0:
+                return timeout
+    logger.warning("Crawl4AI web_fetch: invalid timeout %r in config; using %ss", value, default)
     return float(default)
 
 
@@ -83,7 +90,10 @@ def _build_client(cfg: dict | None) -> Crawl4AiClient:
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
         token = cfg.get("token", token)
-        timeout_s = _coerce_timeout(cfg.get("timeout"), DEFAULT_TIMEOUT_S)
+        # Coerce only when the key is present: an omitted ``timeout`` is not a bad
+        # value, and this runs for every fetch, so warning on it would flood the log.
+        if "timeout" in cfg:
+            timeout_s = _coerce_timeout(cfg["timeout"], DEFAULT_TIMEOUT_S)
     return Crawl4AiClient(base_url=base_url, token=token, timeout_s=timeout_s)
 
 
