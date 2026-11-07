@@ -3456,3 +3456,30 @@ async def test_in_stream_error_after_partial_output_is_retried_from_the_start() 
     assert result.content == "recovered"
     assert "deerflow_error_fallback" not in result.additional_kwargs
     assert "".join(streamed) == "partial answrecovered"
+
+
+@pytest.fixture
+def non_utc_timezone(monkeypatch: pytest.MonkeyPatch):
+    if not hasattr(time, "tzset"):
+        pytest.skip("TZ pinning requires os.tzset (POSIX)")
+    try:
+        with monkeypatch.context() as local_timezone:
+            local_timezone.setenv("TZ", "GMT-8")
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
+
+
+def test_retry_after_zoneless_date_is_anchored_to_utc(non_utc_timezone, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zone-less date forms (asctime, bare date) carry no zone token, but
+    HTTP-date values are always GMT - they must not be read in the
+    host-local timezone (same anchoring as the serper/Jina parsers).
+    """
+    now = datetime(2026, 10, 10, 5, 23, 29, tzinfo=UTC)
+    monkeypatch.setattr(time, "time", lambda: now.timestamp())
+    hint = "Sat Oct 10 12:00:00 2026"
+    hint_at = datetime(2026, 10, 10, 12, 0, 0, tzinfo=UTC)
+    expected = int((hint_at.timestamp() - now.timestamp()) * 1000)
+    exc = FakeError("rate limited", status_code=429, headers={"Retry-After": hint})
+    assert _extract_retry_after_ms(exc) == expected
