@@ -592,6 +592,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             "web_search": {
                 "ddg_search": "DuckDuckGo (no key needed)",
                 "youcom": "You.com (works with no key; YDC_API_KEY enables the full Search API)",
+                "keenable": "Keenable (works with no key; KEENABLE_API_KEY lifts the keyless rate limit)",
             },
             "web_fetch": {"jina_ai": "Jina AI Reader (no key needed)", "crawl4ai": "Crawl4AI (self-hosted, no key needed)"},
             "image_search": {"deerflow.community.image_search.tools": "DuckDuckGo Images (no key needed)"},
