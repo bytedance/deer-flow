@@ -4,18 +4,14 @@ Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-n
 
 [Viewer fence](../../../docs/full-stack-plugins.md).
 
+Capability Center's bundled business/MCP adapter and isolated launcher policy: see [docs/capability-center.md](../../../docs/capability-center.md); preserve admin checks, masked atomic edits, credential isolation, and MCP cache reloads.
+
 Studio keeps sanitized creation metadata.
 
 HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
 `_ensure_thread_metadata`; preserve await-free attachment and cancel/drain
 ownership. Its 5s budget covers admission and I/O: timeout fails strict starts;
 others omit incarnation (MCP fails closed). Tests: `test_thread_create_run_metadata_race.py`.
-
-Capability Center's `business` adapter validates bundled credentials and creates
-an MCP connection. The MCP API permits only its isolated launcher and credential
-environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
-credentials out of tool schemas and preserve admin checks, masked atomic edits,
-and MCP cache reloads.
 
 Memory shutdown resolves hot-reloaded config/backend, flushes and closes in one
 `await_drained` operation. Resolve config off-loop inside the best-effort handler
@@ -102,30 +98,23 @@ Scheme/auth-origin reconstruction still uses forwarding headers. Nginx sets
 `X-Forwarded-Proto` but preserves upstream HTTPS and some other forwarded headers;
 the outer trusted proxy must replace/strip client copies before DeerFlow.
 
-Recognize standalone Studio only by upstream `Auth.types.StudioUser`, never its
-reusable identity string. Resolve the type once at import; older SDKs without
-it retain normal owner scoping. For its assistant reads/searches,
-`langgraph_auth.add_owner_filter` admits genuine server-registered assistants
-and Studio-owned rows; other resources stay owner-scoped. Assistant create/update
-forces server-owned `user_id` and `created_by=user`: LangGraph treats
-`created_by=system` as privileged run ownership. The
-custom application module in `langgraph_studio.py` is imported before the
-locked in-memory runtime lifespan. At that pre-runtime boundary it derives
-genuine system assistant IDs from the CLI-provided graph registry, removes
-their persisted active/version rows so graph registration recreates them, and
-demotes every other legacy `created_by=system` marker in both active assistants
-and version history. This must happen before runtime 0.30.0 loads and purges
-system-marked rows; a user application lifespan is too late. LangGraph executes
-this file-backed custom app without first registering its module in
-`sys.modules`; keep its annotations eager so dataclass processing remains
-compatible with that loader, and preserve the direct file-loader regression
-test. An empty graph registry or absent persistence file is a no-op, while
-persistence parse/write errors fail startup closed. The harness requires
-in-memory runtime 0.30.0 or newer, and a persisted store containing no
-expected registered assistant row emits a drift warning so changes to
-LangGraph's internal persistence contract are observable. With current
-create/update writes and all legacy versions sanitized, ordinary
-owner-scoped assistant version selection remains enabled.
+Recognize standalone Studio only by upstream `Auth.types.StudioUser` (resolve
+once at import; older SDKs retain owner scoping), never its reusable identity
+string. For assistant reads/searches, `langgraph_auth.add_owner_filter` admits
+genuine server-registered assistants and Studio-owned rows; all other resources
+remain owner-scoped. Assistant create/update forces server-owned `user_id` and
+`created_by=user`, because LangGraph treats `created_by=system` as privileged
+run ownership. Before the locked in-memory runtime lifespan, `langgraph_studio.py`
+derives system assistant IDs from the CLI graph registry, removes their persisted
+active/version rows for re-registration, and demotes all other legacy
+`created_by=system` markers in active rows and history. This must precede
+runtime 0.30.0's purge; a user lifespan is too late. LangGraph loads this
+file-backed app without registering its module in `sys.modules`; keep
+annotations eager and preserve the direct file-loader regression test. Empty
+registries/absent persistence are no-ops; parse/write errors fail startup closed.
+Require in-memory runtime >=0.30.0; missing expected persisted assistant rows
+emit drift warnings. After writes and legacy-version sanitization, normal
+owner-scoped version selection remains enabled.
 
 **Routers**:
 
@@ -226,7 +215,7 @@ or `deployment.multi_instance: true`.
 - `DELETE /api/threads/{id}` holds a durable `delete` reservation for the whole cleanup and removes thread filesystem data (off-loop, drained on cancel), checkpoints, owner-scoped historical runs, run events, feedback and thread metadata best-effort. Historical-run cleanup removes only `operation_kind="run"` rows, so internal thread-operation rows — including the reservation protecting that request — stay durable until `RunManager.reserve_thread_operation()` exits. This cleans persisted rows; preventing an already-admitted write from re-creating state for a deleted thread is a separate thread-incarnation contract, not part of this cleanup.
 - Creator SSE and `/wait` apply `on_disconnect` only to confirmed request disconnect or cancellation; bridge failures propagate without cancelling the run. `/wait` consumes bridge END; errors return SDK `__error__`, never stale state.
 - Memory and Redis `StreamBridge` implementations retain only `stream_bridge.queue_maxsize` data events. A syntactically valid `Last-Event-ID` older than the retained watermark, or a live subscriber that falls behind it, yields `StreamGap` before any partial replay. `sse_consumer` maps that control item to an id-less SSE `gap` payload (`stream_replay_gap`) and intentionally leaves the run active; internal `/wait` consumers resume from its latest retained ID because they only need terminal completion. Redis checks bounds plus the non-blocking read in one transaction, using blocking `XREAD` only as a wake-up before repeating the atomic snapshot. For a no-cursor subscriber that established a wait on an empty stream, the first wake response remains provisional until that next snapshot verifies its tail is still retained; this closes the pre-first-delivery trimming window without changing malformed-cursor live tailing. The correctness tradeoff is one three-command snapshot pipeline per poll plus the blocking wake round trip while idle. Malformed cursor behavior remains backend-specific. Memory treats a syntactically numeric cursor below its watermark conservatively as a gap even when the evicted timestamp can no longer be verified; unknown ids at or above the watermark retain the legacy replay-from-earliest policy.
-- Redis `StreamBridge` keys use a rolling retained-buffer TTL (`stream_bridge.stream_ttl_seconds`, refreshed on data and first-END writes) as a leak safety net, not as a run timeout. Startup and lease-driven periodic orphan recovery share one Gateway stream-terminalization path: after `RunManager` durably marks a run `error` with `stop_reason=orphan_recovered`, Gateway publishes `END_SENTINEL` and schedules stream cleanup. The periodic store scan, per-row status writes, and Gateway callback run as one supervised single-flight task, so a slow pass is skipped at the next interval instead of piling up or pausing the sole lease-renewal loop. Store retries have bounded attempts/backoff; an individual operation still relies on the database driver/pool timeout. `RunManager.shutdown()` gives active user runs priority within its shared deadline, then drains or cancels orphan recovery. Gateway tracks delayed recovered-stream cleanups and converts unfinished delays to immediate deletes before closing the bridge; the Redis TTL remains the outage safety net. Only startup recovery, before the runtime yields to requests, projects the latest affected thread to `error`; periodic recovery deliberately avoids that non-atomic projection because `ThreadMetaStore` has no `latest_run_id` conditional-update contract. Store-only SSE and `/wait` consumers wait for the bridge's real END marker after an ordinary durable terminal status, because status persistence can precede tail events. Terminal `orphan_recovered` and `scheduled_task_orphan_recovered` rows permit heartbeat fallback because their producer is gone; ordinary terminal rows still await END. Malformed `Last-Event-ID` reconnect values live-tail new Redis events rather than replaying the retained buffer. Keep cross-component recovery orchestration in Gateway through the generic `RunManager.on_orphans_recovered` callback; do not introduce a harness-to-app dependency. Callback failure warnings include every recovered `run_id` so operators can identify rows whose Gateway-side terminalization needs inspection.
+- Redis `StreamBridge` keys use a rolling retained-buffer TTL (`stream_bridge.stream_ttl_seconds`, refreshed on data and first-END writes) as a leak safety net, not as a run timeout. Startup and lease-driven periodic orphan recovery share one Gateway stream-terminalization path: after `RunManager` durably marks a run `error` with `stop_reason=orphan_recovered`, Gateway publishes `END_SENTINEL` and schedules stream cleanup. The periodic store scan, per-row status writes, and Gateway callback run as one supervised single-flight task, so a slow pass is skipped at the next interval instead of piling up or pausing the sole lease-renewal loop. Store retries have bounded attempts/backoff; an individual operation still relies on the database driver/pool timeout. `RunManager.shutdown()` gives active user runs priority within its shared deadline, then drains or cancels orphan recovery. Gateway tracks delayed recovered-stream cleanups and converts unfinished delays to immediate deletes before closing the bridge; the Redis TTL remains the outage safety net. A delayed END retry remembers whether a stream was retained when it was scheduled and rechecks it after the wait; if cleanup/TTL has since removed that stream, the retry must not recreate an empty generation and instead attempts expired producer-marker cleanup. Only startup recovery, before the runtime yields to requests, projects the latest affected thread to `error`; periodic recovery deliberately avoids that non-atomic projection because `ThreadMetaStore` has no `latest_run_id` conditional-update contract. Store-only SSE and `/wait` consumers wait for the bridge's real END marker after an ordinary durable terminal status, because status persistence can precede tail events. Terminal `orphan_recovered` and `scheduled_task_orphan_recovered` rows permit heartbeat fallback because their producer is gone; ordinary terminal rows still await END. Malformed `Last-Event-ID` reconnect values live-tail new Redis events rather than replaying the retained buffer. Keep cross-component recovery orchestration in Gateway through the generic `RunManager.on_orphans_recovered` callback; do not introduce a harness-to-app dependency. Callback failure warnings include every recovered `run_id` so operators can identify rows whose Gateway-side terminalization needs inspection.
 - Thread-scoped create, stream and wait share an optional owner/thread-scoped `Idempotency-Key` (internal callers: owner-only, cross-thread reuse 409); never pass the raw external key to `RunManager`'s process-wide index. Stores resolve an existing key before `interrupt`/`rollback`, so a retry reuses rather than interrupts its run. Reuse requires matching input, assistant and conversation references; keyed resume stores a versioned strict typed-JSON SHA-256 (`true`, `1` and `1.0` differ) in the private `runs.idempotency_request_json` column, never public `kwargs`; ordinary input needs no extra identity. New readers accept the exact old-writer resume identity shape from `kwargs`, every response strips it; identity-less legacy resume fails closed. Validate strict resume JSON with or without a key; persist the identity only for keyed resume admission. Missing headers stay non-idempotent; stateless `/api/runs/*` is outside this contract (it creates a thread before admission).
 - For a rolling upgrade, route every keyed resume submission/retry on create/stream/wait only to upgraded workers; otherwise pause that traffic or replace old workers first. Old workers ignore the private identity and can reuse `approve` for `deny` with null input. Old-reader schema compatibility does not protect admission. Upgraded workers reject identity-less legacy resumes with 409. Rollout details: `README.md`, `backend/docs/API.md`.
 - Reused `/wait` returns durable status/error, never the latest thread checkpoint; `task is None` is not completion, and store-backed fields must refresh after waiting. Capture reuse before awaiting because the cached record's `idempotency_reused` flag is sticky. A creating `/runs/stream` retry whose terminal stream is gone opts into `gap`/`stream_replay_gap` via `emit_gap_on_missing_stream`, while observer joins and default/stateless consumers emit `end`; never infer this from disconnect policy or the sticky flag. A reused running `store_only` record on a process-local bridge returns 409 without `Retry-After`.
