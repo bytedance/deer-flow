@@ -11,6 +11,25 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 
+@pytest.mark.parametrize(("sample_size", "expected"), [(0, 0), (42, 42), (100, "100+")])
+def test_summary_does_not_claim_a_capped_sample_is_the_total(
+    monkeypatch, fallback_client, sample_size, expected
+):
+    client, _ = fallback_client
+    monkeypatch.setattr(client, "get_repo_info", lambda *args: {})
+    monkeypatch.setattr(client, "get_languages", lambda *args: {})
+    monkeypatch.setattr(client, "get_releases", lambda *args, **kwargs: [])
+    calls = []
+
+    def contributors(*args, limit):
+        calls.append(limit)
+        return [{}] * min(sample_size, limit)
+
+    monkeypatch.setattr(client, "get_contributors", contributors)
+    assert client.summarize_repo("owner", "repo")["contributor_count"] == expected
+    assert calls == [100]
+
+
 @pytest.fixture
 def fallback_client(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", None)
