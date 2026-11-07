@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 from exa_py import Exa
 from langchain.tools import tool
 
+from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url
 from deerflow.config import get_app_config
 
@@ -13,6 +15,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_RESULTS = 5
 DEFAULT_CONTENTS_MAX_CHARACTERS = 1000
+_DAYS_BY_TIME_RANGE: dict[SearchTimeRange, int] = {"day": 1, "week": 7, "month": 30, "year": 365}
+
+
+def _published_date_filters(time_range: SearchTimeRange, *, now: datetime) -> dict[str, str]:
+    """Build Exa publication-date filters for a rolling UTC time window.
+
+    Args:
+        time_range: Use the past 1, 7, 30, or 365 days for day, week, month, or year.
+        now: The timezone-aware UTC reference time captured once by the caller.
+
+    Returns:
+        ISO 8601 UTC strings keyed by start_published_date and end_published_date.
+    """
+    start = now - timedelta(days=_DAYS_BY_TIME_RANGE[time_range])
+    return {
+        "start_published_date": start.isoformat().replace("+00:00", "Z"),
+        "end_published_date": now.isoformat().replace("+00:00", "Z"),
+    }
 
 
 def _coerce_positive_int(value: object, default: int, option: str) -> int:
@@ -89,11 +109,14 @@ def _build_exa_client(extra: dict, base_url: str | None) -> Exa:
 
 
 @tool("web_search", parse_docstring=True)
-def web_search_tool(query: str) -> str:
+def web_search_tool(query: str, time_range: SearchTimeRange | None = None) -> str:
     """Search the web.
 
     Args:
         query: The query to search for.
+        time_range: Optional publication-date filter: day, week, month, or year means the past 1, 7, 30, or 365 days in UTC.
+            Use only when recent publications are requested; this does not filter by update or crawl time.
+            Omit or pass None for unrestricted search. Date filtering may reduce recall for pages without publication dates.
     """
     try:
         config = get_app_config().get_tool_config("web_search")
@@ -110,11 +133,13 @@ def web_search_tool(query: str) -> str:
             )
 
         client = _get_exa_client()
+        date_filters = _published_date_filters(time_range, now=datetime.now(UTC)) if time_range is not None else {}
         res = client.search(
             query,
             type=search_type,
             num_results=max_results,
             contents={"highlights": {"max_characters": contents_max_characters}},
+            **date_filters,
         )
 
         normalized_results = [
