@@ -77,6 +77,8 @@ class SubagentExecutionCapacity:
                 timeout=self._config.queue_timeout_seconds,
             )
         except (TimeoutError, asyncio.CancelledError) as exc:
+            # Caller cancellation during timeout cleanup takes precedence over
+            # reporting a queue timeout, once waiter and slot ownership settle.
             await self._run_cancellation_safe(self._remove_abandoned_waiter(waiter))
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -114,7 +116,12 @@ class SubagentExecutionCapacity:
 
     @staticmethod
     async def _run_cancellation_safe(operation: Coroutine[Any, Any, None]) -> None:
-        """Drain owned capacity bookkeeping before propagating cancellation."""
+        """Drain owned capacity bookkeeping before propagating cancellation.
+
+        The drain waits for the capacity lock without a separate deadline.
+        Further cancellations cannot interrupt it or replace the first one
+        received during the drain.
+        """
         cleanup_task = asyncio.create_task(operation)
         cancellation: asyncio.CancelledError | None = None
         while not cleanup_task.done():
