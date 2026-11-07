@@ -1,5 +1,9 @@
 # Jina web fetch
 
+Tool `timeout` normalization accepts positive integers/integer strings only,
+requiring finite float representation. Other values fall back to 10 seconds
+before both `X-Timeout` and HTTPX request construction; cover both retry modes.
+
 Retries default to zero; one monotonic budget covers attempts/waits. Retry 502/503/504 and connect failures; 429 requires valid Retry-After.
 Accept ASCII seconds or HTTP dates (also obsolete); past dates floor at zero. Wait max(server floor, budget-capped jittered 0.5–4s backoff); unfit floors
 return HTTP errors. Reset hints each attempt; auth/payment errors stay terminal.
