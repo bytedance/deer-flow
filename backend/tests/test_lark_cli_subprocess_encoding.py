@@ -17,6 +17,12 @@ that names no codec is decoded with one that mangles UTF-8, while a call that
 pins its own ``encoding`` is passed through untouched. That reproduces the
 behaviour of the pre-fix call sites on a cp936/cp1252 host even when the test
 host itself is UTF-8.
+
+The Windows SID lookup is a separate capture in the same module: ``whoami``
+writes the account name in the console's ANSI code page rather than UTF-8, so a
+pinned UTF-8 decode still needs an ``errors`` policy. Only the SID (ASCII) and
+the CSV delimiters are used, but a strict decode kills the pipe reader thread
+and turns ``stdout`` into ``None`` before the SID can be read.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,3 +187,38 @@ def test_unpinned_capture_corrupts_the_same_output(fake_cli) -> None:
         # A UTF-8 host locale: the locale decode happens to be correct here.
         return
     assert EXPECTED_USER not in raw
+
+
+def test_windows_sid_resolution_tolerates_non_utf8_account_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Windows credential-tree walk keeps its SID when the account name is CJK.
+
+    ``whoami /user /fo csv /nh`` prints ``"<domain>\\<user>","<sid>"`` with the
+    account name in the console's ANSI code page (the bytes below are a GBK user
+    name). A text-mode capture that names no codec is decoded with the
+    interpreter's encoding; on a UTF-8-mode host the strict decode raises inside
+    subprocess's reader thread and ``stdout`` comes back as ``None``.
+    ``ensure_lark_cli_credential_tree`` then fails with ``AttributeError`` before
+    it can harden any credential directory. The SID itself is ASCII, so replacing
+    the undecodable account name is enough to keep the CSV parse intact.
+    """
+    raw = b'"DESKTOP-ABC\\\xb5\xca\xd7\xd3","S-1-5-21-1-2-3-1001"\r\n'
+    expected_sid = "S-1-5-21-1-2-3-1001"
+
+    def ansi_whoami(_argv, **kwargs):
+        if kwargs.get("text") or kwargs.get("universal_newlines"):
+            encoding = kwargs.get("encoding")
+            if encoding is None:
+                # Emulate the reader thread dying on a strict locale decode.
+                return SimpleNamespace(returncode=0, stdout=None, stderr="")
+            stdout = raw.decode(encoding, kwargs.get("errors") or "strict")
+        else:
+            stdout = raw
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    # Control: without an errors policy this capture really does lose stdout.
+    assert ansi_whoami(["whoami"], text=True).stdout is None
+
+    monkeypatch.setattr(lark_cli.subprocess, "run", ansi_whoami)
+    assert lark_cli._resolve_current_user_sid() == expected_sid

@@ -53,6 +53,7 @@ def _archive_app(
     run_thread_id: str = THREAD_ID,
     run_status: str = "success",
     with_receipt: bool = True,
+    delivery_tool: str = "present_files",
 ) -> tuple[TestClient, MemoryRunStore, MemoryRunEventStore]:
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -77,7 +78,7 @@ def _archive_app(
                 content={
                     "presented": len(presented),
                     "paths": presented,
-                    "by_tool": {"present_files": presented},
+                    "by_tool": {delivery_tool: presented},
                 },
             )
         )
@@ -131,7 +132,8 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert "not-presented.txt" not in archive.namelist()
 
 
-def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("delivery_tool", ["present_files", "present_shared_artifact"])
+def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch, delivery_tool: str) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     client, _, _ = _archive_app(
@@ -142,6 +144,7 @@ def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypa
             "/mnt/user-data/outputs/data.csv",
             "/mnt/user-data/outputs/data.csv",
         ],
+        delivery_tool=delivery_tool,
     )
 
     with client:

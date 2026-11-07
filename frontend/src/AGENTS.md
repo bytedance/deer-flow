@@ -91,7 +91,7 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    Cancel success awaits the exact list and target-detail query cancellations
    before caching both results, then invalidates only the list. Both GETs consume
    AbortSignals and preserve sibling detail loads. Real-hook/HTTP regressions live
-   in `tests/unit/core/background-tasks/hooks.dom.test.tsx`.
+   in `tests/unit/core/background-tasks/cancellation-http.dom.test.tsx`.
    `core/subagent-batches` / `ThreadSubagentBatches` own durable native batches.
    `/api/features` separates SQL availability from startup worker state.
    Show the trigger on default/Custom Agent chats with a running worker, or

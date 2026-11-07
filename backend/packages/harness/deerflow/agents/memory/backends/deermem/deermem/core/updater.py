@@ -1035,6 +1035,10 @@ class MemoryUpdater:
         raw_facts = memory_data.get("facts")
         if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
             raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        for fact in raw_facts:
+            revision = fact.get("revision", 1)
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
@@ -1050,10 +1054,17 @@ class MemoryUpdater:
                 user_id=user_id,
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
-            incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            upsert_revisions = {fact["id"]: (int(current_by_id[fact["id"]].get("revision") or 1) if fact["id"] in current_by_id else None) for fact in incoming_facts}
+            # Backup revisions describe the exported snapshot; writes use the
+            # current snapshot's preconditions, including the fact payload.
+            for fact in incoming_facts:
+                current_revision = upsert_revisions[fact["id"]]
+                if current_revision is not None:
+                    fact["revision"] = current_revision
+            incoming_ids = set(upsert_revisions)
             change_set = {
                 "upserts": incoming_facts,
-                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "upsertRevisions": upsert_revisions,
                 "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
                 "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
             }

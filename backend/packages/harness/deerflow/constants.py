@@ -18,6 +18,11 @@ CONVERSATION_TOOL_USE = "deerflow.tools.conversation:read_conversation"
 # The Gateway sizes reader pages by this tool's tool-output budget entry.
 CONVERSATION_TOOL_NAME = "read_conversation"
 
+# Only these tools' successful presentation paths count as verified delivery in
+# worker receipts and Gateway archive downloads. Keep the tuple ordered for
+# stable receipt projections.
+DELIVERY_PRESENTATION_TOOL_NAMES = ("present_files", "present_shared_artifact")
+
 # Hidden subdirectory (under a thread's outputs dir) that holds the browser
 # tools' per-step screenshots. These are transient live-progress frames, not
 # deliverables, so the workspace-changes scanner excludes this directory. Both

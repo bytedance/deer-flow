@@ -1,60 +1,60 @@
-import { afterEach, expect, rs, test } from "@rstest/core";
+import { afterEach, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { fetch } from "@/core/api/fetcher";
+import * as api from "@/core/background-tasks/api";
 import {
   backgroundTaskQueryKey,
   backgroundTasksQueryKey,
-  useBackgroundTask,
-  useBackgroundTasks,
   useCancelBackgroundTask,
 } from "@/core/background-tasks/hooks";
-import type { BackgroundTaskDetail } from "@/core/background-tasks/types";
+import type {
+  BackgroundTask,
+  BackgroundTaskDetail,
+  BackgroundTaskStatus,
+} from "@/core/background-tasks/types";
+import { enUS } from "@/core/i18n/locales/en-US";
 
-rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
-rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
-rs.mock("@/core/i18n/hooks", () => ({
-  useI18n: () => ({
-    t: { backgroundTasks: { cancelFailed: "Cancel failed" } },
-  }),
+rs.mock("@/core/background-tasks/api", () => ({
+  fetchBackgroundTasks: rs.fn(),
+  fetchBackgroundTask: rs.fn(),
+  cancelBackgroundTask: rs.fn(),
 }));
-rs.mock("sonner", () => ({ toast: { error: rs.fn() } }));
+rs.mock("@/core/i18n/hooks", () => ({ useI18n: () => ({ t: enUS }) }));
 
-const working: BackgroundTaskDetail = {
-  task_id: "task-1",
-  task_name: "Generate report",
-  status: "working",
-  created_at: "2026-08-08T00:00:00Z",
-  updated_at: "2026-08-08T00:00:01Z",
-  error: null,
-  tracking_degraded: false,
-  cancel_requested: false,
-  last_polled_at: null,
-  last_poll_error: null,
-  last_cancel_error: null,
-  cancel_attempt_count: 0,
-  notification_status: "none",
-  notification_error: null,
-  notification_attempt_count: 0,
-  result: null,
-  result_preview: null,
-  result_truncated: false,
-  result_artifact: null,
-  input_required: null,
-};
-const cancelled: BackgroundTaskDetail = {
-  ...working,
-  status: "cancelled",
-  cancel_requested: true,
-};
+const THREAD_ID = "thread-1";
+const TASK_ID = "task-1";
 
-function jsonResponse(value: unknown, status = 200) {
-  return new Response(JSON.stringify(value), {
+function task(status: BackgroundTaskStatus): BackgroundTask {
+  return {
+    task_id: TASK_ID,
+    task_name: "MCP task",
     status,
-    headers: { "Content-Type": "application/json" },
-  });
+    created_at: "2026-10-20T07:00:00Z",
+    updated_at: "2026-10-20T07:00:03Z",
+    error: null,
+    tracking_degraded: false,
+    cancel_requested: status === "cancelled",
+  };
+}
+
+function detail(status: BackgroundTaskStatus): BackgroundTaskDetail {
+  return {
+    ...task(status),
+    last_polled_at: null,
+    last_poll_error: null,
+    last_cancel_error: null,
+    cancel_attempt_count: 0,
+    notification_status: "none",
+    notification_error: null,
+    notification_attempt_count: 0,
+    result: null,
+    result_preview: null,
+    result_truncated: false,
+    result_artifact: null,
+    input_required: null,
+  };
 }
 
 function deferred<T>() {
@@ -66,7 +66,13 @@ function deferred<T>() {
 }
 
 const clients: QueryClient[] = [];
-function setupClient() {
+afterEach(() => {
+  cleanup();
+  for (const client of clients.splice(0)) client.clear();
+  rs.resetAllMocks();
+});
+
+function makeClient(seed: BackgroundTaskDetail): QueryClient {
   const client = new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: Infinity },
@@ -74,170 +80,119 @@ function setupClient() {
     },
   });
   clients.push(client);
-  function wrapper({ children }: { children: ReactNode }) {
+  client.setQueryData(backgroundTasksQueryKey(THREAD_ID), [task(seed.status)]);
+  client.setQueryData(backgroundTaskQueryKey(THREAD_ID, TASK_ID), seed);
+  return client;
+}
+
+function wrapperFor(client: QueryClient) {
+  return function wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
-  }
-  return { client, wrapper };
+  };
 }
 
-afterEach(() => {
-  cleanup();
-  for (const client of clients.splice(0)) client.clear();
-  rs.resetAllMocks();
+test("a detail or list poll that started before the cancel cannot undo it", async () => {
+  const working = detail("working");
+  const cancelled = detail("cancelled");
+  const staleDetail = deferred<BackgroundTaskDetail>();
+  const staleList = deferred<BackgroundTask[]>();
+  rs.mocked(api.fetchBackgroundTask).mockReturnValue(staleDetail.promise);
+  rs.mocked(api.fetchBackgroundTasks).mockReturnValue(staleList.promise);
+  rs.mocked(api.cancelBackgroundTask).mockResolvedValue(cancelled);
+
+  const client = makeClient(working);
+  const { result } = renderHook(() => useCancelBackgroundTask(THREAD_ID), {
+    wrapper: wrapperFor(client),
+  });
+
+  // Both the expanded card's detail poll and the list poll were in flight when
+  // the user pressed Cancel, so both still carry the pre-cancel snapshot.
+  let detailRead!: Promise<BackgroundTaskDetail>;
+  let listRead!: Promise<BackgroundTask[]>;
+  act(() => {
+    detailRead = client.fetchQuery({
+      queryKey: backgroundTaskQueryKey(THREAD_ID, TASK_ID),
+      queryFn: () => api.fetchBackgroundTask(THREAD_ID, TASK_ID),
+    });
+    listRead = client.fetchQuery({
+      queryKey: backgroundTasksQueryKey(THREAD_ID),
+      queryFn: () => api.fetchBackgroundTasks(THREAD_ID),
+    });
+  });
+  expect(api.fetchBackgroundTask).toHaveBeenCalledTimes(1);
+  expect(api.fetchBackgroundTasks).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    await result.current.mutateAsync(TASK_ID);
+  });
+  const detailKey = backgroundTaskQueryKey(THREAD_ID, TASK_ID);
+  const listKey = backgroundTasksQueryKey(THREAD_ID);
+  expect(client.getQueryData<BackgroundTaskDetail>(detailKey)?.status).toBe(
+    "cancelled",
+  );
+  expect(client.getQueryData<BackgroundTask[]>(listKey)?.[0]?.status).toBe(
+    "cancelled",
+  );
+
+  await act(async () => {
+    staleDetail.resolve(working);
+    staleList.resolve([task("working")]);
+    await Promise.allSettled([detailRead, listRead]);
+  });
+
+  // The confirmed cancellation survives the reads that resolved after it, so
+  // the card does not fall back to "working" and resume polling.
+  expect(client.getQueryData<BackgroundTaskDetail>(detailKey)?.status).toBe(
+    "cancelled",
+  );
+  expect(client.getQueryData<BackgroundTask[]>(listKey)?.[0]?.status).toBe(
+    "cancelled",
+  );
 });
 
-for (const { scope, cached } of [
-  { scope: "detail", cached: true },
-  { scope: "detail", cached: false },
-  { scope: "list", cached: true },
-  { scope: "list", cached: false },
-] as const) {
-  test(`a delayed ${cached ? "cached" : "initial"} ${scope} read cannot undo cancellation after the panel closes`, async () => {
-    const delayed = deferred<Response>();
-    const before = scope === "detail" ? working : [working];
-    const confirmed = scope === "detail" ? cancelled : [cancelled];
-    // An unloaded list is populated only by a fresh list GET.
-    const expectedAfterCancel =
-      scope === "list" && !cached ? undefined : confirmed;
-    rs.mocked(fetch).mockImplementation((_url, init) =>
-      init?.method === "POST"
-        ? Promise.resolve(jsonResponse(cancelled))
-        : delayed.promise,
-    );
-    const { client, wrapper } = setupClient();
-    const key =
-      scope === "detail"
-        ? backgroundTaskQueryKey("thread-1", working.task_id)
-        : backgroundTasksQueryKey("thread-1");
-    if (cached) client.setQueryData(key, before);
-    const { result, rerender } = renderHook(
-      ({ enabled }) => ({
-        detail: useBackgroundTask("thread-1", working.task_id, {
-          enabled: enabled && scope === "detail",
-        }),
-        list: useBackgroundTasks("thread-1", {
-          enabled: enabled && scope === "list",
-        }),
-        cancel: useCancelBackgroundTask("thread-1"),
-      }),
-      { initialProps: { enabled: true }, wrapper },
-    );
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
-    // The cancel request can finish after the user closes the panel. Disabled
-    // queries are not refetched by invalidation, so it cannot fence this GET.
-    rerender({ enabled: false });
-    await act(async () => {
-      await result.current.cancel.mutateAsync(working.task_id);
-    });
-    expect(client.getQueryData(key)).toEqual(expectedAfterCancel);
-
-    await act(async () => {
-      // Deliberately ignore transport abort to verify the cache fence as well.
-      delayed.resolve(jsonResponse(before));
-      await delayed.promise;
-    });
-    expect(client.getQueryData(key)).toEqual(expectedAfterCancel);
-
-    // A later legitimate refresh still updates the cache.
-    rs.mocked(fetch).mockResolvedValue(jsonResponse(confirmed));
-    rerender({ enabled: true });
-    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
-    await waitFor(() =>
-      expect(client.getQueryState(key)?.fetchStatus).toBe("idle"),
-    );
-    expect(client.getQueryData(key)).toEqual(confirmed);
-  });
-}
-
-test("cancellation aborts both HTTP reads and preserves sibling tasks and other threads", async () => {
-  const delayedReads: {
-    url: string;
-    signal: AbortSignal | null | undefined;
-    resolve: (value: Response) => void;
-  }[] = [];
-  rs.mocked(fetch).mockImplementation((url, init) => {
-    if (init?.method === "POST")
-      return Promise.resolve(jsonResponse(cancelled));
-    const read = deferred<Response>();
-    delayedReads.push({
-      url: typeof url === "string" ? url : url.url,
-      signal: init?.signal,
-      resolve: read.resolve,
-    });
-    return read.promise;
-  });
-  const { client, wrapper } = setupClient();
-  const otherKey = backgroundTaskQueryKey("other-thread", working.task_id);
-  client.setQueryData(otherKey, working);
-  const { result } = renderHook(
-    () => ({
-      detail: useBackgroundTask("thread-1", working.task_id),
-      list: useBackgroundTasks("thread-1"),
-      other: useBackgroundTask("other-thread", working.task_id),
-      sibling: useBackgroundTask("thread-1", "task-2"),
-      cancel: useCancelBackgroundTask("thread-1"),
-    }),
-    { wrapper },
+test("a failed cancel keeps the cache and lets the in-flight read finish", async () => {
+  const working = detail("working");
+  const refreshed = detail("working");
+  refreshed.last_polled_at = "2026-10-20T07:00:06Z";
+  const staleDetail = deferred<BackgroundTaskDetail>();
+  rs.mocked(api.fetchBackgroundTask).mockReturnValue(staleDetail.promise);
+  rs.mocked(api.cancelBackgroundTask).mockRejectedValue(
+    new Error("Cancel failed"),
   );
-  await waitFor(() => expect(delayedReads).toHaveLength(4));
-  expect(delayedReads.every((read) => read.signal instanceof AbortSignal)).toBe(
-    true,
-  );
-  await act(async () => {
-    await result.current.cancel.mutateAsync(working.task_id);
+
+  const client = makeClient(working);
+  const { result } = renderHook(() => useCancelBackgroundTask(THREAD_ID), {
+    wrapper: wrapperFor(client),
   });
-  expect(delayedReads[0]!.signal!.aborted).toBe(true);
-  expect(delayedReads[1]!.signal!.aborted).toBe(true);
-  expect(delayedReads[2]!.signal!.aborted).toBe(false);
-  expect(delayedReads[3]!.signal!.aborted).toBe(false);
-  // Only the list starts a replacement GET. The confirmed detail is already
-  // authoritative, and unrelated initial detail loads must remain in flight.
-  expect(delayedReads).toHaveLength(5);
-  expect(client.getQueryData(otherKey)).toEqual(working);
-  expect(
-    client.getQueryData(backgroundTaskQueryKey("thread-1", working.task_id)),
-  ).toEqual(cancelled);
+
+  let detailRead!: Promise<BackgroundTaskDetail>;
+  act(() => {
+    detailRead = client.fetchQuery({
+      queryKey: backgroundTaskQueryKey(THREAD_ID, TASK_ID),
+      queryFn: () => api.fetchBackgroundTask(THREAD_ID, TASK_ID),
+    });
+  });
+
   await act(async () => {
-    for (const read of delayedReads) {
-      const value = read.url.includes("?limit=") ? [cancelled] : working;
-      read.resolve(jsonResponse(value));
-    }
+    await expect(result.current.mutateAsync(TASK_ID)).rejects.toThrow(
+      "Cancel failed",
+    );
   });
   expect(
-    client.getQueryData(backgroundTaskQueryKey("thread-1", working.task_id)),
-  ).toEqual(cancelled);
-  await waitFor(() => expect(result.current.sibling.data).toEqual(working));
-});
+    client.getQueryData<BackgroundTaskDetail>(
+      backgroundTaskQueryKey(THREAD_ID, TASK_ID),
+    ),
+  ).toEqual(working);
 
-test("failed cancellation allows a pending detail refresh to finish", async () => {
-  const delayed = deferred<Response>();
-  rs.mocked(fetch).mockImplementation((_url, init) =>
-    init?.method === "POST"
-      ? Promise.resolve(jsonResponse({ detail: "Unavailable" }, 503))
-      : delayed.promise,
-  );
-  const { client, wrapper } = setupClient();
-  const key = backgroundTaskQueryKey("thread-1", working.task_id);
-  client.setQueryData(key, working);
-  const { result } = renderHook(
-    () => ({
-      detail: useBackgroundTask("thread-1", working.task_id),
-      cancel: useCancelBackgroundTask("thread-1"),
-    }),
-    { wrapper },
-  );
-  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   await act(async () => {
-    await expect(
-      result.current.cancel.mutateAsync(working.task_id),
-    ).rejects.toThrow("Unavailable");
+    staleDetail.resolve(refreshed);
+    await detailRead;
   });
-  expect(client.getQueryData(key)).toEqual(working);
-  const completed = { ...working, status: "completed" };
-  await act(async () => {
-    delayed.resolve(jsonResponse(completed));
-  });
-  await waitFor(() => expect(result.current.detail.data).toEqual(completed));
+  expect(
+    client.getQueryData<BackgroundTaskDetail>(
+      backgroundTaskQueryKey(THREAD_ID, TASK_ID),
+    )?.last_polled_at,
+  ).toBe("2026-10-20T07:00:06Z");
 });

@@ -136,8 +136,13 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 
 Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
-HTTPX clients for RAGFlow, LightRAG, You.com, GroundRoute and Webz use
-`asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay on-loop.
+HTTPX clients for several community providers, including RAGFlow, LightRAG,
+You.com, GroundRoute, Webz, Crawl4AI, Browserless, InfoQuest and Jsonify, use
+`asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay on-loop,
+and Browserless and Jsonify own construction as a task so cancellation during
+setup still closes the client it builds.
+The list is non-exhaustive: SearXNG and Jina still construct their clients on
+the loop and should follow the same rule when touched.
 
 ### Harness / App Split
 

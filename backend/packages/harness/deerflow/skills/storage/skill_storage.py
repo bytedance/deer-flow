@@ -372,12 +372,24 @@ class SkillStorage(ABC):
         # to enabled when no explicit config entry exists (so newly
         # installed skills appear active without requiring a manual toggle).
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
             extensions_config = ExtensionsConfig.from_file()
             skills = [dataclasses.replace(s, enabled=extensions_config.is_skill_enabled(s.name, s.category)) for s in skills]
         except Exception as e:
-            logger.warning("Failed to load extensions config: %s", e)
+            # A config that cannot be read says nothing about which skills are
+            # enabled, so the parsed default (``enabled=True``) must not stand
+            # in for an answer: that would turn every disabled skill back on
+            # because of an unrelated defect elsewhere in the file (a malformed
+            # ``mcpServers`` entry, a trailing comma). Fail closed instead —
+            # the skills stay listed, they just cannot be activated until the
+            # config is readable again. The sandbox projection already fails
+            # closed on the same error (``projection._rebuild_public_locked``);
+            # this keeps the runtime half of the gate consistent with it.
+            # ``from_file`` resolves ``$VAR`` placeholders before validation, so
+            # only the failure shape is safe to log (see ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]

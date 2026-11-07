@@ -265,10 +265,13 @@ def test_explicit_skill_policy_eagerly_acquires_and_syncs_existing_thread(
     assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
 
 
+@pytest.mark.parametrize("lazy_projection", [False, True])
 def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
     monkeypatch: pytest.MonkeyPatch,
+    lazy_projection: bool,
 ) -> None:
     provider = _SyncProvider()
+    provider.supports_lazy_agent_skill_isolation = lazy_projection
     middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
     monkeypatch.setattr(
         middleware,
@@ -289,6 +292,147 @@ def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
         reset_sandbox_provider()
 
     assert provider.thread_ids == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+async def test_fresh_skill_projection_defers_acquire_until_first_tool(monkeypatch, async_hook):
+    provider = _AgentSkillSyncProvider()
+    # Bind-mounted providers install the prepared projection during acquire.
+    provider.supports_lazy_agent_skill_isolation = True
+    projection = object()
+    middleware = SandboxMiddleware(available_skills={"allowed"})
+    prepared = []
+
+    def prepare(thread_id, *, user_id):
+        prepared.append((thread_id, user_id))
+        return projection
+
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", prepare)
+    context = {"thread_id": "thread-lazy-policy", "user_id": "owner-policy"}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent({}, runtime) if async_hook else middleware.before_agent({}, runtime)
+        assert result is None
+        assert prepared == [("thread-lazy-policy", "owner-policy")]
+        assert provider.thread_ids == []
+        assert provider.skill_syncs == []
+        assert "sandbox_id" not in context
+
+        tool_runtime = ToolRuntime(state={}, context=context, config={}, stream_writer=lambda _: None, tools=[], tool_call_id="tool-1", store=None)
+        if async_hook:
+            sandbox = await ensure_sandbox_initialized_async(tool_runtime)
+        else:
+            sandbox = ensure_sandbox_initialized(tool_runtime)
+        assert sandbox is provider.sandbox
+        assert provider.thread_ids == ["thread-lazy-policy"]
+        assert provider.user_ids == ["owner-policy"]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+async def test_deferred_skill_projection_still_authorizes_first_tool(monkeypatch, async_hook):
+    provider = _AgentSkillSyncProvider()
+    provider.supports_lazy_agent_skill_isolation = True
+    middleware = SandboxMiddleware(available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: object())
+
+    def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied at first tool")
+
+    async def deny_async(**_kwargs):
+        deny()
+
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution", deny)
+    monkeypatch.setattr("deerflow.sandbox.tools.authorize_sandbox_execution_async", deny_async)
+    context = {"thread_id": "thread-lazy-denied", "user_id": "owner-policy"}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent({}, runtime) if async_hook else middleware.before_agent({}, runtime)
+        assert result is None
+        tool_runtime = ToolRuntime(state={}, context=context, config={}, stream_writer=lambda _: None, tools=[], tool_call_id="tool-1", store=None)
+        with pytest.raises(SandboxAuthorizationError, match="denied at first tool"):
+            if async_hook:
+                await ensure_sandbox_initialized_async(tool_runtime)
+            else:
+                ensure_sandbox_initialized(tool_runtime)
+        assert provider.thread_ids == []
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+@pytest.mark.parametrize("existing", ["checkpoint", "fork", "context", "empty-state", "eager", "upload"])
+async def test_skill_projection_keeps_eager_rebind_and_upload_sync(monkeypatch, async_hook, existing):
+    provider = _AgentSkillSyncProvider()
+    if existing != "upload":
+        provider.supports_lazy_agent_skill_isolation = True
+    projection = object()
+    middleware = SandboxMiddleware(lazy_init=existing != "eager", available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: projection)
+    context = {"thread_id": "thread-policy", "user_id": "owner-policy"}
+    state = {}
+    if existing == "checkpoint":
+        state["sandbox"] = {"sandbox_id": "shared-view-sandbox"}
+    elif existing == "fork":
+        state["sandbox"] = Overwrite({"sandbox_id": "shared-view-sandbox"})
+    elif existing == "context":
+        context["sandbox_id"] = "shared-view-sandbox"
+    elif existing == "empty-state":
+        state["sandbox"] = {}
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        result = await middleware.abefore_agent(state, runtime) if async_hook else middleware.before_agent(state, runtime)
+        assert result is not None
+        assert context["sandbox_id"] == "sync-sandbox"
+        assert provider.thread_ids == ["thread-policy"]
+        assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("async_hook", [False, True])
+@pytest.mark.parametrize("existing", ["checkpoint", "fork", "context"])
+async def test_lazy_projection_existing_binding_still_fails_closed_on_deny(monkeypatch, async_hook, existing):
+    provider = _AgentSkillSyncProvider()
+    provider.supports_lazy_agent_skill_isolation = True
+    middleware = SandboxMiddleware(available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_args, **_kwargs: object())
+
+    def deny(**_kwargs):
+        raise SandboxAuthorizationError("denied before rebinding")
+
+    async def deny_async(**_kwargs):
+        deny()
+
+    monkeypatch.setattr("deerflow.sandbox.middleware.authorize_sandbox_execution", deny)
+    monkeypatch.setattr("deerflow.sandbox.middleware.authorize_sandbox_execution_async", deny_async)
+    context = {"thread_id": "thread-policy", "user_id": "owner-policy"}
+    state = {}
+    if existing == "context":
+        context["sandbox_id"] = "shared-view-sandbox"
+    else:
+        binding = {"sandbox_id": "shared-view-sandbox"}
+        state["sandbox"] = Overwrite(binding) if existing == "fork" else binding
+    set_sandbox_provider(provider)
+    try:
+        runtime = Runtime(context=context)
+        with pytest.raises(SandboxAuthorizationError, match="denied before rebinding"):
+            if async_hook:
+                await middleware.abefore_agent(state, runtime)
+            else:
+                middleware.before_agent(state, runtime)
+        assert provider.thread_ids == []
+        assert provider.skill_syncs == []
+    finally:
+        reset_sandbox_provider()
 
 
 def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquire(

@@ -19,14 +19,11 @@ Preserve the recognition sample and 5,000,000 UTF-8-byte guard. Count incrementa
 on parsing or field-limit errors, report an undetermined count rather than a
 physical-line or sample total.
 
-Keep state `SystemMessage`s; inject transient instructions via request wrappers.
-Skip fully rescued partitions. Fold all raw source in order without human
-anchoring. PII-redact before splitting; budget before escaping. Generated carry:
-marked head/tail within half the raw budget; at most 64 chunks/pass. Commit
-hooks/history/removal only on success. Cap breaches use a bounded process-local
-5m cooldown across builds for the same user/thread/executor/window/policy;
-smaller source or changed policy retries immediately. See the linked contract.
-`trim_tokens_to_summarize=None` uses one unbounded step.
+Fold selected source in order; preserve required context. Copy document metadata
+and direct plaintext; no media decoding/fetching or nested-document traversal.
+PII before splitting, budgets before escaping; hooks/history/removal on success.
+Chunk/carry/cooldown invariants and tests:
+[contract](../../../../../docs/summarization.md).
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
@@ -98,7 +95,7 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
    ordered by application — the last entry produced the final visible bytes — so an
    observer classifies raw→visible transforms from facts rather than by sniffing
    output wording.
-4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries and title input use `redact_text`. Memory admission redacts content, parsed/invalid/legacy call arguments and supported provenance before backend filtering.
+4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries and title input use `redact_text`. Memory admission redacts content, parsed/invalid/legacy call arguments and supported provenance before backend filtering. Disabled PII skips conversion; tool arguments track changes without deep equality. JSON content blocks remain recursive. SDK tests: `tests/test_memory_admission_depth.py`.
 
 5. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
 6. **UploadsMiddleware** - Lead-only current uploads: exact basenames in runtime owner's bucket; skip malformed references/probe errors (debug-log errors). Invalid/display-overflowing sizes use `0`; render >=1 TB compactly without changing stored sizes. Copy messages with metadata, including `response_metadata`.
