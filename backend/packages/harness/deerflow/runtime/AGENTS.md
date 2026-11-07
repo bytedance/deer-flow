@@ -103,7 +103,7 @@ rollback, read the [checkpoint contracts](../../../../docs/runtime-guidance-deta
 
 **Message sequence placement:** Keep backend and frontend message identity rules aligned. Tool results use their own message IDs, assigned on missing-ID callback results before persistence; provider call IDs may repeat. Restore pre-capture ID-less copies from the current lead-call result ID; reset it on a new canonical call, not a usage replay. Keep ID-less legacy rows independent. Details: `backend/docs/runtime-guidance-details.md`.
 
-**Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied.
+**Thread message cursors:** `list_messages` applies both exclusive bounds before `limit`, paging forward whenever `after_seq` is supplied. Direct store calls to `list_messages` and `list_messages_by_run` return no records for `limit=0` across memory, JSONL and SQL; Gateway endpoints still require a positive limit. Parity coverage: `tests/test_run_event_store.py::TestZeroMessageLimit`.
 
 **Journal capture**: Image-only input stops batch scans and later human-event
 capture despite an empty summary. AI summaries strip leading think sections
