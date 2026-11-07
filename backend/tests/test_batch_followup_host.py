@@ -410,3 +410,36 @@ async def test_cancel_batch_tool_requires_runs_cancel_for_followups(batch_host, 
         assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "cancelled"
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_failure_does_not_skip_batch_cancellation(batch_host):
+    """A scheduled-task store failure must not skip batch_continuations cleanup.
+
+    `_run_completion_hook` awaits the scheduler first; an exception there used to
+    leave the claimed follow-up of a loop_capped source run in `dispatching`
+    instead of being cancelled (issue #7969). The worker logs hook errors as
+    non-fatal, so cancellation must still run.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.deps import _run_completion_hook
+
+    controller, batch, repo, _, _, _ = batch_host
+
+    class FailingScheduler:
+        async def handle_run_completion(self, record):
+            raise OSError("schedule store unavailable")
+
+    # The production hook, with a scheduler whose store is unavailable.
+    hook = _run_completion_hook(
+        scheduled_task_service=FailingScheduler(),
+        batch_continuations=controller,
+    )
+
+    # The hook swallows the scheduler error (logged as non-fatal) and still
+    # runs the batch cancellation.
+    await hook(SimpleNamespace(run_id=batch["run_id"], thread_id=batch["thread_id"], status="success", stop_reason="loop_capped"))
+
+    current = await repo.get_batch(batch["id"], user_id=batch["user_id"])
+    assert current["continuation_status"] == "cancelled"
