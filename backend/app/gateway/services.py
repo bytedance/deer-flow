@@ -569,14 +569,16 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     # unmarked ``name="summary"`` would reach the model on the guardrail's
     # genuine-user fallback. Treat it as empty for both steps rather than
     # returning early.
-    source_kwargs = item.get("additional_kwargs")
-    source_kwargs = source_kwargs if isinstance(source_kwargs, dict) else {}
+    raw_kwargs = item.get("additional_kwargs")
+    source_kwargs = raw_kwargs if isinstance(raw_kwargs, dict) else {}
     additional_kwargs = {key: value for key, value in source_kwargs.items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
     if _is_human_message_like(item):
         additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
-    if additional_kwargs == source_kwargs:
+    if additional_kwargs == raw_kwargs:
         # Nothing to change — including the ordinary key-omitted message, which
         # must not gain an empty dict just by passing through here.
+        return item
+    if "additional_kwargs" not in item and not additional_kwargs:
         return item
     return {**item, "additional_kwargs": additional_kwargs}
 
@@ -797,9 +799,18 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 result = {**result, "delegations": cleaned}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
-            result = {**result, "goal": _normalize_external_goal(result["goal"], location="input.goal"), "goal_outcome": None}
+            normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
+            result = {
+                **result,
+                "goal": _strip_external_metadata_from_message_like(normalized_goal),
+                "goal_outcome": None,
+            }
         if "todos" in result:
-            result = {**result, "todos": _normalize_external_todos(result["todos"], location="input.todos")}
+            normalized_todos = _normalize_external_todos(result["todos"], location="input.todos")
+            result = {
+                **result,
+                "todos": None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos],
+            }
     return result
 
 
@@ -841,11 +852,11 @@ def _canonical_run_record_input(
     raw_input: dict[str, Any] | None,
     graph_input: object,
 ) -> dict[str, Any] | None:
-    """Persist the same normalized messages that cross run admission.
+    """Persist the same normalized messages, goal, and todos that cross run admission.
 
     The run record is a client-visible audit surface. Keeping the original raw
-    message there would preserve a non-canonical scope even though the graph
-    receives the validated form.
+    message or state metadata there would preserve a non-canonical scope even
+    though the graph receives the validated form.
     """
     if not isinstance(graph_input, dict):
         return raw_input
@@ -853,6 +864,9 @@ def _canonical_run_record_input(
     messages = graph_input.get("messages")
     if isinstance(messages, list):
         canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    for key in ("goal", "goal_outcome", "todos", "delegations"):
+        if key in graph_input:
+            canonical[key] = graph_input[key]
     return canonical
 
 
