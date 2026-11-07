@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Hashable
 
@@ -16,6 +17,8 @@ from deerflow.persistence.managed_subagents.base import (
     normalize_managed_subagent_name,
 )
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+
+logger = logging.getLogger(__name__)
 
 
 def _normalized_name(name: str) -> str:
@@ -41,7 +44,13 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
     def list(self) -> list[ManagedSubagentDefinition]:
         with self._Session() as session:
             rows = list(session.execute(select(ManagedSubagentRow).order_by(ManagedSubagentRow.name.asc())).scalars())
-        return [ManagedSubagentDefinition.model_validate(row.definition) for row in rows]
+        definitions: list[ManagedSubagentDefinition] = []
+        for row in rows:
+            try:
+                definitions.append(ManagedSubagentDefinition.model_validate(row.definition))
+            except Exception as e:  # noqa: BLE001 — one unreadable definition must not hide the catalog
+                logger.warning("Skipping unreadable managed subagent '%s': %s", row.name, e)
+        return definitions
 
     def create(self, definition: ManagedSubagentDefinition) -> None:
         row = ManagedSubagentRow(
