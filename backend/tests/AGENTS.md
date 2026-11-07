@@ -526,3 +526,11 @@ cases in `test_support_bundle.py` run the real block; harnesses that copy
 async outbound callback before sending the next inbound message. Keep the real
 worker-pool concurrency, preserve per-turn artifact assertions, and stop the
 manager in `finally` so a failure cannot leave tasks using a closed test loop.
+
+## Agent API error diagnostics
+
+`TestAgentsAPIErrorDetail` keeps host paths out of HTTP responses while checking
+the captured `OSError.filename` in server log records. Do not depend on rendered
+traceback path escaping. Inject a permission error for the create route's generic
+500 branch; a file in place of its parent can raise `FileExistsError` on Windows
+and enter the conflict branch. Keep duplicate-agent 409 coverage.
