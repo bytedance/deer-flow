@@ -322,7 +322,7 @@ async def test_invalid_path_name_returns_422(operation: str):
     assert excinfo.value.status_code == 422
 
 
-@pytest.mark.parametrize("name", ["nul", "NUL", "con", "prn", "aux", "com1", "lpt9"])
+@pytest.mark.parametrize("name", ["nul", "NUL", "Nul", "con", "prn", "aux", "com1", "lpt9"])
 async def test_create_managed_subagent_rejects_windows_reserved_names(name: str):
     with pytest.raises(HTTPException) as excinfo:
         await router.create_managed_subagent(
