@@ -2391,6 +2391,20 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert "include the collected results in your final answer" in warning
         assert "file was not saved" in warning
 
+    @pytest.mark.parametrize("layer", ["hash", "frequency"])
+    def test_warning_asks_to_present_created_outputs_before_answering(self, layer):
+        # Told only to stop calling tools, agents skipped present_files for
+        # outputs they had already created, so the run failed its delivery check.
+        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+        runtime = _make_runtime()
+        for i in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+        warning = mw._pending_warnings[_pending_key()][0]
+        assert "If present_files is available" in warning
+        assert "already created in /mnt/user-data/outputs" in warning
+        present = warning.index("present_files call before answering, unless it is the looping tool")
+        assert warning.index("retry the save once") < present < warning.index("produce your final answer")
+
     @pytest.mark.asyncio
     async def test_warned_agent_can_recover_an_existing_file_save_through_the_real_gate(self, tmp_path):
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
@@ -2436,6 +2450,34 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert output.read_text(encoding="utf-8") == "partial results"
         assert result["messages"][-1].content == "Saved partial results."
         assert loop.consume_stop_reason("save-run") is None
+
+    @pytest.mark.asyncio
+    async def test_warned_agent_presents_created_outputs_before_answering(self):
+        presented = []
+
+        @as_tool
+        def bash(command: str) -> str:
+            """Build an output file without running a shell."""
+            return "built"
+
+        @as_tool
+        def present_files(filepaths: list[str]) -> str:
+            """Record the files presented to the user."""
+            presented.extend(filepaths)
+            return "presented"
+
+        loop = LoopDetectionMiddleware(warn_threshold=10, hard_limit=20, tool_freq_warn=3, tool_freq_hard_limit=10)
+        calls = [dict(_bash_call(f"python build_{i}.py"), id=f"build_{i}") for i in range(3)]
+        calls.append({"name": "present_files", "id": "present", "args": {"filepaths": ["/mnt/user-data/outputs/report.docx"]}})
+        model = _CapturingFakeMessagesListChatModel(responses=[*[AIMessage(content="", tool_calls=[call]) for call in calls], AIMessage(content="The report is ready.")])
+        graph = create_agent(model=model, tools=[bash, present_files], middleware=[loop])
+        result = await graph.ainvoke({"messages": [("user", "Build the report.")]}, context={"thread_id": "present-thread", "run_id": "present-run"}, config={"recursion_limit": 30})
+
+        warnings = [message for message in model.seen_messages[3] if isinstance(message, HumanMessage) and message.name == "loop_warning"]
+        assert len(warnings) == 1 and "present_files call before answering" in warnings[0].content
+        assert presented == ["/mnt/user-data/outputs/report.docx"]
+        assert result["messages"][-1].content == "The report is ready."
+        assert loop.consume_stop_reason("present-run") is None
 
     @pytest.mark.parametrize(
         "name,expected",

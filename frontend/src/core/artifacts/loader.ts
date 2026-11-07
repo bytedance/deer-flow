@@ -4,7 +4,7 @@ import { fetch } from "@/core/api/fetcher";
 
 import type { AgentThreadState } from "../threads";
 
-import { buildWriteFileDraftContent } from "./preview";
+import { buildWriteFileDraftContent, parseWriteFileArtifact } from "./preview";
 import { urlOfArtifact } from "./utils";
 
 function fnv1aHash(value: string): string {
@@ -52,11 +52,13 @@ export async function loadArtifactContent({
   threadId,
   isMock,
   full = false,
+  signal,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   full?: boolean;
+  signal?: AbortSignal;
 }) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
@@ -65,6 +67,7 @@ export async function loadArtifactContent({
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url, {
     cache: "no-store",
+    signal,
     headers: full
       ? undefined
       : { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },
@@ -122,6 +125,11 @@ export function loadArtifactContentFromToolCall({
   url: string;
   thread: BaseStream<AgentThreadState>;
 }) {
+  const target = parseWriteFileArtifact(urlString);
+  if (!target) {
+    return undefined;
+  }
+
   const draftContent = buildWriteFileDraftContent({
     filepath: urlString,
     messages: thread.messages,
@@ -130,9 +138,7 @@ export function loadArtifactContentFromToolCall({
     return draftContent;
   }
 
-  const url = new URL(urlString);
-  const toolCallId = url.searchParams.get("tool_call_id");
-  const messageId = url.searchParams.get("message_id");
+  const { messageId, toolCallId } = target;
   if (messageId && toolCallId) {
     const message = thread.messages.find((message) => message.id === messageId);
     if (message?.type === "ai" && message.tool_calls) {

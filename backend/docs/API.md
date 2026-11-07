@@ -62,8 +62,9 @@ patches preserve each other's changes, and same-field writes are last-commit-win
 Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
 notification permission remains device-local and is not changed by this API.
 `locale` is the web UI language; the web app writes it after sign-in and on
-every language switch, and scheduled-task IM notices are written in it (without
-it they use `channel_connections.notification_locale`).
+every language switch, and scheduled-task IM notices and the IM `/connect` and
+`/goal` replies are written in it (without it they use
+`channel_connections.notification_locale`).
 
 ### Personal Access Tokens
 
@@ -384,7 +385,11 @@ the next request without restarting the Gateway. IM channel runs get the same
 default unless a channel `session.config` sets `recursion_limit` (GitHub channel
 runs have their own floor; see
 [CONFIGURATION.md](CONFIGURATION.md#recursion-limits)); embedded
-`DeerFlowClient` runs retain their own defaults and override paths.
+`DeerFlowClient` runs retain their own defaults and override paths. A run that
+reaches the limit ends with status `error` and `stop_reason: "recursion_capped"`;
+its stream `error` event and the `/wait` error envelope use the name
+`GraphRecursionError`, and the message lists up to five outputs the run created
+but did not present.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -724,6 +729,38 @@ the existing Agent. Import is create-only and never restores runtime state.
 **Error behavior:**
 - `/api/agents` and `/api/user-profile` routes answer unexpected failures with a fixed `500` detail such as `{"detail": "Failed to get agent"}`; an unparsable agent `config.yaml` or a filesystem error names host paths, so the full exception stays in server logs
 - Scheduled-task create and update return `invalid_assistant` (422) with a fixed message when the selected agent's config cannot be loaded
+
+### Plugin Diagnostics
+
+`GET /api/plugins/diagnostics`
+
+Returns a snapshot of the current Gateway process's retained extension diagnostics.
+Requires an authenticated administrator; ordinary users and PAT credentials,
+including an administrator's PAT, cannot access it. The existing auth-disabled
+mode retains its synthetic administrator behavior.
+
+```json
+[
+  {
+    "source": "example_extension:install",
+    "level": "error",
+    "summary": "Extension registration failed. See Gateway logs for details."
+  }
+]
+```
+
+- `source` is an ASCII Python entry-point identifier of at most 256 characters;
+  other source strings are replaced with `[redacted]`.
+- `level` is `debug`, `info`, `warning`, or `error`; unexpected levels become `unknown`.
+- `summary` is fixed host text describing a recognized loading, registration,
+  router, or service failure, with a generic fallback for other diagnostics.
+  Raw exception messages, configuration, paths, and tracebacks are not returned.
+
+This read does not clear or modify diagnostics. It reuses the existing 1000-entry
+retention limit, returns `[]` when empty, and sends `Cache-Control: private, no-store`.
+It is a process-local view, not an aggregate across Gateway workers. Task lifecycle
+and observer failures that are only logged do not appear in this list. Consult
+Gateway logs for full details.
 
 ### Models
 

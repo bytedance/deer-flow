@@ -1,5 +1,21 @@
 # Router contracts
 
+Trash listing resolves the live retention configuration off-loop before its
+best-effort sweep. Configuration failures skip automatic cleanup and preserve
+the listing; never substitute a default policy for an unreadable one. Resolve
+the policy before consuming the reconciliation throttle window.
+
+HTTP creation holds `goal_thread_lock` from the idempotency lookup through the
+initial checkpoint write. Same-id HTTP creates must return the existing row,
+including in memory mode; retain the native memory store's overwrite contract
+and SQL duplicate-insert recovery across workers. Release on failure/cancellation
+without blocking different thread IDs. Tests: `test_thread_create_idempotency.py`.
+
+`GET /api/plugins/diagnostics` uses `require_admin_user` before reading the
+canonical runtime diagnostic snapshot. Return bounded entry-point identifiers,
+known levels and fixed summaries; raw messages stay in logs. Never clear the
+sink or expand PAT permissions.
+
 Branch metadata inherits valid `assistant_id` values verbatim. Validate with
 `custom_agent_name` and clear invalid legacy values to null in the new row;
 leave the source record unchanged.
@@ -7,7 +23,10 @@ leave the source record unchanged.
 Console usage attributes legacy rows without a per-model usage map to
 `model_name`, including their recorded `total_input_tokens`. Accumulate those
 inputs with newer usage buckets for the same model; do not infer cache hits.
-Regression coverage lives in `tests/test_console_router.py`.
+A counter that does not coerce to an integer contributes zero tokens instead
+of aborting the request, and non-finite pricing leaves that model's cost
+unreported; rows whose counters are all unusable still fall back to run-level
+totals. Regression coverage lives in `tests/test_console_router.py`.
 
 Shared scheduled-task update validation preserves an unchanged future `once`
 instant on a live task inside `scheduler.min_once_delay_seconds`; new/changed
@@ -88,3 +107,17 @@ State updates synchronize titles into thread metadata only for the root checkpoi
 namespace. Nonroot writes preserve the conversation title, branch-title sequence
 and activity timestamp. `tests/test_threads_router.py` checks metadata/search
 isolation and root title synchronization in full and delta modes.
+
+Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
+`/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
+`get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
+config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.
+
+Managed-model `/discover` and `/import` require administrator access before
+reading credentials or making outbound requests. Discovery is read-only and
+bounded (20 seconds, 2 MiB, 2,000 IDs/20 pages); it never follows redirects
+and requests identity encoding, rejecting compressed bodies before decoding.
+Import probes each new profile, saves through the drained writer, and atomically
+deduplicates retries without changing existing disabled profiles. Saved-key reuse
+requires matching connection and revision, checked again under the write lock
+after probing (409 on change); provider errors remain redacted.

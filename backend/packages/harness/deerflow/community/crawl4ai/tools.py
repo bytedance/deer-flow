@@ -118,7 +118,8 @@ async def web_fetch_tool(url: str) -> str:
         url: The URL to fetch the contents of.
     """
     try:
-        cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
+        # Read config once, off the event loop (it stats and hashes the config files); pass the values down.
+        cfg = await asyncio.to_thread(_get_tool_config, "web_fetch")
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
         url_error = await asyncio.to_thread(validate_public_http_url, url, allow_private_addresses=allow_private_addresses)
         if url_error:

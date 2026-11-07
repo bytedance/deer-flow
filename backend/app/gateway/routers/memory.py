@@ -1,6 +1,7 @@
 """Memory API router for retrieving and managing global memory data."""
 
 import asyncio
+import re
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
@@ -9,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.persistent_writes import run_drained_write
+from app.gateway.secret_masking import mask_secret_values, normalize_config_key
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
@@ -234,6 +236,18 @@ class FactPatchRequest(BaseModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
 
+# Anchored at the end of the key: DeerMem knobs such as ``token_counting`` and
+# ``guaranteed_token_budget`` are not secrets, and ``api_key_env`` names an
+# environment variable rather than holding the key. This is a denylist: plural
+# ``tokens`` stays out because ``max_injection_tokens`` is a knob, and bare
+# ``key``, ``auth`` or ``session`` are too generic to mask.
+_SECRET_CONFIG_KEY_RE = re.compile(r"(^|_)(api_?keys?|access_keys?|secret_keys?|private_keys?|auth_keys?|secrets?|token|passwords?|passwds?|credentials?|authorization|bearer|cookies?)$")
+
+
+def _is_secret_config_key(key: str) -> bool:
+    return bool(_SECRET_CONFIG_KEY_RE.search(normalize_config_key(key)))
+
+
 class MemoryConfigResponse(BaseModel):
     """Response model for memory configuration."""
 
@@ -242,7 +256,13 @@ class MemoryConfigResponse(BaseModel):
     injection_enabled: bool = Field(..., description="Whether memory is injected into the system prompt (call-site gate).")
     shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
     manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
-    backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
+    backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend); credential values such as api_key are masked as ***.")
+
+    @field_validator("backend_config")
+    @classmethod
+    def _mask_backend_secrets(cls, value: dict) -> dict:
+        """Config loading already resolved ``$VAR`` references, so keys would be plaintext."""
+        return mask_secret_values(value, _is_secret_config_key, keep_unset=True)
 
 
 class MemoryStatusResponse(BaseModel):

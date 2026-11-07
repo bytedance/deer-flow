@@ -220,3 +220,9 @@ at most four distinct whitespace-separated keywords (at least two characters),
 within the same authorized knowledge base, and merges duplicate evidence. This
 helps model-generated keyword combinations match the upstream lexical search;
 it does not perform unrestricted search or retry authorization/provider errors.
+
+Document details are checked in batches of at most four concurrent requests per
+search. Every selected document is validated before retrieval; retrieved evidence
+is validated before returning results. Checks remain request-local and results
+retain provider order. A failed or cancelled batch cancels and drains its other
+requests; it never falls back to broader scope or returns partial evidence.

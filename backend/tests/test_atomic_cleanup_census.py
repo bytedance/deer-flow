@@ -69,3 +69,59 @@ def test_agent_store_write_keeps_the_publish_error_when_cleanup_fails(tmp_path, 
 
     with pytest.raises(OSError, match="replace failed"):
         FileAgentStore._write(agent_dir, {"name": "planner"}, "# SOUL")
+
+
+def test_managed_subagent_write_removes_the_temp_when_the_write_fails(tmp_path, monkeypatch):
+    """A failure before the publish still has to discard the staged file."""
+    from deerflow.persistence.managed_subagents import file as store_module
+    from deerflow.persistence.managed_subagents.base import ManagedSubagentDefinition
+
+    definition = ManagedSubagentDefinition(
+        name="planner",
+        description="plans",
+        system_prompt="plan things",
+    )
+
+    def _failing_fsync(*_args, **_kwargs):
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(store_module.os, "fsync", _failing_fsync)
+
+    with pytest.raises(OSError, match="fsync failed"):
+        store_module.FileManagedSubagentStore._atomic_write(tmp_path / "planner.json", definition)
+
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_agent_store_write_removes_the_temp_when_the_write_fails(tmp_path, monkeypatch):
+    """The staging helper must register its path before writing the payload."""
+    from deerflow.persistence.agents import file as store_module
+
+    agent_dir = tmp_path / "agents"
+    agent_dir.mkdir()
+
+    real_named_tempfile = store_module.tempfile.NamedTemporaryFile
+
+    class _FailingWrite:
+        """A real staged file whose payload write fails."""
+
+        def __init__(self, *args, **kwargs):
+            self._inner = real_named_tempfile(*args, **kwargs)
+            self.name = self._inner.name
+
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *exc_info):
+            return self._inner.__exit__(*exc_info)
+
+        def write(self, *_args, **_kwargs):
+            raise OSError("write failed")
+
+    monkeypatch.setattr(store_module.tempfile, "NamedTemporaryFile", _FailingWrite)
+
+    with pytest.raises(OSError, match="write failed"):
+        store_module.FileAgentStore._write(agent_dir, {"name": "planner"}, "# SOUL")
+
+    assert [p.name for p in agent_dir.iterdir()] == []

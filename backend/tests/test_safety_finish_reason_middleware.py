@@ -525,9 +525,9 @@ class TestDetectorWiring:
 class TestFromConfig:
     def test_default_config_uses_builtin_detectors(self):
         mw = SafetyFinishReasonMiddleware.from_config(SafetyFinishReasonConfig())
-        assert len(mw._detectors) == 3
+        assert len(mw._detectors) == 4
         names = {d.name for d in mw._detectors}
-        assert names == {"openai_compatible_content_filter", "anthropic_refusal", "gemini_safety"}
+        assert names == {"openai_compatible_content_filter", "openai_responses_content_filter", "anthropic_refusal", "gemini_safety"}
 
     def test_custom_detectors_loaded_via_reflection(self):
         cfg = SafetyFinishReasonConfig(

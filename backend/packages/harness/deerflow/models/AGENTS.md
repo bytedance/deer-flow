@@ -78,7 +78,8 @@ generic `thinking_enabled` / `reasoning_effort` to it, and
 subagents, summarization, title, one-shot utilities): a required-thinking model
 never enters the disable branch, effort is mapped through aliases or the default
 and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
+template exists. For a top-level effort contract, a disabled template that sets
+`reasoning_effort: "none"` wins over explicit or default request effort. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
 byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
 OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
 the same policy first so run metadata reports the effective values. Design note:
@@ -242,6 +243,15 @@ Preset drafts cannot supply endpoints or adapter paths. Legacy custom
 never infer that adapter from a model-name substring. Reads do not migrate the
 catalog. New names are allocated under the existing catalog lock with bounded
 ASCII slugs and random suffixes; edits preserve names and references.
+
+Moonshot's two exact K3.1 Pro IDs use required thinking, `dialect=none`, preserved
+history and native `low/high/max` effort (default `max`, no aliases). The shared
+DeepSeek adapter gates final request normalization on the official Moonshot
+endpoint and effective request model, including an `extra_body.model` override.
+Omit the unsupported `thinking` switch and fixed sampling keys at both payload
+levels without mutating caller mappings; the SDK merges `extra_body` last.
+Keep K2.5, unknown IDs and other endpoints unchanged. Offline SDK coverage:
+`tests/test_managed_moonshot.py`; live acceptance is a separate validation.
 
 The admin-only `/api/managed-models/providers` exposes form metadata, not routing.
 Full updates require the current revision. Omitted keys are retained only for

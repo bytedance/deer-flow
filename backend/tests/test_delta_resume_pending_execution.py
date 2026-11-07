@@ -326,7 +326,8 @@ async def test_worker_does_not_report_success_after_discarding_pending_tools(che
 
 @pytest.mark.parametrize("selector", ["paused", "input", "completed"])
 @pytest.mark.parametrize("cleanup", ["ordinary", "edit", "rollback", "edit-rollback"])
-async def test_worker_preserves_non_send_pending_nodes(checkpointer, monkeypatch, selector, cleanup):
+@pytest.mark.parametrize("resume_input", [Command(resume="continue"), None], ids=["command", "static"])
+async def test_worker_preserves_non_send_pending_nodes(checkpointer, monkeypatch, selector, cleanup, resume_input):
     graph, manager, calls, paused, head = await _paused_worker(checkpointer, "delta", branch_tasks=True)
     selected = paused if selector == "paused" else await _earlier_checkpoint_without_sends(graph, checkpointer, selector)
     for snapshot in (selected, head):
@@ -346,7 +347,7 @@ async def test_worker_preserves_non_send_pending_nodes(checkpointer, monkeypatch
 
         monkeypatch.setattr(manager, "set_status_if_not_cancelled", cancellation_wins)
 
-    record = await _worker(graph, checkpointer, manager, "delta", config, Command(resume="continue"), metadata={"replay_kind": "edit"} if "edit" in cleanup else None)
+    record = await _worker(graph, checkpointer, manager, "delta", config, resume_input, metadata={"replay_kind": "edit"} if "edit" in cleanup else None)
 
     assert record.status == RunStatus.error
     if "rollback" in cleanup:
@@ -365,7 +366,7 @@ async def test_worker_preserves_non_send_pending_nodes(checkpointer, monkeypatch
     assert after.next == ("tools",)
 
     monkeypatch.setattr(manager, "set_status_if_not_cancelled", original_set_status)
-    recovered = await _worker(graph, checkpointer, manager, "delta", _config("delta"), Command(resume="continue"))
+    recovered = await _worker(graph, checkpointer, manager, "delta", _config("delta"), resume_input)
     assert recovered.status == RunStatus.success
     assert calls == ["probe"]
     messages = (await graph.aget_state(_config("delta"))).values["messages"]

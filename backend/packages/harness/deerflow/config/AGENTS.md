@@ -30,7 +30,9 @@ explicitly carries forward the existing owner's display name when re-bootstrappi
 the Gateway explicitly overrides it when supplied, including null to clear.
 Both stores use `parse_agent_config` to ignore only an invalid stored
 `display_name` on read, logging the agent identifier without the invalid value
-and without rewriting storage. Other config errors still
+and without rewriting storage. It also reads a stored null `description`
+(a bare YAML key, or what `PUT /api/agents/{name}` used to write) as `""`; that
+route now stores an explicit null as `""`. Other config errors still
 raise, and API create/update validation remains strict.
 
 **Main Configuration** (`config.yaml`):
@@ -68,6 +70,9 @@ working-directory changes cannot redirect it. Failed explicit loads preserve the
 prior pin; reset, injection and argument-less reload clear it. Ambient reads never
 pin a path. Runtime-scoped overrides bypass the singleton lock;
 `peek_loaded_app_config()` also returns the existing snapshot without locking.
+Each read stats and hashes `config.yaml` and `extensions_config.json`, so async
+request paths call it through `asyncio.to_thread` (Gateway route and plugin
+authorization in `app/gateway/authz.py`).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.
 
@@ -188,7 +193,7 @@ Tests: `tests/test_secret_file.py`, `tests/test_credentials_key.py`.
 - `mcpServers` - Map of server name → config (enabled, type, command, args, env, url, headers, oauth, description, `routing`, `tools`, `tool_call_timeout`, `session_init_timeout`). `routing.mode="prefer"` emits `<mcp_routing_hints>` prompt guidance; if `tool_search` defers the hinted tool, `McpRoutingMiddleware` can also auto-promote matching deferred schemas before the model call. It does not hard-disable other tools. `session_init_timeout` (default `DEFAULT_MCP_SESSION_INIT_TIMEOUT` = 60s, `null` to disable) bounds server bring-up: tool discovery and persistent stdio session initialization, so a hung server cannot block agent construction indefinitely; durable HTTP/SSE task calls use it for their ephemeral session initialization too. `tool_call_timeout` bounds individual stdio calls and durable-task calls on every transport; other HTTP/SSE tools use transport-level timeouts.
 - `tool_search.auto_promote_top_k` - Global MCP routing auto-promote breadth. Default `3`, clamped to `1..5`; applies only when `tool_search.enabled=true` and only to deferred MCP tools with `routing.mode="prefer"` and non-empty keywords. For lead agents the deferred catalog is built from the full configured MCP set; auto-promotion never grants authority — it only raises visibility for tools already admitted to the agent's catalog, while assembly and execution authorization still apply independently.
 - `skills` - Map of skill name → state (enabled)
-- `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs}` objects. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
+- `middlewares` - `AgentMiddleware` entries for lead and subagent runtime extension: class-path strings or `{class, kwargs, apply_to}` objects. Optional `apply_to` is `both` (default), `lead`, or `subagent`; strings always apply to both chains. Validate all entries before building agents; excluded entries are not imported or constructed. `kwargs` values must be JSON types; YAML dates and timestamps are coerced to ISO strings so they match JSON. `config.yaml -> extensions` can override these fields after validation; overrides are replace-per-field, not list concatenation.
 
 Gateway API endpoints and `DeerFlowClient` methods can modify MCP servers and skill state at runtime; their `extensions_config.json` writes use the shared atomic replacement helper, while `middlewares` remains an operator-controlled config-file extension point.
 
@@ -222,4 +227,24 @@ endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 
 ### Web model provider presets
 
+The five exact OpenAI GPT-6 IDs in `OPENAI_GPT6_MODELS` explicitly select Responses:
+their preset supplies `base_url`, which intentionally bypasses the factory's
+fallback routing. Astra and 6.1 Sol require thinking; Terra, Sol and Luna can
+disable it with `none`. For optional presets, the enable template defaults to
+`medium` and the disabled template's `none` takes precedence over request effort.
+Explicit reasoning overrides discard incompatible preset effort values while
+preserving non-effort templates and provider-owned Responses routing. Translate
+saved effort paths to ChatOpenAI's `reasoning_effort` on a runtime copy, leaving
+encrypted records unchanged. After resolving effort and caller overrides, omit
+temperature, top_p and top_logprobs for these official presets unless effort is
+`none`; preserve sampling for that disabled mode and other providers.
+Keep custom endpoints and unknown IDs unchanged. Real SDK probe, saved-chat and tool-follow-up coverage:
+`tests/test_managed_openai_gpt6.py`.
+
 Managed model provider presets live only in `managed_model_providers.py`. `managed_models.py` reads legacy custom encrypted records compatibly and converts presets into ModelConfig without changing YAML, previous snapshots or injected configurations. See the managed-model section in `../models/AGENTS.md` and the Web registration section of `backend/docs/CONFIGURATION.md`.
+
+Catalog imports use `ManagedModelStore.save(deduplicate=True)` under the existing
+thread/process lock, checking the saved source revision before deduplication
+by provider, endpoint, key and model ID. Ordinary edits
+retain revision checks. `_managed_provider` is private runtime display metadata;
+it must never enter serialized config or SDK request kwargs.

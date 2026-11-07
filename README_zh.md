@@ -433,6 +433,8 @@ DeerFlow 支持可配置的 MCP Server 和 skills，用来扩展能力。
 
 DeerFlow 支持从即时通讯应用接收任务。只要配置完成，对应渠道会自动启动，而且都不需要公网 IP。
 
+渠道不支持发送附件时，原回复会直接说明。部分或全部上传失败时，只要平台仍允许回复，DeerFlow 会补一条汇总提示，列出未发出的文件；全部成功时不重复确认。文件继续保留在 DeerFlow 会话中，回复窗口过期只记录失败，不自动切换为主动通知。
+
 `channels/store.json` 含无效 UTF-8 字节时，采用与 JSON 格式损坏相同的恢复方式：SQL 迁移记录警告并跳过，保留原文件，让渠道可以继续启动；memory 后端的 JSON 存储记录警告并从空状态开始，在下次写入时替换该文件。
 
 DeerFlow 还可以在 workspace UI 里暴露用户自有的 IM 渠道连接。启用 `channel_connections` 后，已登录用户可以从侧边栏 / Settings > Channels 绑定 Telegram、Slack、Discord、Feishu/Lark、DingTalk、WeChat、WeCom、QQ 或 Buzz。它复用现有的 `channels.*` 出站传输，因此不需要公网 IP 或 provider 回调地址。入站 IM 消息会以所连接的 DeerFlow 用户身份运行。设置和安全注意事项参见 [IM Channel Connections](backend/docs/IM_CHANNEL_CONNECTIONS.md)。
@@ -710,6 +712,18 @@ DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开
 
 ## 核心特性
 
+### Token 用量统计
+
+点击侧边栏的 **Token 用量**（`/workspace/usage`），查看近 7/30 天的用量、
+每日输入/输出 Token、各模型的缓存命中输入 Token，以及支持失败筛选和分页的
+运行记录。运行记录包含所有日期，不受图表所选周期限制。
+
+此功能需要 `runs:read` 权限和 SQLite 或 PostgreSQL 数据库，静态演示不提供统计。
+数据来自已持久化的服务商用量；运行过程中或服务商未返回用量时可能不完整，不能
+作为服务商账单。缓存命中 Token 已包含在输入 Token 中。每日分桶使用浏览器当前
+UTC 偏移，并按运行的创建日期归属。页面复用现有 `/api/console` 接口，保留服务端
+价格配置及可选的费用、币种字段。
+
 ### Skills 与 Tools
 
 Skills 是 DeerFlow 能做“几乎任何事”的关键。
@@ -822,7 +836,7 @@ Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 
 
 重新生成此前的回答时，会沿用当前对话的 goal 和已用续跑预算，不会恢复已清除或已达成的旧 goal。重放历史 checkpoint 时会移除旧回答的达成记录，避免把它当作新回答已经达成的证明。
 
-Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
+Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为什么停下，并在 goal 达成后显示「目标已达成」提示；设置了 goal 时不能编辑最后一条消息。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 IM 里，`/goal` 还会说明 goal 是否在进行中、自动续跑为什么停下，或者 goal 已达成（保留到下一次修改 goal），并使用绑定账号在网页界面中选择的语言（未设置时用 `channel_connections.notification_locale`）。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
 ### 手动上下文压缩
 
@@ -839,6 +853,11 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
+
+显式后台 `batch_task` 可用 `depends_on` 声明同批条目的前置关系，前置工作完成后即可继续，
+无需等待无关任务。用户已要求后续汇总或交付时，可用可选的 `continuation` 登记一次主 Agent 接续；
+启用 Goal 时仍由 Goal 负责续跑。执行、取消、授权和恢复范围见
+[批次依赖与完成接续说明](backend/docs/BATCH_CONTINUATION.md)。
 
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 

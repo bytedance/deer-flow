@@ -4,7 +4,7 @@
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a
 PTY, while `/v1/bash` uses a subprocess pipe that stays open for writes. Keep
-persistent shell commands unchanged: the Lark broker shim already ignores TTY
+persistent shell stdin unchanged: the Lark broker shim already ignores TTY
 input. Only fresh `_run_bash_exec` calls prefix the original command with
 `exec < /dev/null` so default stdin gets immediate EOF; explicit
 pipes/heredocs/files still override fd0. Those sessions are created and
@@ -20,7 +20,24 @@ INFO logs contain argc/exit/elapsed only, never argument values.
 
 Regressions: `tests/test_aio_sandbox.py`, `tests/test_lark_broker.py`.
 
+## Command cancellation
+
+Managed bash uses existing async exec/poll APIs without retrying execution.
+Read only the current console entry; keep exit codes and persistent-shell stdin.
+Legacy Shell needs a same-line owner prefix. Poll by returned session/command identity; stop inherited owner processes through
+a separate fixed control command with pidfds. Missing command state or cleanup
+receipts fence reuse through existing quarantine. New output from a running
+command needs its next offset; empty polls retain the previous offsets.
+Markers support cooperative cleanup, not hostile-code isolation.
+
 ## Reuse admission
+
+Open-mode creation returns its port reservation when the Docker or Apple
+Container CLI raises `FileNotFoundError` or `PermissionError` during spawn.
+Catch these only around the CLI call, preserving the original exception;
+post-start errors cannot prove absence. Restricted creation must not opt in:
+its proxy may already own the port, even if the final sandbox CLI cannot start.
+Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
 
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes
@@ -81,6 +98,24 @@ Warm-to-active promotion clears an obsolete in-memory fence under the metadata
 lock, only for the entry that passed reuse checks; a changed entry must retry.
 Partial shutdown raises and remains retryable; successful resources are not retried,
 and cleanup infrastructure closes only after every owned teardown completes.
+
+Signal handlers are a fallback for hosts without a lifespan (embedded
+`DeerFlowClient`, scripts). The handler runs `shutdown()` synchronously and
+force-destroys every sandbox, so on the Gateway's event-loop thread it would
+freeze the loop and kill in-flight runs before uvicorn starts the drain. Under
+`hold_sandbox_shutdown_ownership()` the constructor therefore installs only
+SIGHUP, which uvicorn does not handle; SIGTERM/SIGINT go to uvicorn and the
+lifespan hook shuts the provider down after the run drain and MCP teardown. A
+provider built before the declaration keeps its handlers: the Gateway declares
+first, and uvicorn already replaced any earlier handler and re-raises captured
+signals only after lifespan shutdown.
+
+`shutdown()` closes admission (`_admission_closed`) under `_lock` before its
+snapshot and never reopens it, even when a failed teardown resets
+`_shutdown_called` for retry. `acquire`/`acquire_async`, the post-serializer
+recheck and every active commit (warm reclaim, discovery, create) then raise
+`SandboxCapacityExceededError(reason="shutdown")`. A refused warm reclaim stays
+warm for shutdown to destroy; a refused create rolls back its container.
 
 Broker capability failures are unknown, never confirmed negatives. Cache only
 successful observations per provisioner endpoint/auth identity; a failed refresh

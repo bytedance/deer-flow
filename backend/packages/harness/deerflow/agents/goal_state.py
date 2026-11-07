@@ -30,6 +30,7 @@ class GoalState(TypedDict):
     no_progress_count: int
     max_no_progress_continuations: int
     last_evaluation: NotRequired[dict[str, Any]]
+    last_batch_wakeup_run_id: NotRequired[str]
 
 
 class GoalOutcomeState(TypedDict):

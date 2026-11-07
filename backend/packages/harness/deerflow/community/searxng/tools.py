@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -36,8 +37,13 @@ def _get_tool_config(tool_name: str) -> dict | None:
     return extras if extras is not None else {}
 
 
-def _get_searxng_client() -> SearxngClient:
-    cfg = _get_tool_config("web_search")
+_UNSET = object()
+
+
+def _get_searxng_client(cfg: dict | None = _UNSET) -> SearxngClient:
+    """Build a SearXNG client, from ``cfg`` when the caller already read it."""
+    if cfg is _UNSET:
+        cfg = _get_tool_config("web_search")
     base_url = "http://localhost:8088"
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
@@ -53,7 +59,9 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     try:
-        cfg = _get_tool_config("web_search")
+        # Config resolution stats and hashes the config files; keep it off the
+        # event loop, and build the client from the same read.
+        cfg = await asyncio.to_thread(_get_tool_config, "web_search")
         max_results = 5
         if cfg is not None:
             raw = cfg.get("max_results", max_results)
@@ -69,7 +77,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
                         max_results,
                     )
 
-        client = _get_searxng_client()
+        client = _get_searxng_client(cfg)
         search_kwargs: dict[str, object] = {"max_results": max_results}
         if time_range is not None:
             search_kwargs["time_range"] = time_range

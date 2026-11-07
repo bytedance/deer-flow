@@ -48,21 +48,14 @@ models:
   <Tabs.Tab>
 ```yaml
 models:
-  - name: claude-3-5-sonnet
+  - name: claude-sonnet-5-5
     use: langchain_anthropic:ChatAnthropic
-    model: claude-3-5-sonnet-20241022
+    model: claude-sonnet-5-5
     api_key: $ANTHROPIC_API_KEY
     default_request_timeout: 600.0
     max_retries: 2
     max_tokens: 8192
     supports_vision: true
-    supports_thinking: true
-    when_thinking_enabled:
-      thinking:
-        type: enabled
-    when_thinking_disabled:
-      thinking:
-        type: disabled
 ```
   </Tabs.Tab>
   <Tabs.Tab>
@@ -223,24 +216,46 @@ Configure which tools the agent has access to. The defaults use DuckDuckGo (no A
 ```yaml
 tools:
   # Web search (choose one)
-  - use: deerflow.community.ddg_search.tools:web_search_tool # default, no key required
-  # - use: deerflow.community.tavily.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool # default, no key required
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tavily.tools:web_search_tool
   #   api_key: $TAVILY_API_KEY
 
   # Web fetch (choose one)
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
 
   # Image search
-  - use: deerflow.community.image_search.tools:image_search_tool
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
 
   # File operations
-  - use: deerflow.sandbox.tools:ls_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:glob_tool
-  - use: deerflow.sandbox.tools:grep_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-  - use: deerflow.sandbox.tools:str_replace_tool
-  - use: deerflow.sandbox.tools:bash_tool
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
 ```
 
 ### Database backend

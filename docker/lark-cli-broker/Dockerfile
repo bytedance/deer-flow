@@ -54,15 +54,18 @@ COPY docker/lark-cli-init/build-runtime.sh /usr/local/bin/build-runtime.sh
 RUN chmod +x /usr/local/bin/build-runtime.sh \
     && LARK_CLI_VERSION="${LARK_CLI_VERSION}" /usr/local/bin/build-runtime.sh /opt/lark-cli
 
-# ── Final image: python3 + the staged real binary + the broker module ────────
+# ── Final image: python3 + the staged real binary + the broker runtime ───────
 FROM python:3.12-slim
 
 ARG LARK_CLI_VERSION=v1.0.65
 ENV LARK_CLI_VERSION=${LARK_CLI_VERSION}
 
 COPY --from=builder /opt/lark-cli /opt/lark-cli
-# Single stdlib-only module drives both install-shim and serve.
+# Bundle the broker's stdlib-only dependency closure without installing the harness.
 COPY backend/packages/harness/deerflow/integrations/lark_broker.py /opt/broker/lark_broker.py
+COPY backend/packages/harness/deerflow/utils/atomic_write.py \
+     backend/packages/harness/deerflow/utils/file_revision_metadata.py \
+     /opt/broker/deerflow/utils/
 COPY docker/lark-cli-broker/entrypoint.sh /usr/local/bin/lark-cli-broker
 RUN chmod +x /usr/local/bin/lark-cli-broker
 

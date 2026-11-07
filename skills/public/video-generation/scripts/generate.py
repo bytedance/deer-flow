@@ -82,6 +82,41 @@ def _poll_video_task(host: str, auth: str, task_id: str, max_attempts: int = 120
     raise Exception(f"MiniMax video task {task_id} timed out after {max_attempts} polls")
 
 
+def _poll_gemini_operation(api_key: str, operation_name: str, max_attempts: int = 240, interval: int = 3) -> str:
+    """Wait for a Veo long-running operation and return the generated video URI.
+
+    Bounded like ``_poll_video_task`` so a stuck or rejected operation fails with a
+    diagnosis instead of polling forever. The default budget (12 minutes) leaves
+    room for queueing, which routinely outlasts a short generation.
+    """
+    for _ in range(max_attempts):
+        response = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
+            headers={"x-goog-api-key": api_key},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not payload.get("done", False):
+            time.sleep(interval)
+            continue
+        error = payload.get("error") or {}
+        if error:
+            raise Exception(f"Gemini video operation {operation_name} failed: {error.get('code')} {error.get('message')}")
+        video_response = (payload.get("response") or {}).get("generateVideoResponse") or {}
+        samples = video_response.get("generatedSamples") or []
+        if not samples:
+            # A filtered prompt finishes successfully without any sample.
+            reasons = "; ".join(video_response.get("raiMediaFilteredReasons") or [])
+            detail = f": {reasons}" if reasons else ""
+            raise Exception(f"Gemini video operation {operation_name} returned no generated sample{detail}")
+        uri = (samples[0].get("video") or {}).get("uri")
+        if not uri:
+            raise Exception(f"Gemini video operation {operation_name} returned a sample without a video URI")
+        return uri
+    raise Exception(f"Gemini video operation {operation_name} timed out after {max_attempts} polls")
+
+
 def _retrieve_file_url(host: str, auth: str, file_id: str) -> str:
     response = requests.get(
         f"{host}/v1/files/retrieve",
@@ -163,19 +198,8 @@ def _generate_video_gemini(prompt: str, reference_images: list[str], output_file
     response.raise_for_status()
     data = response.json()
     operation_name = data["name"]
-    while True:
-        response = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/{operation_name}",
-            headers={"x-goog-api-key": gemini_api_key},
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("done", False):
-            sample = data["response"]["generateVideoResponse"]["generatedSamples"][0]
-            download(sample["video"]["uri"], output_file)
-            break
-        time.sleep(3)
+    download_url = _poll_gemini_operation(gemini_api_key, operation_name)
+    download(download_url, output_file)
     return f"The video has been generated successfully to {output_file}"
 
 

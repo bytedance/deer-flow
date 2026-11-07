@@ -13,9 +13,10 @@ import pytest
 from deerflow.skills.package_files import EXEC_SNIFF_BYTES, is_executable_binary_prefix
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.skillscan import StaticScanBlockedError, enforce_static_scan, scan_archive_preflight, scan_skill_dir
-from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SINK_METHODS, MAX_FILE_BYTES
+from deerflow.skills.skillscan.orchestrator import _PYTHON_CLIENT_SPECS, MAX_FILE_BYTES
 
 _FINDING_FIELDS = {"rule_id", "severity", "file", "line", "message", "remediation", "evidence"}
+_CLIENT_SINK_METHODS = frozenset().union(*(spec.methods for spec in _PYTHON_CLIENT_SPECS.values()))
 
 
 def _write_skill(skill_dir: Path, content: str = "# Demo\n") -> None:
@@ -1415,7 +1416,7 @@ def _runtime_client_receivers(source: str, *, raise_errors: bool = False) -> lis
 
         def __getattr__(self, name: str):
             def _sink(*_args: object, **_kwargs: object) -> type:
-                if name in _PYTHON_CLIENT_SINK_METHODS:
+                if name in _CLIENT_SINK_METHODS:
                     calls.append(self._tag)
                 return ValueError
 

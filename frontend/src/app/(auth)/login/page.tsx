@@ -81,10 +81,11 @@ export default function LoginPage() {
     setupStatusPhase === "unavailable" ||
     (setupStatusAttempt > 0 && setupStatusPhase === "checking");
 
-  // Redirect if already authenticated (client-side, post-login)
+  // Redirect if already authenticated. Replace, so Back does not return to a
+  // sign-in page that immediately redirects again.
   useEffect(() => {
     if (isAuthenticated) {
-      router.push(redirectPath);
+      router.replace(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
 
@@ -230,6 +231,16 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  // A signed-in session is already on its way to `redirectPath` (see the
+  // effect above), so it never sees the sign-in form.
+  if (isAuthenticated) {
+    return (
+      <div className="bg-background flex min-h-screen items-center justify-center">
+        <p className="text-muted-foreground text-sm">{t.login.pleaseWait}</p>
+      </div>
+    );
+  }
 
   const actualTheme = theme === "system" ? resolvedTheme : theme;
 
