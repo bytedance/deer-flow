@@ -86,6 +86,17 @@ class SkillStorage(ABC):
             raise ValueError("Skill name must be hyphen-case using lowercase letters, digits, and hyphens only.")
         if len(normalized) > 64:
             raise ValueError("Skill name must be 64 characters or fewer.")
+        return normalized
+
+    @staticmethod
+    def validate_new_skill_name(name: str) -> str:
+        """Validate a name that is about to create a directory.
+
+        Lookups stay on :meth:`validate_skill_name` so a skill an older release
+        already created with a device-name segment remains readable, editable and
+        deletable; only creating a new one is refused on every platform.
+        """
+        normalized = SkillStorage.validate_skill_name(name)
         reason = windows_incompatible_segment(normalized)
         if reason is not None:
             raise ValueError(f"Invalid skill name {normalized!r}: {reason}")

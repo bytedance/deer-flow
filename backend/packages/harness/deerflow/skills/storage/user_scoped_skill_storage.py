@@ -46,6 +46,7 @@ from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +420,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # ------------------------------------------------------------------
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+        self.validate_new_skill_name(name)
         with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)

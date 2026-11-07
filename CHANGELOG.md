@@ -34,6 +34,12 @@ This section accumulates work toward the **2.3.0** milestone
   same message, split at line breaks; a retry resumes after the cards already
   delivered. ([#7798])
   
+- **skills:** Creating a skill whose name is a Windows device name (`nul`, `con`,
+  `com1`, …) is rejected on every platform, and `.skill` archives are refused when
+  a member path carries one of those segments. A skills tree installed on Linux
+  could otherwise not be copied or mounted to a Windows host. Existing skills with
+  such names stay readable, editable and deletable; only creation is refused.
+
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread

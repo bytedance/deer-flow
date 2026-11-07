@@ -105,6 +105,7 @@ class LocalSkillStorage(SkillStorage):
             return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+        self.validate_new_skill_name(name)
         with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
