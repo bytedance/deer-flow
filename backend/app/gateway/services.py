@@ -720,6 +720,30 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
     return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
 
 
+def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject ledger entries the reducer and renderer cannot read.
+
+    ``delegations`` is a reducer channel a caller may Overwrite. ``merge_delegations``
+    keys on ``id`` and indexes ``status``, and the ledger renderer reads
+    ``description``/``subagent_type`` on every model call. A non-object entry or a
+    missing field raises while the state update merges — failing the run with an
+    unhandled ``TypeError``/``KeyError`` instead of a 400 at this boundary.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of delegation objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        for field in ("id", "description", "subagent_type", "status"):
+            if not isinstance(entry.get(field), str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string")
+        normalized.append(dict(entry))
+    return normalized
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Validate and sanitize caller-supplied state values before checkpointing.
 
@@ -754,8 +778,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             stripped[channel] = None if normalized_todos is None else [_strip_external_metadata_from_message_like(item) for item in normalized_todos]
         elif channel == "messages" and value is not None:
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
-        elif channel == "delegations" and isinstance(value, list):
-            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif channel == "delegations":
+            normalized_delegations = _normalize_external_delegations(value, location="values.delegations")
+            stripped[channel] = None if normalized_delegations is None else [_strip_external_delegation_verdict(item) for item in normalized_delegations]
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
@@ -822,11 +847,12 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
         converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
-        delegations = result.get("delegations")
-        if isinstance(delegations, list):
-            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
-            if cleaned != delegations:
-                result = {**result, "delegations": cleaned}
+        if "delegations" in result:
+            normalized_delegations = _normalize_external_delegations(result["delegations"], location="input.delegations")
+            result = {
+                **result,
+                "delegations": None if normalized_delegations is None else [_strip_external_delegation_verdict(entry) for entry in normalized_delegations],
+            }
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
         # merge_goal ignores None, so only a goal value replaces the goal.

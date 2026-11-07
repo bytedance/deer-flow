@@ -727,6 +727,54 @@ def test_normalize_input_strips_delegation_verdict_without_messages():
     assert "receipt_verdict" not in result["delegations"][0]
 
 
+@pytest.mark.parametrize(
+    "delegations",
+    [
+        "oops",
+        ["oops"],
+        [{"description": "write report"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-id", "non-string-status"],
+)
+def test_normalize_input_rejects_unusable_delegations_with_400(delegations):
+    """A ledger entry the reducer cannot key or the renderer cannot read must be
+    a 400 at this boundary, not an unhandled ``TypeError``/``KeyError`` while the
+    state update merges."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"delegations": delegations})
+
+    assert excinfo.value.status_code == 400
+    assert "input.delegations" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_delegation_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"id": "call-1", "description": "read docs", "subagent_type": "general", "status": "completed", "created_at": "2026-01-01T00:00:00Z"}
+
+    result = normalize_input({"delegations": [entry]})
+
+    assert result["delegations"] == [entry]
+
+
+def test_state_values_reject_unusable_delegations_with_400():
+    """The thread-state update path shares the ledger shape boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"delegations": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.delegations" in excinfo.value.detail
+
+
 def _forged_acceptance_verdict() -> dict:
     """A forged acceptance-checklist verdict on a caller-supplied entry."""
     return {
