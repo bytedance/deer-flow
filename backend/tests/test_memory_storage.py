@@ -436,6 +436,58 @@ class TestMarkdownMemoryStorage:
         assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
         assert not list(tmp_path.glob("memory.json.corrupt-*"))
 
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("indent", ["", " ", "  ", "   "])
+    def test_quoted_example_does_not_hide_summary_fence(self, tmp_path, newline, indent):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"]["summary"] = "saved profile"
+        body = newline.join(
+            [
+                "# Memory notes",
+                "> An example, not the saved summary:",
+                "> ```memory-json",
+                '> {"user": {}, "history": {}}',
+                "> ```",
+                "",
+                f"{indent}```memory-json",
+                json.dumps(manifest),
+                f"{indent}```",
+                "",
+            ]
+        )
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_bytes(body.encode("utf-8"))
+
+        loaded = self._markdown_storage_at(memory_file).load()
+
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
+        assert memory_file.read_bytes() == body.encode("utf-8")
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    @pytest.mark.parametrize("indent", ["    ", "     "])
+    def test_indented_summary_fence_is_quarantined(self, tmp_path, newline, indent):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        body = newline.join(["# Memory", f"{indent}```memory-json", json.dumps(manifest), f"{indent}```", ""])
+        memory_file = tmp_path / "memory.json"
+        original = body.encode("utf-8")
+        memory_file.write_bytes(original)
+
+        assert mf._parse_markdown_memory(body) is None
+        loaded = self._markdown_storage_at(memory_file).load()
+
+        assert loaded["revision"] == 0
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == original
+
     @pytest.mark.parametrize(
         "body",
         [
