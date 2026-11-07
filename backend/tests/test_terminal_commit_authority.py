@@ -75,6 +75,218 @@ async def test_unacknowledged_completion_cannot_terminalize_or_recreate():
 
 
 @pytest.mark.anyio
+async def test_metadata_persistence_retains_idempotency_without_store_io_under_lock():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject("thread", idempotency_key="admission-key", idempotency_request={"input": "same"})
+    record.metadata["hitl_approval"] = {"request_id": "approval-1"}
+    original_put = store.put
+
+    async def checked_put(*args, **kwargs):
+        assert not manager._lock.locked()
+        return await original_put(*args, **kwargs)
+
+    store.put = checked_put
+
+    assert await manager.persist_metadata(record.run_id) is True
+    row = await store.get(record.run_id)
+    assert row["idempotency_key"] == "admission-key"
+    assert row["idempotency_request"] == {"input": "same"}
+    assert row["metadata"]["hitl_approval"] == {"request_id": "approval-1"}
+
+
+@pytest.mark.anyio
+async def test_mark_approval_answered_retries_and_updates_memory_and_store():
+    import sqlite3
+
+    from deerflow.runtime.runs.manager import PersistenceRetryPolicy
+
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=2, initial_delay=0, max_delay=0),
+    )
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64}
+    paused = await manager.create_or_reject(
+        "thread",
+        metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True},
+        idempotency_key="admission-key",
+        idempotency_request=identity,
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    original_put = store.put
+    attempts = 0
+
+    async def fail_once(run_id, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return await original_put(run_id, **kwargs)
+
+    store.put = fail_once
+    assert await manager.mark_approval_answered("thread") is True
+
+    assert attempts == 2
+    assert paused.status == RunStatus.success
+    assert paused.metadata == {"retained": True}
+    answered = await store.get(paused.run_id)
+    assert answered["status"] == "success"
+    assert answered["metadata"] == {"retained": True}
+    assert answered["idempotency_key"] == "admission-key"
+    assert answered["idempotency_request"] == identity
+
+
+@pytest.mark.anyio
+async def test_mark_approval_answered_acknowledges_worker_finalization_before_store_io():
+    store = MemoryRunStore()
+    manager = manager_for(store)
+    paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}})
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    previous_revision = paused.terminal_status_revision
+    original_put = store.put
+    answered_put_started, release_answered_put = asyncio.Event(), asyncio.Event()
+
+    async def hold_answered_put(run_id, **kwargs):
+        answered_put_started.set()
+        await release_answered_put.wait()
+        return await original_put(run_id, **kwargs)
+
+    store.put = hold_answered_put
+    answered = asyncio.create_task(manager.mark_approval_answered("thread"))
+    try:
+        await asyncio.wait_for(answered_put_started.wait(), 1)
+        assert paused.terminal_status_revision == previous_revision + 1
+        assert paused.terminal_commit_proof is not None
+        assert paused.terminal_commit_proof.status == RunStatus.success
+        assert manager.terminal_event_status(paused) == "success"
+        assert not paused.terminal_status_persisted
+        release_answered_put.set()
+        assert await asyncio.wait_for(answered, 1) is True
+    finally:
+        release_answered_put.set()
+        await finish(answered)
+
+    receipt = object()
+    seal_evidence = AsyncMock(return_value=True)
+    store.seal_evidence = seal_evidence
+    assert await manager.seal_completed_evidence(paused.run_id, receipt) is True
+    seal_evidence.assert_awaited_once_with(paused.run_id, owner_worker_id="owner", receipt=receipt)
+    await manager.update_run_completion(paused.run_id, status="success", total_tokens=17, message_count=2)
+    completed = await store.get(paused.run_id)
+    assert completed["total_tokens"] == 17
+    assert completed["message_count"] == 2
+    assert paused.terminal_status_persisted
+    assert manager.terminal_event_status(paused) == "success"
+
+
+@pytest.mark.anyio
+async def test_stale_paused_status_ack_cannot_replace_answered_proof():
+    store = MemoryRunStore()
+    manager = manager_for(store)
+    paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}})
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input, persist=False)
+    paused_revision = paused.terminal_status_revision
+    original_finalize = store.finalize_if_not_cancelled
+    committed, release_ack = asyncio.Event(), asyncio.Event()
+
+    async def commit_then_hold_ack(*args, **kwargs):
+        result = await original_finalize(*args, **kwargs)
+        committed.set()
+        await release_ack.wait()
+        return result
+
+    store.finalize_if_not_cancelled = commit_then_hold_ack
+    worker_commit = asyncio.create_task(manager.set_status_if_not_cancelled(paused.run_id, RunStatus.waiting_for_input))
+    try:
+        await asyncio.wait_for(committed.wait(), 1)
+        assert await manager.mark_approval_answered("thread") is True
+        assert paused.terminal_status_revision == paused_revision + 1
+        assert paused.terminal_commit_proof is not None
+        assert paused.terminal_commit_proof.status == RunStatus.success
+        assert paused.terminal_status_persisted
+        release_ack.set()
+        await asyncio.wait_for(worker_commit, 1)
+    finally:
+        release_ack.set()
+        await finish(worker_commit)
+
+    answered = await store.get(paused.run_id)
+    assert answered["status"] == RunStatus.success.value
+    assert paused.status == RunStatus.success
+    assert paused.terminal_commit_proof.status == RunStatus.success
+    assert paused.terminal_status_revision == paused_revision + 1
+    assert manager.terminal_event_status(paused) == "success"
+
+
+@pytest.mark.anyio
+async def test_worker_waiting_metadata_put_cannot_resurrect_answered_run():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True})
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    original_put = store.put
+    stale_put_started, release_stale_put = asyncio.Event(), asyncio.Event()
+
+    async def hold_worker_waiting_put(run_id, **kwargs):
+        if kwargs["status"] == RunStatus.waiting_for_input.value:
+            stale_put_started.set()
+            await release_stale_put.wait()
+        await original_put(run_id, **kwargs)
+
+    store.put = hold_worker_waiting_put
+    worker_persist = asyncio.create_task(manager.persist_metadata(paused.run_id))
+    try:
+        await asyncio.wait_for(stale_put_started.wait(), 1)
+        assert await manager.mark_approval_answered("thread") is True
+        assert (await store.get(paused.run_id))["status"] == RunStatus.success.value
+        release_stale_put.set()
+        assert await asyncio.wait_for(worker_persist, 1) is True
+    finally:
+        release_stale_put.set()
+        await finish(worker_persist)
+
+    assert paused.status == RunStatus.success
+    assert paused.metadata == {"retained": True}
+    answered = await store.get(paused.run_id)
+    assert answered["status"] == RunStatus.success.value
+    assert answered["metadata"] == {"retained": True}
+
+
+@pytest.mark.anyio
+async def test_mark_approval_answered_reconciles_newer_local_state():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}})
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    original_put = store.put
+    answered_put_started, release_answered_put = asyncio.Event(), asyncio.Event()
+
+    async def hold_answered_put(run_id, **kwargs):
+        if kwargs["status"] == RunStatus.success.value:
+            answered_put_started.set()
+            await release_answered_put.wait()
+        await original_put(run_id, **kwargs)
+
+    store.put = hold_answered_put
+    answered = asyncio.create_task(manager.mark_approval_answered("thread"))
+    try:
+        await asyncio.wait_for(answered_put_started.wait(), 1)
+        await manager.set_status(paused.run_id, RunStatus.error, error="newer terminal state", persist=False)
+        release_answered_put.set()
+        assert await asyncio.wait_for(answered, 1) is True
+    finally:
+        release_answered_put.set()
+        await finish(answered)
+
+    assert paused.status == RunStatus.error
+    assert paused.error == "newer terminal state"
+    latest = await store.get(paused.run_id)
+    assert latest["status"] == RunStatus.error.value
+    assert latest["error"] == "newer terminal state"
+
+
+@pytest.mark.anyio
 async def test_committed_cas_waits_for_its_ack_after_renewal_rejection():
     store = MemoryRunStore()
     manager = manager_for(store)

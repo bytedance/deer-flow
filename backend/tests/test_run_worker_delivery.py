@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -965,3 +966,129 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_pending_snapshot_failure_cannot_complete_run_successfully():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-snapshot-failure")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = True
+
+    class SnapshotFailureAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            raise RuntimeError("checkpoint snapshot unavailable")
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: SnapshotFailureAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "checkpoint snapshot unavailable"
+    assert (await run_store.get(record.run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_paused_metadata_is_not_written_after_ownership_loss():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        worker_id="owner",
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=0),
+    )
+    record = await run_manager.create_or_reject("thread-paused-ownership")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = True
+    original_finalize = run_store.finalize_if_not_cancelled
+
+    async def finalize_then_lose_ownership(*args, **kwargs):
+        result = await original_finalize(*args, **kwargs)
+        run_store._runs[record.run_id].update(status="error", error="peer takeover", owner_worker_id="peer", metadata={"owner": "peer"})
+        await run_manager._mark_ownership_lost(record, reason="Test peer takeover", require_active=False)
+        return result
+
+    run_store.finalize_if_not_cancelled = finalize_then_lose_ownership
+    run_store.put = AsyncMock(wraps=run_store.put)
+    run_manager.persist_metadata = AsyncMock(wraps=run_manager.persist_metadata)
+    payload = {"kind": "hitl_approval", "request_id": "approval-1"}
+
+    class PausedAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={},
+                metadata={},
+                next=("agent",),
+                tasks=(SimpleNamespace(interrupts=(SimpleNamespace(value=payload),)),),
+            )
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: PausedAgent(),
+        graph_input={},
+        config={},
+    )
+
+    run_manager.persist_metadata.assert_not_awaited()
+    run_store.put.assert_not_awaited()
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row["error"] == "peer takeover"
+    assert row["metadata"] == {"owner": "peer"}
+
+
+@pytest.mark.anyio
+async def test_generic_interrupt_is_waiting_even_when_hitl_is_disabled():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-generic-pause")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+
+    class GenericPausedAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={},
+                metadata={},
+                next=("answer",),
+                tasks=(SimpleNamespace(interrupts=(SimpleNamespace(value={"question": "Continue?"}),)),),
+            )
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: GenericPausedAgent(),
+        graph_input={},
+        config={},
+    )
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "waiting_for_input"
+    assert "hitl_approval" not in row["metadata"]

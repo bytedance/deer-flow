@@ -828,6 +828,33 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool) -> None:
+    if not app_config.hitl_approval.enabled:
+        return
+    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+
+    known_tool_names = {tool.name for tool in final_tools}
+    unknown_names = set(app_config.hitl_approval.tools) - known_tool_names
+    if unknown_names:
+        logger.warning("hitl_approval.tools contains names not present in this build's tool set: %s", sorted(unknown_names))
+    logger.info(
+        "hitl_approval enabled: tools=%s non_interactive=%s max_actions=%s",
+        app_config.hitl_approval.tools,
+        app_config.hitl_approval.non_interactive,
+        app_config.hitl_approval.max_actions,
+    )
+    middlewares.insert(
+        0,
+        HitlApprovalMiddleware(
+            tool_names=set(app_config.hitl_approval.tools),
+            non_interactive=app_config.hitl_approval.non_interactive,
+            max_actions=app_config.hitl_approval.max_actions,
+            supports_resume=supports_resume,
+            pii_config=app_config.pii_redaction,
+        ),
+    )
+
+
 def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
@@ -1231,6 +1258,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
+        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False)
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1394,6 +1422,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
+    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False))
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
