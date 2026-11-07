@@ -26,6 +26,7 @@ from deerflow_extension_api import (
     HostCapabilityError,
     SkillMutationService,
 )
+from pydantic import BaseModel, Field
 
 from deerflow_extension_skill_evolution.evaluator import (
     EVALUATOR_NAME,
@@ -217,7 +218,11 @@ class EvolutionService:
             assessment_ref=assessment,
         )
         record.operation_id = operation.operation_id
-        record.committed = operation.publication in {"PREPARED", "READY", "NO_CHANGE"}
+        # ``publication`` is the operation's publication state (PREPARED /
+        # APPLIED / NO_CHANGE / ABORTED / NEEDS_REPAIR), not its ``views``
+        # state (PENDING / READY). A commit that the host accepted is either
+        # still publishing (PREPARED) or already landed (APPLIED).
+        record.committed = operation.publication in {"PREPARED", "APPLIED", "NO_CHANGE"}
         return operation
 
     async def rollback(self, *, operation_id: str, idempotency_key: str | None = None) -> Any:
@@ -240,28 +245,33 @@ class EvolutionService:
         return self._mutations
 
 
+# Request models live at module scope: this file uses ``from __future__ import
+# annotations``, and FastAPI cannot resolve a string forward reference to a
+# class that only exists inside ``build_router``'s local namespace.
+class ProposeRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    skill_name: str = Field(min_length=1, max_length=64)
+    candidate_content: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    idempotency_key: str | None = None
+
+
+class ApplyRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    idempotency_key: str | None = None
+
+
+class RevertRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    idempotency_key: str | None = None
+
+
 def build_router(service: EvolutionService):
     """Expose the closed loop as a small HTTP surface for the README walkthrough."""
     from fastapi import APIRouter, HTTPException
-    from pydantic import BaseModel, Field
 
     router = APIRouter(prefix="/api/extension-skill-evolution", tags=["skill-evolution"])
-
-    class ProposeRequest(BaseModel):
-        model_config = {"extra": "forbid"}
-        skill_name: str = Field(min_length=1, max_length=64)
-        candidate_content: str = Field(min_length=1)
-        thread_id: str = Field(min_length=1)
-        run_id: str = Field(min_length=1)
-        idempotency_key: str | None = None
-
-    class ApplyRequest(BaseModel):
-        model_config = {"extra": "forbid"}
-        idempotency_key: str | None = None
-
-    class RevertRequest(BaseModel):
-        model_config = {"extra": "forbid"}
-        idempotency_key: str | None = None
 
     def _guard(coro):
         """Translate named example/host errors into HTTP statuses."""

@@ -162,7 +162,10 @@ class FakeMutationService:
         assessment = None
         if assessment_ref is not None:
             assessment = {"candidate_hash": assessment_ref.candidate_hash, "evaluator": assessment_ref.evaluator, "report_id": assessment_ref.report_id}
-        self._operations[op_id] = _OpRow(operation_id=op_id, publication="READY" if changed else "NO_CHANGE", before_revision=before, after_revision=after, assessment=assessment)
+        # ``publication``, not ``views``: a committed change is APPLIED (or
+        # NO_CHANGE when the candidate is identical to the baseline). The real
+        # host never reports READY here -- that is a ``views`` state.
+        self._operations[op_id] = _OpRow(operation_id=op_id, publication="APPLIED" if changed else "NO_CHANGE", before_revision=before, after_revision=after, assessment=assessment)
         self._committed.add(proposal_id)
         return self._operation_view(op_id)
 
@@ -177,7 +180,7 @@ class FakeMutationService:
         self._seq += 1
         after = AssetRevision("inc-1", self._seq, _digest(self._files))
         new_id = f"op-{len(self._operations) + 1}"
-        self._operations[new_id] = _OpRow(operation_id=new_id, publication="READY", before_revision=expected_current_revision, after_revision=after, assessment=None, reverts_operation_id=operation_id)
+        self._operations[new_id] = _OpRow(operation_id=new_id, publication="APPLIED", before_revision=expected_current_revision, after_revision=after, assessment=None, reverts_operation_id=operation_id)
         return self._operation_view(new_id)
 
     def _bundles_of_operation(self, operation_id: str) -> tuple[BundleFile, ...]:
@@ -255,7 +258,8 @@ async def test_full_loop_propose_apply_rollback(service):
     assert record.candidate_hash and len(record.report_id) == 64
 
     operation = await service.apply(proposal_id=record.proposal_id)
-    assert operation.publication == "READY"
+    assert operation.publication == "APPLIED"
+    assert record.committed is True
     assert operation.before_revision.content_digest != operation.after_revision.content_digest
     # The committed operation carries the evaluator's assessment.
     assert mutations._operations[operation.operation_id].assessment["report_id"] == record.report_id
@@ -309,6 +313,9 @@ async def test_apply_rejects_double_commit(service):
     source = await service.resolve_source(thread_id="t", run_id="r")
     record = await service.propose(skill_name=SKILL, candidate_content=FIXED_MAIN, source_ref=source)
     await service.apply(proposal_id=record.proposal_id)
+    # A successful apply must flip the record's committed flag; otherwise the
+    # ALREADY_COMMITTED guard below never fires against a real host.
+    assert record.committed is True
     with pytest.raises(SkillEvolutionError) as exc:
         await service.apply(proposal_id=record.proposal_id)
     assert exc.value.code == "ALREADY_COMMITTED"
