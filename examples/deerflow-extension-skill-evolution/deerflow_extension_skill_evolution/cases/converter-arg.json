@@ -1,0 +1,8 @@
+{
+  "id": "converter-arg",
+  "description": "SKILL.md must instruct the converter with --format json, not the removed --fmt alias",
+  "checks": [
+    { "kind": "text_contains", "path": "SKILL.md", "needle": "--format json" },
+    { "kind": "text_not_contains", "path": "SKILL.md", "needle": "--fmt " }
+  ]
+}

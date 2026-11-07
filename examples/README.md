@@ -11,8 +11,9 @@ independent Python package using the public `deerflow-extension-api` contract.
 
 Additional examples cover [text-list classification](deerflow-extension-jev-classify/README.md),
 [context pruning](deerflow-extension-jev-context/README.md),
-[advisory screening of fetched content](deerflow-extension-jev-screening/README.md), and
-[sectioned long-form report writing](deerflow-extension-report-sections/README.md).
+[advisory screening of fetched content](deerflow-extension-jev-screening/README.md),
+[sectioned long-form report writing](deerflow-extension-report-sections/README.md), and
+[evidence-gated skill self-evolution](deerflow-extension-skill-evolution/README.md).
 
 ## Edit, test, check, then install
 
