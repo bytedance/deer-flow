@@ -1041,6 +1041,42 @@ def test_replaced_artifact_rejects_previous_if_range_validator(tmp_path, monkeyp
     assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
 
 
+def test_if_range_stream_keeps_the_validated_artifact_generation(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"old lesson")
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    replace_after_headers = False
+    replacement_confirmed = False
+
+    async def replace_between_headers_and_body(scope, receive, send):
+        async def send_and_replace(message):
+            nonlocal replacement_confirmed
+            await send(message)
+            if replace_after_headers and message["type"] == "http.response.start":
+                _replace_preserving_artifact_mtime(artifact_path, b"new slides")
+                replacement_confirmed = True
+
+        await app(scope, receive, send_and_replace)
+
+    with TestClient(replace_between_headers_and_body) as client:
+        first = client.get(url)
+        replace_after_headers = True
+        resumed = client.get(url, headers={"Range": "bytes=4-9", "If-Range": first.headers["etag"]})
+
+    assert replacement_confirmed
+    assert artifact_path.read_bytes() == b"new slides"
+    assert resumed.status_code == 206
+    assert resumed.content == b"lesson"
+    assert resumed.headers["etag"] == first.headers["etag"]
+    assert resumed.headers["content-range"] == "bytes 4-9/10"
+    assert not list(tmp_path.glob(f"{artifacts_router._ARTIFACT_READ_TEMP_PREFIX}*"))
+
+
 @pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_ctime_ns"])
 def test_artifact_digest_invalidates_when_file_identity_changes(tmp_path, monkeypatch, changed_field) -> None:
     artifact_path = tmp_path / "note.txt"
