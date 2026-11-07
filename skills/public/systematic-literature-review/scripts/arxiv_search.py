@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 # Namespace map for arXiv's Atom feed. arXiv extends Atom with its own
@@ -240,6 +241,37 @@ def search(
 # --- CLI -------------------------------------------------------------------
 
 
+def save_evidence(papers: list[dict], output_dir: Path) -> dict:
+    """Persist the API results and delegate file paths instead of retyped metadata.
+
+    Each batch is a small index of at most five paper files. Workers can read
+    papers individually, so a long collection cannot hide later papers behind
+    the tool-output externalization threshold. A fresh directory prevents an
+    interrupted or repeated search from silently replacing earlier evidence.
+    """
+    output_dir = output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+
+    def write_json(path: Path, value: Any) -> None:
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    papers_path = output_dir / "papers.json"
+    write_json(papers_path, papers)
+    paper_paths = []
+    for index, paper in enumerate(papers, start=1):
+        path = output_dir / f"paper-{index:03}.json"
+        write_json(path, paper)
+        paper_paths.append(str(path))
+
+    batch_paths = []
+    for start in range(0, len(paper_paths), 5):
+        path = output_dir / f"batch-{start // 5 + 1:03}.json"
+        write_json(path, paper_paths[start : start + 5])
+        batch_paths.append(str(path))
+
+    return {"paper_count": len(papers), "papers_path": str(papers_path), "batch_paths": batch_paths}
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Query the arXiv API and emit structured paper metadata as JSON.",
@@ -252,6 +284,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("query", help="free-text search topic")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        help="new evidence directory; save full results and paper batches, and print only their paths",
+    )
     parser.add_argument(
         "--max-results",
         type=int,
@@ -293,11 +330,12 @@ def main() -> int:
             start_date=args.start_date,
             end_date=args.end_date,
         )
+        result = save_evidence(papers, args.output_dir) if args.output_dir is not None else papers
     except Exception as exc:
         print(f"arxiv_search.py: {exc}", file=sys.stderr)
         return 1
 
-    json.dump(papers, sys.stdout, ensure_ascii=False, indent=2)
+    json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
 
