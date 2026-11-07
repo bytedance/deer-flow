@@ -1,6 +1,8 @@
 """Configuration for tool progress tracking middleware."""
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
 
 class ToolProgressConfig(BaseModel):
@@ -32,6 +34,7 @@ class ToolProgressConfig(BaseModel):
     )
     min_word_count_for_similarity: int = Field(
         default=10,
+        ge=1,
         description="Minimum unique word count to apply Jaccard check; shorter content skips near-duplicate detection entirely",
     )
     exempt_tools: set[str] = Field(
@@ -43,3 +46,19 @@ class ToolProgressConfig(BaseModel):
         ge=1,
         description="Maximum number of thread histories to keep in memory (LRU eviction)",
     )
+
+    @field_validator("stagnation_threshold", "warn_escalation_count", "min_word_count_for_similarity", "max_tracked_threads", mode="before")
+    @classmethod
+    def _reject_boolean_int_settings(cls, value: Any, info: ValidationInfo) -> Any:
+        """Reject booleans before Pydantic coerces them to 1/0, which every bound below accepts as 1."""
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a positive integer, not a boolean")
+        return value
+
+    @field_validator("jaccard_similarity_threshold", mode="before")
+    @classmethod
+    def _reject_boolean_similarity_threshold(cls, value: Any) -> Any:
+        """Reject booleans before Pydantic coerces them to 1.0/0.0, both of which sit inside the 0..1 bound."""
+        if isinstance(value, bool):
+            raise ValueError("jaccard_similarity_threshold must be a number between 0.0 and 1.0, not a boolean")
+        return value
