@@ -18,7 +18,10 @@ coverage lives in `tests/test_readability.py` and
 `atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
 capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
 `os.replace`, cleaning it on failure. New files use `0666` filtered by the host
-umask; replacements preserve existing permission bits before publication. Never
+umask; replacements preserve existing permission bits — copied onto the sibling
+before publication, except on Windows, which cannot replace or unlink a
+read-only file and therefore clears that attribute first and re-applies the mode
+after the rename (restoring it too when publication fails). Never
 read the process umask by changing it in this threaded runtime. Behavioral tests
 for both tool imports live in `tests/test_browser_outputs_atomic.py`.
 `cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,

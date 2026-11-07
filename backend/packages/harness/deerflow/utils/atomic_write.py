@@ -38,13 +38,34 @@ def cleanup_failed_atomic_write(temporary: Path, fd: int | None = None) -> None:
             logger.warning("Failed to remove temporary output file %s", temporary, exc_info=True)
 
 
+def _clear_destination_read_only(path: Path, mode: int | None) -> bool:
+    """Clear a Windows read-only attribute blocking ``os.replace`` over *path*.
+
+    POSIX rename ignores the target's permission bits; Windows refuses to
+    replace a read-only file. Only the destination itself is cleared, never a
+    symlink's target (the replacement discards the link), matching
+    ``projects/trash.py`` and ``config/paths.py``. Returns ``True`` when the
+    attribute was cleared, so the caller reapplies *mode* afterwards.
+    """
+    if os.name != "nt" or mode is None or mode & stat.S_IWRITE:
+        return False
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            return False
+        os.chmod(path, mode | stat.S_IWRITE)
+    except OSError:
+        return False
+    return True
+
+
 def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: str | None = None, preserve_metadata_from: int | None = None) -> None:
     """Replace *path* with complete bytes, preserving its existing mode.
 
     New files use ``0666 & ~umask``, like ``Path.write_bytes``, so captures
     remain readable through sandbox mounts under the usual ``0022`` umask.
     A hidden, exclusively created sibling keeps partial writes away from the
-    final path. Failure before replacement leaves the previous file intact.
+    final path. Failure before replacement leaves the previous file intact,
+    including a read-only attribute the replacement had to clear.
     A short temporary_prefix supports destinations near the filename limit.
     Linux/macOS callers may supply an already-open source descriptor to preserve
     access controls before writing content; ownership stays with the caller.
@@ -54,12 +75,18 @@ def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: st
     except FileNotFoundError:
         mode = None
 
+    # Windows refuses to replace a read-only destination *and* to unlink a
+    # sibling that inherited that mode, so the preserved mode is copied after
+    # publication there; POSIX copies it onto the sibling before the rename.
+    mode_after_publish = os.name == "nt" and mode is not None and preserve_metadata_from is None
+
     prefix = temporary_prefix if temporary_prefix is not None else f".{path.name}."
     temporary = path.with_name(f"{prefix}{uuid4().hex}.tmp")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     # Let the kernel apply umask; reading it via os.umask would mutate
     # process-global state while other threads may be creating files.
     fd = os.open(temporary, flags, 0o600 if preserve_metadata_from is not None else 0o666)
+    cleared_read_only = False
     try:
         handle = os.fdopen(fd, "wb")
         fd = None  # The file object now owns the descriptor.
@@ -68,13 +95,22 @@ def publish_bytes_atomically(path: Path, content: bytes, *, temporary_prefix: st
                 preserve_revision_metadata(preserve_metadata_from, handle.fileno())
             handle.write(content)
             handle.flush()
-            if mode is not None and preserve_metadata_from is None:
-                if os.name == "nt":
-                    os.chmod(temporary, mode)
-                else:
-                    os.fchmod(handle.fileno(), mode)
+            if mode is not None and preserve_metadata_from is None and not mode_after_publish:
+                os.fchmod(handle.fileno(), mode)
             os.fsync(handle.fileno())
+        cleared_read_only = _clear_destination_read_only(path, mode)
         os.replace(temporary, path)
+        if mode_after_publish or cleared_read_only:
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                with suppress(Exception):
+                    logger.warning("Failed to restore permissions on %s", path, exc_info=True)
     except BaseException:
+        if cleared_read_only:
+            # The replacement failed after the attribute was cleared; give the
+            # operator's mode back without masking the publication error.
+            with suppress(Exception):
+                os.chmod(path, mode)
         cleanup_failed_atomic_write(temporary, fd)
         raise
