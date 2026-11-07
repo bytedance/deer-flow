@@ -23,6 +23,16 @@
 
 ### 修复
 
+- **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
+  此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
+  `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
+  会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件、任意层级的
+  `.env*.local`、`frontend/*.pem`，以及扩展管理器拒绝写入扩展快照的凭据文件都会
+  被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
+  值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
+  镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
+  
 - **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
   未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
   用户可在后续运行中继续处理。([#7953])
@@ -12785,3 +12795,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
