@@ -81,7 +81,7 @@ export async function searchExtensionMentions(
         const candidates = await Promise.race([
           Promise.resolve().then(() => {
             abort.signal.throwIfAborted();
-            return provider.search(query.slice(0, 256), {
+            return provider.search(Array.from(query).slice(0, 256).join(""), {
               ...context,
               namespace: contribution.namespace,
               settings: contribution.settings,
