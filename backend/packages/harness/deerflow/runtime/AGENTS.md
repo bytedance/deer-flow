@@ -153,7 +153,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** `present_files` and `present_shared_artifact` count as verified presentation. Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 

@@ -8,7 +8,7 @@ import posixpath
 import re
 import stat
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, tool
@@ -39,7 +39,7 @@ def _normalized_relative_path(virtual_path: str) -> PurePosixPath:
 def _open_directory(root: str, parts: tuple[str, ...], *, create: bool = False) -> int:
     if os.name != "posix":
         raise ValueError("Shared artifact handoff requires POSIX")
-    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts:
             if create:
@@ -56,11 +56,20 @@ def _open_directory(root: str, parts: tuple[str, ...], *, create: bool = False) 
         raise
 
 
+def _open_outputs_directory(root: str, parts: tuple[str, ...], *, create: bool = False) -> int:
+    paths = get_paths()
+    try:
+        root_parts = Path(root).relative_to(paths.base_dir).parts
+    except ValueError:
+        raise ValueError("Shared artifact output root escapes the runtime home") from None
+    return _open_directory(str(paths.base_dir), (*root_parts, *parts), create=create)
+
+
 def _read_host_output_snapshot(user_id: str, origin_thread_id: str, virtual_path: str) -> bytes:
     validate_thread_id(origin_thread_id)
     relative = _normalized_relative_path(virtual_path)
     root = get_paths().sandbox_outputs_dir(origin_thread_id, user_id=user_id)
-    directory = _open_directory(root, relative.parts[:-1])
+    directory = _open_outputs_directory(root, relative.parts[:-1])
     try:
         descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(descriptor, "rb") as source:
@@ -86,10 +95,14 @@ def _publish_host_output(user_id: str, runtime: Runtime, origin_thread_id: str, 
 
     relative = _normalized_relative_path(virtual_path)
     outputs_path = (runtime.state or {}).get("thread_data", {}).get("outputs_path")
-    if not outputs_path:
+    context = getattr(runtime, "context", None)
+    thread_id = context.get("thread_id") if isinstance(context, dict) else None
+    if not outputs_path or not isinstance(thread_id, str) or not thread_id:
         raise ValueError("Destination outputs directory is unavailable")
-    os.makedirs(outputs_path, exist_ok=True)
-    directory = _open_directory(outputs_path, relative.parts[:-1], create=True)
+    expected_outputs_path = get_paths().sandbox_outputs_dir(thread_id, user_id=user_id)
+    if os.path.abspath(outputs_path) != os.path.abspath(expected_outputs_path):
+        raise ValueError("Destination outputs directory does not belong to the current thread")
+    directory = _open_outputs_directory(outputs_path, relative.parts[:-1], create=True)
     temporary = f".shared-{uuid.uuid4().hex}.part"
     created = False
     try:
@@ -99,26 +112,32 @@ def _publish_host_output(user_id: str, runtime: Runtime, origin_thread_id: str, 
             target.write(content)
             target.flush()
             os.fsync(target.fileno())
+        import fcntl
+
+        fcntl.flock(directory, fcntl.LOCK_EX)
         try:
-            os.link(temporary, relative.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
-        except FileExistsError:
-            pass
-        os.unlink(temporary, dir_fd=directory)
-        created = False
-        descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-        with os.fdopen(descriptor, "rb") as published:
-            before = os.fstat(published.fileno())
-            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != len(content):
-                raise ValueError("Destination artifact changed; existing file retained")
-            published_content = published.read(MAX_BYTES + 1)
-            after = os.fstat(published.fileno())
-            if published_content != content or (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                raise ValueError("Destination artifact changed; existing file retained")
-        return {
-            "path": f"/mnt/user-data/outputs/{relative.as_posix()}",
-            "sha256": actual_sha256,
-            "origin_thread_id": origin_thread_id,
-        }
+            try:
+                os.link(temporary, relative.name, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            except FileExistsError:
+                pass
+            os.unlink(temporary, dir_fd=directory)
+            created = False
+            descriptor = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as published:
+                before = os.fstat(published.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != len(content):
+                    raise ValueError("Destination artifact changed; existing file retained")
+                published_content = published.read(MAX_BYTES + 1)
+                after = os.fstat(published.fileno())
+                if published_content != content or (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+                    raise ValueError("Destination artifact changed; existing file retained")
+            return {
+                "path": f"/mnt/user-data/outputs/{relative.as_posix()}",
+                "sha256": actual_sha256,
+                "origin_thread_id": origin_thread_id,
+            }
+        finally:
+            fcntl.flock(directory, fcntl.LOCK_UN)
     finally:
         try:
             if created:
