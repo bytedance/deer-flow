@@ -11,6 +11,12 @@ import pytest
 from deerflow.community.ddg_search import tools
 
 
+@pytest.fixture(autouse=True)
+def no_real_pacing(monkeypatch):
+    monkeypatch.setattr(tools, "_last_call", None)
+    monkeypatch.setattr(tools, "sleep", lambda seconds: None)
+
+
 @pytest.mark.parametrize(
     ("configured_limit", "env_value", "call_args", "expected_count", "warns"),
     [

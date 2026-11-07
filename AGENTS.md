@@ -41,8 +41,8 @@ Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026
 controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
 redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway's
 `0.0.0.0:8001` bind are container-internal; only published nginx is external.
-Require explicit bind addresses for new published ports;
-`backend/tests/test_compose_default_bind_host.py` pins every service in both files.
+New published ports need explicit binds; tests pin both files and the
+[SearXNG overlay](docker/searxng/README.md).
 
 Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
 Lark broker credential mounts reuse it with their existing subPaths and read-only

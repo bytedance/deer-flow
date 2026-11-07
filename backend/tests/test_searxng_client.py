@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from deerflow.community.searxng import tools
-from deerflow.community.searxng.searxng_client import SearxngClient, SearxngResponseError
+from deerflow.community.searxng.searxng_client import SearxngClient, SearxngEnginesUnavailableError, SearxngResponseError
 
 
 class AsyncMock(MagicMock):
@@ -86,6 +86,36 @@ class TestSearxngClient:
             client = SearxngClient(base_url="http://searxng:8080")
             result = await client.search("empty query")
             assert result == []
+
+    @staticmethod
+    @contextmanager
+    def _payload(payload: dict):
+        with patch("deerflow.community.searxng.searxng_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = payload
+            mock_resp.raise_for_status.return_value = None
+            mock_ctx.get = AsyncMock(return_value=mock_resp)
+            yield mock_ctx
+
+    async def test_empty_answer_with_failed_engines_is_an_upstream_failure(self):
+        """HTTP 200 with no rows because engines failed is not a genuine empty search."""
+        payload = {"results": [], "unresponsive_engines": [["google", "timeout"], ["duckduckgo", "CAPTCHA"]]}
+        with self._payload(payload):
+            with pytest.raises(SearxngEnginesUnavailableError, match=r"google \(timeout\), duckduckgo \(CAPTCHA\)"):
+                await SearxngClient(base_url="http://searxng:8080").search("q")
+
+    async def test_empty_answer_without_failed_engines_stays_empty(self):
+        with self._payload({"results": [], "unresponsive_engines": []}):
+            assert await SearxngClient(base_url="http://searxng:8080").search("q") == []
+
+    async def test_partial_engine_failure_keeps_the_rows(self):
+        row = {"title": "t", "url": "https://example.com/t", "content": "c"}
+        with self._payload({"results": [row], "unresponsive_engines": [["google", "timeout"]]}) as ctx:
+            assert await SearxngClient(base_url="http://searxng:8080").search("q", max_results=1) == [row]
+        assert ctx.get.call_count == 1
 
     async def test_search_http_error(self):
         """Search raises on HTTP error."""
