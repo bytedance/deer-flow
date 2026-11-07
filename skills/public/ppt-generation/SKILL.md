@@ -150,6 +150,8 @@ Photos with EXIF orientation metadata are rotated or mirrored before sizing and 
 
 Transparent slide images retain their alpha channel in the presentation. Opaque images are embedded as JPEG as before.
 
+Images are fitted to the slide without cropping or stretching. When an image's aspect ratio differs from the slide, it is centered with equal margins on opposite sides.
+
 ```bash
 python /mnt/skills/public/ppt-generation/scripts/generate.py \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \

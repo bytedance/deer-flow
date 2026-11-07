@@ -6,11 +6,11 @@
 
 **Architecture:** 每个 skill 是 `skills/public/<name>/` 下的自包含脚本（`SKILL.md` + `scripts/generate.py`，纯 `requests`）。沙箱内目录隔离，故 MiniMax 代码在每个脚本内各自内联。`generate.py` 顶层用 `_resolve_provider()` 选 provider：`<SKILL>_PROVIDER` 覆盖 > 现有 provider 凭证存在 > `MINIMAX_API_KEY` 回退。测试放仓库根 `tests/skills/`，用 `importlib` 按路径加载脚本并 mock `requests`，不打真实 API。
 
-**Tech Stack:** Python 3 + `requests`；测试用 pytest（通过 `uv run --no-project --with pytest --with requests --with Pillow` 运行）；新 skill 用 `skills/public/skill-creator/scripts/init_skill.py` 脚手架。
+**Tech Stack:** Python 3 + `requests`；测试用 pytest（通过 `uv run --no-project --with pytest --with requests --with Pillow --with python-pptx` 运行）；新 skill 用 `skills/public/skill-creator/scripts/init_skill.py` 脚手架。
 
 **测试运行命令（全程统一用这条）:**
 ```bash
-uv run --no-project --with pytest --with requests --with Pillow pytest tests/skills/ -v
+uv run --no-project --with pytest --with requests --with Pillow --with python-pptx pytest tests/skills/ -v
 ```
 
 **关键事实（来自 MiniMax 官方文档，已核实）:**
@@ -1522,7 +1522,7 @@ git commit -m "feat(music-generation): new MiniMax music skill via skill-creator
 
 - [ ] **Step 1: 跑全部 skill 测试**
 
-Run: `uv run --no-project --with pytest --with requests --with Pillow pytest tests/skills/ -v`
+Run: `uv run --no-project --with pytest --with requests --with Pillow --with python-pptx pytest tests/skills/ -v`
 Expected: 全部 PASS（image 7 + video 6 + podcast 6 + music 6 = 25 用例）。
 
 - [ ] **Step 2: 核对四个 skill 目录结构**
