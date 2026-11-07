@@ -13,8 +13,9 @@ import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 
+from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
@@ -132,6 +133,17 @@ class GitHubAgentConfig(BaseModel):
     # never fires from a webhook, even if it has a ``github:`` block.
     bindings: list[GitHubBinding] = Field(default_factory=list)
 
+    @field_validator("installation_id", "recursion_limit", mode="before")
+    @classmethod
+    def _reject_boolean_github_settings(cls, value: object, info: ValidationInfo) -> object:
+        """A boolean here is a typo, not a limit: ``true`` would coerce to 1.
+
+        ``recursion_limit: true`` would halt a GitHub run after a single
+        super-step, and ``installation_id: true`` would mint tokens for
+        installation 1 (see #6293).
+        """
+        return reject_boolean(value, info, kind="an integer or null")
+
     @field_validator("bot_login")
     @classmethod
     def _normalize_bot_login(cls, value: str | None) -> str | None:
@@ -202,6 +214,16 @@ class AgentModelSettings(BaseModel):
         le=MAX_AGENT_OUTPUT_TOKENS,
         description=f"Max output tokens override (1-{MAX_AGENT_OUTPUT_TOKENS}). None = inherit the model profile's value.",
     )
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def _reject_boolean_temperature(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="a number or null")
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def _reject_boolean_max_tokens(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer or null")
 
 
 class AgentConfig(BaseModel):
