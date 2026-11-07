@@ -41,6 +41,37 @@ class _CircuitAdmission:
     generation: int = -1
 
 
+def _is_error_fallback_message(message: Any) -> bool:
+    """True when an AIMessage was synthesized as a handled LLM failure marker."""
+    return isinstance(message, AIMessage) and bool((message.additional_kwargs or {}).get("deerflow_error_fallback"))
+
+
+def _without_trailing_error_fallbacks(messages: list[Any] | tuple[Any, ...] | None) -> list[Any] | None:
+    """Drop trailing ``deerflow_error_fallback`` AIMessages from an outbound request.
+
+    Checkpointed history may keep these markers for the user, but providers that
+    reject assistant prefill fail when a continuation ends on one. Mid-history
+    fallbacks stay in place. Returns ``None`` when the list should be left
+    unchanged (no trailing fallbacks, or trimming would leave nothing to send).
+    """
+    if not messages:
+        return None
+    end = len(messages)
+    while end > 0 and _is_error_fallback_message(messages[end - 1]):
+        end -= 1
+    if end == len(messages) or end == 0:
+        return None
+    return list(messages[:end])
+
+
+def _request_without_trailing_error_fallbacks(request: ModelRequest) -> ModelRequest:
+    """Return ``request`` with trailing error-fallback AIMessages removed, if any."""
+    trimmed = _without_trailing_error_fallbacks(getattr(request, "messages", None))
+    if trimmed is None:
+        return request
+    return request.override(messages=trimmed)
+
+
 class EmptyModelResponseError(RuntimeError):
     """The model completed normally without producing persistent content."""
 
@@ -947,6 +978,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        request = _request_without_trailing_error_fallbacks(request)
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
@@ -1011,6 +1043,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        request = _request_without_trailing_error_fallbacks(request)
         admission = _CircuitAdmission()
         if self._check_circuit(probe_token=admission):
             return self._build_error_fallback_message(
