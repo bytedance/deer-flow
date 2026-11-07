@@ -45,11 +45,33 @@ function labelOfRole(role: SidecarContextRole) {
   return role === "user" ? "User" : "Assistant";
 }
 
+const HIGH_SURROGATE = /[\uD800-\uDBFF]/;
+
+/**
+ * Length of `content` in Unicode code points.
+ *
+ * UTF-16 length is only an upper bound, so text without surrogate pairs is
+ * counted directly and the array is built just for astral characters.
+ */
+function countCodePoints(content: string) {
+  return HIGH_SURROGATE.test(content)
+    ? Array.from(content).length
+    : content.length;
+}
+
 function truncateContextText(content: string, maxChars: number) {
+  // Budgets count Unicode code points, not UTF-16 code units: surrogate pairs
+  // (emoji and other astral characters) are one character, and a truncated
+  // prefix never ends in half of a pair. UTF-16 length is always >= the
+  // code-point count, so a prefix that fits either way needs no conversion.
   if (content.length <= maxChars) {
     return content;
   }
-  return `${content.slice(0, maxChars).trimEnd()}\n[truncated]`;
+  const characters = Array.from(content);
+  if (characters.length <= maxChars) {
+    return content;
+  }
+  return `${characters.slice(0, maxChars).join("").trimEnd()}\n[truncated]`;
 }
 
 export function buildParentConversationContext(
@@ -103,7 +125,7 @@ export function buildParentConversationContext(
       ...message,
       content,
     });
-    selectedChars += content.length;
+    selectedChars += countCodePoints(content);
   }
 
   return selectedMessages;

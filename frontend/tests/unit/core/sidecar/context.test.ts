@@ -116,6 +116,40 @@ test("builds compact parent conversation context from visible messages", () => {
   ]);
 });
 
+test("truncates on code points so a surrogate pair is never split", () => {
+  const parentContext = buildParentConversationContext(
+    [{ type: "ai", id: "parent-ai-emoji", content: "a😀bc" }] as never,
+    { maxCharsPerMessage: 2 },
+  );
+
+  expect(parentContext[0]?.content).toBe("a😀\n[truncated]");
+});
+
+test("does not truncate a message whose code points fit the budget", () => {
+  const content = "😀".repeat(1200);
+  const parentContext = buildParentConversationContext(
+    [{ type: "ai", id: "parent-ai-many-emoji", content }] as never,
+    { maxCharsPerMessage: 1200, maxTotalChars: 1200 },
+  );
+
+  expect(parentContext[0]?.content).toBe(content);
+});
+
+test("counts the total budget in code points across messages", () => {
+  const half = "😀".repeat(600);
+  const parentContext = buildParentConversationContext(
+    [
+      { type: "ai", id: "parent-ai-1", content: half },
+      { type: "ai", id: "parent-ai-2", content: half },
+    ] as never,
+    { maxCharsPerMessage: 1200, maxTotalChars: 1200 },
+  );
+
+  expect(parentContext).toHaveLength(2);
+  expect(parentContext[0]?.content).toBe(half);
+  expect(parentContext[1]?.content).toBe(half);
+});
+
 test("renders parent conversation as read-only background in sidecar prompt", () => {
   const prompt = buildSidecarContextPrompt(
     [
