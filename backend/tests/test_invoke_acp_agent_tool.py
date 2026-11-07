@@ -892,7 +892,9 @@ class _TestAgent:
 
     async def prompt(self, session_id, prompt, **kwargs):
         await self._enter_phase("prompt")
-        return PromptResponse(stop_reason="end_turn")
+        if len(sys.argv) > 5 and sys.argv[5]:
+            await self._conn.session_update(session_id=session_id, update=acp.update_agent_message_text(sys.argv[5]))
+        return PromptResponse(stop_reason=sys.argv[4] if len(sys.argv) > 4 else "end_turn")
 
 
 asyncio.run(acp.run_agent(_TestAgent()))
@@ -933,12 +935,12 @@ def acp_subprocess_tool(monkeypatch, tmp_path):
 
     monkeypatch.setattr(acp_module, "spawn_agent_process", _spying_spawn_agent_process)
 
-    def build_tool(hang_phase="", phase_delay=0, timeout_seconds=2):
+    def build_tool(hang_phase="", phase_delay=0, timeout_seconds=2, stop_reason="end_turn", response_text=""):
         tool = build_invoke_acp_agent_tool(
             {
                 "test": ACPAgentConfig(
                     command=sys.executable,
-                    args=[str(script_path), hang_phase, str(phase_delay), str(phase_path)],
+                    args=[str(script_path), hang_phase, str(phase_delay), str(phase_path), stop_reason, response_text],
                     description="Test ACP agent",
                     timeout_seconds=timeout_seconds,
                 )
@@ -978,6 +980,35 @@ async def test_invoke_acp_agent_completes_within_timeout(acp_subprocess_tool):
     result = await asyncio.wait_for(tool.coroutine(agent="test", prompt="do work"), timeout=15)
     assert result == "(no response)"
     assert acp_subprocess_tool.phase_path.read_text(encoding="utf-8") == "prompt"
+    assert acp_subprocess_tool.captured["proc"].returncode is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stop_reason", ["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"])
+@pytest.mark.parametrize("response_text", ["", "Report section one.\nRemaining sections: 401, 403."])
+async def test_invoke_acp_agent_reports_stop_reasons(acp_subprocess_tool, stop_reason, response_text):
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, normalize_tool_message
+
+    tool = acp_subprocess_tool.build_tool(stop_reason=stop_reason, response_text=response_text, timeout_seconds=10)
+    message = await asyncio.wait_for(
+        tool.ainvoke({"name": tool.name, "type": "tool_call", "id": "acp-limit", "args": {"agent": "test", "prompt": "do work"}}),
+        timeout=20,
+    )
+    normalized = normalize_tool_message(message)
+    if stop_reason == "end_turn":
+        assert message.content == (response_text or "(no response)")
+        assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "success"
+    elif stop_reason in ("max_tokens", "max_turn_requests"):
+        assert message.content.startswith("Partial results:")
+        assert stop_reason in message.content
+        assert message.content.endswith(response_text or "(no response)")
+        assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "partial_success"
+        assert normalized.additional_kwargs[TOOL_META_KEY]["error_type"] is None
+    else:
+        assert message.content.startswith("Error:")
+        assert stop_reason in message.content
+        assert message.content.endswith(response_text or "(no response)")
+        assert normalized.additional_kwargs[TOOL_META_KEY]["status"] == "error"
     assert acp_subprocess_tool.captured["proc"].returncode is not None
 
 

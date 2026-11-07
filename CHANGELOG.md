@@ -92,6 +92,10 @@ This section accumulates work toward the **2.3.0** milestone
   there. Retrying in a completed, failed, running or paused batch is
   unchanged. ([#7792])
 
+- **tools:** ACP responses stopped by `max_tokens` or `max_turn_requests` now
+  identify the output as partial and retain the collected text, instead of
+  looking like a normally completed response.
+
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
   rejects, so the agent then failed every load: the update, GET and repair
