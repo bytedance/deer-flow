@@ -458,7 +458,7 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env, encoding, fallback_encoding))
         return "ok", "", 0, False
 
@@ -496,7 +496,7 @@ def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypat
     pipe reader even though decoding never raises (errors=replace)."""
     calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env, encoding, fallback_encoding))
         return "你好", "", 0, False
 
@@ -523,7 +523,7 @@ def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monk
     code page, so the forced UTF-8 decode keeps the locale as a guarded fallback."""
     calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env, encoding, fallback_encoding))
         return "你好", "", 0, False
 
@@ -546,7 +546,7 @@ def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monk
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -574,7 +574,7 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
 def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -596,7 +596,7 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
 def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, extra_creationflags=0):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 

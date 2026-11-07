@@ -926,6 +926,18 @@ class LocalSandbox(Sandbox):
                     # would report ``"utf-8"`` on hosts running under
                     # ``PYTHONUTF8=1``, silently making this fallback a no-op.
                     fallback_encoding=locale.getencoding(),
+                    # The preamble's ``[Console]::(In|Out)putEncoding`` setters
+                    # reconfigure the console the child is attached to. Without
+                    # this flag the child attaches to the parent's shared console,
+                    # so one sandbox PowerShell command leaves the whole process
+                    # in code page 65001 — and cmd.exe, which decodes .cmd/.bat
+                    # files with the console code page while the ecosystem writes
+                    # shims in the ANSI one, then cannot start any ANSI-encoded
+                    # shim under a non-ASCII path (the lark-cli launcher under a
+                    # CJK user directory). CREATE_NO_WINDOW gives the child its
+                    # own invisible console to pin instead; timeout teardown uses
+                    # taskkill /T /F and does not depend on console signals.
+                    extra_creationflags=subprocess.CREATE_NO_WINDOW,
                 )
             elif self._is_cmd_shell(shell):
                 # cmd builtins use the console output page, which can differ
@@ -971,6 +983,7 @@ class LocalSandbox(Sandbox):
         *,
         encoding: str | None = None,
         fallback_encoding: str | None = None,
+        extra_creationflags: int = 0,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
@@ -984,7 +997,7 @@ class LocalSandbox(Sandbox):
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_write_fd,
                 stderr=stderr_write_fd,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | extra_creationflags,
                 env=env,
             )
         except BaseException:
