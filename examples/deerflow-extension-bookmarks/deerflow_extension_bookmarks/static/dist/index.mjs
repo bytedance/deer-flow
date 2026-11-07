@@ -47,7 +47,12 @@ export default {
             await services.callBackend("save", {
               thread_id: context.thread.thread_id,
               message_id: answer.id,
-              label: answer.text.replace(/\s+/g, " ").trim().slice(0, 80),
+              // Keep the UTF-16 bound without leaving half a surrogate pair.
+              label: answer.text
+                .replace(/\s+/g, " ")
+                .trim()
+                .slice(0, 80)
+                .replace(/[\uD800-\uDBFF]$/u, ""),
               text: answer.text,
             });
             services.showMessage(
