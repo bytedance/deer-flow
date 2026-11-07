@@ -3011,6 +3011,20 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+AIO runs commands from independent subagents concurrently, including Lark CLI
+and skill commands with per-call environment variables. Commands within one
+subagent stay ordered, and each environment-bearing call uses a fresh session.
+Each concurrently executing environment-bearing scope therefore adds one live
+transient Bash session; session demand grows with active scopes. Size the AIO
+server for that demand and verify its session/process capacity before increasing
+subagent concurrency. This client does not impose a separate transient-session cap.
+Cancellation remains routed to the running command while scope release or
+sandbox close waits for it to finish and clean up.
+Scope release waits for in-flight execution and cleanup without a separate drain
+deadline. Allow for the remaining command timeout (600 seconds by default), plus
+session/transport/recovery/cleanup time when setting operator-facing release
+budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
+
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
 during scanning remain excluded.
