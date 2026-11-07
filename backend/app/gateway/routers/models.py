@@ -66,6 +66,7 @@ class ModelResponse(BaseModel):
     description: str | None = Field(None, description="Model description")
     supports_thinking: bool = Field(default=False, description="Whether model supports thinking mode (deprecated: derived from `reasoning`)")
     supports_reasoning_effort: bool = Field(default=False, description="Whether model supports reasoning effort (deprecated: derived from `reasoning`)")
+    provider: str | None = Field(default=None, description="Managed provider display label; no endpoint or credentials")
     reasoning: ReasoningCapabilitiesResponse = Field(..., description="Normalized reasoning capability contract")
 
 
@@ -75,6 +76,7 @@ def _model_response(model: ModelConfig) -> ModelResponse:
         model=model.model,
         display_name=model.display_name,
         description=model.description,
+        provider=model._managed_provider,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         reasoning=ReasoningCapabilitiesResponse(**reasoning_capabilities_payload(resolve_reasoning_contract(model))),

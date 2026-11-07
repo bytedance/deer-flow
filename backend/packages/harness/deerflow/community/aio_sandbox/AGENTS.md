@@ -30,7 +30,21 @@ receipts fence reuse through existing quarantine. New output from a running
 command needs its next offset; empty polls retain the previous offsets.
 Markers support cooperative cleanup, not hostile-code isolation.
 
+## Readiness polling
+
+Build the async readiness client off the event loop. Drain construction and
+close a late client on caller cancellation. If construction or close is
+itself cancelled, log it and preserve the caller's original cancellation.
+Regression: `tests/blocking_io/test_aio_sandbox_readiness_ssl.py`.
+
 ## Reuse admission
+
+Open-mode creation returns its port reservation when the Docker or Apple
+Container CLI raises `FileNotFoundError` or `PermissionError` during spawn.
+Catch these only around the CLI call, preserving the original exception;
+post-start errors cannot prove absence. Restricted creation must not opt in:
+its proxy may already own the port, even if the final sandbox CLI cannot start.
+Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
 
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes
