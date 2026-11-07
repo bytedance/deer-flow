@@ -17,6 +17,7 @@ PORT="${1:?Usage: wait-for-port.sh <port> [timeout] [service_name]}"
 TIMEOUT="${2:-60}"
 SERVICE="${3:-Service}"
 
+# --- Validate the port argument -------------------------------------------
 case "$PORT" in
     ''|*[!0-9]*)
         echo "Port must be a numeric TCP port: $PORT" >&2
@@ -24,8 +25,37 @@ case "$PORT" in
         ;;
 esac
 
-if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+# Strip leading zeros so the length/range checks below are exact
+# (e.g. "065535" represents the valid port 65535).
+port_num="${PORT##0}"
+[ -z "$port_num" ] && port_num=0
+
+# Values longer than 5 digits exceed the maximum TCP port (65535) and would
+# overflow Bash's integer range in the comparison below; reject them up front.
+if [ "${#port_num}" -gt 5 ]; then
     echo "Port must be between 1 and 65535: $PORT" >&2
+    exit 1
+fi
+
+if [ "$port_num" -lt 1 ] || [ "$port_num" -gt 65535 ]; then
+    echo "Port must be between 1 and 65535: $PORT" >&2
+    exit 1
+fi
+
+# --- Validate the timeout argument ----------------------------------------
+case "$TIMEOUT" in
+    ''|*[!0-9]*)
+        echo "Timeout must be a non-negative integer: $TIMEOUT" >&2
+        exit 1
+        ;;
+esac
+
+# Strip leading zeros and guard against values that would overflow Bash's
+# integer range in the wait loop below.
+timeout_num="${TIMEOUT##0}"
+[ -z "$timeout_num" ] && timeout_num=0
+if [ "${#timeout_num}" -gt 18 ]; then
+    echo "Timeout out of range: $TIMEOUT" >&2
     exit 1
 fi
 
