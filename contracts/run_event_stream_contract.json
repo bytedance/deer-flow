@@ -107,6 +107,45 @@
       }
     },
     {
+      "event_type": "run.answer_evidence",
+      "category": "trace",
+      "producer": "RunJournal.record_final_answer_evidence() from FinalAnswerEvidenceMiddleware",
+      "content_schema": {
+        "type": "object",
+        "required": ["schema", "status", "final_message_id", "final_content_sha256", "claimed_action_categories", "unmatched_action_categories", "lead_receipts", "coverage"],
+        "properties": {
+          "schema": {"const": "deerflow.final_answer_evidence.v1"},
+          "status": {"enum": ["no_action_claims", "claims_without_matching_receipts", "matching_receipts_observed", "insufficient_coverage"]},
+          "final_message_id": {"type": ["string", "null"]},
+          "final_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "claimed_action_categories": {"type": "array", "items": {"enum": ["artifact_delivery", "command_execution", "delegation", "file_write", "retrieval"]}, "uniqueItems": true},
+          "unmatched_action_categories": {"type": "array", "items": {"enum": ["artifact_delivery", "command_execution", "delegation", "file_write", "retrieval"]}, "uniqueItems": true},
+          "lead_receipts": {
+            "type": "object",
+            "required": ["count", "by_category", "status_counts"],
+            "properties": {
+              "count": {"type": "integer", "minimum": 0},
+              "by_category": {
+                "type": "object",
+                "propertyNames": {"enum": ["artifact_delivery", "command_execution", "delegation", "file_write", "other", "retrieval"]},
+                "additionalProperties": {"type": "integer", "minimum": 0}
+              },
+              "status_counts": {
+                "type": "object",
+                "propertyNames": {"enum": ["error", "partial_success", "success", "unknown"]},
+                "additionalProperties": {"type": "integer", "minimum": 0}
+              }
+            },
+            "additionalProperties": false
+          },
+          "coverage": {"enum": ["current_run_visible", "unknown"]}
+        },
+        "additionalProperties": true
+      },
+      "metadata_schema": {"type": "object", "additionalProperties": true},
+      "notes": "Advisory, content-free execution evidence for a visible lead final answer. It does not validate claim correctness, rewrite the answer, or establish task acceptance. Child-subagent receipts are excluded from lead receipt counters."
+    },
+    {
       "event_type": "run.terminal",
       "category": "trace",
       "producer": "run_agent() finalization, after final commit ACK and Journal drain, before Evidence Receipt; RecoveryTerminalPublisher after a successful atomic takeover claim",

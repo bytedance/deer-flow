@@ -566,6 +566,19 @@ def build_middlewares(
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
     middlewares = build_lead_runtime_middlewares(**runtime_middleware_kwargs)
 
+    if resolved_app_config.verification.receipts_enabled:
+        from deerflow.agents.middlewares.final_answer_evidence_middleware import FinalAnswerEvidenceMiddleware
+        from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+
+        # ``after_model`` runs in reverse registration order. Insert immediately
+        # after the outer model guards so evidence observes every later
+        # after-model hook. Keep the insertion conditional on the real runtime
+        # chain: tests and embedders may replace the builder with a lightweight
+        # list that has no guard instances, and evidence must remain optional.
+        budget_index = next((index for index, middleware in enumerate(middlewares) if isinstance(middleware, ToolOutputBudgetMiddleware)), None)
+        if budget_index is not None:
+            middlewares.insert(budget_index + 1, FinalAnswerEvidenceMiddleware())
+
     # Always inject current date (and optionally memory) as <system-reminder> into the
     # first HumanMessage to keep the system prompt fully static for prefix-cache reuse.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware

@@ -136,6 +136,12 @@ def _make_terminal_response_middleware():
     return TerminalResponseMiddleware()
 
 
+def _make_final_answer_evidence_middleware():
+    from deerflow.agents.middlewares.final_answer_evidence_middleware import FinalAnswerEvidenceMiddleware
+
+    return FinalAnswerEvidenceMiddleware()
+
+
 def _make_llm_error_handling_middleware():
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.config.app_config import AppConfig
@@ -233,6 +239,7 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.loop_detection_middleware", "LoopDetectionMiddleware", _make_loop_detection_middleware),
     ("deerflow.agents.middlewares.subagent_limit_middleware", "SubagentLimitMiddleware", _make_subagent_limit_middleware),
     ("deerflow.agents.middlewares.terminal_response_middleware", "TerminalResponseMiddleware", _make_terminal_response_middleware),
+    ("deerflow.agents.middlewares.final_answer_evidence_middleware", "FinalAnswerEvidenceMiddleware", _make_final_answer_evidence_middleware),
     ("deerflow.agents.middlewares.llm_error_handling_middleware", "LLMErrorHandlingMiddleware", _make_llm_error_handling_middleware),
     (
         "deerflow.agents.middlewares.model_length_finish_reason_middleware",

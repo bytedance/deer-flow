@@ -764,8 +764,9 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     # verify the custom middleware is injected correctly.
     # With this test's default safety config enabled, the tail order is:
     #   ..., custom, TerminalResponseMiddleware, ModelLengthFinishReasonMiddleware,
-    #   SafetyFinishReasonMiddleware, ClarificationMiddleware, so the custom mock
-    #   sits at index [-5].
+    #   SafetyFinishReasonMiddleware, ClarificationMiddleware, so the custom
+    #   mock sits at index [-5]. EvidenceMiddleware lives near the outer guard
+    #   boundary rather than the tail.
     assert len(middlewares) > 0 and isinstance(middlewares[-5], MagicMock)
 
     from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
