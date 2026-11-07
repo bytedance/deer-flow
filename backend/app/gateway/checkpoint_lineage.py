@@ -6,6 +6,26 @@ from collections.abc import Sequence
 from typing import Any
 
 
+def task_interrupts_by_id(snapshot: Any) -> dict[str, list[Any]]:
+    """Group non-empty task interrupts of one snapshot by task id."""
+    grouped: dict[str, list[Any]] = {}
+    for task in getattr(snapshot, "tasks", None) or ():
+        interrupts = list(getattr(task, "interrupts", ()) or ())
+        if interrupts:
+            grouped[task.id] = interrupts
+    return grouped
+
+
+def is_hitl_approval_payload(value: Any) -> bool:
+    """Whether an interrupt payload is a HITL tool-approval request."""
+    return isinstance(value, dict) and value.get("kind") == "hitl_approval"
+
+
+def hitl_approval_payloads(grouped: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Flatten approval payloads from task_interrupts_by_id output."""
+    return [interrupt.value for interrupts in grouped.values() for interrupt in interrupts if is_hitl_approval_payload(interrupt.value)]
+
+
 class CheckpointLineageError(RuntimeError):
     """Raised when a requested checkpoint ancestor cannot be resolved safely."""
 

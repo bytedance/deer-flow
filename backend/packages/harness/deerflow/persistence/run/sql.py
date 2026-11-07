@@ -259,7 +259,7 @@ class RunRepository(RunStore):
                     RunRow.owner_worker_id == owner_worker_id,
                     or_(RunRow.lease_expires_at.is_(None), RunRow.lease_expires_at > datetime.now(UTC)),
                     RunRow.evidence_retention_revision == receipt.retention_revision,
-                    RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+                    RunRow.status.in_(("success", "error", "timeout", "interrupted", "waiting_for_input")),
                     RunRow.evidence_seal_state == "pending",
                 )
                 .values(evidence_seal_state="sealed", evidence_revision=uuid4().hex, evidence_upper_seq=receipt.upper_event_seq, evidence_event_count=receipt.event_count, change_seq=change_seq)
@@ -1008,7 +1008,7 @@ class RunRepository(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         predicates = (
             RunRow.operation_kind == "run",
-            RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+            RunRow.status.in_(("success", "error", "timeout", "interrupted", "waiting_for_input")),
             RunRow.evidence_seal_state == "pending",
             RunRow.created_at <= before_dt,
             _lease_expired_or_null(RunRow.lease_expires_at, cutoff),

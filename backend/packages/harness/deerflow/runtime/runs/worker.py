@@ -42,7 +42,7 @@ from langgraph.types import Command, Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, DELIVERY_PRESENTATION_TOOL_NAMES, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -50,6 +50,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
+from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -624,6 +625,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
             "__run_input_control",
+            "_hitl_disabled_resume_escape",
+            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -1344,11 +1347,22 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
+        hitl_app_config = ctx.app_config
+        all_reject_hitl_resume = _is_all_reject_hitl_resume(graph_input)
+        if hitl_app_config is None and all_reject_hitl_resume:
+            hitl_app_config = get_app_config()
+        hitl_config = getattr(hitl_app_config, "hitl_approval", None)
+        hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
+        hitl_resume_tool_names = await _pending_hitl_resume_tool_names(checkpointer, checkpoint_config, graph_input)
+        agent_app_config = ctx.app_config
+        if hitl_resume_escape:
+            agent_app_config = hitl_app_config.model_copy(deep=True)
+            agent_app_config.hitl_approval.enabled = True
         runtime_ctx = _build_runtime_context(
             thread_id,
             run_id,
             config.get("context"),
-            ctx.app_config,
+            agent_app_config,
             task_store,
             extensions,
             ctx.conversation_reader,
@@ -1356,6 +1370,15 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
         )
+        # A disabled all-reject escape still needs the HITL hook to consume the
+        # pending interrupt. The assembly marker makes that hook deny rather
+        # than pause again; all other runs cannot inject this internal mode.
+        runtime_ctx.pop("_hitl_disabled_resume_escape", None)
+        runtime_ctx.pop("_hitl_resume_tool_names", None)
+        if hitl_resume_tool_names:
+            runtime_ctx["_hitl_resume_tool_names"] = hitl_resume_tool_names
+        if hitl_resume_escape:
+            runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1430,8 +1453,8 @@ async def run_agent(
             return continuation
 
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
-        if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent_factory_kwargs["app_config"] = ctx.app_config
+        if agent_app_config is not None and _agent_factory_supports_app_config(agent_factory):
+            agent_factory_kwargs["app_config"] = agent_app_config
         from deerflow.extensions import bind_agent_build_extensions
         from deerflow.runtime.assembly_evidence import capture_assembly, project_assembly_evidence
 
@@ -1821,9 +1844,24 @@ async def run_agent(
                 pre_run_snapshot=pre_run_workspace_snapshot,
             )
             delivery_error = _delivery_error(delivery_content)
+            pending_approval = False
+            snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
+            if snapshot_capable and not record.abort_event.is_set() and not delivery_error:
+                snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+                snapshot_tasks = getattr(snapshot, "tasks", None) or ()
+                pending_approval = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
+                if pending_approval:
+                    for task in snapshot_tasks:
+                        for pending_interrupt in getattr(task, "interrupts", ()) or ():
+                            if isinstance(pending_interrupt.value, dict) and pending_interrupt.value.get("kind") == "hitl_approval":
+                                record.metadata["hitl_approval"] = pending_interrupt.value
+                                break
+                        else:
+                            continue
+                        break
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
-                RunStatus.error if delivery_error else RunStatus.success,
+                RunStatus.error if delivery_error else (RunStatus.waiting_for_input if pending_approval else RunStatus.success),
                 error=delivery_error,
                 stop_reason=stop_reason,
                 goal_verdict=record.goal_verdict,
@@ -1831,6 +1869,8 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif pending_approval and not record.ownership_lost:
+                await run_manager.persist_metadata(run_id)
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2138,7 +2178,7 @@ async def run_agent(
                 # Update threads_meta status based on run outcome
                 if started and not record.ownership_lost and thread_store is not None:
                     try:
-                        final_status = "idle" if record.status == RunStatus.success else record.status.value
+                        final_status = "idle" if record.status == RunStatus.success else ("interrupted" if record.status == RunStatus.waiting_for_input else record.status.value)
                         await thread_store.update_status(thread_id, final_status)
                     except Exception:
                         logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
@@ -3102,6 +3142,54 @@ def _complete_state_replacement_values(
 def _is_resume_command_input(graph_input: Any) -> bool:
     """Identify requests that need to preserve interrupted execution position."""
     return isinstance(graph_input, Command) and graph_input.resume is not None
+
+
+async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
+    """Recover gated names from the durable pause matched by this resume."""
+    if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
+        return set()
+    responses = graph_input.resume.get("responses")
+    if not isinstance(responses, list):
+        return set()
+    response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
+    if not response_ids:
+        return set()
+    async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
+        writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
+        # The newest checkpoint carrying either marker decides whether the pause
+        # is still live. A newer head-moving write must not hide an interrupt;
+        # a newer resume must not resurrect an older one.
+        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
+            return set()
+        interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
+        if not interrupt_writes:
+            continue
+        names: set[str] = set()
+        for write in interrupt_writes:
+            interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
+            for pending_interrupt in interrupts:
+                payload = getattr(pending_interrupt, "value", None)
+                if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
+                    continue
+                pending_ids = payload.get("pending_tool_call_ids")
+                actions = payload.get("actions")
+                if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
+                    continue
+                names.update(action.get("tool_name") for action in actions if isinstance(action, Mapping) and isinstance(action.get("tool_name"), str))
+        return names
+    return set()
+
+
+def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
+    """Return whether this is a well-formed reject-only HITL resume payload."""
+    if not isinstance(graph_input, Command) or not isinstance(graph_input.resume, dict):
+        return False
+    responses = graph_input.resume.get("responses")
+    return (
+        isinstance(responses, list)
+        and bool(responses)
+        and all(isinstance(response, dict) and response.get("option_id") == "reject" and isinstance(response.get("tool_call_id"), str) and bool(response["tool_call_id"]) for response in responses)
+    )
 
 
 class CheckpointResumeRejected(RuntimeError):

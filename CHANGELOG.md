@@ -11,6 +11,16 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
+  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
+  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
+  approval card with per-field argument summaries. Approve executes the call,
+  reject returns the reason to the model without executing. IM channels,
+  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
+  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
+  support always reject matching calls regardless of that setting.
+  `hitl_approval.max_actions` configures the approval-batch count limit
+  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
 
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
