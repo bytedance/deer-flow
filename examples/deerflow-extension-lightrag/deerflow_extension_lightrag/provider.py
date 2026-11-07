@@ -12,7 +12,7 @@ from deerflow.community.provider_credentials import reject_url_userinfo
 from deerflow.knowledge import KnowledgeCapabilities, KnowledgeRequestContext, RetrievalHit, RetrievalResult
 from deerflow.knowledge.providers import validate_scope_capabilities
 from deerflow.knowledge.sources import redact_strings
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class Settings(BaseModel):
@@ -23,6 +23,13 @@ class Settings(BaseModel):
     agent_names: list[str] | None = None
     timeout: float = Field(default=30, gt=0, le=120)
     top_k: int = Field(default=20, ge=1, le=100)
+
+    @field_validator("timeout", "top_k", mode="before")
+    @classmethod
+    def reject_boolean_numbers(cls, value: object, info: ValidationInfo) -> object:
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must not be a boolean")
+        return value
 
     @field_validator("base_url")
     @classmethod
