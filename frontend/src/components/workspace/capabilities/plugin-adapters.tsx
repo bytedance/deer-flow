@@ -79,7 +79,10 @@ function ConfiguredPluginSettings({
               htmlFor={`plugin-field-${key}`}
               className="text-sm font-medium"
             >
-              {copy[key as keyof typeof copy] ?? schema.title ?? key}
+              {key === "authorization" &&
+              plugin.config_schema.required?.includes(key)
+                ? copy.authorizationRequired
+                : (copy[key as keyof typeof copy] ?? schema.title ?? key)}
             </label>
             <Input
               id={`plugin-field-${key}`}
