@@ -18,6 +18,7 @@ from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, walk_skill_directories
 from deerflow.skills.types import SkillCategory
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,7 @@ class LocalSkillStorage(SkillStorage):
             return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8-sig")
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+        self.validate_new_skill_name(name)
         with self._skill_projection_mutation(names=(name,)):
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -205,6 +207,11 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError(f"Invalid skill: {message}")
         if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
             raise ValueError(f"Invalid skill name: {skill_name}")
+        # A skill becomes a directory under skills/custom/, so a Windows device
+        # name here fails on Windows hosts and aliases a device on others.
+        reason = windows_incompatible_segment(skill_name)
+        if reason is not None:
+            raise ValueError(f"Invalid skill name {skill_name!r}: {reason}")
 
         target = custom_dir / skill_name
         if target.exists():

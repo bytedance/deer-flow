@@ -89,6 +89,20 @@ class SkillStorage(ABC):
         return normalized
 
     @staticmethod
+    def validate_new_skill_name(name: str) -> str:
+        """Validate a name that is about to create a directory.
+
+        Lookups stay on :meth:`validate_skill_name` so a skill an older release
+        already created with a device-name segment remains readable, editable and
+        deletable; only creating a new one is refused on every platform.
+        """
+        normalized = SkillStorage.validate_skill_name(name)
+        reason = windows_incompatible_segment(normalized)
+        if reason is not None:
+            raise ValueError(f"Invalid skill name {normalized!r}: {reason}")
+        return normalized
+
+    @staticmethod
     def validate_relative_path(relative_path: str, base_dir: Path) -> Path:
         """Validate *relative_path* against *base_dir* and return the resolved target.
 

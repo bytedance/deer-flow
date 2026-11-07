@@ -241,3 +241,60 @@ def test_user_scoped_rejects_dotdot_escape(user_storage):
 def test_user_scoped_rejects_invalid_skill_name(user_storage):
     with pytest.raises(ValueError, match="hyphen-case"):
         user_storage.get_custom_skill_dir("../../escaped")
+
+
+@pytest.mark.parametrize("name", ["nul", "con", "aux", "prn", "com1", "lpt9"])
+def test_reserved_windows_device_names_are_rejected_for_new_skills(storage, name):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.validate_new_skill_name(name)
+    # Lookups stay permissive so a legacy skill remains readable and deletable.
+    assert storage.validate_skill_name(name) == name
+
+
+@pytest.mark.parametrize("name", ["nul", "con"])
+def test_reserved_windows_device_names_are_rejected_on_write(storage, name):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.write_custom_skill(name, "SKILL.md", "# hello")
+
+
+def test_archive_install_rejects_a_reserved_windows_device_name(storage, tmp_path, monkeypatch):
+    import zipfile
+
+    from deerflow.skills.security_scanner import ScanResult
+
+    archive = tmp_path / "reserved.skill"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("reserved/SKILL.md", "---\nname: nul\ndescription: Example\n---\n")
+
+    async def _allow_scan(*_args, **_kwargs):
+        return ScanResult(decision="allow", reason="test")
+
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
+
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        storage.install_skill_from_archive(archive)
+
+
+def test_lookup_paths_keep_accepting_a_legacy_device_name(storage):
+    """Only creation is refused: an existing `nul` skill stays readable and deletable."""
+    assert storage.validate_skill_name("nul") == "nul"
+    assert storage.get_custom_skill_dir("nul").name == "nul"
+
+
+def test_archive_install_rejects_a_device_named_member_segment(storage, tmp_path, monkeypatch):
+    import zipfile
+
+    from deerflow.skills.security_scanner import ScanResult
+
+    archive = tmp_path / "member.skill"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("portable-skill/SKILL.md", "---\nname: portable-skill\ndescription: Example\n---\n")
+        bundle.writestr("portable-skill/references/nul.md", "notes")
+
+    async def _allow_scan(*_args, **_kwargs):
+        return ScanResult(decision="allow", reason="test")
+
+    monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _allow_scan)
+
+    with pytest.raises(ValueError, match="non-portable path segment"):
+        storage.install_skill_from_archive(archive)

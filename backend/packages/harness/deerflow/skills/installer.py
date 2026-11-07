@@ -25,6 +25,7 @@ from deerflow.skills.security_static_scanner import (
     scan_archive_preflight,
     skill_scan_enabled,
 )
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,10 @@ def safe_extract_skill_archive(
             continue
 
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
+        for segment in PurePosixPath(normalized_name).parts:
+            segment_reason = windows_incompatible_segment(segment)
+            if segment_reason is not None:
+                raise ValueError(f"Archive member {info.filename!r} has a non-portable path segment {segment!r}: {segment_reason}")
         member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
