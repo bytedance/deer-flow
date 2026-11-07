@@ -110,8 +110,10 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
-        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-            logger.warning("Failed to read skill states file %s", self._skill_states_file)
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as exc:
+            # A decode failure means the user's disabled set is discarded, and the
+            # next toggle rewrites this file: keep the reason in the log.
+            logger.warning("Failed to read skill states file %s: %s", self._skill_states_file, exc)
         return {}
 
     def _write_skill_states(self, states: dict[str, dict[str, bool]]) -> None:
