@@ -27,7 +27,9 @@ def _get_tavily_client(tool_name: str = "web_search", config: ToolConfig | None 
         api_key = resolve_api_key(config.model_extra.get("api_key"))
     if api_key is None:
         api_key = resolve_api_key(os.getenv("TAVILY_API_KEY"))
-    return AsyncTavilyClient(api_key=api_key)
+    # The SDK re-reads TAVILY_API_KEY unstripped when api_key is None; "" makes a
+    # blank value fail as a missing key instead.
+    return AsyncTavilyClient(api_key=api_key or "")
 
 
 def _response_objects(data: object, container: str) -> list[dict] | None:

@@ -88,7 +88,9 @@ def _get_firecrawl_client(
     api_key = resolve_api_key(cfg.get("api_key")) or resolve_api_key(os.getenv("FIRECRAWL_API_KEY"))
     if api_url is None:
         api_url = cfg.get("base_url")
-    kwargs = {"api_key": api_key}
+    # The SDK re-reads FIRECRAWL_API_KEY unstripped when api_key is None; "" makes
+    # a blank value act as a missing key.
+    kwargs = {"api_key": api_key or ""}
     if api_url:
         kwargs["api_url"] = api_url
     return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]

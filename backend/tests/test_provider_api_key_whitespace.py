@@ -211,21 +211,50 @@ async def test_key_with_trailing_newline_is_sent_stripped_and_never_echoed(provi
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
 @pytest.mark.parametrize("configured", [{"api_key": ""}, {"api_key": " \n"}, {}], ids=["empty", "blank", "absent"])
-async def test_fastcrw_without_its_own_key_never_sends_the_firecrawl_key(configured, backend, monkeypatch, caplog):
-    """fastCRW builds the Firecrawl SDK client, which reads FIRECRAWL_API_KEY when it gets no key."""
+async def test_fastcrw_without_its_own_key_never_sends_the_firecrawl_key(configured, tool_name, backend, monkeypatch, caplog):
+    """fastCRW builds the Firecrawl SDK client, which reads FIRECRAWL_API_KEY when it gets no key.
+
+    Only the SDK's v2 client honours the ``""`` sentinel; running both tools pins
+    that search and scrape still reach it rather than the v1 client.
+    """
     from deerflow.community.fastcrw import tools
 
     firecrawl_key = "fc-other-provider-key-93b1"
     monkeypatch.delenv("CRW_API_KEY", raising=False)
     monkeypatch.delenv("CRW_API_URL", raising=False)
     monkeypatch.setenv("FIRECRAWL_API_KEY", firecrawl_key)
-    monkeypatch.setattr(tools, "get_app_config", lambda: _app_config({"base_url": backend.url, **configured}))
+    monkeypatch.setattr(tools, "get_app_config", lambda: _app_config({"base_url": backend.url, "network_isolation_confirmed": True, **configured}))
+    monkeypatch.setattr(tools, "validate_public_http_url", lambda url, **kwargs: None)
     caplog.set_level(logging.DEBUG)
 
-    result = await _outcome(lambda: asyncio.to_thread(tools.web_search_tool.invoke, {"query": "q"}))
+    if tool_name == "web_search":
+        result = await _outcome(lambda: asyncio.to_thread(tools.web_search_tool.invoke, {"query": "q"}))
+    else:
+        result = await _outcome(lambda: asyncio.to_thread(tools.web_fetch_tool.invoke, {"url": "https://example.com"}))
 
     assert backend.recorder.headers, f"fastCRW never reached its endpoint; it returned {result!r}"
     assert all("authorization" not in request for request in backend.recorder.headers)
     assert firecrawl_key not in result
     assert firecrawl_key not in caplog.text
+
+
+BLANK_ENV_CASES = [
+    ("tavily", "TAVILY_API_KEY", _tavily),
+    ("exa", "EXA_API_KEY", _exa),
+    ("firecrawl", "FIRECRAWL_API_KEY", _firecrawl),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("provider", "env_name", "call"), BLANK_ENV_CASES, ids=[case[0] for case in BLANK_ENV_CASES])
+async def test_blank_environment_key_is_never_handed_back_to_the_sdk(provider, env_name, call, loopback_httpx, monkeypatch):
+    """These SDKs re-read their variable unstripped when given no key; a blank one must act as missing."""
+    backend = loopback_httpx
+    monkeypatch.setenv(env_name, " \r\n")
+
+    result = await call("none", backend, monkeypatch)
+
+    assert "header value" not in result, f"{provider} handed the raw variable back to its SDK: {result!r}"
+    assert all(request.get("authorization", "").strip() == "" and "x-api-key" not in request for request in backend.recorder.headers)

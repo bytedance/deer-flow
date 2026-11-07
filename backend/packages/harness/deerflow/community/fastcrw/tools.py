@@ -42,7 +42,9 @@ def _get_fastcrw_client(
     if base_url is None:
         base_url = os.getenv("CRW_API_URL", DEFAULT_BASE_URL)
     # The Firecrawl SDK reads FIRECRAWL_API_KEY when api_key is None; "" stops it
-    # sending another provider's key to the fastCRW endpoint.
+    # sending another provider's key to the fastCRW endpoint. Only the SDK's v2
+    # client, which serves search and scrape, honours "": its v1 client still reads
+    # FIRECRAWL_API_KEY, so never call ``client.v1`` here.
     return FirecrawlApp(api_key=api_key or "", api_url=base_url)  # type: ignore[arg-type]
 
 

@@ -34,7 +34,9 @@ This section accumulates work toward the **2.3.0** milestone
   through `provider_credentials.resolve_api_key` like the other providers', and
   a blank configured key falls back to the environment for Tavily, Exa,
   Firecrawl and fastCRW. fastCRW without a key of its own no longer lets the
-  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint. ([#7981])
+  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
+  `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
+  instead of reaching the SDK as is. ([#7981])
 - **agents:** Unfinished todos no longer trigger additional model calls or
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a

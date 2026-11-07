@@ -31,7 +31,8 @@
   其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
   `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
   的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
-  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点。([#7981])
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
+  `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
 - **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
   未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
   用户可在后续运行中继续处理。([#7953])
