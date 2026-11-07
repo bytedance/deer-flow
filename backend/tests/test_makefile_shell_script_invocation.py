@@ -25,7 +25,11 @@ bare, and the POSIX definition of ``RUN_SHELL_SCRIPT`` must name an interpreter.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+from support.shell import require_script_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = REPO_ROOT / "Makefile"
@@ -130,3 +134,92 @@ def test_scripts_never_invoke_sibling_scripts_bare() -> None:
     """
     bare = [f"scripts/{name}:{number}: {line}" for name, number, line in _sibling_script_invocations()]
     assert not bare, "these lines run another shell script without an interpreter, so they fail with 'Permission denied' in checkouts that lost the executable bit; prefix them with 'bash':\n  " + "\n  ".join(bare)
+
+
+# ---------- make clean portability ----------
+
+
+def _clean_recipe() -> list[str]:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    target = re.search(r"^clean:\s*\n(?P<recipe>(?:\t[^\n]*\n?)+)", text, re.MULTILINE)
+    assert target is not None, "expected a clean target in the Makefile"
+    return [line.lstrip("\t").removeprefix("@").removeprefix("-") for line in target.group("recipe").splitlines()]
+
+
+def test_clean_deletes_runtime_data_through_run_shell_script() -> None:
+    """Deletion must not use bare ``rm`` recipes: they silently no-op on Windows.
+
+    ``SHELL := cmd.exe`` under ``OS=Windows_NT`` means bare ``rm -rf ...
+    2>/dev/null || true`` lines fail (no rm; ``2>/dev/null`` is not cmd
+    redirection) while the ``-`` prefix swallows the error, so ``make clean``
+    prints "✓ Cleanup complete" with ``backend/.deer-flow`` (database, users,
+    threads, uploads, memory, secrets) and ``logs/*.log`` still on disk.
+    """
+    recipe = _clean_recipe()
+    routed = [line for line in recipe if "clean_runtime_data.sh" in line]
+    assert routed, "expected the clean recipe to route deletion through scripts/clean_runtime_data.sh"
+    unrouted = [line for line in routed if not line.startswith("$(RUN_SHELL_SCRIPT)")]
+    assert not unrouted, "these clean recipe lines invoke the cleanup script without $(RUN_SHELL_SCRIPT), which is absent under cmd.exe on Windows:\n  " + "\n  ".join(unrouted)
+    bare_rm = [line for line in recipe if not line.startswith(("$(RUN_SHELL_SCRIPT)", "echo", "$(MAKE)")) and re.search(r"\brm\b", line)]
+    assert not bare_rm, "these clean recipe lines call rm directly; under cmd.exe on Windows they silently no-op:\n  " + "\n  ".join(bare_rm)
+
+
+def _stage_cleanup_script(tmp_path: Path) -> Path:
+    script = tmp_path / "scripts" / "clean_runtime_data.sh"
+    script.parent.mkdir()
+    shutil.copyfile(SCRIPTS_DIR / "clean_runtime_data.sh", script)
+    return script
+
+
+def test_clean_runtime_data_script_deletes_runtime_tree_and_logs(tmp_path: Path) -> None:
+    """The routed script must remove the runtime tree and service logs."""
+    bash = require_script_bash()
+    script = _stage_cleanup_script(tmp_path)
+    secrets = tmp_path / "backend" / ".deer-flow" / "secrets"
+    secrets.mkdir(parents=True)
+    (secrets / "api.yaml").write_text("secret\n", encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "gateway.log").write_text("log\n", encoding="utf-8")
+
+    result = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "backend" / ".deer-flow").exists()
+    assert not (logs / "gateway.log").exists()
+
+
+def test_clean_runtime_data_script_removes_a_directory_named_like_a_log(tmp_path: Path) -> None:
+    """The old ``rm -rf logs/*.log`` also removed matching directories; keep that scope.
+
+    A stray ``logs/x.log/`` directory must not abort the script — with ``set -e``
+    that would fail ``make clean`` after ``make stop`` has already stopped the
+    stack.
+    """
+    bash = require_script_bash()
+    script = _stage_cleanup_script(tmp_path)
+    runtime = tmp_path / "backend" / ".deer-flow"
+    runtime.mkdir(parents=True)
+    logs = tmp_path / "logs"
+    stray_directory = logs / "x.log"
+    stray_directory.mkdir(parents=True)
+    (stray_directory / "nested.txt").write_text("x\n", encoding="utf-8")
+
+    result = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    assert not runtime.exists()
+    assert not stray_directory.exists()
+
+
+def test_clean_runtime_data_script_tolerates_a_missing_logs_directory(tmp_path: Path) -> None:
+    """A fresh checkout may have no logs yet; the script must still succeed."""
+    bash = require_script_bash()
+    script = _stage_cleanup_script(tmp_path)
+    runtime = tmp_path / "backend" / ".deer-flow"
+    runtime.mkdir(parents=True)
+
+    result = subprocess.run([bash, str(script)], capture_output=True, text=True, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    assert not runtime.exists()

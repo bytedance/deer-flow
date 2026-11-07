@@ -193,12 +193,13 @@ dev-multi-down:
 
 # Clean up: deletes local runtime data, not just temporary files. The guard
 # runs before stop, which would otherwise stop a running stack's sandboxes.
+# Deletion goes through RUN_SHELL_SCRIPT: recipes run under cmd.exe on
+# Windows, where a bare `rm -rf ... 2>/dev/null || true` is a silent no-op.
 clean:
 	@$(RUN_SHELL_SCRIPT) ./scripts/check-data-not-in-use.sh
 	@$(MAKE) --no-print-directory stop
 	@echo "Deleting local runtime data in backend/.deer-flow ($(RUNTIME_DATA_CONTENTS)) and logs/*.log..."
-	@-rm -rf backend/.deer-flow 2>/dev/null || true
-	@-rm -rf logs/*.log 2>/dev/null || true
+	@$(RUN_SHELL_SCRIPT) ./scripts/clean_runtime_data.sh
 	@echo "✓ Cleanup complete"
 
 # ==========================================
