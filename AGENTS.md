@@ -233,6 +233,11 @@ Repo-wide conventions:
   import unavailable and mock HTTP transport to keep tests offline.
   Video, podcast, and chart-visualization CLI failures exit non-zero;
   diagnostics on stderr, success URLs on stdout; test offline.
+  Podcast input/audio/transcript identity checks run before writes or TTS;
+  cover resolved paths and existing file aliases offline. Darwin ASCII-case-only missing
+  paths query the existing ancestor's volume policy; unknown policy requires
+  names differing by more than case. Keep non-ASCII case and normalization aliases out of this
+  preflight's claims. Diagnostics include both offending paths.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
 - **Skill text encoding** — use explicit UTF-8 for textual skill resources.
