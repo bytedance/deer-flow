@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import logging
 import posixpath
-import re
 from collections.abc import Collection, Mapping
 from html import escape
 from typing import Any, TypedDict
 
-import yaml
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntry
+from deerflow.skills.frontmatter import split_skill_markdown
 
 _SKILL_FILE_NAME = "SKILL.md"
-# `\ufeff` is the UTF-8 byte-order mark a Windows-saved SKILL.md can carry. The loader and
-# validator already tolerate it (see `deerflow.skills.frontmatter._FRONTMATTER_RE`); without it
-# here the match fails on the leading marker and the captured description comes back empty.
-_FRONT_MATTER_RE = re.compile(r"^\ufeff?---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
 # Stamped instead of SKILL_CONTEXT_ENTRY_KEY when the read SKILL.md belongs to
 # a skill whose action-scoped ``skill:activate`` decision is denied: the file
@@ -79,16 +74,10 @@ def _skill_name_from_path(skill_md_path: str) -> str:
 
 def _parse_description(content: str) -> str:
     """Extract frontmatter description from already-read SKILL.md content."""
-    match = _FRONT_MATTER_RE.match(content)
-    if not match:
+    parts, _error = split_skill_markdown(content)
+    if parts is None:
         return ""
-    try:
-        metadata = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
-        return ""
-    if not isinstance(metadata, dict):
-        return ""
-    description = metadata.get("description")
+    description = parts.metadata.get("description")
     if not isinstance(description, str):
         return ""
     return " ".join(description.split())[:_SKILL_DESCRIPTION_MAX_CHARS]
