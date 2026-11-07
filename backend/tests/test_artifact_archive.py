@@ -385,6 +385,28 @@ def test_archive_rejects_casefolded_entry_collisions(tmp_path, monkeypatch) -> N
     assert response.status_code == 409
 
 
+@pytest.mark.parametrize("file_name,directory_name", [("Report", "report"), ("Caf\u00e9", "Cafe\u0301")])
+@pytest.mark.parametrize("directory_first", [False, True])
+def test_archive_rejects_portable_file_directory_collisions(tmp_path, monkeypatch, file_name, directory_name, directory_first) -> None:
+    outputs = tmp_path / "outputs"
+    nested = outputs / directory_name / "slides"
+    nested.mkdir(parents=True)
+    if (outputs / file_name).exists():
+        pytest.skip("this filesystem already aliases the colliding names")
+    (outputs / file_name).write_bytes(b"lesson summary")
+    (nested / "lesson.pptx").write_bytes(b"slide bytes")
+    paths = [
+        f"/mnt/user-data/outputs/{file_name}",
+        f"/mnt/user-data/outputs/{directory_name}/slides/lesson.pptx",
+    ]
+    if directory_first:
+        paths.reverse()
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=paths)
+    with client:
+        response = client.post(ARCHIVE_URL)
+    assert response.status_code == 409
+
+
 def test_archive_rechecks_size_after_open(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
