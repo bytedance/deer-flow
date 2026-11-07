@@ -374,6 +374,49 @@ def test_cancelled_env_waiter_never_submits_a_command(paused_env_command):
             _join_observed_thread(queued)
 
 
+@pytest.mark.parametrize("close_first", [False, True])
+@pytest.mark.parametrize("release_count", [1, 2])
+def test_cancel_reaches_env_command_while_scope_drains(paused_env_command, close_first, release_count):
+    case = paused_env_command
+    first = _start_observed_thread(case.run, name="first-env")
+    workers = []
+    progress = {name: threading.Event() for name in ["close", "release-0", "release-1"]}
+
+    class DrainLock(_ObservedScopeLock):
+        def acquire(self, *args, **kwargs):
+            if event := progress.get(threading.current_thread().name):
+                event.set()
+            return super().acquire(*args, **kwargs)
+
+    try:
+        assert case.entered.wait(5)
+        owner = case.sandbox._command_scopes.find("first")
+        scoped = case.sandbox._scoped_shell_sessions["first"]
+        scoped.lock = DrainLock(scoped.lock)
+        if close_first:
+            workers.append(_start_observed_thread(case.sandbox.close, name="close"))
+            assert progress["close"].wait(5)
+        for index in range(release_count):
+            workers.append(_start_observed_thread(lambda: case.sandbox.release_command_scope("first"), name=f"release-{index}"))
+            assert progress[f"release-{index}"].wait(5), "Release must join the scope even when close is already draining it"
+        case.sandbox.request_command_cancel("first")
+        assert owner.cancelled.is_set(), "Cancellation was routed to a replacement owner instead of the running command"
+        assert case.sandbox._command_scopes.find("first") is owner
+        case.resume.set()
+        for worker in [first, *workers]:
+            _join_observed_thread(worker)
+        assert "cancelled" in first.results[0]
+        assert owner.cleaned.is_set()
+        assert len(case.controls) == 1
+        assert sum(path.endswith("/close") for _, path, _ in case.requests) == 1
+        assert case.sandbox._command_scopes.find("first") is None
+        assert not case.sandbox._scoped_shell_sessions
+    finally:
+        case.resume.set()
+        for worker in [first, *workers]:
+            _join_observed_thread(worker)
+
+
 def test_cancelling_one_env_scope_preserves_another_scopes_command(paused_env_command):
     case = paused_env_command
     first = _start_observed_thread(case.run, name="first-env")

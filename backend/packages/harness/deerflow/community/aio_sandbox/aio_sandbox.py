@@ -167,15 +167,14 @@ class AioSandbox(Sandbox):
         cleanup is never blocked.
         """
         # Close admission for scoped commands before draining their sessions.
-        # A scoped call that already registered itself remains in this snapshot
-        # and is joined through its per-scope lock below; later calls fail
-        # without creating an orphaned registry entry.
+        # Keep entries registered while draining so concurrent release still
+        # joins their locks and cancellation reaches the admitted command owner.
+        # Later calls fail without creating an orphaned registry entry.
         with self._scope_registry_lock:
             if self._closed:
                 return
             self._closed = True
             scoped_sessions = list(self._scoped_shell_sessions.items())
-            self._scoped_shell_sessions.clear()
         for scope_id, scoped in scoped_sessions:
             with scoped.lock:
                 if scoped.session_id is not None and self._client is not None:
@@ -186,6 +185,10 @@ class AioSandbox(Sandbox):
                         request_options=self._bounded_cleanup_request_options(),
                     )
                     scoped.session_id = None
+                with self._scope_registry_lock:
+                    if self._scoped_shell_sessions.get(scope_id) is scoped:
+                        self._command_scopes.release(scope_id)
+                        self._scoped_shell_sessions.pop(scope_id)
 
         with self._lock:
             if self._recovery_session_id is not None and self._client is not None:
@@ -713,15 +716,14 @@ class AioSandbox(Sandbox):
         a thread-key serializer must account for this in their release budget.
         Returning early would require retaining ownership until work is drained.
         """
-        self._command_scopes.release(scope_id)
         with self._scope_registry_lock:
             scoped = self._scoped_shell_sessions.get(scope_id)
-            if scoped is not None:
-                # Keep draining entries visible to close(), while fencing new
-                # and already-queued commands before waiting on their lock.
-                scoped.releasing = True
-        if scoped is None:
-            return
+            if scoped is None:
+                self._command_scopes.release(scope_id)
+                return
+            # Keep draining entries visible to close(), while fencing new
+            # and already-queued commands before waiting on their lock.
+            scoped.releasing = True
         try:
             with scoped.lock:
                 if scoped.session_id is None or self._client is None:
@@ -736,6 +738,9 @@ class AioSandbox(Sandbox):
         finally:
             with self._scope_registry_lock:
                 if self._scoped_shell_sessions.get(scope_id) is scoped:
+                    # Keep cancellation routed to the original owner until
+                    # execution and cleanup drain. Only this entry may retire it.
+                    self._command_scopes.release(scope_id)
                     self._scoped_shell_sessions.pop(scope_id)
 
     @staticmethod

@@ -35,6 +35,9 @@ fresh bash creation, execution, polling and cleanup. Only that private path
 skips the shared implicit-shell lock. Releasing entries reject admission and stay
 visible to close until drained; queued calls recheck identity. Keep same-scope
 ordering, fresh env sessions, cancellation ownership and closed admission.
+Close also retains draining entries. Retire the command owner only after the
+scope lock drains, under the registry identity check, so cancellation during
+release/close reaches the active command and concurrent releases stay idempotent.
 `scope_lock_held=True` requires ownership of the registered scope lock for the
 whole invocation, including retries. Release has no separate drain deadline;
 HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
