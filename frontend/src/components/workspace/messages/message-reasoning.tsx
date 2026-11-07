@@ -65,7 +65,9 @@ export function MessageReasoning({
         )}
         <ChevronRightIcon className="size-4 transition-transform group-data-[state=open]/reasoning:rotate-90" />
       </ReasoningTrigger>
-      <SafeReasoningContent>{children}</SafeReasoningContent>
+      <SafeReasoningContent isStreaming={isLoading}>
+        {children}
+      </SafeReasoningContent>
     </Reasoning>
   );
 }

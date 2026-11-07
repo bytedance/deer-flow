@@ -7,16 +7,44 @@ import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
 const answer = "你好！有什么可以帮你的吗？";
 const reasoning = "先理解用户的需求，再给出简洁的回答。";
 
-async function freezeHistoryClock(page: Page) {
-  await page.clock.install({ time: new Date("2026-01-01T00:00:00Z") });
-  await page.clock.pauseAt(new Date("2026-01-01T00:00:01Z"));
+async function observeHistoryMounts(page: Page) {
+  // Fix Date without pausing timers used to publish loaded history.
+  await page.clock.setFixedTime(new Date("2026-01-01T00:00:00Z"));
+  await page.addInitScript(() => {
+    const states: (string | null)[] = [];
+    Object.assign(window, { historyReasoningMounts: states });
+    const seen = new WeakSet<Element>();
+    new MutationObserver(() => {
+      for (const trigger of document.querySelectorAll(
+        "button[aria-expanded]",
+      )) {
+        if (
+          !trigger.querySelector('[data-testid="run-duration"]') ||
+          seen.has(trigger)
+        )
+          continue;
+        seen.add(trigger);
+        states.push(trigger.getAttribute("aria-expanded"));
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
+}
+
+async function expectCollapsedHistoryMounts(page: Page) {
+  const states = await page.evaluate(
+    () =>
+      (window as unknown as { historyReasoningMounts: (string | null)[] })
+        .historyReasoningMounts,
+  );
+  expect(states.length).toBeGreaterThan(0);
+  expect(states.every((state) => state === "false")).toBe(true);
 }
 
 for (const encoding of ["provider", "inline", "none"] as const) {
   test(`shows one compact Chinese duration header: ${encoding}`, async ({
     page,
   }, testInfo) => {
-    await freezeHistoryClock(page);
+    await observeHistoryMounts(page);
     await page
       .context()
       .addCookies([
@@ -62,7 +90,8 @@ for (const encoding of ["provider", "inline", "none"] as const) {
       exact: true,
     });
     if (encoding !== "none") {
-      // Timers are paused: retries cannot hide an initially expanded panel.
+      // The observer catches initial expansion even if an auto-close ran.
+      await expectCollapsedHistoryMounts(page);
       expect(await trigger.getAttribute("aria-expanded")).toBe("false");
       await trigger.click();
       await expect(page.getByText(reasoning, { exact: true })).toBeVisible();
@@ -83,6 +112,7 @@ for (const encoding of ["provider", "inline", "none"] as const) {
     await expect(label).toHaveCount(1);
     await expect(label).toHaveText("用时 31 秒");
     if (encoding !== "none") {
+      await expectCollapsedHistoryMounts(page);
       expect(await trigger.getAttribute("aria-expanded")).toBe("false");
     }
     await page.mouse.move(0, 0);
@@ -110,7 +140,7 @@ for (const kind of ["processing", "subagent"] as const) {
   test(`binds completed ${kind} duration to its reasoning disclosure`, async ({
     page,
   }) => {
-    await freezeHistoryClock(page);
+    await observeHistoryMounts(page);
     mockLangGraphAPI(page, {
       threads: [
         {
@@ -156,6 +186,7 @@ for (const kind of ["processing", "subagent"] as const) {
     });
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
     await expect(trigger).toBeVisible();
+    await expectCollapsedHistoryMounts(page);
     expect(await trigger.getAttribute("aria-expanded")).toBe("false");
     await trigger.click();
     await expect(page.getByText(reasoning, { exact: true })).toBeVisible();
@@ -166,6 +197,7 @@ for (const kind of ["processing", "subagent"] as const) {
     ).toHaveCount(0);
     await page.reload();
     await expect(page.getByTestId("run-duration")).toHaveCount(1);
+    await expectCollapsedHistoryMounts(page);
     expect(await trigger.getAttribute("aria-expanded")).toBe("false");
   });
 }
