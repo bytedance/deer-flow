@@ -2728,6 +2728,10 @@ call.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
+When loop detection, the run token budget, or a provider safety/output-length
+limit stops a run, unfinished todos are retained for a later user run; todo
+completion reminders do not restart model calls or tool execution after that stop.
+Safety-stopped partial text is preserved; it does not trigger a Todo retry.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, configured
@@ -3244,6 +3248,8 @@ If a file disappears while being hashed, the scan omits that file and continues
 recording the others. A concurrent scratch-file removal therefore does not
 discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
+
+`present_shared_artifact` publishes another conversation's persisted output using `origin_thread_id + path + sha256`. Same-user, runtime-home-confined reads and writes reject path traversal, symlinks and changed content; an existing destination with different content is retained, while identical concurrent handoffs succeed. Successful handoffs count as run delivery and archive receipts. The current POSIX implementation does not acquire a source sandbox or cross user boundaries.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
