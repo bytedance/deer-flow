@@ -67,6 +67,7 @@ Do NOT read the python file, just call it with the parameters.
 ## Output Handling
 
 - Music is saved as MP3 (typically in `/mnt/user-data/outputs/`).
+- Generation failures, including missing credentials, exit with status 1 and write diagnostics to stderr. Successful generation exits zero and prints its result to stdout.
 - Returned audio must decode to nonempty bytes and have an ID3 tag header or MPEG frame signature. This is a header sanity check, not complete audio decoding.
 - Malformed, empty or unrecognized audio is rejected before creating the output directory or opening the output file; an existing output is preserved.
 - Missing audio reports "MiniMax returned no audio data"; whitespace-only hex reports "MiniMax audio decoded to empty bytes".
