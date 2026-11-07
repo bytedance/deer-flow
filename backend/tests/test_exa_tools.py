@@ -55,7 +55,7 @@ def mock_exa_client():
 class TestWebSearchTool:
     @pytest.mark.parametrize(
         ("time_range", "expected_start"),
-        [("day", "2024-12-31T12:30:00Z"), ("week", "2024-12-25T12:30:00Z"), ("month", "2024-12-02T12:30:00Z"), ("year", "2024-01-02T12:30:00Z"), (None, None)],
+        [("day", "2024-12-31T12:30:00.123456Z"), ("week", "2024-12-25T12:30:00.123456Z"), ("month", "2024-12-02T12:30:00.123456Z"), ("year", "2024-01-02T12:30:00.123456Z"), (None, None)],
     )
     def test_time_range_sdk_request(self, mock_app_config, time_range, expected_start):
         """Exercise the real SDK's validation and snake_case to camelCase conversion."""
@@ -71,12 +71,12 @@ class TestWebSearchTool:
             return {"results": [{"id": "https://example.com", "url": "https://example.com", "title": "Release", "highlights": ["New release"]}], "requestId": "req"}
 
         with patch("deerflow.community.exa.tools.datetime") as clock, patch.object(Exa, "request", fake_request):
-            clock.now.return_value = datetime(2025, 1, 1, 12, 30, tzinfo=UTC)
+            clock.now.return_value = datetime(2025, 1, 1, 12, 30, microsecond=123456, tzinfo=UTC)
             result = web_search_tool.invoke({"query": "agent releases", "time_range": time_range})
 
         expected = {"query": "agent releases", "type": "auto", "numResults": 5, "contents": {"highlights": {"maxCharacters": 1000}}}
         if expected_start is not None:
-            expected.update(startPublishedDate=expected_start, endPublishedDate="2025-01-01T12:30:00Z")
+            expected.update(startPublishedDate=expected_start, endPublishedDate="2025-01-01T12:30:00.123456Z")
             clock.now.assert_called_once_with(UTC)
         else:
             clock.now.assert_not_called()
