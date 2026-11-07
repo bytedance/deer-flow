@@ -116,7 +116,7 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
+covered by a path attributed by the journal to `present_files` or `present_shared_artifact`; presenting only
 an unrelated pre-existing path does not satisfy delivery. Receipts for such
 runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
 `stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
