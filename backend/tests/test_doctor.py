@@ -721,6 +721,22 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SERPLY_API_KEY" in (result.fix or "")
 
+    def test_cloro_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLORO_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.cloro.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "cloro" in result.detail
+
+    def test_cloro_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CLORO_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.cloro.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "CLORO_API_KEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
