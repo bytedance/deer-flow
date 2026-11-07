@@ -92,6 +92,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "memory_tool_system",
         "todo_list_system",
         "durable_context_data",
+        "durable_context_update",
         "slash_skill_activation",
         "mcp_routing_hints",
         "available-deferred-tools",
