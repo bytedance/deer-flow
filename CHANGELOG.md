@@ -31,8 +31,12 @@ This section accumulates work toward the **2.3.0** milestone
   API keys and MCP credentials into every gateway image layer through
   `COPY backend ./backend`. `frontend/.env.local` reached the frontend image the
   same way. They are now excluded at the root and in `backend/`, along with
-  `.env*.local` at any depth. Published CI images were not affected; rebuild
-  local images that were pushed or shared. ([#7958])
+  `.env*.local` at any depth, `frontend/*.pem`, and the credential files the
+  extension manager refuses inside extension snapshots. A locally built
+  frontend image no longer inlines `NEXT_PUBLIC_*` values from
+  `frontend/.env.local`; the Docker stack's single nginx origin needs none of
+  them. Published CI images were not affected; rebuild local images that were
+  pushed or shared. ([#7958])
 
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's

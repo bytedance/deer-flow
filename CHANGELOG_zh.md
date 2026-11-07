@@ -27,9 +27,11 @@
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
   `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
   会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
-  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件，以及任意
-  层级的 `.env*.local` 都会被排除。CI 发布的镜像不受影响；已推送或分享过的
-  本地镜像请重新构建。([#7958])
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件、任意层级的
+  `.env*.local`、`frontend/*.pem`，以及扩展管理器拒绝写入扩展快照的凭据文件都会
+  被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
+  值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
+  镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
 
 - **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
   同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
