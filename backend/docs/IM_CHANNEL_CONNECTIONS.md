@@ -187,6 +187,16 @@ graph TB
     Msg --> Stream3 --> Stream --> Mid1 --> Mid2 --> Final
 ```
 
+Feishu rejects a card whose request body exceeds 30 KB (`230025`). The channel
+budgets card text at 24 KB of that body, measured as the bytes the text adds
+after both JSON escapes, and sends CJK unescaped (3 bytes per character, about
+8,000 per card). A streamed update that no longer fits shows the part that does,
+ending in `…`. A longer final answer fills the running card and continues in up
+to 10 cards replied to the same source message, split at line breaks; past that
+the last card is clipped and marked `... (truncated)`. A retry of a partially
+delivered answer resumes after the cards already sent, and a reply to any of the
+cards continues the conversation.
+
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
 ## Attachment delivery feedback
@@ -827,6 +837,12 @@ WeCom groups bound before group destinations were introduced keep their legacy
 chat identity. That compatibility applies only to the old group-binding shape;
 a new private binding never authorizes messages from an unbound group. Bind a
 specific group again with a name to make it available as a notification target.
+
+Each WeCom group is its own conversation, with one DeerFlow thread per member;
+a private chat is keyed by the sender alone. A group bound with its own
+`/connect` keeps the thread it had before groups got their own conversation. A
+legacy group binding covers every group of the bot, so its earlier thread is
+not continued in any of them; each group starts a new one.
 
 ### WeChat private notifications
 

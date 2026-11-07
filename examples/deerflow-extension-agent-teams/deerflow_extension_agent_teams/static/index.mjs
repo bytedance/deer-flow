@@ -509,6 +509,11 @@ function mount(root, context) {
     feed.append(empty);
     const composer = node("form", "", { className: "chat-composer" });
     const recipients = new Set();
+    const selectedArtifacts = new Map();
+    const attachmentStatus = node("p", "", {
+      className: "hint",
+      role: "status",
+    });
     const chips = node("div", "", {
       className: "recipient-chips",
       ariaLabel: t("Recipients", "接收成员"),
@@ -554,7 +559,11 @@ function mount(root, context) {
         if (!composer.reportValidity() || !task.value.trim()) return;
         const text = inputText(task, t("Message to team", "发送给团队的消息")),
           ids = [...recipients];
-        const fingerprint = JSON.stringify([text, [...ids].sort()]);
+        const artifacts = [...selectedArtifacts.values()].sort(
+          (a, b) =>
+            a.artifact_id.localeCompare(b.artifact_id) || a.version - b.version,
+        );
+        const fingerprint = JSON.stringify([text, [...ids].sort(), artifacts]);
         if (fingerprint !== sentFingerprint) {
           draftKey = requestId();
           sentFingerprint = fingerprint;
@@ -569,6 +578,7 @@ function mount(root, context) {
                 member_id: id,
                 text,
                 request_id: `${draftKey}:${id}`,
+                ...(artifacts.length ? { artifacts } : {}),
               }),
             ),
           );
@@ -577,10 +587,19 @@ function mount(root, context) {
           if (failed) throw failed.reason;
           if (
             task.value.trim() === text &&
-            JSON.stringify([...recipients]) === JSON.stringify(ids)
+            JSON.stringify([...recipients]) === JSON.stringify(ids) &&
+            JSON.stringify(
+              [...selectedArtifacts.values()].sort(
+                (a, b) =>
+                  a.artifact_id.localeCompare(b.artifact_id) ||
+                  a.version - b.version,
+              ),
+            ) === JSON.stringify(artifacts)
           ) {
             task.value = "";
             recipients.clear();
+            selectedArtifacts.clear();
+            paintArtifacts(true);
             paintRecipients();
           }
           draftKey = requestId();
@@ -742,7 +761,7 @@ function mount(root, context) {
       }),
       send,
     );
-    composer.append(picker, chips, task, composerFooter);
+    composer.append(picker, chips, task, attachmentStatus, composerFooter);
     composer.onsubmit = (e) => {
       e.preventDefault();
       send.click();
@@ -809,9 +828,148 @@ function mount(root, context) {
       if (!hadPublicEntries && state.entries.length) publicState.open = true;
       hadPublicEntries = state.entries.length > 0;
     }
+    const artifactPanel = node("details", "", {
+      className: "public-state team-artifacts",
+    });
+    const artifactSummary = node("summary");
+    const artifactList = node("div", "", { className: "public-state-list" });
+    artifactPanel.append(artifactSummary, artifactList);
+    let artifactRevision = null;
+    let hadReadyArtifacts = false;
+    function paintArtifacts(force = false) {
+      const entries = team.artifacts ?? [];
+      const revision = JSON.stringify(entries);
+      if (!force && revision === artifactRevision) return;
+      artifactRevision = revision;
+      artifactSummary.textContent = t(
+        `Files · ${entries.length} versions`,
+        `团队成果 · ${entries.length} 个文件版本`,
+      );
+      artifactList.replaceChildren();
+      if (!entries.length)
+        artifactList.append(
+          node(
+            "p",
+            t(
+              "Members can register output files while working. Saved versions can be attached to another member's task.",
+              "成员工作时可以登记输出文件，保存后可选择指定版本交给其他成员。",
+            ),
+            { className: "hint" },
+          ),
+        );
+      for (const entry of entries) {
+        const card = node("article", "", { className: "public-state-entry" });
+        const author =
+          team.members.find((member) => member.id === entry.source.member_id)
+            ?.name ?? entry.source.member_id;
+        const state =
+          entry.status === "ready"
+            ? t("Saved", "已保存")
+            : entry.status === "pending"
+              ? t("Waiting for task completion", "等待任务完成")
+              : t("Capture failed", "保存失败");
+        card.append(
+          node("strong", `${entry.name} · v${entry.version}`),
+          node(
+            "p",
+            `${entry.filename} · ${author} · ${state}${entry.size === null ? "" : ` · ${entry.size} B`}`,
+            { className: "hint" },
+          ),
+        );
+        if (entry.error) card.append(node("p", entry.error));
+        if (entry.status === "ready") {
+          const key = `${entry.artifact_id}:${entry.version}`;
+          const label = node("label", "", { className: "artifact-attachment" });
+          const checkbox = node("input", "", {
+            type: "checkbox",
+            checked: selectedArtifacts.has(key),
+            ariaLabel: t(
+              `Attach ${entry.name} v${entry.version}`,
+              `附加 ${entry.name} v${entry.version}`,
+            ),
+          });
+          checkbox.onchange = () => {
+            if (checkbox.checked && selectedArtifacts.size >= 4) {
+              checkbox.checked = false;
+              attachmentStatus.textContent = t(
+                "Choose up to four file versions.",
+                "最多选择四个文件版本。",
+              );
+              return;
+            }
+            if (checkbox.checked)
+              selectedArtifacts.set(key, {
+                artifact_id: entry.artifact_id,
+                version: entry.version,
+              });
+            else selectedArtifacts.delete(key);
+            attachmentStatus.textContent = selectedArtifacts.size
+              ? t(
+                  `${selectedArtifacts.size} file version(s) attached to the next task`,
+                  `下一项任务已附加 ${selectedArtifacts.size} 个文件版本`,
+                )
+              : "";
+          };
+          label.append(
+            checkbox,
+            node("span", t("Attach to next task", "附加到下一项任务")),
+          );
+          card.append(
+            label,
+            button(
+              t("Download", "下载"),
+              async () => {
+                const chunks = [];
+                let offset = 0;
+                do {
+                  const chunk = await call("get_artifact", {
+                    team_id: team.id,
+                    artifact_id: entry.artifact_id,
+                    version: entry.version,
+                    offset,
+                  });
+                  chunks.push(
+                    Uint8Array.from(atob(chunk.content_base64), (c) =>
+                      c.charCodeAt(0),
+                    ),
+                  );
+                  offset = chunk.next_offset;
+                } while (offset !== null);
+                const blob = new Blob(chunks, {
+                  type: "application/octet-stream",
+                });
+                if (blob.size !== entry.size)
+                  throw new Error(
+                    t("Incomplete file download", "文件下载不完整"),
+                  );
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = entry.filename;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              },
+              "text-button",
+            ),
+          );
+        }
+        card.append(
+          button(
+            t("Open source conversation", "打开来源会话"),
+            async () => context.openConversation?.(entry.source.thread_id),
+            "text-button",
+          ),
+        );
+        artifactList.append(card);
+      }
+      const ready = entries.some((entry) => entry.status === "ready");
+      if (!hadReadyArtifacts && ready) artifactPanel.open = true;
+      hadReadyArtifacts = ready;
+      if (!selectedArtifacts.size) attachmentStatus.textContent = "";
+    }
     chat.append(feed, liveBar, composer);
     body.append(members, chat);
-    workspace.append(header, publicState, body);
+    workspace.append(header, publicState, artifactPanel, body);
     content.replaceChildren(workspace);
     const cards = new Map();
     function dateLabel(value) {
@@ -984,6 +1142,7 @@ function mount(root, context) {
     }
     function paintActivity() {
       paintPublicState();
+      paintArtifacts();
       const nearBottom =
         feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
       const oldSize = cards.size;

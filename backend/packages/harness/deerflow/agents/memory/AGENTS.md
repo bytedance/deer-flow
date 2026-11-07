@@ -19,6 +19,9 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
+apply the read policy to the whole result, with value-free diagnostics.
+
 #### Main components
 
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
@@ -185,6 +188,10 @@ Writes use a user lock, shared revision, fact revisions, and a recovery journal.
 Point operations can rebase only when all original fact preconditions still hold.
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
+
+Replacement imports copy facts, validate supplied revisions as positive integers,
+and use live revisions for existing IDs. Omitted revisions stay valid. Preserve
+manifest, upsert, absence and delete preconditions.
 
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
