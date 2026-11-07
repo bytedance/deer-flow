@@ -24,6 +24,10 @@ and direct plaintext; no media decoding/fetching or nested-document traversal.
 PII before splitting, budgets before escaping; hooks/history/removal on success.
 Chunk/carry/cooldown invariants and tests:
 [contract](../../../../../docs/summarization.md).
+Template syntax/field-lookup failures share `_render_summary_prompt`: return `None`
+before model calls, hooks or history changes at both sites. Automatic turns retain
+context; manual compaction raises `SummaryGenerationError`. Warnings use the
+release-policy fingerprint.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
