@@ -24,6 +24,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **subagents:** Managed subagent creation now rejects Windows reserved device
+  names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
+  `normalize_managed_subagent_name(..., for_creation=True)` validator and
+  Gateway `/api/subagents` boundary before attempting filesystem writes,
+  preventing `OSError` failures on Windows hosts while keeping existing
+  read and delete operations permissive.
+
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -35,7 +42,6 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
-  
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
   call. Existing sandbox bindings and providers that require skill uploads
