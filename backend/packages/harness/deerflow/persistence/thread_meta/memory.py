@@ -8,6 +8,7 @@ router for thread records.
 from __future__ import annotations
 
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from langgraph.store.base import BaseStore
@@ -76,13 +77,16 @@ class MemoryThreadMetaStore(ThreadMetaStore):
                 "user_id": resolved_user_id,
                 "display_name": display_name,
                 "status": "idle",
-                "metadata": metadata or {},
+                "metadata": deepcopy(metadata or {}),
                 "values": {},
                 "created_at": now,
                 "updated_at": now,
             }
+            # Prepare the public receipt before publication: copy failure must
+            # not report a failed create after changing the stored row.
+            result = deepcopy(record)
             await self._store.aput(THREADS_NS, thread_id, record)
-            return record
+            return result
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
         async with self._thread_locks.hold(thread_id):
@@ -100,7 +104,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         return False
 
     async def get(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
-        return await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.get")
+        record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.get")
+        return deepcopy(record) if record is not None else None
 
     async def search(
         self,
@@ -151,7 +156,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         if archived is not None:
             records = [record for record in records if ((record.get("metadata") or {}).get(THREAD_ARCHIVED_METADATA_KEY) is True) == archived]
         records.sort(key=self._sort_key, reverse=True)
-        return records[offset : offset + limit]
+        # Filter/sort/page before copying; only returned rows need ownership.
+        return [deepcopy(record) for record in records[offset : offset + limit]]
 
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         item = await self._store.aget(THREADS_NS, thread_id)
@@ -197,7 +203,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             if record is None:
                 return
             merged = dict(record.get("metadata") or {})
-            merged.update(metadata)
+            merged.update(deepcopy(metadata))
             record["metadata"] = merged
             if touch:
                 record["updated_at"] = now_iso()
