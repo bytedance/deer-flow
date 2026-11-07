@@ -33,7 +33,8 @@ This section accumulates work toward the **2.3.0** milestone
   the conversation history kept, and four of them also logged it. Keys now go
   through `provider_credentials.resolve_api_key` like the other providers', and
   a blank configured key falls back to the environment for Tavily, Exa,
-  Firecrawl and fastCRW. ([#7981])
+  Firecrawl and fastCRW. fastCRW without a key of its own no longer lets the
+  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint. ([#7981])
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made

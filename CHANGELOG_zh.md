@@ -30,7 +30,8 @@
   b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
   其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
   `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
-  的配置密钥为空时会回退到环境变量。([#7981])
+  的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点。([#7981])
 
 - **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
   序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：

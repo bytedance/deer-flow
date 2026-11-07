@@ -208,3 +208,24 @@ async def test_key_with_trailing_newline_is_sent_stripped_and_never_echoed(provi
     assert sent and set(sent) == {expected}, f"{provider} never sent its key cleanly; it returned {result!r}"
     assert KEY not in result
     assert KEY not in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("configured", [{"api_key": ""}, {"api_key": " \n"}, {}], ids=["empty", "blank", "absent"])
+async def test_fastcrw_without_its_own_key_never_sends_the_firecrawl_key(configured, backend, monkeypatch, caplog):
+    """fastCRW builds the Firecrawl SDK client, which reads FIRECRAWL_API_KEY when it gets no key."""
+    from deerflow.community.fastcrw import tools
+
+    firecrawl_key = "fc-other-provider-key-93b1"
+    monkeypatch.delenv("CRW_API_KEY", raising=False)
+    monkeypatch.delenv("CRW_API_URL", raising=False)
+    monkeypatch.setenv("FIRECRAWL_API_KEY", firecrawl_key)
+    monkeypatch.setattr(tools, "get_app_config", lambda: _app_config({"base_url": backend.url, **configured}))
+    caplog.set_level(logging.DEBUG)
+
+    result = await _outcome(lambda: asyncio.to_thread(tools.web_search_tool.invoke, {"query": "q"}))
+
+    assert backend.recorder.headers, f"fastCRW never reached its endpoint; it returned {result!r}"
+    assert all("authorization" not in request for request in backend.recorder.headers)
+    assert firecrawl_key not in result
+    assert firecrawl_key not in caplog.text

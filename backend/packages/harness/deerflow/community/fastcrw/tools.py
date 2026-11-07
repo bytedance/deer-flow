@@ -41,7 +41,9 @@ def _get_fastcrw_client(
         api_key = resolve_api_key(os.getenv("CRW_API_KEY"))
     if base_url is None:
         base_url = os.getenv("CRW_API_URL", DEFAULT_BASE_URL)
-    return FirecrawlApp(api_key=api_key, api_url=base_url)  # type: ignore[arg-type]
+    # The Firecrawl SDK reads FIRECRAWL_API_KEY when api_key is None; "" stops it
+    # sending another provider's key to the fastCRW endpoint.
+    return FirecrawlApp(api_key=api_key or "", api_url=base_url)  # type: ignore[arg-type]
 
 
 def _resolve_fastcrw_base_url(cfg: dict | None) -> str:
