@@ -189,6 +189,32 @@ class TestSlackExtractInboundFiles:
 
         assert files[0]["filename"] == "slack-file-F1.bin"
 
+    def test_non_decimal_digit_size_is_ignored(self):
+        from app.channels.slack import SlackChannel
+
+        files = SlackChannel._extract_inbound_files(
+            {
+                "files": [
+                    {
+                        "id": "F1",
+                        "name": "a.bin",
+                        "mimetype": "application/octet-stream",
+                        "size": "²",
+                        "url_private_download": "https://files.slack.com/files-pri/T-F/download/a",
+                    },
+                    {
+                        "id": "F2",
+                        "name": "b.bin",
+                        "mimetype": "application/octet-stream",
+                        "size": "③",
+                        "url_private_download": "https://files.slack.com/files-pri/T-F/download/b",
+                    },
+                ]
+            }
+        )
+
+        assert [item["size"] for item in files] == [None, None]
+
 
 class TestSlackReceiveFile:
     def test_downloads_bytes_with_bearer_token_and_strips_url(self, monkeypatch):
