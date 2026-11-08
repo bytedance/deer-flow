@@ -72,6 +72,13 @@ class TestClassifyCommand:
             "rm -rf $HOME",
             "rm -rf $HOME/",
             "rm -rf ${HOME}/",
+            "rm -rf ${HOME:?}",
+            "rm -rf ${HOME:-$HOME}",
+            "rm -rf ${!HOME}",
+            "rm -rf $USERPROFILE",
+            "rm -rf $HOMEPATH",
+            "rm -rf $HOMEDRIVE",
+            "rm -rf $env:USERPROFILE",
             'rm -rf "$HOME/"',
             "rm -rf $HOME/*",
             "rm -fr /",
@@ -474,6 +481,8 @@ class TestClassifyCommand:
             "rm -rf $HOMELESS",
             "rm -rf $MY_HOME/",
             "rm -rf ${HOME_CACHE}",
+            "rm -rf '$HOME'",
+            "> '$HOME/.bashrc'",
             'echo "Today is $(date)"',  # safe $() — date is not in dangerous list
             "echo `whoami`",  # safe backtick — whoami is not in dangerous list
             "mkdir -p src/{components,utils}",  # brace expansion
