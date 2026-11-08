@@ -18,39 +18,12 @@ post-compaction tool-message tail. The verdict remains advisory, not a gate.
 
 from __future__ import annotations
 
-import re
 from typing import TypedDict
 
 from deerflow.agents.middlewares.tool_receipt import ToolReceipt, parse_citations
 
 VERDICT_SOURCE = "receipt_citations"
 VERDICT_REQUIREMENT = "cited_ids_in_execution_record"
-
-#: Zero-citation heuristic: a completed report making action claims with no
-#: receipt citations is a weak-negative signal, not a clean bill. Verb list
-#: plus path-with-extension patterns; false positives cost one UNVERIFIED
-#: line, false negatives let false success through — biased toward sensitive.
-_ACTION_VERB_RE = re.compile(
-    r"\b(wrote|written|created|saved|generated|ran|executed|uploaded|downloaded"
-    r"|deleted|modified|updated|installed|deployed|fetched|built|compiled"
-    r"|produced|exported|fixed|added|changed|removed|implemented|patched"
-    r"|refactored|renamed|moved|merged|committed|edited|replaced|tested"
-    r"|verified|cleaned|configured)\b",
-    re.IGNORECASE,
-)
-#: CJK reports have no word boundaries, so the English list never fires on
-#: them; match common action verbs directly instead.
-_CJK_ACTION_VERB_RE = re.compile(
-    r"创建|生成|写入|保存|修改|更新|删除|运行|执行|安装|部署|上传|下载"
-    r"|修复|添加|新增|编写|编译|构建|导出|测试|提交|移动|重命名|配置|替换|清理"
-)
-_FILE_PATH_RE = re.compile(r"(?:/[\w.\-]+){2,}|\b[\w.\-]+\.(?:py|md|txt|json|ya?ml|csv|html|js|ts|sh|log|pdf|png|jpe?g)\b")
-
-#: Safety net beyond any verb list: a harvested non-empty receipt ledger means
-#: the subagent demonstrably executed tools, so a paragraph-length report that
-#: cites none of them is UNVERIFIED regardless of language or phrasing. Short
-#: status confirmations stay a vacuous pass.
-_NONTRIVIAL_REPORT_MIN_CHARS = 240
 
 #: Anti-automation-bias: model-visible verdict text always states its boundary.
 _LIMITATION = "execution evidence only, does not validate claim correctness"
@@ -70,10 +43,6 @@ class ReceiptVerdict(TypedDict):
     failed: list[CitationFailure]
     unknown: list[str]
     no_citation_claims: bool
-
-
-def _has_action_claims(report_text: str) -> bool:
-    return bool(_ACTION_VERB_RE.search(report_text) or _CJK_ACTION_VERB_RE.search(report_text) or _FILE_PATH_RE.search(report_text))
 
 
 def verify_receipt_citations(report_text: str, receipts: list[ToolReceipt]) -> ReceiptVerdict:
@@ -96,12 +65,10 @@ def verify_receipt_citations(report_text: str, receipts: list[ToolReceipt]) -> R
             failed.append({"id": rid, "reason": f"anchor mismatch: cited as {anchor}, receipt {rid} is {receipt['tool_name']}"})
             continue
         resolved.append(rid)
-    no_citation_claims = not cited and (_has_action_claims(report_text) or bool(receipts) and len(report_text.strip()) >= _NONTRIVIAL_REPORT_MIN_CHARS)
-    if cited:
-        citation_resolved = not failed and not unknown
-    else:
-        # Claim-free report with nothing to check: vacuous pass, renders nothing.
-        citation_resolved = not no_citation_claims
+    # Legacy field retained for persisted-contract compatibility; prose is not
+    # parsed as a claim. Absence of citations is explicitly unresolved.
+    no_citation_claims = False
+    citation_resolved = bool(cited) and not failed and not unknown
     return ReceiptVerdict(
         source=VERDICT_SOURCE,
         requirement=VERDICT_REQUIREMENT,
@@ -160,10 +127,8 @@ def validate_receipt_verdict(value: object) -> ReceiptVerdict | None:
 
 def render_citation_verdict(verdict: ReceiptVerdict) -> str:
     """Render the verdict as the delegation-ledger citation segment."""
-    if verdict["no_citation_claims"]:
-        return "citations: UNVERIFIED — action claims without receipt citations"
-    if not verdict["cited"]:
-        return ""
+    if verdict["no_citation_claims"] or not verdict["cited"]:
+        return "citations: UNVERIFIED — no receipt citations"
     parts = [f"{len(verdict['resolved'])} resolved"]
     if verdict["failed"]:
         parts.append(f"{len(verdict['failed'])} failed")

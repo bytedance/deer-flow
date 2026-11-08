@@ -21,7 +21,7 @@ _PATTERN_CACHE: dict[tuple[str, str | None], list[re.Pattern[str]]] = {}
 def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Pattern[str]]:
     """Load and compile signal patterns from a YAML file.
 
-    ``name`` is ``"correction"`` or ``"reinforcement"``. ``patterns_dir``
+    ``name`` is a signal name. ``patterns_dir``
     overrides the bundled ``core/message_patterns/`` directory; ``None`` (the
     default) loads the bundled defaults, which mirror the pre-externalization
     hardcoded patterns so zero-config behavior is unchanged. Compiled patterns
@@ -272,7 +272,7 @@ SIGNAL_NAMES: tuple[str, ...] = (
 )
 
 #: Trailing messages :func:`detect_signals` scans by default. This is the "recent
-#: turns" window the extraction hints and the reinforcement gate are about; a caller
+#: turns" window the extraction diagnostics use; a caller
 #: with a different question -- the pre-screen's L3 veto, which has to answer for a
 #: whole batch -- passes ``window=None``.
 _SIGNAL_WINDOW = 6
@@ -288,7 +288,7 @@ def detect_signals(
 
     Returns the set of signal names whose patterns match a human message among the
     last ``window`` messages (the default 6, the "recent turns" window the
-    extraction hints and the reinforcement gate are about). ``window=None`` scans
+    extraction diagnostics use). ``window=None`` scans
     every message instead: the pre-screen's L3 veto needs that, because a skip
     consumes the whole post-watermark batch, so an explicit signal anywhere in that
     batch must keep it out of judging -- not only one inside the trailing window.
@@ -311,51 +311,3 @@ def detect_signals(
                 hits.add(name)
                 break
     return hits
-
-
-# Trailing characters stripped before a whole-message trivial match: a pure
-# acknowledgment with trailing punctuation ("ok.", "好的！") is still trivial.
-_TRIVIAL_TRAIL = " \t\n\r.。,，!！?？;；"
-
-
-def filter_trivial(
-    messages: list[Any],
-    *,
-    patterns: list[re.Pattern[str]] | None = None,
-    patterns_dir: str | None = None,
-) -> list[Any]:
-    """Drop pure-acknowledgment human turns and their AI replies.
-
-    A human turn is "trivial" when its whole (stripped) text matches a trivial
-    pattern (e.g. "嗯", "ok", "好的", "谢谢") -- matched via ``fullmatch`` so a
-    substantive turn containing "ok" is never dropped. The matched human turn
-    and its following assistant reply are both removed (reusing the
-    ``skip_next_ai`` discipline from :func:`filter_messages_for_memory`). When
-    every turn is trivial, the result is empty, which the caller treats as "do
-    not enqueue" (saving an extraction LLM call).
-    """
-    if patterns is None:
-        patterns = load_patterns("trivial", patterns_dir=patterns_dir)
-    if not patterns:
-        return list(messages)
-
-    result: list[Any] = []
-    skip_next_ai = False
-    for msg in messages:
-        msg_type = getattr(msg, "type", None)
-        if msg_type == "human":
-            content = extract_message_text(msg).strip().rstrip(_TRIVIAL_TRAIL)
-            is_trivial = bool(content) and any(pattern.fullmatch(content) for pattern in patterns)
-            if is_trivial:
-                skip_next_ai = True
-                continue
-            result.append(msg)
-            skip_next_ai = False
-        elif msg_type == "ai":
-            tool_calls = getattr(msg, "tool_calls", None)
-            if not tool_calls:
-                if skip_next_ai:
-                    skip_next_ai = False
-                    continue
-                result.append(msg)
-    return result
