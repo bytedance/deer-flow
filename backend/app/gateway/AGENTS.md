@@ -13,19 +13,17 @@ HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
 ownership. Its 5s budget covers admission and I/O: timeout fails strict starts;
 others omit incarnation (MCP fails closed). Tests: `test_thread_create_run_metadata_race.py`.
 
-Capability Center's `business` adapter validates bundled credentials and creates
-an MCP connection. The MCP API permits only its isolated launcher and credential
-environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
-credentials out of tool schemas and preserve admin checks, masked atomic edits,
-and MCP cache reloads.
+Capability Center `business`: validate bundled credentials, create MCP connection.
+MCP API allows only its isolated launcher and credential env keys; reject arbitrary
+commands and manifest-policy bypasses. No credentials in tool schemas; retain
+admin checks, masked atomic edits and MCP cache reloads.
 
-Memory shutdown resolves hot-reloaded config/backend, flushes and closes in one
-`await_drained` operation. Resolve config off-loop inside the best-effort handler
-so malformed edits cannot abort teardown. Cancellation waits for owned workers.
-The host sets no close timeout: `close()` must be quick or internally bounded;
-budget it, flush timeout and other hooks within pod grace. Drain extension
-`stop_services()` across cancellation before later resources unwind; each
-service `stop()` has a 30-second `asyncio.timeout`.
+Memory shutdown: resolve hot-reloaded config/backend off-loop in the best-effort
+handler; malformed edits must not abort teardown. Flush/close in one
+`await_drained`; cancellation waits for owned workers. Host close has no timeout:
+`close()` must be quick or internally bounded. Fit close, flush timeout and other
+hooks within pod grace. Drain extension `stop_services()` across cancellation
+before later resources unwind; each `stop()` has a 30s `asyncio.timeout`.
 
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
