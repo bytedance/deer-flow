@@ -475,8 +475,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(management).toHaveCount(1);
     await expect(management).toContainText(
       zh
-        ? "需要安装和配置，不包含管理页面。"
-        : "Requires installation and configuration; no management page is included.",
+        ? "导入文件、网址和文本，并查询、管理文档处理任务。"
+        : "Import files, URLs and text, then inspect and manage document processing.",
     );
     const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
     await expect(lightrag).toHaveCount(1);
@@ -492,8 +492,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(weknora).toHaveCount(1);
     await expect(weknora).toContainText(
       zh
-        ? "需要管理员安装并配置访问权限。"
-        : "Requires administrator installation and access configuration.",
+        ? "检索 WeKnora 知识库和所选文档，并展示来源引用。"
+        : "Search WeKnora knowledge bases and selected documents with source citations.",
     );
     await weknora
       .getByRole("button", {
@@ -503,9 +503,17 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-weknora#readme$/);
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "使用前准备" : "Before you start",
+      }),
+    ).toBeVisible();
+    await expect(page.getByRole("article")).toContainText(
+      zh ? "管理员已配置连接" : "administrator-configured connection",
+    );
     await page
       .getByRole("button", {
         name: zh ? "全部扩展" : "All extensions",
@@ -533,7 +541,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
     await page
@@ -547,9 +555,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     });
     await expect(workflow).toHaveCount(1);
     await expect(workflow).toContainText(
-      zh
-        ? "不支持重启回放或硬金额预算"
-        : "No restart replay or hard monetary budget",
+      zh ? "按保留版本确认成果" : "review retained output versions",
     );
     await workflow
       .getByRole("button", {
@@ -559,7 +565,7 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-workflows#readme$/);
     await page
@@ -596,6 +602,12 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
     await expect(
       page.getByText("deerflow-extension-agent-teams", { exact: true }),
+    ).not.toBeVisible();
+    await page
+      .getByText(zh ? "技术信息" : "Technical details", { exact: true })
+      .click();
+    await expect(
+      page.getByText("deerflow-extension-agent-teams", { exact: true }),
     ).toBeVisible();
     // The search only filters the directory, so the detail view drops it.
     await expect(
@@ -605,7 +617,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toHaveCount(0);
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
     await page
@@ -634,7 +646,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-retrieval#readme$/);
     await page
@@ -657,7 +669,7 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-jev-screening#readme$/);
     await page
@@ -702,17 +714,17 @@ test("extension detail fits a narrow viewport with its tab in view", async ({
   await expect(
     page.getByRole("tab", { name: "Extensions", exact: true }),
   ).toBeInViewport({ ratio: 1 });
+  await page.getByText("Technical details", { exact: true }).click();
   await expect(
-    page.getByRole("button", {
-      name: "Reload extensions (refresh page)",
-      exact: true,
-    }),
+    page.getByRole("button", { name: "Refresh extensions", exact: true }),
   ).toBeVisible();
   const scroller = await capabilityCenterScroller(page);
   expect(
     await scroller.evaluate((node) => node.scrollWidth - node.clientWidth),
   ).toBe(0);
-  const note = page.getByRole("note");
+  const note = page
+    .getByRole("complementary")
+    .filter({ hasText: "Usage & management" });
   const noteBox = await note.boundingBox();
   const textBox = await note
     .getByText(
