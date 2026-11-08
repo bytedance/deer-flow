@@ -3,9 +3,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from deerflow.scheduler.schedules import (
+    UNSCHEDULABLE_ERROR_PREFIX,
     next_run_at,
     normalize_cron_expression,
     parse_interval_seconds,
+    pauses_unschedulable,
+    stored_next_run_at,
     validate_timezone,
 )
 
@@ -208,3 +211,28 @@ def test_next_run_at_for_interval_does_not_catch_up_from_a_stale_now():
 def test_parse_interval_seconds_rejects_invalid_spec(spec):
     with pytest.raises(ValueError, match="every_seconds"):
         parse_interval_seconds(spec)
+
+
+def test_stored_next_run_at_reports_instead_of_raising():
+    now = datetime(2026, 11, 8, tzinfo=UTC)
+
+    assert stored_next_run_at("interval", {"every_seconds": 60}, "UTC", now=now) == (now + timedelta(seconds=60), None)
+    assert stored_next_run_at("interval", {"every_seconds": 60}, "Mars/Base", now=now) == (None, f"{UNSCHEDULABLE_ERROR_PREFIX}Unknown timezone: Mars/Base")
+    next_at, error = stored_next_run_at("cron", {"cron": "61 * * * *"}, "UTC", now=now)
+    assert next_at is None
+    assert error.startswith(UNSCHEDULABLE_ERROR_PREFIX)
+
+
+@pytest.mark.parametrize(
+    ("schedule_type", "status", "schedule_error", "expected"),
+    [
+        ("interval", "enabled", "broken", True),
+        ("cron", "running", "broken", True),
+        ("cron", "enabled", None, False),
+        ("once", "running", "broken", False),
+        ("cron", "paused", "broken", False),
+        ("cron", "completed", "broken", False),
+    ],
+)
+def test_only_a_live_recurring_task_is_paused(schedule_type, status, schedule_error, expected):
+    assert pauses_unschedulable(schedule_type, status, schedule_error) is expected

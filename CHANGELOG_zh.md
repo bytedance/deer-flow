@@ -26,6 +26,11 @@
 
 ### 修复
 
+- **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
+  已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
+  不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
+  之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
+  在修复计划之前，恢复该任务会提示具体问题。([#7993])
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -12811,3 +12816,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993

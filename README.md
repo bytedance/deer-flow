@@ -2975,6 +2975,9 @@ slot. For a user-requested summary or delivery after background work, the option
 keeps ownership when active. See [batch dependencies and follow-up](backend/docs/BATCH_CONTINUATION.md)
 for authorization, cancellation, recovery and result semantics.
 
+When a source run fails or hits a hard stop, the Gateway attempts each batch
+cancellation independently. A failed cancellation logs the batch and run IDs.
+
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
 Queued requests finish removing their queue entry and returning any transferred
@@ -3946,6 +3949,7 @@ Current MVP capabilities:
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
+- A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
