@@ -132,6 +132,16 @@ describe("parseCron", () => {
     expect(parseCron("garbage").preset).toBe("custom");
     expect(parseCron("garbage").parts.raw).toBe("garbage");
   });
+
+  test.each([
+    "60 * * * *",
+    "99 9 * * *",
+    "0 24 * * *",
+    "0 9 0 * *",
+    "0 9 32 * *",
+  ])("keeps the out-of-range cron %j as custom", (cron) => {
+    expect(parseCron(cron)).toEqual({ preset: "custom", parts: { raw: cron } });
+  });
 });
 
 describe("describeSchedule", () => {
@@ -609,6 +619,16 @@ describe("describeTaskSchedule", () => {
       "每天 09:00 (Asia/Shanghai)",
     );
   });
+
+  test.each(["60 9 * * 1-5", "0 24 * * 1-5"])(
+    "does not describe the out-of-range cron %j as a preset",
+    (cron) => {
+      expect(describeTaskSchedule(cronTask(cron), "en-US")).toEqual({
+        text: "Custom schedule (Asia/Shanghai)",
+        raw: cron,
+      });
+    },
+  );
 
   test("a custom cron never shows the expression in text", () => {
     const { text, raw } = describeTaskSchedule(
