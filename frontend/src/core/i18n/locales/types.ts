@@ -304,6 +304,12 @@ export interface Translations {
   };
 
   artifactPreview: {
+    preparingDownload: string;
+    retryDownload: string;
+    downloadFailed: string;
+    downloadRequested: string;
+    retry: string;
+    unavailable: string;
     loadingPreview: string;
     resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
@@ -1595,6 +1601,19 @@ export interface Translations {
 
   // Uploads
   uploads: {
+    status: {
+      pending: string;
+      uploading: string;
+      uploaded: string;
+      failed: string;
+      cancelled: string;
+    };
+    cancelUpload: string;
+    retryUpload: string;
+    notReady: string;
+    attachment: string;
+    image: string;
+    removeAttachment: (filename: string) => string;
     uploading: string;
     uploadingFiles: string;
     limitsHint: (

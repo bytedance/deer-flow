@@ -45,7 +45,6 @@ import {
   PromptInputActionMenuContent,
   PromptInputActionMenuItem,
   PromptInputActionMenuTrigger,
-  PromptInputAttachment,
   PromptInputAttachments,
   PromptInputButton,
   PromptInputFooter,
@@ -137,6 +136,7 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
 import {
   appendSpeechTranscript,
   getSpeechRecognitionConstructor,
@@ -158,6 +158,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { InputAttachment } from "./input-attachment";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -266,6 +267,7 @@ function escapeXmlAttribute(value: string) {
 }
 
 export type InputBoxSubmitOptions = {
+  attachmentUploads?: AttachmentUploadSession;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /** Thread IDs attached through the conversation picker; sent as run context. */
@@ -898,6 +900,16 @@ export function InputBox({
       }),
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
+  // A different draft owns a fresh cache, even when its files have the same names.
+  const attachmentUploads = useMemo(
+    () => new AttachmentUploadSession(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [draftKey],
+  );
+  useLayoutEffect(() => {
+    attachmentUploads.activate();
+    return () => attachmentUploads.deactivate();
+  }, [attachmentUploads]);
   const agentScopedSkills = useMemo(
     () =>
       agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
@@ -1535,6 +1547,7 @@ export function InputBox({
         ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
       };
       const submitOptions: InputBoxSubmitOptions = {
+        attachmentUploads,
         ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
         ...(quotes.length
           ? {
@@ -1614,6 +1627,7 @@ export function InputBox({
       textInput.value,
       conversationReferences,
       draftKey,
+      attachmentUploads,
       invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
@@ -3118,7 +3132,10 @@ export function InputBox({
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
-                <PromptInputAttachment data={attachment} />
+                <InputAttachment
+                  data={attachment}
+                  uploadSession={attachmentUploads}
+                />
               </div>
             )}
           </PromptInputAttachments>

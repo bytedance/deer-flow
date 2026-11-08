@@ -4340,3 +4340,15 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
+
+### File attachments and downloads
+
+Attachments show individual ready, uploading, uploaded, failed and cancelled states.
+Retry a failed file or remove it before sending again; successful uploads and the
+message draft are retained. File cards share format icons and preserve extensions
+in long filenames. Sent attachments open in the right-hand artifact panel.
+Single-file downloads show preparation and retry feedback while preventing duplicate
+requests. Unsupported formats offer the original file for download.
+
+Deployments can add binary readers through the optional `artifactPreviews` browser
+contribution; see the [plugin contract](docs/full-stack-plugins.md#artifact-previews).

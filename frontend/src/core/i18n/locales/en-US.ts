@@ -400,6 +400,13 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "Preparing download…",
+    retryDownload: "Retry download",
+    downloadFailed: "Download failed. Try again.",
+    downloadRequested: "Sent to browser downloads",
+    retry: "Retry preview",
+    unavailable:
+      "Preview is unavailable for this format. Download the original file to view it.",
     loadingPreview: "Preparing preview...",
     resourcesUnavailable:
       "Some preview resources could not be loaded. View the source or download the files for the complete content.",
@@ -1926,6 +1933,20 @@ export const enUS: Translations = {
 
   // Subtasks
   uploads: {
+    status: {
+      pending: "Ready to send",
+      uploading: "Uploading…",
+      uploaded: "Uploaded",
+      failed: "Upload failed",
+      cancelled: "Cancelled",
+    },
+    cancelUpload: "Cancel upload",
+    retryUpload: "Retry upload",
+    notReady:
+      "Attachments are not ready. Retry failed files or remove them, then send again.",
+    attachment: "Attachment",
+    image: "Image",
+    removeAttachment: (filename) => `Remove attachment: ${filename}`,
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>

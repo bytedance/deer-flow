@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
+import { QueryClientProvider } from "@/components/query-client-provider";
 import { ArtifactViewer } from "@/components/workspace/artifacts/artifact-viewer";
 import {
   artifactViewerTitle,
@@ -9,6 +10,7 @@ import {
   requiresAuthenticatedViewer,
   type ArtifactViewerTarget,
 } from "@/core/artifacts/viewer";
+import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import {
   ACCOUNT_DISABLED_LOGIN_URL,
@@ -45,7 +47,7 @@ async function requireViewerAccess(target: ArtifactViewerTarget | null) {
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":
-      return;
+      return { user: result.user, unknown: false };
     case "unauthenticated":
       redirect(
         buildLoginUrl(
@@ -64,7 +66,7 @@ async function requireViewerAccess(target: ArtifactViewerTarget | null) {
       // Render anyway: the viewer surfaces its own load failure with a
       // download link, which beats bouncing a detached window to a page the
       // user did not ask for.
-      return;
+      return { user: null, unknown: true };
     default:
       assertNever(result);
   }
@@ -74,7 +76,7 @@ export default async function ArtifactViewerPage({
   searchParams,
 }: ArtifactViewerPageProps) {
   const target = parseArtifactViewerQuery(await searchParams);
-  await requireViewerAccess(target);
+  const auth = await requireViewerAccess(target);
 
   if (!target) {
     const { t } = await getI18n();
@@ -87,11 +89,20 @@ export default async function ArtifactViewerPage({
     );
   }
 
-  return (
-    <ArtifactViewer
-      filepath={target.filepath}
-      threadId={target.threadId}
-      isMock={target.isMock}
-    />
+  const viewer = (
+    <QueryClientProvider>
+      <ArtifactViewer
+        filepath={target.filepath}
+        threadId={target.threadId}
+        isMock={target.isMock}
+      />
+    </QueryClientProvider>
+  );
+  return auth ? (
+    <AuthProvider initialUser={auth.user} initialAuthUnknown={auth.unknown}>
+      {viewer}
+    </AuthProvider>
+  ) : (
+    viewer
   );
 }
