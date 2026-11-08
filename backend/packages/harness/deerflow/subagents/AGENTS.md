@@ -1,6 +1,11 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
 Drain cleanup; preserve terminal outcomes on cancel.
+Queued capacity abandonment drains waiter removal and transferred-slot release
+across repeated caller cancellation, just like an acquired slot's final release.
+The drain waits for the capacity lock without its own deadline. Cancellation
+during timeout cleanup takes precedence over the queue timeout.
+Regression: `tests/test_subagent_capacity.py`.
 
 Optional batch dependencies and one-shot follow-up reuse batch claims and AgentRuns.
 See [behavior and ownership](../../../../docs/BATCH_CONTINUATION.md): keep one execution lease and check conversation state before admission; never persist live capabilities.

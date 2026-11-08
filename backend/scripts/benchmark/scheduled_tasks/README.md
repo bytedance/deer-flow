@@ -194,7 +194,7 @@ An alleged goal arm is rejected unless its actual run has goal metadata and a
 durable `goal_verdict`. A plain arm is rejected if either appears. Artifact and
 source-use grades are independent of the evaluator's verdict. Delivery is checked
 separately against the host's `run.delivery` receipt and its successful
-`present_files` path binding; an AI claim or requested tool-call name cannot
+`present_files`/`present_shared_artifact` path binding; an AI claim or requested tool-call name cannot
 establish delivery. Effective independent completion requires correct artifact
 values, source use, host delivery and successful run status. A subsequent
 `token_capped` stop does not erase verified completion; a capped run without
