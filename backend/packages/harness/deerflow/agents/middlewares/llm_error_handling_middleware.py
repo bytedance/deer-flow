@@ -427,7 +427,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         class_override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
         if class_override is not None:
             candidates.append(class_override)
-        if isinstance(exc, openai.APIError) and not _has_status_or_error_code(exc):
+        # Connection/timeout types already establish a transient transport failure.
+        if isinstance(exc, openai.APIError) and not isinstance(exc, openai.APIConnectionError) and not _has_status_or_error_code(exc):
             candidates.append(2)
         reason_override = _REASON_RETRY_BUDGETS.get(reason)
         if reason_override is not None:

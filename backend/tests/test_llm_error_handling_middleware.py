@@ -3234,6 +3234,60 @@ def test_in_stream_error_without_usable_status_or_code_gets_one_retry(exc: opena
     assert middleware._max_attempts_for(exc, "transient") == 2
 
 
+@pytest.mark.parametrize("exc_type", [openai.APIConnectionError, openai.APITimeoutError])
+@pytest.mark.parametrize("max_attempts", [1, 3, 5])
+def test_sync_openai_network_errors_exhaust_the_configured_budget(monkeypatch: pytest.MonkeyPatch, exc_type: type[openai.APIConnectionError], max_attempts: int) -> None:
+    middleware = _build_middleware(retry_max_attempts=max_attempts)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        raise exc_type(request=_STREAM_REQUEST)
+
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert attempts == max_attempts
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_type"] == exc_type.__name__
+    assert result.additional_kwargs["error_reason"] == "transient"
+
+
+@pytest.mark.parametrize("exc_type", [openai.APIConnectionError, openai.APITimeoutError])
+@pytest.mark.parametrize("max_attempts", [3, 5])
+def test_async_openai_network_errors_can_recover_on_the_last_configured_attempt(monkeypatch: pytest.MonkeyPatch, exc_type: type[openai.APIConnectionError], max_attempts: int) -> None:
+    middleware = _build_middleware(retry_max_attempts=max_attempts)
+    attempts = 0
+    events: list[dict] = []
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts < max_attempts:
+            raise exc_type(request=_STREAM_REQUEST)
+        return AIMessage(content="recovered")
+
+    monkeypatch.setattr("asyncio.sleep", fake_sleep)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: events.append)
+    monkeypatch.setattr("deerflow.agents.middlewares.llm_error_handling_middleware.aemit_custom_event", fake_emit_custom_event)
+
+    result = asyncio.run(middleware.awrap_model_call(SimpleNamespace(), handler))
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert attempts == max_attempts
+    assert [(event["type"], event["reason"], event["max_attempts"]) for event in events] == [("llm_retry", "transient", max_attempts)] * (max_attempts - 1)
+
+
 def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
     # Spaces before and after ``:``/``=`` must be separate runs in the status
     # regex; two adjacent ``[ \t]*`` would backtrack quadratically here.

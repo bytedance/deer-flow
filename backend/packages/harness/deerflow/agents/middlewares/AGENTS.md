@@ -1,14 +1,12 @@
 ### Middleware Chain
 
-Tool-result JSON analysis is best-effort: parser depth failures must preserve the
-original content and must not abort the graph. Explicit error results fall back
-to `unknown` / recoverable / `try_alternative`, without classifying incidental
-JSON fields as auth failures. Producer metadata remains authoritative. Keep
-depth regressions in `tests/test_tool_result_meta_json_depth.py`, including real
-LocalSandbox reads through both synchronous and asynchronous agent graphs.
-Deep graph cases must establish a real parser depth failure or report a skip.
+JSON depth failures preserve content and never abort graphs. Unclassified
+explicit failures stay `unknown` / recoverable / `try_alternative`; incidental
+JSON fields cannot establish auth failure. Producer metadata wins. Keep real
+sync/async LocalSandbox tests in `tests/test_tool_result_meta_json_depth.py`;
+deep cases must prove parser depth failure or skip.
 
-Browserless artifact.deerflow_http_response.status_code carries X-Response-Code. Only non-bool int 400..599 establishes failure, never titles. Direct calls retain strings.
+Browserless artifact.deerflow_http_response.status_code carries X-Response-Code; only non-bool int 400..599 establishes failure, never titles. Direct calls return (content, artifact).
 
 Tool-call argument depth handling is best-effort; see `tests/test_tool_call_json_depth.py`.
 
@@ -63,12 +61,12 @@ Summarization: enabled task-continuity retention or None. DurableContext:
 normalized skills root, sorted read tools, continuity switch. All history readers,
 including capture failures, validate persisted metadata; malformed values must
 not abort compaction/model calls.
-LLMErrorHandling release identity includes structured_evidence_v1.
-Model failures use explicit status/provider fields and exception types; prose is
-diagnostic only. An OpenAI `APIError` without status or code gets one retry.
-OpenAI-compatible adapters raise `EmptyModelResponseError` for HTTP-success
-responses with empty choices before LangChain indexes the list. Keep the guard
-on each adapter and the legacy `langchain_openai:ChatOpenAI` factory path.
+LLMErrorHandling release identity: `structured_evidence_v1`. Classify model
+failures by status/provider fields and exception types; prose is diagnostic.
+Status/code-less OpenAI `APIError` gets at most one retry; `APIConnectionError`
+(including `APITimeoutError`) keeps `llm_call.retry_max_attempts`.
+Adapters and the legacy `langchain_openai:ChatOpenAI` factory must raise
+`EmptyModelResponseError` for HTTP-success empty choices before LangChain indexing.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which
@@ -131,15 +129,14 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
     No config gate — appended unconditionally in `_build_runtime_middlewares`, for both lead and subagents.
 
 13. **ReadBeforeWriteMiddleware** - *(`read_before_write.enabled`, default on; #3857)* Existing-file `write_file` (including append) and `str_replace` require the newest matching `read_file` content hash. Marks live on ToolMessages: dropping a read loses its mark; writes never refresh it. Sync/async read/check/execution/mark steps share a per-(scope, path) gate. Uninspectable content fails open. It owns sandbox authorization; `SandboxAuthorizationError` becomes an error ToolMessage. Outside ToolProgress/ToolErrorHandling, blocks consume no slot and stamp `deerflow_tool_meta` plus `deerflow_write_block` (`{path, tool}`). `wrap_model_call` elides blocked payloads with deterministic placeholders (`elide_blocked_payloads`, `elide_min_chars`), preserving state, receipts and journal. All model-bound argument rewrites use `tool_call_args`; policy stays in this gate.
-13b. **HarnessGuardMiddleware** - *(`harness_guard.enabled`, default on)* Error diagnosis and optional write gate. When `write_verify_syntax: true`, checks `.py`/`.json` syntax on `str_replace` for valid files. Offers observations, never preset repair commands. Warns on repeated error signatures and alternating tool loops per `(thread_id, run_id)` via `BoundedDict`.
+13b. **HarnessGuardMiddleware** - *(`harness_guard.enabled`, default on)* Diagnoses errors; optional `write_verify_syntax` checks valid `.py`/`.json` on `str_replace`. Give observations, never repair commands. `BoundedDict` tracks repeated error signatures and alternating tool loops per `(thread_id, run_id)`.
 14. **ToolProgressMiddleware** - *(optional, if `tool_progress.enabled`)* State-machine-based stagnation guard (RFC #3177). Outer wrapper around ToolErrorHandlingMiddleware so its tool wrapper receives results already stamped with `deerflow_tool_meta`. Recoverable problems stay WARNED with hints; explicitly producer-stamped non-recoverable problems can escalate or block. Legacy prose-derived content_analysis cannot establish a hard block. It is independent of LoopDetection's turn-level call-pattern guard. Effective phase changes emit `middleware:tool_progress`, including `reset` when a later agent invocation (for example, goal continuation) clears WARNED/BLOCKED state. The state machine supplies the action and count threshold (`null` for category rules, recovery, and reset); recorder calls happen after releasing the state lock. Events include the actual sync/async hook plus bounded status, error, and recovery fields. Server-owned recorder keys determine subagent attribution. Arguments, content, prompts, and hashes are never persisted; recorder failures are fail-open. See [event semantics](../../../../../docs/RUN_EVENT_STREAM.md).
 15. **ToolReceiptMiddleware + ToolErrorHandlingMiddleware** - `ToolReceiptMiddleware` is *(optional, if `verification.receipts_enabled`, default on)*. It is the **outermost `wrap_tool_call` layer** — registered ahead of authorization, audit, write and progress gates — because Guardrail/SandboxAudit/ReadBeforeWrite/ToolProgress can short-circuit a call with their own ToolMessage (and SandboxAudit annotates medium-risk results); an inner receipt layer would silently gap the ledger on those results (ordering constraints in `deerflow.extensions.ordering`). Normal results still carry the `deerflow_tool_meta` status ToolErrorHandlingMiddleware stamps on the inner return path; short-circuit messages self-stamp meta or fall back to `message.status`. It stamps deterministic provenance (tool name, status, args/output hashes, byte count, timestamp) onto direct `ToolMessage` results and every matching `ToolMessage` carried in `Command.update.messages`, including delegated `task`, `present_file`, `view_image`, and `tool_search` results; before model calls it derives a hidden receipt ledger (display ids r1..rN) from message state, and when the 2,000-character budget is exceeded the newest receipts are retained in chronological order with their original ids plus an older-receipts omission marker. Rendering returns both the text and its retained receipt subset; every response that received a ledger carries only that exact server-owned subset, never omitted receipts. Snapshot validation accepts a strictly consecutive positive original-id range (for example `r24`–`r30`) rather than requiring `r1`, so subagent terminal citation verification resolves ids against evidence present in the citing turn even when later summarization drops and renumbers tool messages. Model-generated citation IDs are digit-bounded before integer conversion; oversized IDs are ignored as malformed input rather than raising through task write-back. Citation parsing deduplicates exact `(id, anchor)` pairs, not IDs alone, so repeated identical references stay compact while every distinct anchor claim is verified. Gateway strips delegated receipts/verdicts from external messages. `ToolErrorHandlingMiddleware` receives `AppConfig`, converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting, stamps every result with `deerflow_tool_meta` (status / error_type / recoverable_by_model / recommended_next_action / source) via `tool_result_meta.normalize_tool_result`, stamps structured metadata for task exception wrappers, and stamps skill-read metadata for downstream durable-context capture. Task tool result text is generated from the same status/result/error inputs as the structured metadata so callers do not hand-write a second protocol string.
-   JSON error-envelope inference excludes successful native `read_file` results:
-   their `error` fields belong to the document. Explicit error status, existing
-   metadata and legacy `Error:` failures remain authoritative; other tools keep
-   JSON error inference. Real truncation markers still produce partial results.
-   `tests/test_read_file_json_result_meta.py` exercises native sync/async reads,
-   receipts and follow-up calls with the progress guard on and off.
+   Successful native `read_file` JSON is document data. Explicit errors, existing
+   metadata and legacy `Error:` failures still win; other tools retain JSON error
+   inference. Actual truncation is partial success.
+   `tests/test_read_file_json_result_meta.py`: native sync/async reads, receipts
+   and follow-up calls, progress guard on/off.
 16. **ArtifactCaptureMiddleware** - See [tool artifacts](TOOL_ARTIFACTS.md).
 
 Authorization identity is independent of enforcement. Gateway strips client identity overrides: only the server auth source sets `is_internal`, and only authenticated IM `body.context` supplies `channel_user_id` (never `body.config`). `build_principal_from_context` applies role defaults, strict provenance, and copied attributes; RBAC rejects unknown defaults. Delegation and `GuardrailMiddleware` share this identity. Layer 1 precedes deferred assembly across agent paths and its provider is reused for Layer 2; framework skill/memory ordering stays stable. Trusted `DeerFlowClient.stream()` accepts identity overrides. Its graph key always includes effective storage `user_id` and, when enforced, the full Principal; nested attributes are copied so mutation cannot hide stale cache state.
@@ -164,7 +161,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
 23. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
 24. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses); captures the runtime-resolved user so standalone LangGraph Server reads and writes stay in the same bucket
 25. **ViewImageMiddleware** - *(vision models only)* Enforces the shared vision cap on remote rereads (see [download contract](../../sandbox/AGENTS.md)). Rebuilds hidden base64 context in `ModelRequest.messages`, keeping lightweight `viewed_images` in checkpoints. Caps each request at four recent images and 28 MiB base64; constructor limits may tighten caps. Skips over-budget reads. Re-views refresh reducer recency. Validated blob refs precede compatibility paths. `_image_injection_plan` removes stale server-marked context, including old `before_model`/`after_model` payloads, then shares eligibility for sync/async injection. Removal requires both the reserved ID prefix and marker, preserving user and unmarked legacy messages. Both paths recheck `sandbox:execute` before I/O. Host copies require `actual_path` to match the current user/thread's canonical virtual path, even for old checkpoints or replacement sandboxes; absent/mismatched identity skips reads. Only the async wrapper passes `authorization_checked=True` after its gate to avoid duplicate checks in its worker.
-26. **McpRoutingMiddleware** - Compatibility no-op. Routing keywords remain advisory prompt metadata; mentions, quotes and negation cannot promote schemas or establish intent. Only explicit `tool_search` selection exposes admitted deferred tools. No `routing_hint` promotion events are emitted.
+26. **McpRoutingMiddleware** - Compatibility no-op. Keywords are advisory; mentions, quotes and negation establish neither intent nor promotion. Only explicit `tool_search` exposes admitted deferred schemas. No `routing_hint` promotion events.
 27. **DeferredToolPromotionAuditMiddleware** - Observes final `tool_search` `Command`s. It atomically claims new names per lead run or subagent execution to dedupe parallel searches, derives subagent attribution from the server-installed recorder, returns the original `Command`, and omits private payloads
 28. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides MCP schemas until explicit `tool_search` selection promotes them. Promotions union within the catalog/user-message scope and reset next turn. Legacy state without `turn_id` survives only when an AI response follows the latest user message (in-flight resume).
 29. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives. The subagent builder places its date-only context middleware immediately before this coalescer, so the built-in subagent prompt and hidden date reminder still reach providers as one leading system block
@@ -200,4 +197,4 @@ chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_model_response.py` plus the middleware-level classification cases in
 `tests/test_llm_error_handling_middleware.py`.
 
-Receipts check IDs/anchors/status. Uncited results remain unresolved; legacy no_citation_claims is readable.
+Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
