@@ -94,6 +94,11 @@ export const enUS: Translations = {
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
     catalog: {
+      officePreview: {
+        title: "Office file preview",
+        description:
+          "Preview Excel, Word and PowerPoint files in the side panel with an installed browser extension.",
+      },
       workflows: {
         title: "Script workflows",
         description:

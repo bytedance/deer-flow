@@ -78,6 +78,7 @@ export interface Translations {
     catalogHint: string;
     installationGuide: string;
     catalog: Record<
+      | "officePreview"
       | "workflows"
       | "reportSections"
       | "agentTeams"

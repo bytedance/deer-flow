@@ -1742,6 +1742,14 @@ Use it as-is. Or tear it apart and make it yours.
 
 ## Core Features
 
+### Office artifact preview extension
+
+The optional [Office preview package](examples/deerflow-extension-office-preview/README.md)
+adds read-only XLSX, DOCX and PPTX readers with search, worksheet/page navigation,
+Word outlines, PowerPoint thumbnails and per-file reading preferences. It requires
+the artifact-preview host contribution and operator installation; it is not enabled
+by a catalog entry alone. Legacy binary Office files retain the download fallback.
+
 ### Token usage dashboard
 
 Open **Token usage** in the workspace sidebar (`/workspace/usage`) to review

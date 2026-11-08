@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "entry": "static/dist/index.mjs",
+  "files": [
+    "static/dist/chunks/chunk-NWLAFHBG.mjs",
+    "static/dist/chunks/chunk-OVILVMKS.mjs",
+    "static/dist/chunks/dist-B6BZ7TMN.mjs",
+    "static/dist/chunks/docx-preview-QV5HQON7.mjs",
+    "static/dist/chunks/exceljs.min-NXNSZJ7T.mjs",
+    "static/dist/chunks/jszip.min-U7S5BDMK.mjs",
+    "static/dist/chunks/office-Y657LIWC.mjs",
+    "static/dist/index.mjs"
+  ]
+}

@@ -93,6 +93,11 @@ export const zhCN: Translations = {
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
     catalog: {
+      officePreview: {
+        title: "Office 文件预览",
+        description:
+          "安装浏览器扩展后，在右侧面板预览 Excel、Word 和 PowerPoint 文件。",
+      },
       workflows: {
         title: "脚本工作流",
         description:

@@ -247,3 +247,11 @@ Repo-wide conventions:
   all publishing on drift. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.
+
+### Office preview example
+
+`examples/deerflow-extension-office-preview/` packages Office readers through the
+optional `artifactPreviews` browser contract. Keep parser dependencies and resources
+in the extension; rebuild its manifest and static module graph after UI changes.
+Test packaged assets with the Office E2E fixtures; rendering must preserve original
+downloads and state its search limits.
