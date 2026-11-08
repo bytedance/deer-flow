@@ -25,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import ConfigDict
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import ModelLengthFinishReasonMiddleware
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.app_config import AppConfig
@@ -73,13 +74,13 @@ def _has_completion_reminder(request: list[BaseMessage]) -> bool:
     return any(isinstance(message, HumanMessage) and message.name == "todo_completion_reminder" for message in request)
 
 
-async def _run_goal_with_capped_user_turn(model: _ScriptedModel):
+async def _run_goal_with_capped_user_turn(model: _ScriptedModel, guard: Any):
     saver = InMemorySaver()
     manager = RunManager(store=MemoryRunStore())
     graph = create_agent(
         model=model,
         tools=[],
-        middleware=[TodoMiddleware(), ModelLengthFinishReasonMiddleware()],
+        middleware=[TodoMiddleware(), guard],
         state_schema=ThreadState,
         context_schema=dict,
         checkpointer=saver,
@@ -114,15 +115,24 @@ async def _run_goal_with_capped_user_turn(model: _ScriptedModel):
 
 
 @pytest.mark.asyncio
-async def test_goal_continuation_after_a_length_cap_still_gets_todo_reminders(monkeypatch):
+@pytest.mark.parametrize(
+    ("guard", "finish_reason", "stop_reason"),
+    [
+        # ModelLength keeps the first cap reason already in the context.
+        pytest.param(ModelLengthFinishReasonMiddleware, "length", "model_length_capped", id="length"),
+        # Safety overwrites the context's stop_reason unconditionally.
+        pytest.param(SafetyFinishReasonMiddleware, "content_filter", "safety_capped", id="safety"),
+    ],
+)
+async def test_goal_continuation_after_a_provider_stop_still_gets_todo_reminders(monkeypatch, guard, finish_reason, stop_reason):
     def deny_network(*args, **kwargs):
         raise AssertionError("This controlled regression must not use the network")
 
     monkeypatch.setattr(socket.socket, "connect", deny_network)
     model = _ScriptedModel(
         responses=[
-            # User turn: the provider cuts the answer at its output limit.
-            AIMessage(content="Here is the first half of the report", response_metadata={"finish_reason": "length"}),
+            # User turn: the provider stops the answer early.
+            AIMessage(content="Here is the first half of the report", response_metadata={"finish_reason": finish_reason}),
             # Hidden Goal turn: a complete response that tries to stop with the appendix unfinished.
             AIMessage(content="The report is done."),
             AIMessage(content="Adding the appendix now."),
@@ -131,13 +141,13 @@ async def test_goal_continuation_after_a_length_cap_still_gets_todo_reminders(mo
         requests=[],
     )
 
-    record, goal = await _run_goal_with_capped_user_turn(model)
+    record, goal = await _run_goal_with_capped_user_turn(model, guard())
 
     assert record.error is None
-    # The run still reports the cap from the user turn.
-    assert record.stop_reason == "model_length_capped"
+    # The run still reports the stop from the user turn.
+    assert record.stop_reason == stop_reason
     assert goal is not None and goal["continuation_count"] == 1
-    # The capped user turn ends without a reminder ...
+    # The stopped user turn ends without a reminder ...
     assert not _has_completion_reminder(model.requests[0])
     # ... but the continuation's premature exit is reminded twice, up to the usual cap.
     assert len(model.requests) == 4

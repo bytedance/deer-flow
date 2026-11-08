@@ -32,10 +32,13 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
-# Source-inventory and graph tests pin these values to the actual guard stamps.
+# Source-inventory and graph tests pin these values to the actual guard stamps;
+# the provider-stop vocabulary is imported from the guards that write it.
 # Loop and token stops cap the whole run: their budgets stay exhausted and a
 # Goal stands down on them, so runtime.context["stop_reason"] is authoritative.
 _COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
@@ -43,7 +46,7 @@ _COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
 # runtime.context keeps the first cap across hidden Goal turns, and a Goal
 # continues after these, so the context alone does not mean the current
 # response was capped.
-_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {"safety_capped": "safety_termination", "model_length_capped": "model_length_termination"}
+_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {SAFETY_CAPPED_STOP_REASON: SAFETY_TERMINATION_MARKER, MODEL_LENGTH_CAPPED_STOP_REASON: MODEL_LENGTH_TERMINATION_MARKER}
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -168,6 +171,9 @@ class TodoMiddleware(TodoListMiddleware):
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
             "skip_completion_reminder_on_safety_cap": True,
+            # Every stop_reason that suppresses reminders, for the stop-reason
+            # inventory test. Only the run-level reasons are read from
+            # runtime.context; provider stops are matched by response marker.
             "completion_reminder_hard_stop_reasons": [*_COMPLETION_REMINDER_RUN_STOP_REASONS, *_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS],
             "completion_reminder_response_stop_markers": dict(_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS),
         }
