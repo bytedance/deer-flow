@@ -1475,6 +1475,7 @@ DELETE /api/threads/{thread_id}
 **Error behavior:**
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+- `500` with `{"detail": "Failed to delete thread checkpoints."}` when the checkpoint store fails. The thread and its metadata are kept, so the owner can retry the delete
 
 Deleting a thread also removes every user's read marker for it.
 

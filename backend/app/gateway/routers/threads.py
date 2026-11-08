@@ -826,14 +826,17 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         # being deleted under a run that has just been admitted.
         response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
-    # Remove checkpoints (best-effort)
+    # Remove checkpoints. Unlike the cleanup below this is not best-effort: the
+    # read routes treat a thread with no thread_meta row as an untracked legacy
+    # thread open to every user, so the row must not outlive a failed checkpoint
+    # delete. Failing here keeps the row, and the owner can retry the delete.
     checkpointer = getattr(request.app.state, "checkpointer", None)
-    if checkpointer is not None:
+    if checkpointer is not None and hasattr(checkpointer, "adelete_thread"):
         try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+            await checkpointer.adelete_thread(thread_id)
+        except Exception as exc:
+            logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
 
     # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
     # are deleted, so the durable thread-operation reservation protecting this

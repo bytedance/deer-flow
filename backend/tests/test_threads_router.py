@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import threading
 from contextlib import asynccontextmanager
@@ -5401,3 +5402,44 @@ def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
         assert asyncio.run(_count()) is None
     finally:
         asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_keeps_owner_row_when_checkpoint_delete_fails(tmp_path, monkeypatch, caplog) -> None:
+    """A failed checkpoint delete must not leave a checkpoint-only thread behind.
+
+    Read routes treat a thread without a ``threads_meta`` row as an untracked
+    legacy thread open to every user, so dropping the row while the checkpoints
+    survive would publish the deleted conversation. The delete fails instead,
+    keeps the owner's row, and succeeds when the owner retries.
+    """
+    app = _build_project_threads_app(tmp_path)
+    owner, other = {"x-test-user": "user-a"}, {"x-test-user": "user-b"}
+    checkpointer = app.state.checkpointer
+    delete_checkpoints = checkpointer.adelete_thread
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}, headers=owner).json()["thread_id"]
+        anyio.run(lambda: _write_checkpoint(checkpointer, thread_id, str(uuid6()), [HumanMessage(id="human-1", content="private question")], step=1))
+
+        monkeypatch.setattr(checkpointer, "adelete_thread", AsyncMock(side_effect=RuntimeError("database is locked: /secret/checkpoints.db")))
+        with caplog.at_level(logging.ERROR, logger=threads.logger.name):
+            failed = client.delete(f"/api/threads/{thread_id}", headers=owner)
+
+        assert failed.status_code == 500
+        assert failed.json() == {"detail": "Failed to delete thread checkpoints."}
+        assert any(record.levelno >= logging.ERROR and "Failed to delete checkpoints" in record.getMessage() for record in caplog.records)
+        assert anyio.run(lambda: app.state.thread_store.check_access(thread_id, "user-a", require_existing=True))
+        for read in (
+            lambda: client.get(f"/api/threads/{thread_id}", headers=other),
+            lambda: client.get(f"/api/threads/{thread_id}/state", headers=other),
+            lambda: client.post(f"/api/threads/{thread_id}/history", json={}, headers=other),
+            lambda: client.get(f"/api/threads/{thread_id}/goal", headers=other),
+        ):
+            assert read().status_code == 404
+
+        monkeypatch.setattr(checkpointer, "adelete_thread", delete_checkpoints)
+        retried = client.delete(f"/api/threads/{thread_id}", headers=owner)
+
+        assert retried.status_code == 200, retried.text
+        assert anyio.run(lambda: checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})) is None
+        assert client.get(f"/api/threads/{thread_id}", headers=other).status_code == 404
