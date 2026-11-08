@@ -1,12 +1,4 @@
-"""Telegram new-message sends must wait out a Bot API flood hint.
-
-The final-edit path already sleeps ``retry_after``. A fresh ``sendMessage`` /
-``sendRichMessage`` goes through ``Channel._send_with_retry``, whose shared
-backoff is ``2**attempt`` and ignores the hint, so a long 429 burns the
-attempt budget and the reply is dropped. These tests pin the Telegram
-override: wait ``max(backoff, retry_after)``, and leave every other channel
-on the shared backoff.
-"""
+"""Telegram's final-reply sends honor bounded Bot API flood waits."""
 
 from __future__ import annotations
 
@@ -229,7 +221,8 @@ class TestTelegramNewMessageRetryAfter:
 
         _run(go())
 
-    def test_repeated_flood_wait_still_stops_at_the_attempt_bound(self, monkeypatch):
+    @pytest.mark.parametrize(("hint", "expected_wait"), [(30, 30.0), (timedelta(hours=2), 60.0)])
+    def test_repeated_flood_wait_still_stops_at_the_attempt_bound(self, monkeypatch, hint, expected_wait):
         async def go():
             channel, bot = _channel_with_bot()
             sleeps = _patch_retry_sleep(monkeypatch)
@@ -237,14 +230,14 @@ class TestTelegramNewMessageRetryAfter:
 
             async def always_limited(**kwargs):
                 calls["n"] += 1
-                raise _flood(30)
+                raise _flood(hint)
 
             bot.send_message = always_limited
             with pytest.raises(Exception, match="Flood control exceeded"):
                 await channel.send(_final("hello"), _max_retries=3)
 
             assert calls["n"] == 3
-            assert sleeps == [30.0, 30.0]
+            assert sleeps == [expected_wait, expected_wait]
             assert bot.sent == []
 
         _run(go())
@@ -295,7 +288,12 @@ class TestTelegramNewMessageRetryAfter:
 
         _run(go())
 
-    def test_short_hint_does_not_shrink_the_local_backoff(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "hint",
+        [0.25, float("inf"), float("nan"), "invalid", {}, 10**400],
+        ids=["short", "infinite", "nan", "nonnumeric", "wrong-type", "overflow"],
+    )
+    def test_unusable_hint_keeps_the_local_backoff(self, monkeypatch, hint):
         async def go():
             channel, bot = _channel_with_bot()
             sleeps = _patch_retry_sleep(monkeypatch)
@@ -305,7 +303,7 @@ class TestTelegramNewMessageRetryAfter:
             async def flaky(**kwargs):
                 calls["n"] += 1
                 if calls["n"] == 1:
-                    raise _flood(0.25)
+                    raise _flood(hint)
                 return await real_send(**kwargs)
 
             bot.send_message = flaky
