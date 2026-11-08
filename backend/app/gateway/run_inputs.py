@@ -75,7 +75,8 @@ async def list_thread_inputs(thread_id: str, request: Request):
             if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
                 status = "not_applied"
             items.append({key: value for key, value in {**entry, "status": status, "target_run_id": row["run_id"]}.items() if key != "context"})
-    return {"items": items[-32:], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
+    keep = sorted(range(len(items)), key=lambda i: (items[i]["status"] in ("applied", "cancelled"), -i))[:32]
+    return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
 
 
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):
