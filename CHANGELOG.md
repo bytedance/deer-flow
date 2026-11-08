@@ -28,6 +28,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **subagents:** Managed subagent creation now rejects Windows reserved device
+  names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
+  `normalize_managed_subagent_name(..., for_creation=True)` validator and
+  Gateway `/api/subagents` boundary before attempting filesystem writes,
+  preventing `OSError` failures on Windows hosts while keeping existing
+  read and delete operations permissive.
+
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
   expression stopped working (a zone missing from the time zone database
@@ -36,6 +43,7 @@ This section accumulates work toward the **2.3.0** milestone
   expired, every later poll failed before admitting any due task. That task
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
+  
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
