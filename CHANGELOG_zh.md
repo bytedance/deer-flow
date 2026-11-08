@@ -21,8 +21,60 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### 修复
 
+- **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
+  卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
+  用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
+  且脱敏的地址与此前完全相同。([#8006])
+- **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
+  已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
+  不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
+  之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
+  在修复计划之前，恢复该任务会提示具体问题。([#7993])
+- **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
+  （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
+  Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
+  `--from-file` 创建的 Kubernetes Secret）会让传输层报出 `Illegal header value
+  b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
+  其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
+  `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
+  的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
+  `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
+- **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
+  此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
+  `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
+  会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件、任意层级的
+  `.env*.local`、`frontend/*.pem`，以及扩展管理器拒绝写入扩展快照的凭据文件都会
+  被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
+  值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
+  镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
+  
+- **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
+  未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
+  用户可在后续运行中继续处理。([#7953])
+
+- **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
+  序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
+  最终更新及其回复兜底都会被拒绝，运行中卡片停留在最后一次流式内容或只剩 `▉`。
+  现在卡片不再转义中日韩字符，并按其在请求中占用的字节计算预算。流式更新只显示能
+  放下的部分；更长的最终回答会在同一条消息下以最多 10 张卡片按行续发，重试会从
+  已送达的卡片之后继续。([#7798])
+  
+- **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
+  同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
+  `require_bound_identity: false`，以及旧版群绑定），成员的私聊和其发过言的所有群
+  共用同一个 DeerFlow 线程：群内回复可能用到该成员私聊或其他群的内容，失去原始
+  frame 的回复也会被发到私聊。现在群以 `chatid` 为键、每位成员一个线程，私聊线程
+  保持不变。通过各自 `/connect` 绑定的群保留原有线程；覆盖该机器人所有群的旧版
+  群绑定会在每个群中开始新线程。([#7794])
+  
 - **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
   沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
   ([#7782])
@@ -12761,5 +12813,12 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006

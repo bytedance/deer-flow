@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,14 +31,19 @@ def cached_source(analysis, tmp_path):
     source = tmp_path / "input.csv"
     source.write_text("id\n1\n", encoding="utf-8")
     temp_root = tmp_path / "temp"
-    analysis["get_cache_db_path"].__globals__["CACHE_DIR"] = str(
-        temp_root / ".data-analysis-cache"
-    )
-    key = analysis["compute_files_hash"]([str(source)])
-    table_map = {}
-    with duckdb.connect(analysis["get_cache_db_path"](key)) as con:
-        analysis["_load_csv"](con, str(source), table_map)
-    analysis["save_table_map"](key, table_map)
+    scope = analysis["main"].__globals__
+    scope["CACHE_DIR"] = str(temp_root / ".data-analysis-cache")
+
+    def load_csv(con, files):
+        table_map = {}
+        for path in files:
+            analysis["_load_csv"](con, path, table_map)
+        return table_map
+
+    # Seed through real generation publication, bypassing only spatial setup.
+    scope["load_files"] = load_csv
+    with analysis["open_analysis_cache"]([str(source)]):
+        pass
     return source, temp_root
 
 
@@ -51,7 +57,9 @@ def opened_connections(analysis, monkeypatch):
         return con
 
     monkeypatch.setitem(
-        analysis["main"].__globals__, "duckdb", SimpleNamespace(connect=connect)
+        analysis["main"].__globals__,
+        "duckdb",
+        SimpleNamespace(connect=connect, Error=duckdb.Error),
     )
     yield connections
     for con in connections:
@@ -351,17 +359,19 @@ def test_empty_cache_is_closed_before_removal(
     monkeypatch.setitem(namespace, "load_files", lambda con, files: {})
     removed = []
 
-    def remove_closed_database(path):
+    rmtree = shutil.rmtree
+
+    def remove_closed_generation(path):
         assert len(opened_connections) == 1
         with pytest.raises(duckdb.ConnectionException, match="closed"):
             opened_connections[0].execute("SELECT 1")
         removed.append(path)
-        os.remove(path)
+        rmtree(path)
 
     monkeypatch.setitem(
         namespace,
-        "os",
-        SimpleNamespace(**{**vars(os), "remove": remove_closed_database}),
+        "shutil",
+        SimpleNamespace(rmtree=remove_closed_generation),
     )
     monkeypatch.setattr(
         sys,

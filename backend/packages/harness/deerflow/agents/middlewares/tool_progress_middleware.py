@@ -494,6 +494,10 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         if state.phase == "blocked":
             return state, None, None
 
+        # Legacy content guesses cannot assert tool unavailability.
+        if meta.source == "content_analysis" and not meta.recoverable_by_model:
+            meta = replace(meta, error_type="unknown", recoverable_by_model=True, recommended_next_action="try_alternative")
+
         # Count this call as a problem before branching so all exit paths leave
         # consecutive_problems in a consistent state (never 0 when the tool has failed).
         new_count = state.consecutive_problems + 1

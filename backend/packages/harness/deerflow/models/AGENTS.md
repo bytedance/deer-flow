@@ -34,6 +34,13 @@ joining the blocking FIFO are one lock-protected decision: do not split the
 fast-path permit check from queue insertion, or an older caller can be overtaken
 while handing off to the wait queue.
 
+`OpenAIEmptyChoicesMixin` translates HTTP-success responses with an empty
+`choices` list into the shared `EmptyModelResponseError` before provider adapters
+reach LangChain's list indexing. Keep it in every OpenAI-compatible adapter;
+the factory maps legacy `langchain_openai:ChatOpenAI` profiles to
+`GuardedChatOpenAI`. Regression coverage lives in `tests/test_openai_response_guard.py`
+and `tests/test_model_factory.py`.
+
 - `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
 - Legacy disable-path heuristics treat null `extra_body`, `thinking`, and nested `extra_body.thinking` template values as absent, allowing native/vLLM fallbacks. The enable path still forwards configured values. Regression cases live in `tests/test_model_factory.py`.
 - Supports `thinking_enabled` flag with per-model `when_thinking_enabled` / `when_thinking_disabled` overrides; on both the legacy and the contract path every template and every synthesized `extra_body` payload goes through `_merge_thinking_payload` (the native-Anthropic disable assigns the top-level `thinking` mapping outright — a tagged union keyed by `type`): keys are never removed (a template can only add or override; nested mappings inherit the profile's other keys), template wins on conflicts, so a template's `extra_body` never clobbers sibling keys such as `extra_body.tool_stream`. Corollary: a disable template cannot clear a key the profile sets, so enable-only keys such as `extra_body.thinking.budget_tokens` belong in `when_thinking_enabled`, never in the base `extra_body`. Templates are deep-copied as they are merged, so constructor kwargs never alias the cached `ModelConfig`. The vLLM switch has two spellings (`_VLLM_THINKING_SWITCHES`: legacy `thinking` alias, `enable_thinking`); when a profile spells it differently from the payload, the payload's value is mirrored onto the profile's spelling rather than deleting or canonicalizing it — `VllmChatModel` collapses the pair to `enable_thinking`, other OpenAI-compatible classes send both, and either way the server reads the template's intent. Do not canonicalize `thinking` → `enable_thinking` in the factory: chat templates differ on which key they honor, and only `VllmChatModel` opts into that remap
@@ -267,6 +274,8 @@ provider settings/reasoning transforms as chat. Disable optional thinking for
 short probes; required thinking and unknown third-party models use automatic
 tool choice. MiniMax's existing adapter normalizes the OpenAI SDK's
 `max_completion_tokens` into MiniMax's documented `max_tokens` for both paths.
+The `stepfun` preset reuses `PatchedChatStepFun` for reasoning capture/replay and
+the same token-field normalization; its ordinary API route is distinct from Step Plan.
 Tests: `test_managed_models.py`, `test_managed_deepseek.py`,
 `test_managed_provider_presets.py` (real vendor SDKs with HTTP doubles), opt-in
 `test_managed_deepseek_live.py` / `test_managed_presets_live.py`, and

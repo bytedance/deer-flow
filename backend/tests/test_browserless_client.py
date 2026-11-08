@@ -19,6 +19,31 @@ class AsyncMock(MagicMock):
         return super().__call__(*args, **kwargs)
 
 
+def test_web_fetch_tool_declares_content_and_artifact_return_contract():
+    assert tools.web_fetch_tool.response_format == "content_and_artifact"
+
+
+@pytest.mark.asyncio
+async def test_direct_web_fetch_call_returns_content_and_artifact(monkeypatch):
+    client = MagicMock()
+    client.fetch_html_with_status = AsyncMock(
+        return_value=BrowserlessFetchResult(
+            html="<html><body>page</body></html>",
+            target_status_code="200",
+            target_status="OK",
+        )
+    )
+    monkeypatch.setattr(tools, "_get_tool_config", lambda *_args: {"base_url": "https://browserless.invalid"})
+    monkeypatch.setattr(tools, "_get_browserless_client", lambda *_args: client)
+    monkeypatch.setattr(tools, "validate_public_http_url", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(tools, "_validate_backend_base_url", lambda *_args: None)
+    monkeypatch.setattr(tools._readability_extractor, "extract_article", lambda *_args, **_kwargs: SimpleNamespace(to_markdown=lambda: "page content"))
+
+    result = await tools.web_fetch_tool.coroutine(url="https://example.com")
+
+    assert result == ("page content", {"deerflow_http_response": {"status_code": 200}})
+
+
 @pytest.mark.asyncio
 class TestBrowserlessClient:
     """Tests for the BrowserlessClient class."""

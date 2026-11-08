@@ -2,6 +2,7 @@
 
 import copy
 import json
+import logging
 
 from deerflow_extension_api.agent_runs import AgentRunError, ExecutionFence
 
@@ -10,6 +11,7 @@ from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.runtime.goal import goal_waits_for_external_result, read_thread_goal
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 
+logger = logging.getLogger(__name__)
 _TRUSTED = object()
 
 
@@ -133,7 +135,10 @@ class BatchContinuations:
         if record.status == "success" and record.stop_reason not in GOAL_RUN_HARD_STOP_REASONS:
             return
         for batch in await self.app.state.subagent_batch_repo.list_continuation_batches_for_run(record.run_id):
-            await self.app.state.subagent_batch_service.cancel_batch(batch_id=batch["id"], user_id=batch["user_id"])
+            try:
+                await self.app.state.subagent_batch_service.cancel_batch(batch_id=batch["id"], user_id=batch["user_id"])
+            except Exception:
+                logger.warning("Batch %s cancellation failed for run %s (non-fatal)", batch["id"], record.run_id, exc_info=True)
         goal = await read_thread_goal(self.app.state.checkpointer, record.thread_id)
         if goal and goal.get("status") == "active" and goal.get("created_at"):
             await self.app.state.subagent_batch_repo.suppress_thread_continuations(record.thread_id, goal_created_at=goal["created_at"])
