@@ -1,7 +1,7 @@
 """FTS5-based retrieval engine for DeerMem.
 
 Provides BM25 full-text search over stored facts with:
-- jieba Chinese tokenization (optional, falls back to whitespace)
+- jieba Chinese tokenization (optional, falls back to CJK character bigrams)
 - FTS5 MATCH syntax support (AND/OR/NOT/phrase/prefix) with fallback
 - Time-decay + confidence-weighted ranking
 - Category filtering
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import retrieval_index_directory
+from .relevance import cjk_token
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +52,33 @@ except ImportError:
     _jieba_available = False
 
 
+# Capturing group so ``re.split`` keeps the CJK runs it separates on.
+_CJK_RUN_RE = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff]+)")
+
+
 def _tokenize(text: str) -> list[str]:
-    """Tokenize text: jieba for Chinese, whitespace split for English."""
+    """Tokenize text: jieba for Chinese, CJK bigrams otherwise.
+
+    Without jieba, whitespace-delimited words are kept verbatim except for
+    their CJK runs, which are split into character bigrams with the same
+    ``relevance.cjk_token`` strategy the relevance ranker uses.  Indexing and
+    querying share this function, so unsegmented Chinese text stays matchable
+    in the default (dependency-free) install.
+    """
     if not text or not text.strip():
         return []
     if _jieba_available:
         return [t for t in jieba.cut(text) if t.strip()]
-    return [t for t in text.split() if t.strip()]
+    tokens: list[str] = []
+    for word in text.split():
+        for part in _CJK_RUN_RE.split(word):
+            if not part:
+                continue
+            if _CJK_RUN_RE.fullmatch(part):
+                tokens.extend(cjk_token(part))
+            else:
+                tokens.append(part)
+    return tokens
 
 
 # ── FTS5 query preprocessing ──────────────────────────────────────────
@@ -148,13 +169,15 @@ class FTS5Retrieval:
     # ── Index operations ───────────────────────────────────────────────
 
     def _preprocess_content(self, content: str) -> str:
-        """Preprocess content for indexing: jieba tokenize for Chinese."""
+        """Preprocess content for indexing: segment CJK so queries can match.
+
+        Must stay aligned with the query side (``_build_fallback_query``); both
+        go through ``_tokenize`` so index and query agree on Chinese without
+        jieba.
+        """
         if not content:
             return ""
-        if _jieba_available:
-            tokens = _tokenize(content)
-            return " ".join(tokens)
-        return content
+        return " ".join(_tokenize(content))
 
     def _row_from_document(self, document: dict[str, Any]) -> tuple[Any, ...]:
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")

@@ -47,6 +47,31 @@ def test_chinese_subphrase_search_uses_jieba_tokenization(tmp_path: Path) -> Non
         adapter.close()
 
 
+@pytest.mark.skipif(_jieba_available, reason="this gap only applies to installs without the memory-zh extra")
+def test_chinese_fact_is_recallable_without_memory_zh_extra(tmp_path: Path) -> None:
+    """A CJK fact indexed in the default install must stay retrievable.
+
+    ``uv sync --group dev --locked`` and the contributor CI path install no
+    ``memory-zh`` extra, so ``_tokenize`` has to segment CJK on its own. It
+    emits character bigrams (the same ``relevance.cjk_token`` strategy the
+    relevance ranker uses) on both the index and the query side; a whitespace
+    fallback would keep the whole CJK run as one FTS5 token and silently return
+    zero hits for every sub-phrase.
+    """
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-default", "调度器会重试失败的任务"), scope=scope, path="")
+        results = adapter.search("重试", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert results, (
+            "expected the stored Chinese fact to be recalled by the CJK sub-phrase '重试', got 0 hits: "
+            "the no-jieba fallback must emit CJK bigrams instead of keeping '调度器会重试失败的任务' as one token"
+        )
+        assert [item["fact"]["id"] for item in results] == ["zh-default"]
+    finally:
+        adapter.close()
+
+
 def test_score_time_decay_and_advanced_phrase_query(tmp_path: Path) -> None:
     engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
     try:
