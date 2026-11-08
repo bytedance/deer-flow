@@ -452,6 +452,85 @@ describe("artifact URL helpers", () => {
     expect(collectThreadArtifactPaths(state, [messages[0]!])).toBe(state);
   });
 
+  test("collectThreadArtifactPaths restores a delivered shared artifact", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const messages = [
+      { type: "human", id: "h", content: "share it" },
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [
+          {
+            id: "s1",
+            name: "present_shared_artifact",
+            args: {
+              origin_thread_id: "origin-1",
+              path: "/mnt/user-data/outputs/lesson.pptx",
+              sha256: "a".repeat(64),
+            },
+          },
+          {
+            id: "s2",
+            name: "present_shared_artifact",
+            args: {
+              origin_thread_id: "origin-1",
+              path: "/mnt/user-data/outputs/missing.pptx",
+              sha256: "b".repeat(64),
+            },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "t1",
+        tool_call_id: "s1",
+        name: "present_shared_artifact",
+        content:
+          "Successfully presented shared artifact; origin_thread_id=origin-1; sha256=" +
+          "a".repeat(64),
+      },
+      {
+        type: "tool",
+        id: "t2",
+        tool_call_id: "s2",
+        name: "present_shared_artifact",
+        content:
+          "Error: Source artifact changed; expected SHA-256 does not match",
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    // Reopened thread: the /history head carries no artifacts channel, so the
+    // delivered path has to come back from its own successful tool result.
+    expect(collectThreadArtifactPaths([], messages)).toEqual([
+      "/mnt/user-data/outputs/lesson.pptx",
+    ]);
+  });
+
+  test("collectThreadArtifactPaths ignores a shared artifact with no result", async () => {
+    const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+    const messages = [
+      {
+        type: "ai",
+        id: "a1",
+        content: "",
+        tool_calls: [
+          {
+            id: "s1",
+            name: "present_shared_artifact",
+            args: {
+              origin_thread_id: "origin-1",
+              path: "/mnt/user-data/outputs/lesson.pptx",
+              sha256: "a".repeat(64),
+            },
+          },
+        ],
+      },
+    ] as Parameters<typeof collectThreadArtifactPaths>[1];
+
+    expect(collectThreadArtifactPaths([], messages)).toEqual([]);
+  });
+
   test("builds encoded write-file URLs without undefined query parameters", async () => {
     const { buildWriteFileArtifactURL } = await loadFreshArtifactUtils();
     const filepath = "/mnt/user-data/outputs/a b#c?%20.md";

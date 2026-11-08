@@ -1,7 +1,10 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
 import { getBackendBaseURL } from "../config";
-import { extractPresentFilesFromMessage } from "../messages/utils";
+import {
+  extractPresentFilesFromMessage,
+  extractSharedArtifactPaths,
+} from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
 import type { AgentThreadState } from "../threads";
 
@@ -116,12 +119,13 @@ export function collectThreadArtifactPaths(
   stateArtifacts: readonly string[],
   messages: readonly Message[],
 ): readonly string[] {
-  const presented = messages
-    .flatMap((message) => extractPresentFilesFromMessage(message))
-    .filter(
-      (path): path is string =>
-        typeof path === "string" && path.startsWith("/mnt/"),
-    );
+  const presented = [
+    ...messages.flatMap((message) => extractPresentFilesFromMessage(message)),
+    ...extractSharedArtifactPaths(messages),
+  ].filter(
+    (path): path is string =>
+      typeof path === "string" && path.startsWith("/mnt/"),
+  );
   if (presented.length === 0) {
     return stateArtifacts;
   }

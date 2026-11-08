@@ -1105,6 +1105,47 @@ export function extractPresentFilesFromMessage(message: Message) {
   return files;
 }
 
+const SHARED_ARTIFACT_TOOL = "present_shared_artifact";
+const SHARED_ARTIFACT_DELIVERED = "Successfully presented shared artifact";
+
+/**
+ * `/mnt/` paths delivered by `present_shared_artifact`, taken only from calls
+ * whose own tool result reports success. A reopened thread rebuilds its values
+ * from the history head, which carries messages but no `artifacts` channel, so
+ * a handoff that worked live is otherwise missing from the sidebar. A failed or
+ * unresolved handoff stays out.
+ */
+export function extractSharedArtifactPaths(messages: readonly Message[]) {
+  const delivered = new Set<string>();
+  for (const message of messages) {
+    if (message.type !== "tool" || !message.tool_call_id) continue;
+    const content = message.content;
+    if (
+      typeof content !== "string" ||
+      !content.startsWith(SHARED_ARTIFACT_DELIVERED)
+    ) {
+      continue;
+    }
+    delivered.add(message.tool_call_id);
+  }
+  if (delivered.size === 0) {
+    return [];
+  }
+  const paths: string[] = [];
+  for (const message of messages) {
+    if (message.type !== "ai") continue;
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.name !== SHARED_ARTIFACT_TOOL || !toolCall.id) continue;
+      if (!delivered.has(toolCall.id)) continue;
+      const path = toolCall.args?.path;
+      if (typeof path === "string" && path.startsWith("/mnt/")) {
+        paths.push(path);
+      }
+    }
+  }
+  return paths;
+}
+
 export function hasSubagent(message: AIMessage) {
   for (const toolCall of message.tool_calls ?? []) {
     if (toolCall.name === "task") {
