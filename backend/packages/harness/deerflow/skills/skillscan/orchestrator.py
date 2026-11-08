@@ -1446,11 +1446,19 @@ def _http_host(url: str) -> str | None:
     if not url[:8].lower().startswith(("http://", "https://")):
         return None
     try:
-        # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
-        # for the host. Malformed URLs remain outbound in _is_outbound_url.
-        host = urlsplit(url).hostname
+        parts = urlsplit(url)
     except ValueError:
         return None
+    # A bracketed literal where userinfo belongs is read as the host by
+    # urlsplit on 3.12 and rejected outright on 3.13, so the answer would
+    # change with the interpreter. Refuse to name a host either way: the
+    # URL stays outbound in _is_outbound_url, like the other malformed shapes.
+    userinfo, at_sign, _hostport = parts.netloc.rpartition("@")
+    if at_sign and userinfo.startswith("[") and userinfo.endswith("]"):
+        return None
+    # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
+    # for the host. Malformed URLs remain outbound in _is_outbound_url.
+    host = parts.hostname
     return host.lower() if host else None
 
 
