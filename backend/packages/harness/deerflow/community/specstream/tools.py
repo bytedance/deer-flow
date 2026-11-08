@@ -137,11 +137,11 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     sources = _response_objects(data, "sources")
     if sources is None:
         return json.dumps({"error": "SpecStream returned an unexpected response format", "query": query}, ensure_ascii=False)
-    if not sources:
+    answer = _normalize_answer(data.get("answer"))
+    if not sources and answer is None:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
 
     output: dict[str, object] = {"query": query}
-    answer = _normalize_answer(data.get("answer"))
     if answer is not None:
         output["answer"] = answer
     results = [

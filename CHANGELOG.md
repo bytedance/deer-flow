@@ -12,6 +12,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
+  ranked results with a direct answer when the sources agree on one, and fetch
+  returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation

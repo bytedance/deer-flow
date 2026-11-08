@@ -184,6 +184,21 @@ class TestWebSearchTool:
 
         assert parsed["error"] == "No results found"
 
+    @pytest.mark.parametrize("sources", [[], None])
+    def test_answer_without_sources_is_still_returned(self, mock_config_with_key, sources):
+        data = {"sources": sources, "answer": {"value": "1889", "page": "https://example.com/1"}}
+        with patch(f"{_MODULE}.httpx.Client") as mock_client_cls:
+            mock_client_cls.return_value.__enter__.return_value.request.return_value = _make_response(data)
+
+            from deerflow.community.specstream.tools import web_search_tool
+
+            parsed = json.loads(web_search_tool.invoke({"query": "when was it built"}))
+
+        assert "error" not in parsed
+        assert parsed["answer"] == {"value": "1889", "url": "https://example.com/1"}
+        assert parsed["total_results"] == 0
+        assert parsed["results"] == []
+
     @pytest.mark.parametrize("sources", ["oops", [1, "a"]])
     def test_malformed_sources_return_format_error(self, mock_config_with_key, sources, caplog):
         with patch(f"{_MODULE}.httpx.Client") as mock_client_cls:
