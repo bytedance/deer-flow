@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from croniter import croniter
 
 MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60
+UNSCHEDULABLE_ERROR_PREFIX = "schedule can no longer be computed: "
 
 
 def should_advance_schedule_cursor(schedule_type: str, *, trigger: str) -> bool:
@@ -110,3 +111,34 @@ def next_run_at(
         return now.astimezone(UTC) + timedelta(seconds=every_seconds)
 
     raise ValueError(f"Unsupported schedule_type: {schedule_type}")
+
+
+def stored_next_run_at(
+    schedule_type: str,
+    schedule_spec: dict[str, object],
+    timezone_name: str,
+    *,
+    now: datetime,
+) -> tuple[datetime | None, str | None]:
+    """``next_run_at`` for an admitted schedule, or why it no longer computes.
+
+    Admission validates every schedule, but a stored one can stop computing
+    later: a zone the installed tz database no longer has, or a cron expression
+    a newer croniter rejects. Runtime bookkeeping runs inside the shared
+    scheduler poll, so it must not raise for one task; callers take the task
+    off the schedule with :func:`pauses_unschedulable` instead.
+    """
+    try:
+        return next_run_at(schedule_type, schedule_spec, timezone_name, now=now), None
+    except (ValueError, OverflowError) as exc:
+        return None, f"{UNSCHEDULABLE_ERROR_PREFIX}{exc}"
+
+
+def pauses_unschedulable(schedule_type: str, status: str | None, schedule_error: str | None) -> bool:
+    """Whether a task whose schedule no longer computes is paused.
+
+    Only a live recurring task changes: a once task has no later run to lose,
+    and a paused or finished task keeps its status. Resuming re-validates the
+    schedule, so it reports the problem until the schedule is fixed.
+    """
+    return schedule_error is not None and schedule_type != "once" and status in {"enabled", "running"}
