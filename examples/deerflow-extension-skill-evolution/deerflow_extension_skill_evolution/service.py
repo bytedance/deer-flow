@@ -325,8 +325,14 @@ def build_router(service: EvolutionService):
         if status is None:
             raise SkillEvolutionError("SOURCE_NOT_VISIBLE", f"run {run_id} is not visible to this caller")
 
-    def _guard(coro):
-        """Translate named example/host errors into HTTP statuses."""
+    def _guard(coro, *, case_errors: bool = False):
+        """Translate named example/host errors into HTTP statuses.
+
+        ``case_errors`` is set only on routes that load the operator case files
+        (``POST /proposals``; ``/health`` handles them itself). Elsewhere a
+        ``ValueError`` is a host or example bug and must surface as a 500 — not
+        as a misleading ``CASE_INVALID`` pointing at the case directory.
+        """
 
         async def run():
             try:
@@ -345,8 +351,11 @@ def build_router(service: EvolutionService):
                 status = 404 if exc.code in {"NOT_FOUND", "NOT_FOUND_OR_FORBIDDEN"} else 409
                 raise HTTPException(status_code=status, detail=str(exc)) from exc
             except ValueError as exc:
-                # A broken operator-supplied case file fails closed (`load_cases_dir`
-                # raises), but as a 400 diagnostic rather than an unhandled 500.
+                # A broken operator-supplied case file fails closed
+                # (`load_cases_dir` raises), but as a 400 diagnostic rather
+                # than an unhandled 500 — only where cases are actually read.
+                if not case_errors:
+                    raise
                 raise HTTPException(status_code=400, detail=f"CASE_INVALID: {exc}") from exc
 
         return run()
@@ -382,7 +391,7 @@ def build_router(service: EvolutionService):
                 "report": record.report,
             }
 
-        return await _guard(work())
+        return await _guard(work(), case_errors=True)
 
     @router.get("/proposals")
     async def list_proposals(request: Request) -> dict[str, Any]:

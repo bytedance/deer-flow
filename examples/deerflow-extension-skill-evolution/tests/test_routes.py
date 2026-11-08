@@ -18,6 +18,7 @@ import json
 
 from deerflow_extension_api import ExtensionPrincipal, ExtensionRuntimeDeps, HostCapabilityError
 from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY
+from deerflow_extension_api.run_evidence import RUN_EVIDENCE_READER_RESOLVER_KEY, RunStatusView
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from test_lifecycle import OWNER, FakeEvidence, FakeMutationService
@@ -47,6 +48,34 @@ class _MissingEvidence(FakeEvidence):
         raise HostCapabilityError("NOT_FOUND", "run is unavailable in this scope")
 
 
+class _ValueErrorOnCheck(FakeMutationService):
+    """A host invariant bug raised from ``check`` on the apply route."""
+
+    async def check(self, *, proposal_id: str):
+        raise ValueError("host invariant failed")
+
+
+class _ValueErrorOnGetOperation(FakeMutationService):
+    """A host invariant bug raised before ``revert`` can run."""
+
+    async def get_operation(self, *, operation_id: str):
+        raise ValueError("host invariant failed")
+
+
+class _InvisibleRunReader:
+    """A request-scoped reader for which the anchor run does not exist."""
+
+    async def get_run_status(self, *, thread_id: str, run_id: str):
+        return None
+
+
+class _VisibleRunReader:
+    """A request-scoped reader that confirms the anchor run is visible."""
+
+    async def get_run_status(self, *, thread_id: str, run_id: str):
+        return RunStatusView(thread_id=thread_id, run_id=run_id, status="success")
+
+
 def _client(
     tmp_path,
     mutations: FakeMutationService | None = None,
@@ -54,6 +83,7 @@ def _client(
     user_id: str | None = OWNER,
     case_text: str = CASE_JSON,
     evidence: FakeEvidence | None = None,
+    raise_server_exceptions: bool = True,
 ) -> tuple[TestClient, FakeMutationService]:
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()
@@ -63,7 +93,7 @@ def _client(
     asyncio.run(service.start(ExtensionRuntimeDeps(skill_mutations=host, completed_run_evidence=evidence if evidence is not None else FakeEvidence())))
     app = FastAPI()
     app.include_router(build_router(service))
-    client = TestClient(app)
+    client = TestClient(app, raise_server_exceptions=raise_server_exceptions)
     _as(client, user_id)
     return client, host
 
@@ -243,3 +273,58 @@ def test_a_broken_case_file_is_a_400_diagnostic(tmp_path):
     assert health.json()["detail"].startswith("CASE_INVALID")
     assert proposed.status_code == 400
     assert proposed.json()["detail"].startswith("CASE_INVALID")
+
+
+def test_apply_does_not_label_a_host_value_error_as_case_invalid(tmp_path):
+    """Apply never reads the case files, so a host bug must surface as a 500."""
+    client, _host = _client(tmp_path, mutations=_ValueErrorOnCheck(), raise_server_exceptions=False)
+    proposal_id = _propose(client).json()["proposal_id"]
+
+    response = client.post(f"{PREFIX}/proposals/{proposal_id}/apply", json={})
+
+    assert response.status_code == 500
+
+
+def test_revert_does_not_label_a_host_value_error_as_case_invalid(tmp_path):
+    """Revert never reads the case files either."""
+    client, _host = _client(tmp_path, mutations=_ValueErrorOnGetOperation(), raise_server_exceptions=False)
+
+    response = client.post(f"{PREFIX}/operations/does-not-matter/revert", json={})
+
+    assert response.status_code == 500
+
+
+def test_hidden_run_anchor_is_403_before_the_host_is_touched(tmp_path):
+    """The request-scoped reader is the production path; None means not visible."""
+    client, host = _client(tmp_path)
+    setattr(client.app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, lambda request: _InvisibleRunReader())
+
+    response = _propose(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"].startswith("SOURCE_NOT_VISIBLE")
+    assert host._proposals == {}
+
+
+def test_denied_run_reader_is_403(tmp_path):
+    """The Gateway's resolver raises PermissionError without ``runs:read``."""
+    client, _host = _client(tmp_path)
+
+    def denied(request):
+        raise PermissionError("run evidence requires runs:read")
+
+    setattr(client.app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, denied)
+
+    response = _propose(client)
+
+    assert response.status_code == 403
+
+
+def test_visible_run_anchor_still_reaches_the_service(tmp_path):
+    """A visible anchor must not be blocked by the new reader check."""
+    client, _host = _client(tmp_path)
+    setattr(client.app.state, RUN_EVIDENCE_READER_RESOLVER_KEY, lambda request: _VisibleRunReader())
+
+    response = _propose(client)
+
+    assert response.status_code == 200
