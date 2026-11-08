@@ -22,6 +22,10 @@ This section accumulates work toward the **2.3.0** milestone
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **models:** Administrators can select StepFun in **Settings → Models** and
+  connect an ordinary StepFun API account with an API key and model ID.
+  ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### Fixed
 
 - **community:** A search or fetch API key that ends in a newline no longer

@@ -109,7 +109,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
 **模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
-Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+Moonshot/Kimi、智谱/Z.AI、MiniMax 和阶跃星辰（StepFun）的端点、认证与适配器，地域和 Coding Plan
 使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
 新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
 
