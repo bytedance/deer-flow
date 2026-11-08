@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -64,6 +65,14 @@ class _ScriptedModel(GenericFakeChatModel):
         return self
 
 
+class _ModelRequests(BaseCallbackHandler):
+    def __init__(self):
+        self.messages = []
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.messages.append(messages[0])
+
+
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("progress_enabled", [False, True])
 @pytest.mark.parametrize("first_kind", ["json_error", "error_prose", "marker_prose", "success", "missing", "truncated"])
@@ -113,8 +122,21 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
         "thread_directories_created": True,
     }
     context = {"thread_id": "json-result-test", "user_id": "default"}
-    result = graph.invoke(state, context=context) if mode == "sync" else await graph.ainvoke(state, context=context)
+    captured = _ModelRequests()
+    config = {"callbacks": [captured]}
+    result = graph.invoke(state, context=context, config=config) if mode == "sync" else await graph.ainvoke(state, context=context, config=config)
     first, second = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+
+    visible = [message for message in captured.messages[-1] if isinstance(message, ToolMessage)]
+    assert len(visible) == 2
+    for stored, projected in zip((first, second), visible, strict=True):
+        assert json.loads(projected.content) == {
+            TOOL_META_KEY: {key: stored.additional_kwargs[TOOL_META_KEY][key] for key in ("status", "source")},
+            "content": stored.content,
+        }
+        assert projected is not stored
+        assert projected.tool_call_id == stored.tool_call_id
+        assert projected.additional_kwargs[TOOL_RECEIPT_KEY] == stored.additional_kwargs[TOOL_RECEIPT_KEY]
 
     assert second.content.replace("\r\n", "\n") == notes
     assert str(outputs / "notes.txt") in reads

@@ -4290,6 +4290,7 @@ and QuickJS source-build prerequisites for other Python/CPU combinations are inc
 
 Tool-result and model-error policies use producer metadata, native exit status, actual exception types and structured HTTP/provider fields. Page titles, quoted errors and words such as “timeout” or “no results” do not establish a failure category or permanent tool unavailability. Browserless passes the target HTTP status in the tool artifact; providers without that evidence preserve page text without guessing from it. Repeated-call and resource budgets still apply.
 File reads report actual failures and truncation at the producer; producer-stamped successful reads preserve document examples, including text beginning with `Error:`.
+For stamped text results, the model receives a JSON object separating reported execution status from `content`, with whitespace preserved by JSON escaping. Checkpoints and tool receipts retain the original result. This exposes existing status to providers that omit message metadata; it does not validate the document's claims or guarantee the model's final answer.
 
 OpenAI connection and timeout errors use the configured `llm_call.retry_max_attempts` budget (default: three total attempts). Other OpenAI `APIError` failures without usable status or error code receive at most one retry, within that configured ceiling.
 

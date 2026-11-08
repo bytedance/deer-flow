@@ -14,6 +14,7 @@ from typing import Literal, get_args
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 
 TOOL_META_KEY = "deerflow_tool_meta"
@@ -42,6 +43,40 @@ _UNKNOWN_ERROR: dict[str, object] = {
     "recommended_next_action": "try_alternative",
 }
 TOOL_RESULT_ERROR_TYPES = frozenset({"auth", "rate_limited", "transient", "config", "permission", "no_results", "not_found", "internal", "unknown", PROGRESS_GUARD_ERROR_TYPE})
+
+
+class _ModelToolResultText(str):
+    """Request-local encoding marker; copied or persisted text is never trusted."""
+
+
+def tool_result_for_model(message: ToolMessage) -> ToolMessage:
+    """Expose reported execution status separately from textual result data.
+
+    Provider serializers drop additional_kwargs (and often ToolMessage.status).
+    Project only validated status/source fields, never arbitrary metadata or
+    artifacts. Keep the original message for checkpoints, UI and receipt hashes.
+    Legacy content-analysis stamps and native multimodal blocks pass through.
+    """
+    if not isinstance(message.content, str) or isinstance(message.content, _ModelToolResultText):
+        return message
+    meta = (message.additional_kwargs or {}).get(TOOL_META_KEY)
+    if not isinstance(meta, dict):
+        return message
+    status, source = meta.get("status"), meta.get("source")
+    if not isinstance(status, str) or status not in get_args(ToolResultStatus):
+        return message
+    if not isinstance(source, str) or source not in {"tool_return", "exception", "progress_middleware"}:
+        return message
+    envelope = {TOOL_META_KEY: {"status": status, "source": source}, "content": message.content}
+    # A successful invocation can subsequently have its visible text shortened
+    # by a budget wrapper. Expose that fact separately from execution status.
+    transforms = [entry["kind"] for entry in read_tool_transforms(message) if entry["kind"] in {"truncated", "externalized"}]
+    if transforms:
+        envelope["content_transforms"] = list(dict.fromkeys(transforms))
+    content = _ModelToolResultText(json.dumps(envelope, ensure_ascii=False))
+    kwargs = dict(message.additional_kwargs or {})
+    append_tool_transform(kwargs, "structured_tool_result", by="ToolErrorHandlingMiddleware")
+    return message.model_copy(update={"content": content, "additional_kwargs": kwargs})
 
 
 def _http_error_category(status: object) -> str | None:
