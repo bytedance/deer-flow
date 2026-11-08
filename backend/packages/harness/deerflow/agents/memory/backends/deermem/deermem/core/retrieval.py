@@ -14,12 +14,14 @@ without importing storage and creating a circular dependency.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
 import re
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -413,20 +415,22 @@ class FTS5Retrieval:
             FROM memory_fts
             WHERE {where_clause}
             ORDER BY bm25_score
-            LIMIT ?
         """
-        params.append(top_k * 2)
 
         with self._lock:
             try:
-                conn = self._conn
-                rows = conn.execute(sql, params).fetchall()
+                # BM25 alone cannot bound the composite top-k after decay/confidence.
+                # Stream all matches and retain only top_k payloads in Python.
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    cursor.row_factory = sqlite3.Row
+                    scored_rows = ((self._compute_final_score(bm25_score=-row["bm25_score"], confidence=row["confidence"], created_at=row["created_at"]), row) for row in cursor)
+                    rows = heapq.nlargest(top_k, scored_rows, key=lambda item: item[0])
             except sqlite3.OperationalError as e:
                 logger.debug("FTS5 query syntax error: %s (query: %s)", e, fts5_query)
                 return None
 
         results: list[dict[str, Any]] = []
-        for row in rows:
+        for score, row in rows:
             (
                 doc_id,
                 indexed_content,
@@ -440,12 +444,6 @@ class FTS5Retrieval:
                 fact_json,
                 bm25_score,
             ) = row
-
-            score = self._compute_final_score(
-                bm25_score=-bm25_score,  # FTS5 returns negative
-                confidence=confidence,
-                created_at=created_at,
-            )
 
             fact: dict[str, Any] = {}
             if fact_json:
@@ -466,7 +464,7 @@ class FTS5Retrieval:
             results.append(fact)
 
         logger.debug(
-            "FTS5 raw SQL: fts5_query=%r scope_user=%r scope_agent=%r category=%r -> %d rows. bm25 raw: %s",
+            "FTS5 composite top-k: fts5_query=%r scope_user=%r scope_agent=%r category=%r -> %d rows. bm25 raw: %s",
             fts5_query,
             scope_user,
             scope_agent,
@@ -475,8 +473,7 @@ class FTS5Retrieval:
             [(r["id"], r["bm25_score"]) for r in results[:10]],
         )
 
-        results.sort(key=lambda r: r["score"], reverse=True)
-        return results[:top_k]
+        return results
 
     def _compute_final_score(
         self,
