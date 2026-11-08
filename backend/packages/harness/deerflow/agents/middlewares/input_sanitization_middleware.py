@@ -325,9 +325,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             if id(original_content[i]) not in text_block_ids:
                 result.append(original_content[i])
         result.extend(original_content[last + 1 :])
-        # Empty bare strings were skipped during extraction, but are still
-        # text items rather than provider-compatible non-text blocks.
-        return [block for block in result if not (isinstance(block, str) and not block)]
+        return result
 
     def _sanitize_message(self, msg: HumanMessage) -> HumanMessage | None:
         """Return a sanitized copy of *msg*, or None when nothing needs changing.
@@ -337,12 +335,23 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         message is never mutated.
         """
         content = msg.content
+        normalized_message = None
+        if isinstance(content, list):
+            filtered = [block for block in content if not (isinstance(block, str) and not block)]
+            if len(filtered) != len(content):
+                # Normalize before early returns, including image-only and
+                # already-framed messages. Use an empty string rather than
+                # introducing an empty content-parts list for all-empty input.
+                content = filtered or ""
+                normalized_message = msg.model_copy(update={"content": deepcopy(content)})
+                if not filtered:
+                    return normalized_message
         text_content, text_blocks = self._extract_text_from_content(content)
 
         # No text at all (e.g. image-only message) — pass through
         if not text_content and not isinstance(content, str):
             logger.debug("_sanitize_message: no text content in message — passing through")
-            return None
+            return normalized_message
 
         # Sanitize only the user's original input when available (set by
         # UploadsMiddleware before it prepends the <current_uploads> block),
@@ -417,8 +426,8 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             processed = _check_user_content(text_content)  # fallback
 
         if processed == text_content:
-            # Already clean / already wrapped — no override needed
-            return None
+            # Already clean / already wrapped — only normalization may be needed
+            return normalized_message
 
         if text_blocks:
             new_content = self._rebuild_content(content, processed, text_blocks)

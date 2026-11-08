@@ -203,3 +203,7 @@ chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_llm_error_handling_middleware.py`.
 
 Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
+
+InputSanitization removes empty bare strings from genuine user content lists before
+text-related early returns; all-empty string lists become an empty string. Request
+copies preserve metadata and leave persisted history untouched.
