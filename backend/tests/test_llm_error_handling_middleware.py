@@ -3096,7 +3096,7 @@ def test_omniroute_in_stream_504_is_transient(exc: openai.APIError) -> None:
     ],
 )
 def test_prose_status_is_diagnostic_only(message: str) -> None:
-    assert _build_middleware()._classify_error(_in_stream_error(message)) == (False, "generic")
+    assert _build_middleware()._classify_error(RuntimeError(message)) == (False, "generic")
 
 
 @pytest.mark.parametrize(
@@ -3126,7 +3126,9 @@ def test_in_stream_error_takes_its_status_from_structured_fields(error_fields: d
 
 def test_in_stream_non_error_status_does_not_hide_server_error_type() -> None:
     exc = _in_stream_error("stream aborted after HTTP 200", type="server_error")
-    assert _build_middleware()._classify_error(exc) == (True, "transient")
+    middleware = _build_middleware()
+    assert middleware._classify_error(exc) == (True, "transient")
+    assert middleware._max_attempts_for(exc, "transient") == 2
 
 
 @pytest.mark.parametrize(
@@ -3144,15 +3146,21 @@ def test_in_band_lookup_skips_non_error_statuses(exc: openai.APIError) -> None:
 @pytest.mark.parametrize(
     "exc",
     [
-        pytest.param(_in_stream_error("upstream rate-limit hit"), id="hyphenated-message"),
-        pytest.param(_in_stream_error("Upstream request failed.", code="rate_limit_exceeded"), id="snake-case-code"),
+        pytest.param(RuntimeError("upstream rate-limit hit"), id="hyphenated-message"),
         pytest.param(_in_stream_error("Request exceeded the local execution expiration.", code="RATE_LIMIT_EXECUTION_TIMEOUT"), id="upper-snake-case-code"),
         pytest.param(RuntimeError("Codex API response.failed (rate_limit_exceeded): slow down"), id="codex-response-failed"),
-        pytest.param(_in_stream_error("rate-limit header malformed"), id="separator-busy-without-a-status"),
+        pytest.param(RuntimeError("rate-limit header malformed"), id="separator-busy-without-a-status"),
     ],
 )
 def test_unrecognized_codes_and_busy_prose_stay_generic(exc: Exception) -> None:
     assert _build_middleware()._classify_error(exc) == (False, "generic")
+
+
+@pytest.mark.parametrize("code", ["rate_limit_exceeded", "rate_limit_error"])
+def test_structured_openai_rate_limit_codes_are_retriable(code: str) -> None:
+    exc = _in_stream_error("Upstream request failed.", code=code)
+
+    assert _build_middleware()._classify_error(exc) == (True, "transient")
 
 
 @pytest.mark.parametrize(
@@ -3192,10 +3200,20 @@ def test_unrecognized_codes_and_busy_prose_stay_generic(exc: Exception) -> None:
         pytest.param(_in_stream_error("invalid tool call at tools[0][503].function"), id="nested-index"),
         pytest.param(_in_stream_error("rate-limit header malformed", code=400), id="code-400-beats-separator-busy"),
         pytest.param(_in_stream_error("HTTP 400: rate-limit header malformed"), id="message-400-beats-separator-busy"),
+        pytest.param(_in_stream_error("upstream failed", code="\u0665\u0660\u0663"), id="non-ascii-code"),
     ],
 )
-def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.APIError) -> None:
-    assert _build_middleware()._classify_error(exc) == (False, "generic")
+def test_in_stream_error_retry_requires_status_code_or_openai_apierror(exc: openai.APIError) -> None:
+    middleware = _build_middleware()
+    status = _extract_in_band_status(exc, include_type=False)
+    has_status = status is not None
+    has_error_code = isinstance(exc.code, str) and bool(exc.code.strip())
+
+    if has_status or has_error_code:
+        assert middleware._classify_error(exc) == (False, "generic")
+    else:
+        assert middleware._classify_error(exc) == (True, "transient")
+        assert middleware._max_attempts_for(exc, "transient") == 2
 
 
 @pytest.mark.parametrize(
@@ -3207,18 +3225,19 @@ def test_in_stream_error_without_a_retriable_signal_stays_generic(exc: openai.AP
         pytest.param(_in_stream_error("Upstream request failed.", error="upstream timeout"), id="string-error-field"),
         pytest.param(_in_stream_error("Upstream request failed.", code={"value": 503}), id="dict-code"),
         pytest.param(_in_stream_error("Upstream request failed.", status=["503"]), id="list-status"),
-        # Arabic-Indic digits for 503: int() accepts them, the status check must not.
-        pytest.param(_in_stream_error("Upstream request failed.", code="\u0665\u0660\u0663"), id="non-ascii-digit-code"),
     ],
 )
-def test_in_stream_error_with_a_malformed_body_stays_generic(exc: openai.APIError) -> None:
-    assert _build_middleware()._classify_error(exc) == (False, "generic")
+def test_in_stream_error_without_usable_status_or_code_gets_one_retry(exc: openai.APIError) -> None:
+    middleware = _build_middleware()
+
+    assert middleware._classify_error(exc) == (True, "transient")
+    assert middleware._max_attempts_for(exc, "transient") == 2
 
 
 def test_in_stream_status_parsing_stays_fast_on_a_long_message() -> None:
     # Spaces before and after ``:``/``=`` must be separate runs in the status
     # regex; two adjacent ``[ \t]*`` would backtrack quadratically here.
-    exc = _in_stream_error("status" + " " * 50_000 + "x")
+    exc = RuntimeError("status" + " " * 50_000 + "x")
     started = time.perf_counter()
     assert _build_middleware()._classify_error(exc) == (False, "generic")
     assert time.perf_counter() - started < 1.0

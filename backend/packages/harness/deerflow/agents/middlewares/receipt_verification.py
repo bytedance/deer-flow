@@ -127,9 +127,7 @@ def validate_receipt_verdict(value: object) -> ReceiptVerdict | None:
 
 def render_citation_verdict(verdict: ReceiptVerdict) -> str:
     """Render the verdict as the delegation-ledger citation segment."""
-    if verdict["no_citation_claims"]:
-        return "citations: UNVERIFIED — no receipt citations"
-    if not verdict["cited"]:
+    if verdict["no_citation_claims"] or not verdict["cited"]:
         return "citations: UNVERIFIED — no receipt citations"
     parts = [f"{len(verdict['resolved'])} resolved"]
     if verdict["failed"]:

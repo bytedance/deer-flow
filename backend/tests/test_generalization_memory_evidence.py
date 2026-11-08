@@ -6,13 +6,18 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from test_memory_updater import _make_memory, _make_updater, _memory_config
 
-from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import filter_trivial
+from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import _strip_upload_mentions_from_memory
 
 
-def test_short_contextual_confirmation_is_preserved():
+def test_short_contextual_confirmation_is_preserved(tmp_path):
     messages = [HumanMessage(content="What are my preferences?"), AIMessage(content="Do you always prefer Chinese replies?"), HumanMessage(content="\u662f\u7684"), AIMessage(content="Understood.")]
-    assert filter_trivial(messages) == messages
+    memory = DeerMem(backend_config={"storage_path": str(tmp_path)})
+
+    prepared = memory._prepare_update(messages)
+
+    assert prepared is not None
+    assert prepared[0] == messages
 
 
 @pytest.mark.parametrize("content", ["User builds file upload systems for a living.", "User prefers uploading documents through the browser."])

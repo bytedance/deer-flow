@@ -40,6 +40,37 @@ def test_existing_meta_is_preserved():
     assert result.additional_kwargs[TOOL_META_KEY] is existing
 
 
+def test_legacy_read_file_error_prefix_is_classified_as_failure():
+    msg = ToolMessage(content="Error: File not found: /workspace/missing.txt", tool_call_id="read", name="read_file")
+
+    meta = _meta(normalize_tool_message(msg))
+
+    assert meta["status"] == "error"
+    assert meta["error_type"] == "unknown"
+    assert meta["source"] == "tool_return"
+
+
+def test_stamped_read_file_success_may_start_with_error_prefix():
+    metadata = {
+        "status": "success",
+        "error_type": None,
+        "recoverable_by_model": True,
+        "recommended_next_action": "continue",
+        "source": "tool_return",
+    }
+    msg = ToolMessage(
+        content="Error: is an example shown in this document.",
+        tool_call_id="read",
+        name="read_file",
+        additional_kwargs={TOOL_META_KEY: metadata},
+    )
+
+    result = normalize_tool_message(msg)
+
+    assert _meta(result) is metadata
+    assert _meta(result)["status"] == "success"
+
+
 @pytest.mark.parametrize("name", ["bash", "bash_tool"])
 @pytest.mark.parametrize("content", ["\nExit Code: 1", "12 passed, 1 error\nExit Code: 7", "Command exited with code 3", "partial output\nExit Code: -9", "Command timed out\nExit Code: 124"])
 def test_bash_nonzero_exit_marker_is_a_recoverable_error(name, content):

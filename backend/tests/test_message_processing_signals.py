@@ -1,11 +1,9 @@
-"""Tests for message-processing signal detection and trivial filtering.
+"""Tests for message-processing signal detection and DeerMem preparation.
 
-Pins three behaviors: ``detect_signals`` recognizes all six signal classes
-(correction, reinforcement, preference, identity, goal, decision);
-``filter_trivial`` drops pure-ack turns and their replies while keeping
-substantive turns; and ``_prepare_update`` returns the full signal set as a
-``frozenset`` (not just correction/reinforcement), so every detected class
-flows through to the extraction prompt.
+Pins that ``detect_signals`` recognizes all six signal classes (correction,
+reinforcement, preference, identity, goal, decision), and ``_prepare_update``
+returns the full signal set as a ``frozenset`` so each detected class reaches
+the extraction prompt.
 """
 
 from __future__ import annotations
@@ -16,7 +14,7 @@ from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.core.message_processing import (
     detect_signals,
     extract_message_text,
-    filter_trivial,
+    load_patterns,
 )
 
 
@@ -66,36 +64,6 @@ def test_detect_signals_multiple_classes_in_one_turn() -> None:
     assert "preference" in signals
 
 
-# ── filter_trivial ─────────────────────────────────────────────────────────
-
-
-def test_filter_trivial_retains_short_reply_context() -> None:
-    msgs = [_human("嗯"), _ai("thanks"), _human("what next"), _ai("let's see")]
-    result = filter_trivial(msgs)
-    assert result == msgs  # Short responses need their conversational context.
-
-
-def test_filter_trivial_keeps_substantive_message_containing_ok() -> None:
-    msgs = [_human("use uv to install, ok?"), _ai("done")]
-    result = filter_trivial(msgs)
-    assert len(result) == 2  # not dropped: not a whole-message ack
-
-
-def test_filter_trivial_keeps_short_turns() -> None:
-    msgs = [_human("好的"), _ai("嗯")]
-    assert filter_trivial(msgs) == msgs
-
-
-def test_filter_trivial_tolerates_trailing_punctuation() -> None:
-    msgs = [_human("ok."), _ai("ok!")]
-    assert filter_trivial(msgs) == msgs
-
-
-def test_filter_trivial_no_patterns_keeps_all() -> None:
-    msgs = [_human("ok"), _ai("ok")]
-    assert filter_trivial(msgs, patterns=[]) == msgs
-
-
 # ── _prepare_update: seam-stable 3-tuple projection ────────────────────────
 
 
@@ -110,6 +78,16 @@ def test_prepare_update_keeps_short_turns(tmp_path) -> None:
     messages = [_human("好的"), _ai("嗯")]
     prepared = m._prepare_update(messages)
     assert prepared is not None and prepared[0] == messages
+
+
+def test_custom_patterns_dir_still_loads_signal_patterns(tmp_path) -> None:
+    pattern_file = tmp_path / "preference.yaml"
+    pattern_file.write_text("- 'I always prefer kiwi'\n", encoding="utf-8")
+
+    patterns = load_patterns("preference", patterns_dir=str(tmp_path))
+
+    assert len(patterns) == 1
+    assert patterns[0].search("I always prefer kiwi")
 
 
 def test_prepare_update_returns_correction_signal(tmp_path) -> None:

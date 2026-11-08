@@ -116,7 +116,7 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
     result = graph.invoke(state, context=context) if mode == "sync" else await graph.ainvoke(state, context=context)
     first, second = [message for message in result["messages"] if isinstance(message, ToolMessage)]
 
-    assert second.content == notes
+    assert second.content.replace("\r\n", "\n") == notes
     assert str(outputs / "notes.txt") in reads
     assert second.additional_kwargs[TOOL_RECEIPT_KEY]["status"] == "success"
     expected_status = {"missing": "error", "truncated": "partial_success"}.get(first_kind, "success")
@@ -129,7 +129,7 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
         assert len(first.content) < len(first_content)
         assert "truncated" in first.content.lower()
     else:
-        assert first.content == first_content
+        assert first.content.replace("\r\n", "\n") == first_content
 
 
 @pytest.mark.asyncio

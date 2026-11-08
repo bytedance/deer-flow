@@ -19,6 +19,8 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+DeerMem retains short context-dependent replies for extraction. This may increase batch size and LLM use; do not restore regex-based acknowledgement filtering.
+
 Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
 apply the read policy to the whole result, with value-free diagnostics.
 
@@ -320,7 +322,7 @@ All automatic, manual, tool, and import paths use `deermem/core/eviction.py`.
 `hybrid-v1` is opt-in and uses confidence, confirmation freshness, and access heat.
 Shadow mode records disagreement while enforcing confidence-only selection.
 
-Extraction never increments confirmation counters from lexical/model hints; require fact-bound human evidence. Preserve existing/manual values.
+Extraction never increments confirmation counters or updates `lastConfirmedAt` from lexical/model hints; require fact-bound human evidence. Preserve existing/manual values. When `lastConfirmedAt` is absent, hybrid confirmation freshness and staleness review fall back to `createdAt`; repeated conversational mentions do not refresh either timestamp.
 The extraction prompt keeps the legacy factsToReinforce field empty and assigns
 no confidence floor to correction phrases. Context determines category,
 confidence and the number of supported focus themes.

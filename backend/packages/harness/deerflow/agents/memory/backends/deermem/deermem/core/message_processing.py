@@ -21,7 +21,7 @@ _PATTERN_CACHE: dict[tuple[str, str | None], list[re.Pattern[str]]] = {}
 def load_patterns(name: str, *, patterns_dir: str | None = None) -> list[re.Pattern[str]]:
     """Load and compile signal patterns from a YAML file.
 
-    ``name`` is ``"correction"`` or ``"reinforcement"``. ``patterns_dir``
+    ``name`` is a signal name. ``patterns_dir``
     overrides the bundled ``core/message_patterns/`` directory; ``None`` (the
     default) loads the bundled defaults, which mirror the pre-externalization
     hardcoded patterns so zero-config behavior is unchanged. Compiled patterns
@@ -311,13 +311,3 @@ def detect_signals(
                 hits.add(name)
                 break
     return hits
-
-
-def filter_trivial(
-    messages: list[Any],
-    *,
-    patterns: list[re.Pattern[str]] | None = None,
-    patterns_dir: str | None = None,
-) -> list[Any]:
-    """Preserve short replies: their meaning can depend on earlier turns."""
-    return list(messages)

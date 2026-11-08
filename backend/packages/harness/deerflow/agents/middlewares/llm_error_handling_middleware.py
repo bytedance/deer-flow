@@ -27,6 +27,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
+from deerflow.models.response_errors import EmptyModelResponseError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
@@ -40,21 +41,6 @@ _NON_CIRCUIT_FAILURE_REASONS = {"burst_rate", "empty_response"}
 @dataclass(slots=True)
 class _CircuitAdmission:
     generation: int = -1
-
-
-class EmptyModelResponseError(RuntimeError):
-    """The model completed normally without producing persistent content."""
-
-    code = "EMPTY_RESPONSE"
-
-    def __init__(
-        self,
-        message: str = "Model returned a completed response with no content",
-        *,
-        response_message: AIMessage | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.response_message = response_message
 
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
@@ -441,6 +427,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         class_override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
         if class_override is not None:
             candidates.append(class_override)
+        if isinstance(exc, openai.APIError) and not _has_status_or_error_code(exc):
+            candidates.append(2)
         reason_override = _REASON_RETRY_BUDGETS.get(reason)
         if reason_override is not None:
             candidates.append(reason_override)
@@ -560,6 +548,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 return False, "quota"
             if code == "limit_burst_rate":
                 return True, "burst_rate"
+            if code in {"rate_limit_exceeded", "rate_limit_error"}:
+                return True, "transient"
         if status is None:
             status = _extract_in_band_status(exc)
         if status is not None:
@@ -571,6 +561,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # This exact LangChain adapter sentinel is a protocol failure, unlike
         # arbitrary IndexError or text mentioning an empty response.
         if isinstance(exc, ValueError) and str(exc).strip().casefold() == _EMPTY_STREAM_MARKER:
+            return True, "transient"
+        # OpenAI can report a failure inside an HTTP-200 stream without a
+        # status or structured error code. Exception type is the only evidence
+        # available in that case, so allow one reconnect and then surface it.
+        if isinstance(exc, openai.APIError) and not _has_status_or_error_code(exc):
             return True, "transient"
         return False, "generic"
 
@@ -997,6 +992,34 @@ def _extract_in_band_status(exc: BaseException, *, include_type: bool = True) ->
             if isinstance(value, str) and value.strip().lower() == "server_error":
                 return 500
     return None
+
+
+def _has_status_or_error_code(exc: BaseException) -> bool:
+    """Return whether an exception carries a usable status or explicit code."""
+    status = _extract_status_code(exc)
+    if status is None:
+        status = _extract_in_band_status(exc, include_type=False)
+    if status is not None:
+        return True
+
+    for attr in ("code", "error_code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value.strip():
+            return True
+
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    candidates = [body]
+    error = body.get("error")
+    if isinstance(error, dict):
+        candidates.append(error)
+    for candidate in candidates:
+        for key in ("code", "error_code"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
 
 
 def _as_http_status(value: Any) -> int | None:

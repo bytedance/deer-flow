@@ -19,9 +19,32 @@ def test_error_prose_cannot_determine_category_or_stop(text):
     assert meta["recoverable_by_model"] is True
 
 
-@pytest.mark.parametrize("text", ["A guide to no results found", "partial results are discussed here", "Error: an example from a manual", '{"error": {"code": 401}}'])
-def test_document_content_keeps_success(text):
-    msg = normalize_tool_message(ToolMessage(content=text, tool_call_id="1", name="read_file"))
+@pytest.mark.parametrize(
+    ("text", "producer_stamped"),
+    [
+        ("A guide to no results found", False),
+        ("partial results are discussed here", False),
+        ("Error: an example from a manual", True),
+        ('{"error": {"code": 401}}', False),
+    ],
+)
+def test_document_content_keeps_success(text, producer_stamped):
+    kwargs = (
+        {
+            "additional_kwargs": {
+                TOOL_META_KEY: {
+                    "status": "success",
+                    "error_type": None,
+                    "recoverable_by_model": True,
+                    "recommended_next_action": "continue",
+                    "source": "tool_return",
+                }
+            }
+        }
+        if producer_stamped
+        else {}
+    )
+    msg = normalize_tool_message(ToolMessage(content=text, tool_call_id="1", name="read_file", **kwargs))
     assert msg.additional_kwargs[TOOL_META_KEY]["status"] == "success"
 
 

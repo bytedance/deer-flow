@@ -64,6 +64,11 @@ normalized skills root, sorted read tools, continuity switch. All history reader
 including capture failures, validate persisted metadata; malformed values must
 not abort compaction/model calls.
 LLMErrorHandling release identity includes structured_evidence_v1.
+Model failures use explicit status/provider fields and exception types; prose is
+diagnostic only. An OpenAI `APIError` without status or code gets one retry.
+OpenAI-compatible adapters raise `EmptyModelResponseError` for HTTP-success
+responses with empty choices before LangChain indexes the list. Keep the guard
+on each adapter and the legacy `langchain_openai:ChatOpenAI` factory path.
 
 **Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
 `tool_calls` update: adapters resend stale `content` tool-call blocks, which

@@ -162,8 +162,9 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
         meta = _make_meta(status="error", source="tool_return", **{**_UNKNOWN_ERROR, "error_type": category})
     elif msg.status == "error":
         meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
-    elif msg.name != "read_file" and content.startswith(_ERROR_PREFIX):
-        # Compatibility with native tools' error-envelope protocol.
+    elif content.startswith(_ERROR_PREFIX):
+        # Legacy tool envelopes, including unstamped read_file checkpoints, use
+        # this prefix. Producer-stamped successful file contents return above.
         meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
     elif msg.name != "read_file" and _extract_json_error_text(content) is not None:
         meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)

@@ -15,12 +15,12 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_openai import ChatOpenAI
 
 from deerflow.models.assistant_payload_replay import (
     restore_assistant_payloads,
     restore_reasoning_content,
 )
+from deerflow.models.openai_response import GuardedChatOpenAI
 from deerflow.models.reasoning_capture import typed_choice_message, with_reasoning_content
 
 _MISSING = object()
@@ -55,7 +55,7 @@ def _extract_reasoning(value: Any) -> str | object:
     return _MISSING
 
 
-class PatchedChatStepFun(ChatOpenAI):
+class PatchedChatStepFun(GuardedChatOpenAI):
     """ChatOpenAI with full reasoning support for StepFun models.
 
     Captures ``reasoning`` / ``reasoning_content`` from both streaming and
