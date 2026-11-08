@@ -359,11 +359,13 @@ class HarnessGuardMiddleware(AgentMiddleware):
                 if matching_streak + 1 >= self.config.max_repeated_error_signatures:
                     repetition_warning = f"[HARNESS GUARD: CRITICAL REPETITION] Error '{sig_str}' has occurred {matching_streak + 1} times consecutively. Do NOT repeat this action without addressing the root cause."
 
-            # Check alternating oscillation pattern (A -> B -> A -> B)
-            if self.config.detect_alternating_loops and len(history) >= 3:
+            # Check alternating oscillation pattern (A -> B -> A -> B). Only
+            # failures form the loop: a success ends it, its content must reach
+            # the model unchanged, and a window containing it is not a loop.
+            if self.config.detect_alternating_loops and is_error and len(history) >= 3:
                 h = list(history)
                 r0, r1, r2, r3 = h[-3], h[-2], h[-1], record
-                if r0.tool_name == r2.tool_name and r1.tool_name == r3.tool_name and r0.tool_name != r1.tool_name and sum(1 for r in (r0, r1, r2, r3) if r.is_error) >= 3:
+                if r0.tool_name == r2.tool_name and r1.tool_name == r3.tool_name and r0.tool_name != r1.tool_name and all(r.is_error for r in (r0, r1, r2)):
                     oscillation_warning = f"[HARNESS GUARD: OSCILLATION DETECTED] Alternating failing tool loop detected between '{r0.tool_name}' and '{r1.tool_name}'. Pause and re-evaluate your strategy."
 
             history.append(record)
