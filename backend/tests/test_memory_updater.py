@@ -1107,6 +1107,13 @@ class TestFormatConversationForUpdate:
 
         assert format_conversation_for_update([msg]) == ""
 
+    def test_whitespace_only_assistant_turn_is_skipped(self):
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.content = "   "
+
+        assert format_conversation_for_update([msg]) == ""
+
     def test_image_only_blocks_do_not_leak_the_block_repr(self):
         """An image-only turn contributes no text, not a base64 Python repr."""
         payload = "data:image/png;base64," + "A" * 2000
