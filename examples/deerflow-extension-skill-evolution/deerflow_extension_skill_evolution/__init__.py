@@ -27,7 +27,12 @@ _DEFAULT_CASES_DIR = Path(__file__).resolve().parent / "cases"
 @extension(api="0.2.11", name="skill-evolution")
 def install(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
     """Register the evolution service and its HTTP walkthrough surface."""
-    if config.get("enabled", True) is False:
+    # ``is False`` alone would silently keep the plugin on for ``enabled: 0`` or
+    # ``enabled: "false"``; a mistyped off switch must fail the deployment.
+    enabled = config.get("enabled", True)
+    if type(enabled) is not bool:
+        raise ValueError(f"skill-evolution: config.enabled must be a boolean, got {enabled!r}")
+    if not enabled:
         return
 
     cases_dir = config.get("cases_dir")

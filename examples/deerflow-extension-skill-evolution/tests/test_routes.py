@@ -7,15 +7,20 @@ unresolvable forward reference, FastAPI silently treats ``body`` as a query
 parameter, and every POST answers 422 while every service-level test stays
 green. These tests go through ``TestClient`` so the request models are actually
 resolved, validated, and rejected the way a caller experiences them.
+
+They also pin caller binding: the host capability handles the service holds are
+operator-scoped, so the routes — not the host — must refuse to act on another
+user's skill.
 """
 
 import asyncio
 import json
 
-from deerflow_extension_api import ExtensionRuntimeDeps
+from deerflow_extension_api import ExtensionPrincipal, ExtensionRuntimeDeps, HostCapabilityError
+from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from test_lifecycle import FakeEvidence, FakeMutationService
+from test_lifecycle import OWNER, FakeEvidence, FakeMutationService
 
 from deerflow_extension_skill_evolution.service import EvolutionService, build_router
 
@@ -23,21 +28,44 @@ SKILL = "example-skill"
 PREFIX = "/api/extension-skill-evolution"
 BASE_MAIN = "---\nname: example-skill\ndescription: demo\n---\n\nRun `scripts/run.py --fmt json`.\n"
 FIXED_MAIN = BASE_MAIN.replace("--fmt json", "--format json")
+CASE_JSON = json.dumps({"id": "converter-arg", "description": "SKILL.md must instruct --format json", "checks": [{"kind": "text_contains", "path": "SKILL.md", "needle": "--format json"}]})
 
 
-def _client(tmp_path, mutations: FakeMutationService | None = None) -> tuple[TestClient, FakeMutationService]:
+def _as(client: TestClient, user_id: str | None) -> None:
+    """Switch the request principal this client resolves (``None`` = anonymous)."""
+
+    def resolver(request):
+        return None if user_id is None else ExtensionPrincipal(user_id=user_id)
+
+    setattr(client.app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, resolver)
+
+
+class _MissingEvidence(FakeEvidence):
+    """A host whose sealed-run reader answers ``NOT_FOUND`` for every anchor."""
+
+    async def get_snapshot(self, **kwargs):
+        raise HostCapabilityError("NOT_FOUND", "run is unavailable in this scope")
+
+
+def _client(
+    tmp_path,
+    mutations: FakeMutationService | None = None,
+    *,
+    user_id: str | None = OWNER,
+    case_text: str = CASE_JSON,
+    evidence: FakeEvidence | None = None,
+) -> tuple[TestClient, FakeMutationService]:
     cases_dir = tmp_path / "cases"
     cases_dir.mkdir()
-    (cases_dir / "01-arg.json").write_text(
-        json.dumps({"id": "converter-arg", "description": "SKILL.md must instruct --format json", "checks": [{"kind": "text_contains", "path": "SKILL.md", "needle": "--format json"}]}),
-        encoding="utf-8",
-    )
+    (cases_dir / "01-arg.json").write_text(case_text, encoding="utf-8")
     service = EvolutionService(cases_dir=cases_dir)
     host = mutations if mutations is not None else FakeMutationService()
-    asyncio.run(service.start(ExtensionRuntimeDeps(skill_mutations=host, completed_run_evidence=FakeEvidence())))
+    asyncio.run(service.start(ExtensionRuntimeDeps(skill_mutations=host, completed_run_evidence=evidence if evidence is not None else FakeEvidence())))
     app = FastAPI()
     app.include_router(build_router(service))
-    return TestClient(app), host
+    client = TestClient(app)
+    _as(client, user_id)
+    return client, host
 
 
 def _propose(client: TestClient, **overrides):
@@ -123,6 +151,33 @@ def test_unknown_proposal_returns_404(tmp_path):
     assert response.status_code == 404
 
 
+def test_unknown_operation_returns_404(tmp_path):
+    """``NOT_FOUND_OR_FORBIDDEN`` from the real host is a 404, not a conflict."""
+    client, _host = _client(tmp_path)
+
+    response = client.post(f"{PREFIX}/operations/does-not-exist/revert", json={})
+
+    assert response.status_code == 404
+
+
+def test_apply_unknown_proposal_returns_404(tmp_path):
+    """A proposal this service never staged is absent, not a conflict."""
+    client, _host = _client(tmp_path)
+
+    response = client.post(f"{PREFIX}/proposals/does-not-exist/apply", json={})
+
+    assert response.status_code == 404
+
+
+def test_unknown_evidence_run_returns_404(tmp_path):
+    """``NOT_FOUND`` from the sealed-run reader is a 404 as well."""
+    client, _host = _client(tmp_path, evidence=_MissingEvidence())
+
+    response = _propose(client)
+
+    assert response.status_code == 404
+
+
 def test_health_route_reports_the_evaluator(tmp_path):
     client, _host = _client(tmp_path)
 
@@ -132,3 +187,59 @@ def test_health_route_reports_the_evaluator(tmp_path):
     assert payload["evaluator"]
     assert payload["evaluator_version"]
     assert payload["cases"] == 1
+
+
+def test_routes_require_an_authenticated_principal(tmp_path):
+    client, _host = _client(tmp_path, user_id=None)
+
+    assert client.get(f"{PREFIX}/proposals").status_code == 401
+    assert _propose(client).status_code == 401
+
+
+def test_propose_refuses_a_skill_owned_by_someone_else(tmp_path):
+    """The injected host capability is allowlist-scoped, so the route binds the owner."""
+    client, _host = _client(tmp_path, user_id="someone-else")
+
+    response = _propose(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"].startswith("FORBIDDEN")
+
+
+def test_proposals_are_scoped_to_their_owner(tmp_path):
+    client, _host = _client(tmp_path)
+    proposal_id = _propose(client).json()["proposal_id"]
+
+    _as(client, "someone-else")
+
+    assert client.get(f"{PREFIX}/proposals").json()["proposals"] == []
+    # Another owner's proposal is not disclosed — not even its existence.
+    assert client.get(f"{PREFIX}/proposals/{proposal_id}").status_code == 404
+    applied = client.post(f"{PREFIX}/proposals/{proposal_id}/apply", json={})
+    assert applied.status_code == 403
+    assert applied.json()["detail"].startswith("FORBIDDEN")
+
+
+def test_revert_is_scoped_to_the_operation_owner(tmp_path):
+    client, _host = _client(tmp_path)
+    proposal_id = _propose(client).json()["proposal_id"]
+    operation_id = client.post(f"{PREFIX}/proposals/{proposal_id}/apply", json={}).json()["operation_id"]
+
+    _as(client, "someone-else")
+    response = client.post(f"{PREFIX}/operations/{operation_id}/revert", json={})
+
+    assert response.status_code == 403
+    assert response.json()["detail"].startswith("FORBIDDEN")
+
+
+def test_a_broken_case_file_is_a_400_diagnostic(tmp_path):
+    """A malformed operator case file fails closed, but not as a 500 traceback."""
+    client, _host = _client(tmp_path, case_text="{ not json")
+
+    health = client.get(f"{PREFIX}/health")
+    proposed = _propose(client)
+
+    assert health.status_code == 400
+    assert health.json()["detail"].startswith("CASE_INVALID")
+    assert proposed.status_code == 400
+    assert proposed.json()["detail"].startswith("CASE_INVALID")

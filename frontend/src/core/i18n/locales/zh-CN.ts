@@ -147,6 +147,11 @@ export const zhCN: Translations = {
         description:
           "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
       },
+      skillEvolution: {
+        title: "证据驱动的技能进化",
+        description:
+          "在回归用例与宿主校验通过后才提议技能修改，对比新旧结果，并可回滚到已确认的版本。",
+      },
       knowledgeManagement: {
         title: "知识入库与处理",
         description:

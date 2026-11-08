@@ -61,12 +61,17 @@ def test_referenced_files_exist_flags_dangling_script_reference():
     assert run_check(Check("referenced_files_exist", path="SKILL.md"), fixed).passed
 
 
-def test_referenced_files_exist_ignores_prose_and_urls():
-    # The reference regex must not fire on sentence fragments or URLs.
-    prose = pkg(**{"SKILL.md": "Use the scripts/run helper from https://example.com/scripts/run.py docs.\n"})
+def test_referenced_files_exist_ignores_urls_and_trims_sentence_punctuation():
+    # A URL path is not an in-package reference; a bare token still is.
+    prose = pkg(**{"SKILL.md": "Use the scripts/run helper. See https://example.com/scripts/run.py docs.\n"})
     outcome = run_check(Check("referenced_files_exist", path="SKILL.md"), prose)
-    assert not outcome.passed  # bare token still extracted; strict by design
+    assert not outcome.passed
     assert "scripts/run" in outcome.detail
+    assert "example.com" not in outcome.detail
+
+    # A file named at the end of a sentence is the file, not "run.py.".
+    fixed = pkg(**{"SKILL.md": "Run scripts/run.py.\n", "scripts/run.py": SCRIPT_OK})
+    assert run_check(Check("referenced_files_exist", path="SKILL.md"), fixed).passed
 
 
 def test_scripts_parse_is_syntax_only_and_never_executes():

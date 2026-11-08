@@ -118,6 +118,17 @@ The run must be completed and sealed — it is the evidence anchor the host
 requires for staging (`source_refs`), so every proposal records *which run
 motivated the change*.
 
+**Every route binds the caller.** The capability handles injected into the
+service are scoped to the extension by the operator's grant, not to the
+requesting user, so the routes resolve the host principal
+(`deerflow_extension_api.auth.resolve_principal`) and refuse to act on a skill
+owned by anyone else: `propose`, `apply` and `revert` answer 401 without a
+principal and 403 (`FORBIDDEN`) across owners, and `GET /proposals` lists only
+the caller's own proposals (another owner's proposal reads as 404, without
+disclosing that it exists). When the host exposes a request-scoped run-evidence
+reader, the evidence anchor must also be visible to the caller; hosts without
+one fall back to the owner check.
+
 ## Offline walkthrough (tests)
 
 The package ships the demonstration as tests; no Gateway, model, or network:
@@ -167,7 +178,10 @@ one concrete and reviewable:
 3. **The verdict travels with the commit.** `AssessmentRef` pins
    `evaluator`, `evaluator_version`, and a content-addressed `report_id`
    (SHA-256 over the canonical report JSON) to the exact `candidate_hash` and
-   `base_revision`.
+   `base_revision`. The report bytes themselves are held in this service's
+   in-memory cache, not persisted; the id lets anyone holding the report — or
+   recomputing it from the same cases and frozen bundles — verify that it is
+   the one this commit cites.
 4. **Fail-closed by default.** `unjustified` and `failed` proposals are
    discarded before they can commit; a host `check` denial blocks the commit;
    an assessment mismatch is rejected by the host itself.

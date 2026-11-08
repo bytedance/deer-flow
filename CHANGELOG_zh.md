@@ -21,6 +21,12 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **插件：** 新增 `deerflow-extension-skill-evolution` 示例扩展：通过已合入的
+  `SkillMutationService` 走完 propose → evaluate → apply → rollback，只在评估结论为
+  `justified` 时携带 `AssessmentRef` 提交，将报告绑定到确切的候选哈希与基线版本，回滚保持追加式记录。
+  演示路由把每个操作绑定到调用者身份。该扩展为可选安装，未授予
+  `host_access.skill_mutations` 时不执行任何操作。([#7984])
+
 ### 修复
 
 - **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
@@ -12772,3 +12778,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7794]: https://github.com/bytedance/deer-flow/pull/7794
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7984]: https://github.com/bytedance/deer-flow/pull/7984

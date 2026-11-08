@@ -31,6 +31,7 @@ from deerflow_extension_api import (
 )
 from deerflow_extension_api.run_evidence import RunPage
 
+from deerflow_extension_skill_evolution import install
 from deerflow_extension_skill_evolution.evaluator import Case, Check
 from deerflow_extension_skill_evolution.service import EvolutionService, SkillEvolutionError
 
@@ -88,7 +89,7 @@ class FakeMutationService:
 
     async def read_skill(self, *, source_ref: str, name: str) -> SkillRevisionView:
         if name != SKILL:
-            raise HostCapabilityError("NOT_FOUND", name)
+            raise HostCapabilityError("NOT_FOUND_OR_FORBIDDEN", name)
         rev = self._current_revision()
         return SkillRevisionView(target_ref=f"asset:{name}", owner_id=OWNER, name=name, revision=rev, content=self._files["SKILL.md"].decode(), enabled=True)
 
@@ -116,7 +117,7 @@ class FakeMutationService:
     async def get_proposal(self, *, proposal_id: str) -> Proposal:
         proposal = self._proposals.get(proposal_id)
         if proposal is None:
-            raise HostCapabilityError("NOT_FOUND", proposal_id)
+            raise HostCapabilityError("NOT_FOUND_OR_FORBIDDEN", proposal_id)
         return proposal
 
     async def read_proposal_bundle(self, *, proposal_id: str, max_bytes: int = 33554432) -> ProposalBundle:
@@ -172,7 +173,7 @@ class FakeMutationService:
     async def revert(self, *, operation_id: str, expected_current_revision: AssetRevision, idempotency_key: str) -> Operation:
         row = self._operations.get(operation_id)
         if row is None:
-            raise HostCapabilityError("NOT_FOUND", operation_id)
+            raise HostCapabilityError("NOT_FOUND_OR_FORBIDDEN", operation_id)
         if expected_current_revision != self._current_revision():
             raise HostCapabilityError("REVISION_CONFLICT")
         # Revert to the revision that operation replaced.
@@ -194,7 +195,7 @@ class FakeMutationService:
 
     async def get_operation(self, *, operation_id: str) -> Operation:
         if operation_id not in self._operations:
-            raise HostCapabilityError("NOT_FOUND", operation_id)
+            raise HostCapabilityError("NOT_FOUND_OR_FORBIDDEN", operation_id)
         return self._operation_view(operation_id)
 
     async def find_operation(self, *, idempotency_key: str, method: str = "commit") -> Operation | None:
@@ -325,6 +326,17 @@ async def test_start_requires_the_grant(service):
     with pytest.raises(SkillEvolutionError) as exc:
         await service.start(ExtensionRuntimeDeps(skill_mutations=None))
     assert exc.value.code == "NOT_GRANTED"
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", "true", None])
+def test_install_rejects_a_non_boolean_enabled_switch(value):
+    """A mistyped off switch must fail the deployment instead of staying on."""
+    with pytest.raises(ValueError, match="config.enabled must be a boolean"):
+        install(None, {"enabled": value})
+
+
+def test_install_accepts_an_explicit_off_switch():
+    install(None, {"enabled": False})
 
 
 async def test_propose_before_start_raises(service):

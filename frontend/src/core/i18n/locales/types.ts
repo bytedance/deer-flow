@@ -90,6 +90,7 @@ export interface Translations {
       | "knowledgeManagement"
       | "knowledgePlatform"
       | "knowledgeCenter"
+      | "skillEvolution"
       | "weknora"
       | "lightrag"
       | "example",

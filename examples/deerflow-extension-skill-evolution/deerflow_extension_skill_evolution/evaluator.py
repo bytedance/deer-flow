@@ -42,10 +42,13 @@ Decision = Literal["justified", "unjustified", "failed"]
 #: ``.candidate``) converts with ``{f.path: f.content for f in files}``.
 Package = Mapping[str, bytes]
 
-# Bare in-package references inside SKILL.md prose. Deliberately strict: a
-# reference must appear as a standalone token, not inside a URL or sentence
-# punctuation, and only the two conventional skill subdirectories are scanned.
-_REFERENCE_RE = re.compile(r"\b((?:scripts|assets)/[A-Za-z0-9_./-]+)")
+# Bare in-package references inside SKILL.md prose. A reference must appear as
+# a standalone token: the lookbehind rejects a preceding word character, path
+# separator, dot, colon or dash, so a URL such as
+# ``https://example.com/scripts/run.py`` is not mistaken for an in-package file.
+# Trailing sentence punctuation is trimmed after the match (see ``_references``).
+# Only the two conventional skill subdirectories are scanned.
+_REFERENCE_RE = re.compile(r"(?<![\w/.:-])((?:scripts|assets)/[A-Za-z0-9_./-]+)")
 _CASE_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 _MAX_DETAIL_CHARS = 300
 
@@ -169,6 +172,16 @@ class CaseOutcome:
         return all(outcome.passed for outcome in self.candidate)
 
 
+def _references(text: str) -> list[str]:
+    """Extract bare in-package file references from prose.
+
+    ``scripts/run.py.`` at the end of a sentence is the file ``scripts/run.py``,
+    not a file whose name ends in a period, so trailing ``.``/``/``/``-`` are
+    stripped before the token is looked up in the package.
+    """
+    return [token for raw in _REFERENCE_RE.findall(text) if (token := raw.rstrip("./-"))]
+
+
 def _decode(package: Package, path: str) -> tuple[str | None, str]:
     content = package.get(path)
     if content is None:
@@ -211,7 +224,7 @@ def run_check(check: Check, package: Package) -> CheckOutcome:
         text, detail = _decode(package, check.path)
         if text is None:
             return CheckOutcome(check.kind, False, detail)
-        missing = sorted({token for token in _REFERENCE_RE.findall(text) if token not in package})
+        missing = sorted({token for token in _references(text) if token not in package})
         passed = not missing
         return CheckOutcome(check.kind, passed, "" if passed else _clip(f"{check.path} references missing files: {', '.join(missing)}"))
 

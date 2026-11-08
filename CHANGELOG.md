@@ -22,6 +22,14 @@ This section accumulates work toward the **2.3.0** milestone
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **plugins:** Add the `deerflow-extension-skill-evolution` example extension:
+  it drives the merged `SkillMutationService` through propose → evaluate →
+  apply → rollback, commits only a `justified` verdict with an `AssessmentRef`
+  binding the report to the exact candidate hash and base revision, and keeps
+  revert append-only. Its walkthrough routes bind every action to the caller's
+  principal. Opt-in; it does nothing without an operator
+  `host_access.skill_mutations` grant. ([#7984])
+
 ### Fixed
 
 - **channels:** WeCom group messages now have their own conversation. Every
@@ -16054,3 +16062,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7984]: https://github.com/bytedance/deer-flow/pull/7984

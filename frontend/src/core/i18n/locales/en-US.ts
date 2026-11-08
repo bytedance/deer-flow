@@ -154,6 +154,11 @@ export const enUS: Translations = {
         description:
           "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
       },
+      skillEvolution: {
+        title: "Evidence-gated skill evolution",
+        description:
+          "Propose skill edits only after a regression case and host checks pass, compare old and new results, and roll back to a known-good revision.",
+      },
       knowledgeManagement: {
         title: "Knowledge ingestion and processing",
         description:
