@@ -2721,6 +2721,12 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 
 ### Manual Context Compaction
 
+If a completed thread operation fails to release its database reservation,
+the next operation on that thread retries cleanup before admission. This also
+recovers single-worker deployments with lease heartbeats disabled. Completed
+requests remain replayable by idempotency key. Failed cleanup keeps the thread
+busy, and active work retains its reservation.
+
 Automatic and manual compaction process all selected history in chronological
 chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
 input per step; generated summaries use at most half to leave room for source.
