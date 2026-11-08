@@ -2942,7 +2942,9 @@ export function useThreadStream({
                 ? error.message
                 : "Failed to upload files.";
             toast.error(
-              options?.attachmentUploads ? t.uploads.notReady : errorMessage,
+              errorMessage === "Attachments are not ready"
+                ? t.uploads.notReady
+                : errorMessage,
             );
             setOptimisticMessages([]);
             setOptimisticThreadId(null);

@@ -84,8 +84,13 @@ export async function prepareWordOutline(zip) {
   const file = zip.file("word/document.xml");
   if (!file) return [];
   const xml = parse(await file.async("string")),
-    outline = [],
-    prefix = `office-${crypto.randomUUID()}-`;
+    outline = [];
+  const names = [...xml.getElementsByTagNameNS("*", "bookmarkStart")].map(
+    (bookmark) => attr(bookmark, "name") ?? "",
+  );
+  let suffix = 0;
+  while (names.some((name) => name.startsWith(`office-${suffix}-`))) suffix++;
+  const prefix = `office-${suffix}-`;
   for (const paragraph of xml.getElementsByTagNameNS("*", "p")) {
     const props = child(paragraph, "pPr");
     const level = Number(

@@ -34,11 +34,16 @@ it("retains success, retries only the failed file and never conflates equal file
     return response(files[0]!.name);
   });
   const session = new AttachmentUploadSession(upload);
-  await expect(session.uploadAll("thread", [first, second])).rejects.toThrow();
+  await expect(session.uploadAll("thread", [first, second])).rejects.toThrow(
+    "offline",
+  );
   expect(session.status(first)).toBe("uploaded");
   expect(session.status(second)).toBe("failed");
+  expect(session.error(first)).toBeUndefined();
+  expect(session.error(second)).toBe("offline");
   await session.retry(second);
   expect(session.status(second)).toBe("uploaded");
+  expect(session.error(second)).toBeUndefined();
   await session.uploadAll("thread", [first, second]);
   expect(upload).toHaveBeenCalledTimes(3);
 });

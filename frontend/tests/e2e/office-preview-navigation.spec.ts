@@ -143,6 +143,38 @@ test("Word page controls follow manual scrolling and fit width follows viewport 
   ).toHaveAttribute("aria-pressed", "false");
 });
 
+test("Word preview and outline work without secure-context crypto", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+    });
+  });
+  const panel = await openFile(page, "navigation.docx");
+  await expect(panel.locator("section.docx")).toHaveCount(3);
+  await expect(
+    panel
+      .getByRole("navigation", { name: "Document outline" })
+      .getByRole("button"),
+  ).toHaveCount(3);
+});
+
+test("Excel pending search supports Enter and Escape", async ({ page }) => {
+  const panel = await openFile(page, "chart-only.xlsx");
+  const find = panel.getByRole("searchbox", { name: "Find in file" });
+  const matches = panel.getByRole("status", { name: "Search matches" });
+  await expect(panel.getByRole("table", { name: "Summary" })).toBeVisible();
+  await find.fill("Design");
+  await find.press("Enter");
+  await expect(matches).toHaveText("1 / 2");
+  await find.fill("Documentation");
+  await find.press("Escape");
+  await expect(matches).toHaveText("Find text");
+  await expect(panel.locator("mark[data-office-match]")).toHaveCount(0);
+});
+
 test("chart-only Excel drawings do not prevent cell previews or cross-sheet search", async ({
   page,
 }) => {

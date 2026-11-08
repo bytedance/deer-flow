@@ -13,6 +13,7 @@ export type AttachmentUploadStatus =
 type Entry = {
   status: AttachmentUploadStatus;
   result?: UploadedFileInfo;
+  error?: string;
   controller?: AbortController;
   promise?: Promise<void>;
 };
@@ -42,6 +43,9 @@ export class AttachmentUploadSession {
   }
   status(part: PromptInputFilePart): AttachmentUploadStatus {
     return this.entries.get(this.key(part))?.status ?? "pending";
+  }
+  error(part: PromptInputFilePart): string | undefined {
+    return this.entries.get(this.key(part))?.error;
   }
   activate() {
     this.active = true;
@@ -98,9 +102,12 @@ export class AttachmentUploadSession {
           throw new Error("Attachment was not stored");
         entry.result = result;
         entry.status = "uploaded";
-      } catch {
-        if (this.entries.get(key) === entry)
+      } catch (error) {
+        if (this.entries.get(key) === entry) {
           entry.status = controller.signal.aborted ? "cancelled" : "failed";
+          if (entry.status === "failed" && error instanceof Error)
+            entry.error = error.message;
+        }
       } finally {
         entry.controller = undefined;
         this.emit();
@@ -138,8 +145,12 @@ export class AttachmentUploadSession {
       !this.active ||
       cancellations !== this.cancellations ||
       parts.some((part) => this.status(part) !== "uploaded")
-    )
-      throw new Error("Attachments are not ready");
+    ) {
+      const failed = parts.find((part) => this.error(part));
+      throw new Error(
+        failed ? this.error(failed) : "Attachments are not ready",
+      );
+    }
     return parts.map((part) => this.entries.get(this.key(part))!.result!);
   }
 }

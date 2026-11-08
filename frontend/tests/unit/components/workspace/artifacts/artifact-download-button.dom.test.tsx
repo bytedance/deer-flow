@@ -55,6 +55,7 @@ it("blocks duplicate clicks while preparing, shows retry on error and downloads 
   fireEvent.click(button);
   fireEvent.click(button);
   expect(state.prepare).toHaveBeenCalledTimes(1);
+  expect(state.prepare.mock.calls[0]![0]).toContain("?download=true");
   expect(
     screen.getByRole("button", { name: /Preparing/ }).hasAttribute("disabled"),
   ).toBe(true);

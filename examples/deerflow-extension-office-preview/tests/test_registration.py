@@ -3,6 +3,7 @@
 import json
 import sys
 import unittest
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend/packages/extension-api"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from deerflow_extension_office_preview import install  # noqa: E402 — standalone offline test
+install = import_module("deerflow_extension_office_preview").install
 
 
 class RegistrationTests(unittest.TestCase):

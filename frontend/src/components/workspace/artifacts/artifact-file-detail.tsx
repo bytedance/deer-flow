@@ -769,6 +769,7 @@ export function ArtifactFileDetail({
               filepath={filepath}
               threadId={threadId}
               isMock={isMock}
+              isRunning={thread.isLoading}
             />
           )}
         </div>

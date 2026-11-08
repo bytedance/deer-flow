@@ -163,6 +163,15 @@ export async function mountOffice(root, context) {
   let matches = [],
     current = -1;
   let search = () => {};
+  let searchTimer;
+  const flushSearch = () => {
+    if (searchTimer === undefined) return false;
+    clearTimeout(searchTimer);
+    searchTimer = undefined;
+    search();
+    return true;
+  };
+  disposals.push(() => clearTimeout(searchTimer));
   const updateMatches = (items) => {
     matches = items;
     current = -1;
@@ -193,17 +202,23 @@ export async function mountOffice(root, context) {
   find.append(query, matchCount, previousMatch, nextMatch, scope);
   shell.insertBefore(find, body);
   query.addEventListener("input", () => {
-    search();
-    if (matches.length) moveMatch(1);
+    clearTimeout(searchTimer);
+    updateMatches([]);
+    searchTimer = setTimeout(() => {
+      searchTimer = undefined;
+      search();
+      if (matches.length) moveMatch(1);
+    }, 200);
   });
   query.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
+      flushSearch();
       moveMatch(event.shiftKey ? -1 : 1);
     }
     if (event.key === "Escape") {
       query.value = "";
-      search();
+      if (!flushSearch()) search();
     }
   });
   shell.addEventListener("keydown", (event) => {
@@ -308,8 +323,14 @@ export async function mountOffice(root, context) {
     let active;
     const paintSearch = () => {
       const groups = new Map();
-      for (const td of paper.querySelectorAll("td"))
-        groups.set(td.dataset.address, highlightText(td, query.value.trim()));
+      const value = query.value.trim();
+      const pattern = value
+        ? new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu")
+        : null;
+      for (const td of paper.querySelectorAll("td")) {
+        if (td.querySelector("mark[data-office-match]") || pattern?.test(td.textContent))
+          groups.set(td.dataset.address, highlightText(td, value));
+      }
       return groups;
     };
     const renderSheet = (sheet) => {

@@ -124,6 +124,36 @@ test("switching files aborts, disposes and isolates the previous mount", async (
   expect(dispose).toHaveBeenCalledTimes(2);
 });
 
+test("run completion reloads the open file and fences the previous renderer", async () => {
+  setup();
+  const contexts: ArtifactPreviewContext[] = [];
+  const dispose = rs.fn();
+  state.mount.mockImplementation(
+    (_root: HTMLElement, context: ArtifactPreviewContext) => {
+      contexts.push(context);
+      void context.readFile();
+      return { dispose };
+    },
+  );
+  state.read.mockResolvedValue({ bytes: new ArrayBuffer(4), etag: '"v1"' });
+  const props = { filepath: "/refresh.xlsx", threadId: "thread" };
+  const view = render(<PluginArtifactPreview {...props} isRunning={false} />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  view.rerender(<PluginArtifactPreview {...props} isRunning />);
+  expect(state.read).toHaveBeenCalledTimes(1);
+  state.read.mockResolvedValue({ bytes: new ArrayBuffer(5), etag: '"v2"' });
+  view.rerender(<PluginArtifactPreview {...props} isRunning={false} />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(state.read).toHaveBeenCalledTimes(2);
+  expect(contexts[0]!.signal.aborted).toBe(true);
+  expect(dispose).toHaveBeenCalledTimes(1);
+  expect(contexts[1]!.signal.aborted).toBe(false);
+});
+
 for (const etag of ['"lan-revision"', null]) {
   test(`reads on an insecure origin with ETag ${etag ?? "absent"}`, async () => {
     setup();

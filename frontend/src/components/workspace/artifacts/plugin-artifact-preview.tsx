@@ -135,11 +135,33 @@ export function PluginArtifactPreview(props: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
+  isRunning?: boolean;
 }) {
   const { match, isLoading, viewerId } = useArtifactPreviewRenderer(
     props.filepath,
   );
   const { locale, t } = useI18n();
+  const [revision, setRevision] = useState(0);
+  const previous = useRef({
+    threadId: props.threadId,
+    filepath: props.filepath,
+    isRunning: props.isRunning,
+  });
+  useEffect(() => {
+    const old = previous.current;
+    previous.current = {
+      threadId: props.threadId,
+      filepath: props.filepath,
+      isRunning: props.isRunning,
+    };
+    if (
+      old.threadId === props.threadId &&
+      old.filepath === props.filepath &&
+      old.isRunning &&
+      !props.isRunning
+    )
+      setRevision((value) => value + 1);
+  }, [props.threadId, props.filepath, props.isRunning]);
   if (isLoading)
     return (
       <div className="text-muted-foreground flex items-center gap-2 p-6 text-sm">
@@ -150,7 +172,7 @@ export function PluginArtifactPreview(props: {
   if (!match) return <ArtifactDownloadFallback {...props} />;
   return (
     <MountedPreview
-      key={`${viewerId}:${props.threadId}:${props.filepath}:${locale}:${match.contribution.namespace}`}
+      key={`${viewerId}:${props.threadId}:${props.filepath}:${locale}:${match.contribution.namespace}:${revision}`}
       renderer={match.renderer}
       viewerId={viewerId ?? "anonymous"}
       rendererKey={`${match.contribution.namespace}:${match.renderer.id}`}

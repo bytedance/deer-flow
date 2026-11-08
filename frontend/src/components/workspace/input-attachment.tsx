@@ -43,6 +43,7 @@ export function InputAttachment({
     emptySnapshot,
   );
   const status = uploadSession?.status(data) ?? "pending";
+  const uploadError = uploadSession?.error(data);
 
   const filename = data.filename ?? "";
 
@@ -178,6 +179,11 @@ export function InputAttachment({
               )}
             </div>
           </div>
+          {uploadError && (
+            <p className="text-destructive max-w-72 text-xs break-words">
+              {uploadError}
+            </p>
+          )}
         </div>
       </PromptInputHoverCardContent>
     </PromptInputHoverCard>
