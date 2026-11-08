@@ -37,6 +37,21 @@ This section accumulates work toward the **2.3.0** milestone
   Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
   `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
   instead of reaching the SDK as is. ([#7981])
+  
+- **docker:** Images built from a checkout no longer contain its local
+  configuration. `.dockerignore` did not exclude `config.yaml`,
+  `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
+  checkout that keeps them in the legacy `backend/` location baked its model
+  API keys and MCP credentials into every gateway image layer through
+  `COPY backend ./backend`. `frontend/.env.local` reached the frontend image the
+  same way. They are now excluded at the root and in `backend/`, along with
+  `.env*.local` at any depth, `frontend/*.pem`, and the credential files the
+  extension manager refuses inside extension snapshots. A locally built
+  frontend image no longer inlines `NEXT_PUBLIC_*` values from
+  `frontend/.env.local`; the Docker stack's single nginx origin needs none of
+  them. Published CI images were not affected; rebuild local images that were
+  pushed or shared. ([#7958])
+  
 - **agents:** Unfinished todos no longer trigger additional model calls or
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a
@@ -16084,4 +16099,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
