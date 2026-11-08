@@ -224,6 +224,10 @@ For Google's official Gemini OpenAI-compatible endpoint, use the
 
 For MindIE XML tool calls, see the
 [argument parsing and newline compatibility guide](backend/docs/CONFIGURATION.md#mindie-xml-tool-arguments).
+Tool-result recovery treats null and empty call IDs alike — including the
+`"None"` and `"missing_tool_call_id"` spellings middleware producers use when a
+provider call had no ID — preserving middleware guidance when a result can be
+uniquely paired; ambiguous partial results remain rejected.
 Both synchronous and asynchronous streams retain this compatibility: tool-enabled
 streams simulate chunks from a non-streaming response, while no-tool streams stay native.
 Newline compatibility preserves literal escapes inside backtick and tilde code
@@ -250,7 +254,7 @@ fences, including unclosed fences, in complete and streamed replies.
 
    Brave web search preserves valid entries in mixed result lists. Malformed response containers or lists containing no usable entries return a structured format error; missing, null, or empty results keep the existing "No results found" response. Format errors also log the malformed container's path and type, or the absence of usable result objects, without including search queries, credentials, or payload values.
 
-   You.com, GroundRoute and Webz initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
+   Several providers, including You.com, GroundRoute, Webz, InfoQuest and Jsonify, initialize HTTPX clients in a worker thread so synchronous TLS trust loading does not block the agent event loop; requests and session cleanup remain asynchronous.
 
    GroundRoute web search and fetch contain malformed HTTP-success payloads the same way: a non-object payload, a `results` container that is not a list, or a non-empty list with no object entries returns the provider's format error, while non-object entries in an otherwise valid list are skipped in order. Missing, null, or empty results keep the existing "No results found" response.
 
@@ -275,6 +279,8 @@ fences, including unclosed fences, in complete and streamed replies.
    InfoQuest web and image search screen result URLs through the shared public-URL policy and omit rejected rows. Responses without the required `search_result` envelope return a format error instead of exposing the raw provider payload.
 
    Jina, Browserless, and InfoQuest web fetches resolve relative links and image sources using the requested page URL (or a usable HTML base URL), so returned Markdown includes complete destinations. Link resolution preserves the surrounding HTML source, including malformed-page formatting.
+
+   Direct Python calls to `web_fetch_tool` return `(content, artifact)` so Browserless can keep the target page's HTTP status out of page prose. Callers that previously expected a string should unpack the tuple; Agent tool calls continue to expose content and artifact through LangChain's tool result.
 
    Self-hosted Browserless, Crawl4AI, Firecrawl, and fastCRW fetch backends require outbound isolation from private, loopback, link-local, and cloud-metadata networks before setting `network_isolation_confirmed: true` on each tool. DeerFlow rejects private or unverifiable backends by default because those services handle redirects, DNS resolution, and subresources themselves. `allow_private_addresses` permits intentional internal target URLs and does not bypass the backend check. See [delegated fetch deployment](backend/docs/CONFIGURATION.md#delegated-fetch-backend-isolation); `make doctor` reports backend configurations that would be refused.
 
@@ -331,7 +337,7 @@ fences, including unclosed fences, in complete and streamed replies.
    Administrators can open **Settings → Models** to select a provider and enter
    only its **API Key** and **model ID**. Endpoints, authentication and adapters are
    backend presets for OpenAI, Anthropic, DeepSeek, Alibaba Cloud Bailian/Qwen,
-   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI and MiniMax. Region and plan-specific
+   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI, MiniMax and StepFun. Region and plan-specific
    entries are explicitly distinguished. Arbitrary model IDs are accepted; internal
    names are generated automatically and remain stable when a model ID changes.
    Newly saved models are enabled and immediately refresh existing chat and Agent
@@ -342,6 +348,11 @@ fences, including unclosed fences, in complete and streamed replies.
    entries are retained on retries; individual failures remain available to retry.
    Chat pickers support name/ID search, provider filtering, favorites and the
    eight most recently selected models, scoped to your account in this browser.
+
+   The OpenAI preset routes `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`,
+   `gpt-6-sol` and `gpt-6-luna` through the Responses API for tool calling,
+   with model-specific thinking and reasoning-effort defaults. Flash mode
+   turns off reasoning for GPT-6.1 Terra, GPT-6 Sol and GPT-6 Luna.
 
    The Moonshot (China) preset recognizes `kimi-k3.1-pro` and
    `kimi-k3.1-pro-highspeed` with required thinking, image input and native
@@ -701,6 +712,19 @@ If the Gateway does not become healthy within the startup window, deployment
 exits non-zero and prints the container status plus recent Gateway logs. The
 production image starts from its already-built environment and never resolves
 or installs Python dependencies at container startup.
+
+Images built from a checkout never contain its local configuration:
+`.dockerignore` keeps `config.yaml`, `config.yaml.bak`, `extensions_config.json`
+and `mcp_config.json` (at the root or in the legacy `backend/` location), `.env`
+and `.env*.local` files, local HTTPS keys (`frontend/*.pem`), and the credential
+files the extension manager refuses inside `backend/extensions/sources/` out of
+the build context. Compose mounts the config and passes the environment at
+runtime, so pushing or sharing an image does not publish those credentials.
+A locally built frontend image therefore no longer picks up `NEXT_PUBLIC_*`
+values from `frontend/.env.local`: `next build` inlines them into the client
+bundle, Compose's environment reaches only `next start`, and `frontend/Dockerfile`
+takes no build arguments for them. The Docker stack serves the frontend and
+Gateway from one nginx origin and needs none of them.
 
 If `make up` reports an unwritable runtime home or an unreadable persisted secret
 after `make docker-start`, run the printed `sudo chown -R <uid>:<gid> '<home>'`
@@ -1097,8 +1121,14 @@ ports from the configured starting port are occupied, allocation reports
 that no port is available instead of attempting an out-of-range bind.
 In open network mode, a missing Docker/Apple Container CLI or a permission-denied
 CLI startup returns the reserved port while reporting the original error, so
-repeated attempts do not exhaust the port range. Restricted network mode
-retains its existing cleanup rules because a proxy may already hold the port.
+repeated attempts do not exhaust the port range. Restricted network creation
+returns its reservation when no proxy could have been created or after confirming
+that the proxy has been removed, including when later network cleanup fails.
+An uncertain proxy keeps its reservation in the existing local cleanup ledger.
+Later creation attempts do not automatically reclaim it. The reservation remains
+until the existing ownership-fenced absent teardown completes or the backend
+process restarts. This bookkeeping does not provide durable recovery across
+backend instances.
 
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
@@ -1202,6 +1232,7 @@ downloading a partial transcript. Public demos export their bundled messages.
 Capability Center groups plugins by office collaboration, documents and knowledge, search and research, business and data, and development and operations. The directory includes setup references alongside existing MCP configurations and Lark. Recommended integrations and built-in support do not imply an installed or verified connection; the Installed filter shows configured MCP entries and installed Lark only.
 
 Personal MCP connections configured in the web interface are persisted per user.
+Personal MCP HTTP/SSE connections admitted under the public-network policy load TLS trust off the Gateway event loop, while retaining public-address checks, certificate verification and per-origin connection isolation.
 Unexpected failures when changing deployment or personal MCP configuration return fixed error messages; exception details stay in server logs.
 Deployment tools remain shared. Administrators can add, edit, enable, disable and delete shared MCP servers under **Platform provided**; ordinary users see their status without controls. Personal plugin switches affect only the signed-in user's connections. See [connection ownership](docs/capability-center.md#personal-and-deployment-mcp-configuration).
 
@@ -1229,9 +1260,9 @@ including when a server configuration is edited at the same time.
 
 When deferred MCP tool discovery is enabled, `tool_search` supports opt-in literal keyword queries such as `keywords:notebook jupyter`. Keywords match names and descriptions in any order, ranked by distinct term coverage and then name hits; ties retain catalog order. This mode uses the first 256 characters after the prefix and at most 16 unique whitespace-separated terms, returning up to five tools. Punctuation stays literal. Bare queries and `+required` ranking keep their existing regular-expression semantics; `select:tool_a,tool_b` still fetches all exact, case-sensitive name matches.
 
-MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
+MCP routing metadata describes tool capabilities as advisory context. Matching a keyword in user text does not reveal a deferred schema or establish that the user requested a tool. The agent selects appropriate tools via `tool_search`; the legacy `auto_promote_top_k` configuration is accepted but does not trigger automatic promotion.
 
-Deferred MCP schema promotions last for the current user turn. They remain active across that turn's model/tool loop and checkpoint resume, then become deferred again when a new user message starts the next turn; the next turn must discover them again through `tool_search` or match their routing hints. Resuming a legacy in-flight checkpoint preserves previously searched tools even when routing hints also match that turn.
+Deferred MCP schema selections last for the current user turn. They remain active across that turn's model/tool loop and checkpoint resume, then become deferred again when a new user message starts the next turn. Legacy in-flight checkpoints retain previously searched tools in their original scope.
 
 Deferred `tool_search` regex queries share a 100 ms execution budget across the catalog, including `+required` ranking. Patterns are limited to 256 characters and searchable names/descriptions to 65,536 characters each. Queries that exceed a limit return a retry hint without promoting partial results; use a simpler pattern, `keywords:`, or `select:` with exact names. Oversized catalog fields are reported with the tool name, field and length, and logged with the MCP server name when available; use `keywords:` or `select:` because simplifying the pattern cannot shrink a catalog field. Exact selection remains uncapped and bypasses regex limits; the literal `keywords:` mode also bypasses regex limits. Invalid regex syntax still falls back to a literal substring match.
 
@@ -1438,6 +1469,7 @@ Notes:
 - Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
 - In Telegram private chats, text, attachment and streaming replies (including "Working on it...") can still be delivered if their referenced user or bot message was deleted, such as after clearing chat history during a run. Group reply-target requirements remain unchanged to preserve forum routing.
 - In Telegram groups, replying to a delivered bot response or attachment continues its DeerFlow conversation. Reply mappings survive restarts and stay scoped to the user's connection when one is bound. New, unrelated group messages still start separate conversations; private-chat routing is unchanged.
+- New Telegram final-reply sends use the bot API's rate-limit wait up to 60 seconds per retry. Missing, invalid, or shorter hints use the usual backoff. The "Working on it..." acknowledgment is best effort.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -1488,7 +1520,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
-5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
+5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment. A reply longer than one card (about 8,000 CJK characters) continues in further cards, up to 10 per answer.
 6. _(Optional)_ Interactive clarification cards: set `card_interaction_enabled: true` under `channels.feishu` to let the agent's option-based clarifications render as clickable button cards, preserving any background context before the question. Then, in the developer console, open **Callback Configuration** (回调配置 — a separate tab from **Event Subscriptions**), subscribe to `card.action.trigger` in **Long Connection** mode, and publish a new app version. A click resolves the clarification exactly like typing the choice; only the user who triggered the clarification can operate its card. Button answers are saved in the conversation history, and subsequent clarifications continue in the same thread.
 
 If the SDK repeatedly logs `CERTIFICATE_VERIFY_FAILED`, see [Feishu / Lark TLS troubleshooting](backend/docs/IM_CHANNEL_CONNECTIONS.md#feishu--lark-tls-troubleshooting) to check the Gateway's CA trust configuration.
@@ -1506,6 +1538,7 @@ Scheduled-task result and lifecycle notices can also be pushed to a bound Feishu
 7. `allowed_users` takes iLink user IDs. Unset, `null`, `[]`, or a blank string allows everyone. A single ID is one entry, not a sequence of characters, and an unquoted integer-valued number is stored as that integer's text. A scalar string containing commas or interior whitespace logs a warning but remains one literal ID; use a YAML list for multiple IDs. Invalid entries are ignored with a warning; any other configured value that yields no valid ID denies every user and logs an error. `/connect` is still accepted before that check, and a denied sender is dropped before inbound media is downloaded.
 8. Shutdown waits for in-flight cursor writes. On token expiry, DeerFlow persists the cursor reset and removes the saved token before completing poller cancellation.
 9. Inbound attachments keep separate staged copies even when filenames match within one message or across messages. Their original filenames are preserved for upload ingestion. Private staged copies are removed after ingestion or when a message is dropped or fails.
+10. WeChat server long-poll hints are accepted from 1 through 300 seconds. Invalid hints leave the last accepted value in use, or `polling_timeout` if no hint has been accepted. Set `respect_server_longpoll_timeout: false` to always use the configured value.
 
 **WeCom Setup**
 
@@ -1601,8 +1634,7 @@ When `tool_progress.enabled` is true, the same run event history also records
 result-quality guard phase changes. It records loop-detection decisions and
 deferred MCP tool promotions for both the lead agent and ordinary task
 subagents. Promotion
-events identify newly promoted deferred-tool names and whether routing metadata or
-`tool_search` selected them, without copying the search query, routing keywords,
+events identify deferred-tool names selected by `tool_search`, without copying the search query, routing keywords,
 schemas, arguments, results, or catalog hash into the promotion event itself.
 
 #### LangSmith Tracing
@@ -1812,6 +1844,9 @@ and when a subagent performed the retrieval. Missing page numbers and public
 URLs remain absent; sources without a URL are readable as local evidence.
 Inline citations remain readable after Markdown sanitization, and supplied page
 numbers use the selected interface language.
+Shared knowledge results skip entries that exceed the remaining output budget
+and retain later fitting entries in provider order. Retained citations stay
+paired with their visible evidence.
 Copying a source reference produces a Markdown link that escapes brackets in the
 visible title and wraps a URL containing parentheses in angle brackets, so the
 copied reference stays a valid link. New providers use the shared
@@ -1865,6 +1900,11 @@ recorded in the [acceptance report](examples/deerflow-extension-knowledge-manage
 Skills are what make DeerFlow do *almost anything*.
 
 A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+
+For MiniMax, the [video-generation skill](skills/public/video-generation/SKILL.md)
+accepts `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds).
+Unset overrides use the provider defaults. Invalid duration strings fail before
+the script submits a request.
 
 The video-generation skill derives reference-image MIME metadata from `.png`,
 `.jpg`, `.jpeg`, `.webp`, and `.gif` filename extensions (case-insensitive). A
@@ -1944,7 +1984,7 @@ values nested in lists or structs, before opening the destination. Filter them
 or replace them with `NULL` in SQL; the CLI reports an error and preserves any
 existing output rather than writing invalid JSON.
 
-The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
+The **data-analysis** skill preserves each CSV file or Excel sheet when names collide across inputs. [Prepare its Python environment](skills/public/data-analysis/SKILL.md#environment-setup) explicitly with DuckDB and openpyxl; missing packages report setup instructions instead of installing themselves during analysis. Use the SQL names printed by `inspect` (such as `report`, `report_1`) for queries and summaries. Its cache follows ordered input basenames and contents, so renaming or reordering inputs rebuilds their table map instead of silently selecting a different source. Cache publication uses complete immutable generations: import writers close before their database and table map become visible together, so overlapping processes can read the same snapshot. Interrupted private builds are removed and damaged entries rebuild; legacy flat caches rebuild once. Complete generations remain available to active readers, so stop analyses before manually clearing `.data-analysis-cache/`. Automatic cache garbage collection is not provided. Quoted original names also resolve without rewriting query text; apostrophes in upload paths and double quotes in column names are preserved through loading, inspection, queries, and summaries. CSV, JSON, and Markdown exports accept bare filenames such as `report.csv` in the current working directory as well as nested relative and absolute paths.
 
 After an answer loads skills, its toolbar includes **Skills used**. Hover over or click the icon to see the skills and their sources; hovering a skill name underlines it. Select a skill to inspect its `SKILL.md` in the resizable side panel (a drawer on mobile). The view uses snapshots captured during successful configured read-tool loads or explicit slash activation, so later edits or removal of a skill do not rewrite its history. Repeated loads appear once per run, in first-load order. Range reads and bounded snapshots are labeled as partial; older conversations without captured evidence do not show this menu. Copy returns the captured Markdown, including YAML frontmatter. Package-relative links and images remain readable references rather than navigating away from the conversation. Skill loads performed through other tools, such as shell commands, are not inferred from answer text.
 
@@ -2586,9 +2626,10 @@ Backend response cleanup preserves unrelated tag names such as `<think-tank>` an
 The Web UI composer can polish draft input before sending. The rewrite runs as a short Gateway LLM request using the `input_polish` model configuration, keeps slash skill prefixes such as `/data-analysis`, and only replaces the local draft after the user clicks the polish button; it does not create a thread run or persist a message.
 
 Input polishing, follow-up suggestions, background project-file summaries, the
-LLM skill scanner, thread title generation, and the `/goal` evaluator construct
-their model providers off the Gateway event loop, so local credential reads do
-not stall unrelated requests.
+LLM skill scanner, thread title generation, the `/goal` evaluator, and manual
+context compaction (`/compact`) construct their model providers off the
+Gateway event loop, so local credential reads do not stall unrelated
+requests.
 
 When the agent asks for clarification, the Web UI shows the structured response card but keeps the normal composer available. Users can complete the card or send a free-form chat message to bypass it; that message closes the latest pending clarification and becomes the agent's next input. Accompanying answer text stays outside the execution steps panel, and answering the request keeps previously completed text in the conversation while the agent continues.
 
@@ -2666,6 +2707,9 @@ Automatic and manual compaction process all selected history in chronological
 chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
 input per step; generated summaries use at most half to leave room for source.
 Oversized summaries retain marked head/tail text; raw history is never clipped.
+Native document titles, context and direct plain-text bodies are included in the
+summary input. Binary documents and remote media are not decoded or fetched;
+nested document blocks are not traversed.
 A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
@@ -2699,6 +2743,12 @@ call.
 In planning mode, if the original `write_todos` call is no longer visible,
 DeerFlow adds a reminder using the latest task statuses before the next model
 call. Skipped or failed compaction leaves the existing messages unchanged.
+When loop detection, the run token budget, or a provider safety/output-length
+limit stops a run, unfinished todos are retained for a later user run; todo
+completion reminders do not restart model calls or tool execution after that stop.
+Safety-stopped partial text is preserved; it does not trigger a Todo retry.
+A provider safety or output-length stop applies to the response it ended: if an
+unmet goal continues the run, later continuation turns still get todo reminders.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, configured
@@ -2710,6 +2760,9 @@ It is off by default; enabled deployments supply a secret for stable, keyed
 value-derived placeholders. No token-to-raw mapping is persisted. Raw thread
 text and local fallback titles remain available for display; memory redaction
 copies messages without changing the caller's history or tool execution.
+For SDK agents without a checkpointer, deeply nested JSON tool arguments do not
+prevent memory admission, with PII redaction either enabled or disabled.
+Structured JSON content blocks still use recursive redaction and remain depth-limited.
 The hidden `/goal` continuation is redacted before it is stored.
 
 The Web UI preserves persisted message order when merging history with live updates. Streaming steps around a persisted result inside the loaded history stay together, including steps that arrive after the result. Steps captured during compaction also remain visible before their persisted result when history has not refreshed and the UI has not rendered them yet.
@@ -2918,7 +2971,22 @@ Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline whil
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
 
+Batch items can declare `depends_on` using other keys in the same batch. Ready
+items run without waiting for unrelated work; waiting items consume no execution
+slot. For a user-requested summary or delivery after background work, the optional
+`continuation` argument registers one lead-Agent follow-up. The existing Goal
+keeps ownership when active. See [batch dependencies and follow-up](backend/docs/BATCH_CONTINUATION.md)
+for authorization, cancellation, recovery and result semantics.
+
+When a source run fails or hits a hard stop, the Gateway attempts each batch
+cancellation independently. A failed cancellation logs the batch and run IDs.
+
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
+
+Queued requests finish removing their queue entry and returning any transferred
+slot before cancellation propagates. The cleanup waits for the capacity lock
+without its own deadline. Cancellation during timeout cleanup takes precedence
+over the queue timeout.
 
 While durable batch tools are available, a later owner turn can explicitly inspect selected results with `read_batch_result(batch_id, position=0, offset=0, max_chars=4000)`. The reader is restricted to the current user and thread, including in explicitly bound SDK graphs. It returns one window of a JSON document containing the stored report, execution/error state and separate acceptance criteria/verdict, without starting or waiting for work. Concatenate `content` windows before parsing: pass `next_offset` and the returned `revision` as `expected_revision` until `next_offset` is null. A changed item returns `restart_required`; discard prior windows and start at zero. Use `next_position` for a selected next item within `batch_status.total_items`. The maximum window is 8,192 characters; metadata shares the window budget, and JSON response framing adds overhead. `result_truncated` means storage already capped the report; continuation cannot recover discarded content. A succeeded item is not an accepted task, and unchecked criteria remain UNVERIFIED. No automatic result ingestion, waiting loop or UI change is added.
 
@@ -2971,6 +3039,12 @@ Native workers support per-subagent `thinking_enabled` and `reasoning_effort` th
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ### Sandbox & File System
+
+With local host bash enabled, the path guard permits division in simple shell
+arithmetic and recognized single-quoted Python, Node.js and Perl programs.
+Variable-built paths remain checked even when the filename is numeric or a
+glob precedes the slash. This is a best-effort guard; host filesystem isolation
+requires an isolated sandbox provider.
 
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
@@ -3205,6 +3279,8 @@ If a file disappears while being hashed, the scan omits that file and continues
 recording the others. A concurrent scratch-file removal therefore does not
 discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
+
+`present_shared_artifact` publishes another conversation's persisted output using `origin_thread_id + path + sha256`. Same-user, runtime-home-confined reads and writes reject path traversal, symlinks and changed content; an existing destination with different content is retained, while identical concurrent handoffs succeed. Successful handoffs count as run delivery and archive receipts. The current POSIX implementation does not acquire a source sandbox or cross user boundaries.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
@@ -3567,7 +3643,9 @@ Legacy memory files are normalized when read or imported, including recoverable 
 
 In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
 
-When a fact scope reaches `max_facts`, DeerMem still uses the historical confidence-only eviction order by default. Operators can opt in to `memory.backend_config.fact_eviction_policy: hybrid-v1`, which combines bounded confidence (65%), explicit-confirmation freshness (25%), and query-driven access heat (10%). Hybrid signal metadata is collected only while hybrid-v1 or shadow mode is enabled. Explicit confirmation is returned as `factsToReinforce` by the existing memory-update LLM call and is accepted only when deterministic message processing also detects a user reinforcement signal; it also resets the fact's staleness-review clock. This deterministic gate is batch-level: it establishes only that a human message among the last six filtered messages in the current extraction batch matched a reinforcement pattern. The LLM-selected `factsToReinforce` ID supplies the fact binding; DeerMem does not independently verify a signal-to-fact correspondence. Repeated extraction or automatic injection never confirms a fact. Custom `memory_update` prompts should add the optional `factsToReinforce` array to participate in confirmation freshness. Access heat is stored in a separate decaying sidecar and increases only when `memory_search` actually returns the fact, so reads do not rewrite canonical Markdown or its `updatedAt`. Hybrid mode also reserves a bounded minimum of correction slots (10% of the cap, at most 10; unused slots return to normal competition). Capacity deletion remains physical, but a bounded metadata-only audit records fact IDs, categories, policy scores, and reasons without copying fact content. `fact_eviction_shadow_enabled: true` evaluates hybrid-v1 alongside the default policy without changing actual retention. This feature adds no LLM invocation and can be rolled back by selecting `confidence`.
+When a fact scope reaches `max_facts`, DeerMem still uses the historical confidence-only eviction order by default. Operators can opt in to `memory.backend_config.fact_eviction_policy: hybrid-v1`, which combines bounded confidence (65%), explicit-confirmation freshness (25%), and query-driven access heat (10%). Hybrid signal metadata is collected only while hybrid-v1 or shadow mode is enabled. Automatic confirmation from lexical reinforcement signals and model-selected fact IDs is disabled: a phrase elsewhere in a batch cannot establish that the user confirmed a particular fact. Existing confirmation metadata remains readable; extraction and injection never increment it. Custom prompts may retain factsToReinforce for compatibility, but that proposal alone cannot update confirmation counters or reset staleness. Access heat is stored in a separate decaying sidecar and increases only when `memory_search` actually returns the fact, so reads do not rewrite canonical Markdown or its `updatedAt`. Hybrid mode also reserves a bounded minimum of correction slots (10% of the cap, at most 10; unused slots return to normal competition). Capacity deletion remains physical, but a bounded metadata-only audit records fact IDs, categories, policy scores, and reasons without copying fact content. `fact_eviction_shadow_enabled: true` evaluates hybrid-v1 alongside the default policy without changing actual retention. This feature adds no LLM invocation and can be rolled back by selecting `confidence`.
+
+When `lastConfirmedAt` is absent, hybrid confirmation freshness and staleness review use `createdAt`. Repeated mentions in conversation do not refresh either timestamp.
 
 File-backed memory now separates global user context from agent facts. Each user has one `memory.json` containing only the project-independent `user` and `history` summaries; every fact is a canonical Markdown file below `agents/{agent_name}/facts/`. Existing lead-agent middleware, API, Settings, import/export, and embedded-client calls that omit `agent_name` resolve inside DeerMem to the reserved `__default__` bucket. That bucket is outside the valid custom-agent name grammar, so a real custom agent named `lead-agent` has a separate fact repository and deleting a custom agent cannot delete a memory-only directory without `config.yaml`. Public agent identifiers are case-insensitive and canonicalized to lowercase. Runtime/API readers still receive a compatibility `facts` array for the selected/default agent, so the frontend does not read agent facts from `memory.json`; structured Markdown `source` metadata is projected to the historical string field at the MemoryManager boundary. An unscoped Clear All first migrates facts from unread legacy per-agent JSON without adopting its soon-to-be-cleared summaries, then removes shared summaries and facts from every agent bucket while preserving agent configuration files, so a later read cannot resurrect skipped legacy facts; an explicitly agent-scoped clear removes only that agent's facts. On first normal read, old facts embedded in the user JSON are migrated automatically to `__default__`; facts written to the earlier implicit `lead-agent` bucket are also moved when that directory is not a real custom agent. Migration and normal writes notify the configured retrieval adapter only after durable storage locks are released. DeerMem uses a scope-aware SQLite FTS5/BM25 adapter by default, stores only rebuildable derived index data under `.retrieval/` (or under `memory.backend_config.retrieval_index_path` when set; a relative value resolves against `storage_path`), and rebuilds it in the background during Gateway startup or lazily on the first scoped search. A corrupt derived index is recreated automatically. When several Gateway instances share one `storage_path`, point `retrieval_index_path` at instance-local disk: SQLite's WAL mode is unsupported on network filesystems, each instance re-syncs a user's index on its next search after a peer writes, and a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that leaves the index under the memory root logs a warning at startup. The Helm chart mounts a Pod-local `emptyDir` for it. Set `memory.backend_config.retrieval_adapter` to an empty string to disable it and use the local substring fallback. Chinese tokenization is optional; install the backend `memory-zh` extra (`uv sync --extra memory-zh`) for jieba-assisted sub-phrase search. Journaled writes, a shared user lock, and optimistic user-memory revisions prevent silent lost updates.
 
@@ -3590,6 +3668,13 @@ Memory injection follows the configured operation mode. In `middleware` mode, De
 An individual Custom Agent can opt out of memory without changing the global setting. Add `memory_enabled: false` to that agent's `users/{user_id}/agents/{name}/config.yaml`. The agent still receives the current-date reminder, but DeerFlow does not inject recalled memory, queue passive or summarization-driven memory updates (including manual `/compact`), expose memory tools, or add memory-tool instructions for that agent. If an existing agent is switched off, its previously injected memory block is removed from checkpoint state before the next model call while its date reminder and conversation remain. Omitting the field (or setting it to `true`) preserves the existing global `memory` behavior.
 
 Single-fact repository operations are genuinely incremental: an upsert/delete reads, journals, writes, and re-indexes only the addressed fact files, and returns an explicit incomplete delta rather than a cache-dependent fake full document. Summary change sets merge the supplied `user`/`history` child keys over the persisted sections so a partial update cannot erase omitted siblings; full imports normalize both sections to the complete compatibility schema before applying replacement values. Imports reject malformed fact lists or blank/non-text content with HTTP 400 before changing stored memory; recoverable legacy metadata still receives defaults. An explicit empty fact list remains an intentional clear. Manager/API compatibility methods materialize a fresh full document only when their public response contract requires one. Fact-level point operations use separate expected user-memory and fact revisions and may explicitly rebase when every addressed fact precondition still holds. Snapshot-derived operations such as scoped clear, capped create, consolidation, and trimming never replay stale delete/trim sets: a manifest conflict reloads the complete document and recomputes the operation, with a bounded retry. Fact paths use the first two hexadecimal characters of `SHA-256(fact_id)` so generated `fact_*` IDs distribute across shards. The cache token combines the shared JSON's nanosecond mtime, size, and persisted revision; this prevents coarse-mtime same-size writes from returning stale data without scanning fact files. Direct out-of-band Markdown edits require an explicit reload. Storage-specific conflicts and corruption are translated at the MemoryManager boundary; the Gateway returns conflict as HTTP 409 and a stable, non-sensitive corruption error as HTTP 500. Full-document `save()` remains a compatibility API and computes a diff before writing; malformed or missing `facts` can no longer silently erase an agent's Markdown files. Legacy migration preserves non-empty `user`/`history` before deleting an agent `memory.json`; conflicting summaries keep the legacy file and fail loudly instead of choosing a winner.
+
+DeerMem backup imports restore saved fact contents even after those facts have
+been edited, using the current stored revisions to protect the restore. Older
+backups may omit fact revisions. Backup revisions are validated before the
+importer substitutes current revisions. Rejected imports preserve stored memory.
+A concurrent write during import still returns HTTP 409 so the caller can reload
+and retry.
 
 Legacy facts in `memory.json` migrate automatically into the reserved `__default__` Markdown bucket on the user's first normal memory read. Operators who prefer to audit or complete the migration before serving traffic can run the optional idempotent CLI from `backend/`:
 
@@ -3855,6 +3940,7 @@ Current MVP capabilities:
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
+- A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
@@ -3941,7 +4027,7 @@ schedule tools keep their existing inputs. See the [group delivery guide](backen
 
 Set both `scheduler.enabled: true` and `scheduler.tool_enabled: true`, then restart
 Gateway. An authorized interactive turn can use `schedule_task` to create, update,
-list, pause, resume or delete tasks, start a trial run, or save a note. For
+list, pause, resume or delete tasks, request a card for a trial run, or save a note. For
 example: “Every weekday at 9:00, check release-checklist.md and tell me what is
 still unchecked; stop when everything is checked.” In the web app the result is a
 live card with the schedule, the stop condition and buttons, and the agent
@@ -4000,13 +4086,7 @@ recurring runs may read the previous executed occurrence through opt-in
 provides a source reference, not an automatic summary or a post-back into the
 originating chat.
 
-For a trial, ask directly, for example “Run it now”, “OK, run it now” or
-“先跑一次吧”; in the web app the card's **Run once now** button does the same.
-The host accepts a bounded set of English/Chinese direct-run requests from the
-current user turn, optionally after a short acknowledgement such as “Sure,” or
-“好的，”. A bare “yes” or “好”, task mentions, and quoted or conditional requests
-do not start a paid run. When a run is already waiting to start, no extra trial
-is added and the agent says so. A trial does not count toward `max_runs`.
+To start a trial, use the task card's **Run once now** button or the corresponding action on `/workspace/scheduled-tasks`. A request in chat can bring up the card, but its wording alone does not dispatch a run. The action uses the existing authenticated, owner-checked endpoint; an already waiting run is not duplicated. A trial does not count toward `max_runs`.
 
 A goal occurrence can use up to nine agent turns, with an evaluator request after
 each. Evaluator requests and provider-reported tokens are included in run usage;
@@ -4231,6 +4311,20 @@ After a Gateway restart, sign in and select **Recover workflow** to recover a co
 reported separately from uncertain admission. Accepted launches retain their request
 identity across inspection refresh failures, with a separate inspection retry action. A runnable example, installation steps
 and QuickJS source-build prerequisites for other Python/CPU combinations are included.
+
+## Evidence-based agent decisions
+
+Tool-result and model-error policies use producer metadata, native exit status, actual exception types and structured HTTP/provider fields. Page titles, quoted errors and words such as “timeout” or “no results” do not establish a failure category or permanent tool unavailability. Browserless passes the target HTTP status in the tool artifact; providers without that evidence preserve page text without guessing from it. Repeated-call and resource budgets still apply.
+File reads report actual failures and truncation at the producer; producer-stamped successful reads preserve document examples, including text beginning with `Error:`.
+For stamped text results, the model receives a JSON object separating reported execution status from `content`, with whitespace preserved by JSON escaping. Checkpoints and tool receipts retain the original result. This exposes existing status to providers that omit message metadata; it does not validate the document's claims or guarantee the model's final answer.
+
+OpenAI connection and timeout errors use the configured `llm_call.retry_max_attempts` budget (default: three total attempts). Other OpenAI `APIError` failures without usable status or error code receive at most one retry, within that configured ceiling.
+
+Memory extraction preserves short context-dependent replies and durable facts that mention uploads. Keeping these turns can increase extraction batch size and LLM use. The extractor distinguishes lasting user information from transient file availability using conversation context; lexical matches do not confirm a stored fact.
+
+Receipt verification resolves cited receipt identifiers and anchors. It does not verify the truth or completeness of an uncited narrative; a report with no receipt citations is shown as unverified. Interaction guidance asks for clarification when consequential information is missing and otherwise permits stated assumptions and independent progress. Bundled research, consulting, initialization and creative skills adapt their examples and workload to the user's request rather than prescribing an answer or fixed interview/search quota.
+
+Deferred MCP tools become available through explicit `tool_search` selection; routing keywords are advisory. Chat requests to trial a scheduled task return an owner-checked action card. Use its authenticated **Run once now** action or the scheduled-task page to dispatch the trial.
 
 ## License
 

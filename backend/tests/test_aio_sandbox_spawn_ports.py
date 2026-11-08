@@ -215,19 +215,28 @@ def test_restricted_spawn_failure_keeps_port_when_proxy_cleanup_is_uncertain(mon
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *args: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *args: events.append("proxy started"))
+
+    def started_proxy(*args):
+        args[-1].proxy_may_exist = True
+        events.append("proxy started")
+
+    monkeypatch.setattr(backend, "_start_network_proxy", started_proxy)
 
     def fail_spawn(cmd, **kwargs):
         assert cmd[:2] == ["docker", "run"]
         events.append("sandbox spawn failed")
         raise error_type("sandbox executable could not start")
 
-    def uncertain_cleanup(sandbox_id):
+    def uncertain_cleanup(sandbox_id, **kwargs):
         events.append("cleanup unconfirmed")
         raise error_type("cannot confirm whether proxy stopped")
 
+    def uncertain_inspection(*args, **kwargs):
+        raise error_type("cannot inspect proxy")
+
     monkeypatch.setattr(local_backend.subprocess, "run", fail_spawn)
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", uncertain_cleanup)
+    monkeypatch.setattr(backend, "_inspect_container_entries", uncertain_inspection)
     with pytest.raises(error_type):
         backend.create("thread", "sandbox")
 

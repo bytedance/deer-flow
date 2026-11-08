@@ -178,11 +178,18 @@ def test_functional_arguments_still_distinguish_operations(name, args, changed):
     assert evaluate(goal, turn(different))["no_progress_count"] == 0
 
 
-def test_legacy_fetched_error_page_reuses_existing_tool_classification():
+@pytest.mark.parametrize("status_code,expected", [(404, 1), (None, 0)])
+@pytest.mark.parametrize("serialized", [False, True])
+def test_fetched_page_uses_producer_status_not_title(status_code, expected, serialized):
     goal = evaluate(build_goal_state("Read the sources"), turn(operation()))
     call = {"name": "web_fetch", "args": {"url": "https://example.invalid/missing"}, "id": "fetch"}
-    messages = turn([AIMessage(content="", tool_calls=[call]), ToolMessage(content="# 404 Not Found\nnginx", tool_call_id="fetch")])
-    assert evaluate(goal, messages)["no_progress_count"] == 1
+    artifact = {"deerflow_http_response": {"status_code": status_code}} if status_code is not None else None
+    messages = turn([AIMessage(content="", tool_calls=[call]), ToolMessage(content="# 404 Not Found\nnginx", name="web_fetch", tool_call_id="fetch", artifact=artifact)])
+    if serialized:
+        messages = [message.model_dump() for message in messages]
+    original = copy.deepcopy(messages)
+    assert evaluate(goal, messages)["no_progress_count"] == expected
+    assert messages == original
 
 
 @pytest.mark.parametrize("serialized", [False, True])

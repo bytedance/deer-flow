@@ -45,7 +45,7 @@ def _meta_kwargs(
     error_type: str | None = None,
     recoverable_by_model: bool = True,
     recommended_next_action: str = "continue",
-    source: str = "content_analysis",
+    source: str = "tool_return",
 ) -> dict[str, object]:
     return {
         TOOL_META_KEY: {

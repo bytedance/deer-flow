@@ -19,6 +19,8 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+DeerMem retains short context-dependent replies for extraction. This may increase batch size and LLM use; do not restore regex-based acknowledgement filtering.
+
 Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
 apply the read policy to the whole result, with value-free diagnostics.
 
@@ -189,6 +191,10 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 
+Replacement imports copy facts, validate supplied revisions as positive integers,
+and use live revisions for existing IDs. Omitted revisions stay valid. Preserve
+manifest, upsert, absence and delete preconditions.
+
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
@@ -289,7 +295,16 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
-An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Stored facts are editable JSON: a `confidence` such as `10**400` is a valid JSON integer, and every fact-confidence coercion on a read or import path (`_coerce_source_confidence`, the dedup merge comparison, `prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import normalization) must treat the resulting `OverflowError` like any other unusable value. Canonical storage still rejects an out-of-range confidence as corruption at load time; these helpers cover values reaching them through editable or legacy paths. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
+Reject out-of-range `confidence` per item, including percentages. Warn with
+the raw value and keep the original scale. On reads and imports, treat
+`OverflowError` from large JSON integers (e.g. `10**400`) as unusable
+confidence in `_coerce_source_confidence`, dedup merge,
+`prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import
+normalization. Canonical loads still report invalid confidence as corruption.
+Filter invalid facts before storage's `[0, 1]` validation can abort the batch,
+keep its watermark unchanged, and repeat the paid call. Reject batches with
+`factsToRemove` if any new fact is dropped because `replacementFactIndex`
+refers to the original `newFacts` positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
@@ -307,10 +322,10 @@ All automatic, manual, tool, and import paths use `deermem/core/eviction.py`.
 `hybrid-v1` is opt-in and uses confidence, confirmation freshness, and access heat.
 Shadow mode records disagreement while enforcing confidence-only selection.
 
-Only deterministic message processing can confirm a fact.
-The updater's `factsToReinforce` output supplies only the fact binding.
-The deterministic gate matches a human message in the last six filtered batch messages.
-It does not require a separate signal-to-fact match.
+Extraction never increments confirmation counters or updates `lastConfirmedAt` from lexical/model hints; require fact-bound human evidence. Preserve existing/manual values. When `lastConfirmedAt` is absent, hybrid confirmation freshness and staleness review fall back to `createdAt`; repeated conversational mentions do not refresh either timestamp.
+The extraction prompt keeps the legacy factsToReinforce field empty and assigns
+no confidence floor to correction phrases. Context determines category,
+confidence and the number of supported focus themes.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
@@ -608,12 +623,7 @@ off must load rather than fail the reload and leave the previous judge running.
   skip that batch's maintenance review). Note the shipped default
   `staleness_review_enabled: true` therefore makes the pre-screen inert until an
   operator turns it off; that is the intended conservative Phase 1 policy.
-- Model hints are **additive**: the hint text takes the union of deterministic
-  signals and model labels, but the reinforcement evidence gate reads the
-  **deterministic set only**, so a model verdict can never write a confirmation.
-  A model hint may veto a pre-screen skip (only `prescreen enforce` ×
-  `classifier hints`); it can never cause one. Weakening hints only add text —
-  they never drive deletion or demotion.
+- Model and lexical signal hints never establish intent or authorize a confirmation. They only add a generic reminder to inspect full context; a hint may veto a pre-screen skip but cannot cause one. Weakening hints never drive deletion or demotion.
 - **Online `hints` is a separate gate from the pre-screen evaluation below.** The
   signal-classification design §6 requires its own independently human-reviewed
   dataset, a pre-registered δ with per-stratum sample sizes for
@@ -622,18 +632,14 @@ off must load rather than fail the reload and leave the previous judge running.
   dataset, so passing its gates approves `enforce` only; `hints` stays off or
   `shadow` until the §6 evidence exists.
 - `mutations_accepted` is counted at the real apply sites (accepted new facts,
-  accepted removals, accepted confirmations, accepted consolidations) and is the
+  accepted removals and accepted consolidations) and is the
   definition of "worth remembering": a batch whose only effect was a summary
   rewrite counts zero, so a skip that dropped it is not a missed memory. A new
   fact counts only if it survives capacity enforcement (and any consolidation
   that consumes it as a source); a near-duplicate merge counts only when it
   actually raised the target's confidence (a no-op restatement changes nothing)
   and the target survives (matched by id, or by identity for legacy id-less
-  facts); a removal or reinforcement counts only for an
-  id that actually existed — a proposal that passes its gate but changes no
-  persistent fact must not register as a lost memory. Scoring runs against the
-  scrubbed fact set (upload-event facts are dropped on the way to persistence), so
-  a proposal the scrub removes is not counted either. The counter is published
+  facts); a removal counts only for an id that actually existed. Extraction distinguishes transient thread uploads from durable user preferences by context, not by deleting sentences containing upload words. The counter is published
   only after persistence succeeds: a failed apply (rejected commit, storage
   error) omits it, so the evaluation censors that record as a missing sample
   rather than reading it as a lost memory.
