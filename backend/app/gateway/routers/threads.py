@@ -1037,12 +1037,15 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     # Write an empty checkpoint so state endpoints work immediately
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
+        # LangGraph reads step/source/writes/parents back from this root
+        # checkpoint (history walks, the next turn's step), so client metadata
+        # goes first and cannot replace them.
         ckpt_metadata = {
+            **metadata,
             "step": -1,
             "source": "input",
             "writes": None,
             "parents": {},
-            **metadata,
             "created_at": now,
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})

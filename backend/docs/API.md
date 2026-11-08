@@ -188,6 +188,10 @@ only letters, digits and hyphens; any other value is rejected with `422`.
 Branches preserve valid stored IDs, including their original spelling. If a
 legacy source has an invalid ID, its new branch stores `null` and uses the lead agent.
 
+`metadata` is stored on the thread and copied into its first checkpoint. The
+checkpoint's own `step`, `source`, `writes`, `parents` and `created_at` always
+win over same-named keys in `metadata`.
+
 **Response:**
 ```json
 {

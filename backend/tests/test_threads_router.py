@@ -5303,6 +5303,45 @@ def test_create_thread_marks_a_host_origin_from_request_state() -> None:
     assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
 
 
+@pytest.mark.parametrize(
+    "forged",
+    [{"parents": "x"}, {"step": "zero"}, {"source": "loop", "writes": {"runtime_run_duration": {"run-1": 1.0}}}],
+    ids=["parents", "step", "source-writes"],
+)
+def test_create_thread_keeps_langgraph_checkpoint_metadata(monkeypatch, forged) -> None:
+    """Client metadata cannot replace the keys LangGraph reads from the root checkpoint.
+
+    A bad ``parents`` breaks every history read and a bad ``step`` breaks every
+    later turn, so the thread could only be deleted.
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.run_event_store = MemoryRunEventStore()
+    graph_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    config = {"configurable": {"thread_id": "forged-meta", "checkpoint_ns": ""}}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "forged-meta", "metadata": {**forged, "title": "mine"}})
+        assert created.status_code == 200, created.text
+
+        root = asyncio.run(checkpointer.aget_tuple(config)).metadata
+        assert {key: root[key] for key in ("step", "source", "writes", "parents")} == {"step": -1, "source": "input", "writes": None, "parents": {}}
+        assert root["title"] == "mine"
+        for response in (client.get("/api/threads/forged-meta"), client.get("/api/threads/forged-meta/state"), client.post("/api/threads/forged-meta/history", json={})):
+            assert response.status_code == 200, response.text
+
+    graph = graph_factory()
+    graph.checkpointer = checkpointer
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config))
+
+    with TestClient(app) as client:
+        history = client.post("/api/threads/forged-meta/history", json={})
+        assert history.status_code == 200, history.text
+        assert history.json()[-1]["metadata"]["step"] == -1
+        assert all(isinstance(entry["metadata"]["step"], int) for entry in history.json())
+
+
 def _unread_app(tmp_path, *, owner_check_passes: bool = True):
     from uuid import UUID
 
