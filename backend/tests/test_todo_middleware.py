@@ -222,6 +222,12 @@ def _ai_no_tool_calls():
     return AIMessage(content="I'm done!")
 
 
+def _ai_stopped_by(stop_reason):
+    """The response a guard leaves behind: provider stops also mark the message."""
+    marker = {"safety_capped": "safety_termination", "model_length_capped": "model_length_termination"}.get(stop_reason)
+    return AIMessage(content="I'm done!", additional_kwargs={marker: {"suppressed_tool_call_count": 0}} if marker else {})
+
+
 def _ai_with_invalid_tool_calls():
     return AIMessage(
         content="",
@@ -357,7 +363,7 @@ class TestAfterModel:
         mw = TodoMiddleware()
         runtime = _make_runtime()
         runtime.context["stop_reason"] = stop_reason
-        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+        state = {"messages": [_ai_stopped_by(stop_reason)], "todos": _incomplete_todos()}
 
         result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
 
@@ -383,8 +389,24 @@ class TestAfterModel:
         base_hook.assert_called_once()
         base_hook.reset_mock()
         runtime.context["stop_reason"] = stop_reason
+        state["messages"] = [_ai_stopped_by(stop_reason)]
         assert after_model() is None
         base_hook.assert_not_called()
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["safety_capped", "model_length_capped"])
+    def test_earlier_provider_stop_in_context_keeps_completion_reminders(self, invoke_async, stop_reason):
+        # Goal continuation turns share the run's context, which keeps the first
+        # cap for the run record. A complete later response is not capped.
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result == {"jump_to": "model"}
+        assert mw._completion_reminder_count_for_runtime(runtime) == 1
 
     @pytest.mark.parametrize("stop_reason", [None, "custom_stop", "subagent_limit_capped", [], {}])
     def test_unrecognized_stop_reason_keeps_completion_reminders(self, stop_reason):

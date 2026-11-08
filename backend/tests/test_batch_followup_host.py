@@ -1,6 +1,7 @@
 """Real AgentRuns admission and SQL fencing for native batch follow-ups."""
 
 import asyncio
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -8,6 +9,7 @@ import pytest
 import pytest_asyncio
 from langchain_core.messages import AIMessage
 from langgraph.graph import MessagesState, StateGraph
+from test_batch_dependencies import create
 from test_batch_dependencies import repo as _repo_fixture
 from test_extension_agent_runs import host as _host_fixture
 from test_extension_agent_runs import runtime as _runtime_fixture
@@ -410,3 +412,74 @@ async def test_cancel_batch_tool_requires_runs_cancel_for_followups(batch_host, 
         assert (await repo.get_batch(batch["id"], user_id=batch["user_id"]))["continuation_status"] == "cancelled"
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_failure_does_not_skip_batch_cancellation(batch_host, caplog):
+    """A scheduled-task store failure must not skip batch_continuations cleanup.
+
+    `_run_completion_hook` awaits the scheduler first; an exception there used to
+    leave the claimed follow-up of a loop_capped source run in `dispatching`
+    instead of being cancelled (issue #7969). The worker logs hook errors as
+    non-fatal, so cancellation must still run.
+    """
+    from types import SimpleNamespace
+
+    from app.gateway.deps import _run_completion_hook
+
+    controller, batch, repo, _, _, _ = batch_host
+
+    class FailingScheduler:
+        async def handle_run_completion(self, record):
+            raise OSError("schedule store unavailable")
+
+    # The production hook, with a scheduler whose store is unavailable.
+    hook = _run_completion_hook(
+        scheduled_task_service=FailingScheduler(),
+        batch_continuations=controller,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.deps"):
+        await hook(SimpleNamespace(run_id=batch["run_id"], thread_id=batch["thread_id"], status="success", stop_reason="loop_capped"))
+
+    current = await repo.get_batch(batch["id"], user_id=batch["user_id"])
+    assert current["continuation_status"] == "cancelled"
+    warnings = [record for record in caplog.records if record.name == "app.gateway.deps" and record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == f"Scheduled task completion hook failed for run {batch['run_id']} (non-fatal)"
+    assert warnings[0].exc_info and isinstance(warnings[0].exc_info[1], OSError)
+
+
+@pytest.mark.asyncio
+async def test_batch_cancellation_failure_does_not_skip_remaining_batches(batch_host, monkeypatch, caplog):
+    from types import SimpleNamespace
+
+    controller, batch, repo, _, _, _ = batch_host
+    other = await create(
+        repo,
+        [{"key": "b", "prompt": "Read B"}],
+        user_id=batch["user_id"],
+        thread_id=batch["thread_id"],
+        run_id=batch["run_id"],
+        continuation=batch["continuation"],
+    )
+    cancel_batch = repo.cancel_batch
+    failed_id = None
+
+    async def fail_first_cancel(batch_id, *, user_id):
+        nonlocal failed_id
+        if failed_id is None:
+            failed_id = batch_id
+            raise OSError("batch store unavailable")
+        return await cancel_batch(batch_id, user_id=user_id)
+
+    monkeypatch.setattr(repo, "cancel_batch", fail_first_cancel)
+    with caplog.at_level(logging.WARNING, logger="app.subagent_batches.continuation"):
+        await controller.source_finished(SimpleNamespace(run_id=batch["run_id"], thread_id=batch["thread_id"], status="success", stop_reason="loop_capped"))
+
+    statuses = {batch_id: (await repo.get_batch(batch_id, user_id=batch["user_id"]))["continuation_status"] for batch_id in (batch["id"], other["id"])}
+    assert statuses[failed_id] in ("pending", "dispatching")
+    assert list(statuses.values()).count("cancelled") == 1
+    assert [entry for entry in caplog.record_tuples if entry[0] == "app.subagent_batches.continuation"] == [
+        ("app.subagent_batches.continuation", logging.WARNING, f"Batch {failed_id} cancellation failed for run {batch['run_id']} (non-fatal)")
+    ]

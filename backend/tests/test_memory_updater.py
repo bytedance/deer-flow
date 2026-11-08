@@ -1093,6 +1093,47 @@ class TestFormatConversationForUpdate:
         assert "Tom &amp; Jerry" in result
         assert "a &lt; b" in result
 
+    def test_content_less_message_is_skipped_instead_of_rendering_none(self):
+        """A content-less message must not become the literal "None" turn.
+
+        ``str(None)`` is truthy, so the previous fallback fed ``Assistant: None``
+        to the extraction prompt as if the assistant had said it. Sibling helpers
+        (``utils/messages.py:message_content_to_text``, the mem0 copy, and
+        ``message_processing.extract_message_text``) all return "" here.
+        """
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.content = None
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_whitespace_only_assistant_turn_is_skipped(self):
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.content = "   "
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_image_only_blocks_do_not_leak_the_block_repr(self):
+        """An image-only turn contributes no text, not a base64 Python repr."""
+        payload = "data:image/png;base64," + "A" * 2000
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = [{"type": "image_url", "image_url": {"url": payload}}]
+
+        assert format_conversation_for_update([msg]) == ""
+
+    def test_text_blocks_render_when_an_image_block_is_also_present(self):
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = [
+            {"type": "text", "text": "what is in this screenshot?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]
+
+        result = format_conversation_for_update([msg])
+        assert result == "User: what is in this screenshot?"
+
 
 # ---------------------------------------------------------------------------
 # update_memory - structured LLM response handling

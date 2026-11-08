@@ -133,6 +133,8 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
+Exempt closer division only in verified expression spans.
+
 Case-insensitive literal grep uses KMP + single-character `re.IGNORECASE` for
 linear work and Unicode parity. Regression: `tests/test_local_grep_long_lines.py`.
 
