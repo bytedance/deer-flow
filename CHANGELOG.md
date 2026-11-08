@@ -28,6 +28,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **middleware:** With PII redaction enabled, a long run of text without
+  spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
+  detector was quadratic in the length of such a run, and redaction re-scans
+  every user message on every model call, so one 100 KB paste blocked every
+  thread for about 6 s per model call. The scan is now linear, and it redacts
+  exactly the same addresses as before. ([#8006])
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
   expression stopped working (a zone missing from the time zone database
@@ -16128,3 +16134,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006
