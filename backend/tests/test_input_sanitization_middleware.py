@@ -818,11 +818,13 @@ class TestEmptyTextItemsAreDropped:
         )
 
         assert isinstance(processed, list)
-        # Non-text blocks before the first text block keep their position.
-        assert processed[0] == image_block
-        assert processed[1]["type"] == "text"
-        assert "caption" in processed[1]["text"]
+        # The merged text block takes the position of the first text item, and
+        # the image keeps its own place after it — it is never dropped.
+        assert processed[0]["type"] == "text"
+        assert "caption" in processed[0]["text"]
+        assert processed[1] == image_block
         assert len(processed) == 2
+        assert not any(isinstance(block, str) for block in processed)
 
     def test_image_only_message_still_passes_through_untouched(self):
         image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
