@@ -754,6 +754,10 @@ export interface Translations {
     title: string;
     description: string;
     followUpPending: string;
+    followUpUnknown: string;
+    outcomeUnknown: string;
+    outcomeUnknownCount: (count: number) => string;
+    outcomeUnknownHint: string;
     followUpStopped: string;
     workerUnavailable: string;
     empty: string;

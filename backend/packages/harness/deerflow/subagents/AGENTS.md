@@ -83,6 +83,15 @@ Expiry recovery compares expiry. Keep PostgreSQL locks parent-first and polling 
 by lease/3. `tests/test_batch_lease_lifecycle.py` covers real SQLite interleavings,
 threaded initialization, peer cancellation and renewal drain.
 
+**Conservative batch recovery**: freeze the host recovery policy at admission.
+Commit dispatch intent under the claim lease before `execute_async`; a missing
+result after dispatch is `outcome_unknown`, including supervisor uncertainty and
+timeouts. Unknown items cannot retry, satisfy dependencies or trigger follow-up.
+Only proven admission rejection can clear dispatch intent for automatic retry.
+Known execution failures are terminal under this policy. Contract and process
+crash regression: `backend/docs/BATCH_CONTINUATION.md`,
+`tests/test_batch_gateway_crash_recovery.py`.
+
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 
 Native worker reasoning settings come from YAML or managed definitions, with explicit per-agent overrides. Unset values request False/None, never parent thinking. Send original settings to the model factory to preserve validation and adjustment logs; record normalized effective settings in the assembly observer. Legacy stored definitions may omit both fields.

@@ -2101,6 +2101,9 @@ subagent_runtime:
 # - running: items from one batch allowed to hold real execution slots
 subagent_batches:
   enabled: false
+  # Frozen for each newly submitted batch. conservative blocks automatic replay
+  # after dispatch when the outcome is unknown; existing batches keep their policy.
+  recovery_policy: retry  # retry | conservative
   poll_interval_seconds: 1
   lease_seconds: 120
   max_items_per_batch: 5000

@@ -100,6 +100,7 @@ Tests: `html-assets.dom.test.ts`, `artifact-file-preview.dom.test.tsx`,
    percentages. Use fixed item-preview pages and load-more; full results need
    JSONL export. Gate pause/resume/cancel and failed-item retries on the worker.
    Never infer batches from prompts or put full results in chat state.
+   Unknown outcomes stay nonterminal: no retry, localized state/count and blocked follow-up.
    Review citations use only the selected persisted snapshot. Poll open details
    until their own response is terminal, regardless of compact-list status;
    stop on close. Compact attempt/status/update changes invalidate cached details

@@ -2,7 +2,11 @@
 
 DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
 
-**Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; routine production upgrades do not require manual Alembic commands. The audited offline recovery below is an exception for the out-of-tree incarnation revision. A new revision must always chain onto the current head — never insert one ahead of an already-shipped revision (re-parenting it): alembic only walks forward from a database's stamped revision, so every database already stamped at or past the insertion point treats the inserted revision as an applied ancestor and never executes it. Inserting `0023_run_change_seq` ahead of the shipped `0023_user_preferences` stranded those databases without the run-change clock schema until `0025_repair_run_change_seq` re-applied it (#5516).
+**Convention**: every ORM column/table/index change needs an Alembic revision under
+`migrations/versions/`, chained to the current head. Never re-parent shipped
+revisions: databases stamped past an inserted revision skip it (#5516, repaired
+by `0025_repair_run_change_seq`). Gateway startup runs `alembic upgrade head`;
+manual Alembic use is only for the audited out-of-tree incarnation recovery below.
 
 **Hybrid bootstrap** (`persistence/bootstrap.py::bootstrap_schema`, invoked from `persistence/engine.py::init_engine`):
 
@@ -40,7 +44,10 @@ The empty-DB path keeps using `create_all` because `Base.metadata` is the only a
 `0039_user_disabled` → `0040_scheduled_group_notice` →
 `0041_im_notice_preferences` → `0042_channel_leases` →
 `0043_runtime_im_notices` → `0044_channel_runtime_configs` →
-`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` (head).
+`0045_completed_run_evidence` → `0046_skill_mutations` → `0047_mcp_oauth_tokens` → `0048_extension_execution_leases`, then `0049_run_inputs` and `0049_run_producer_fencing` → `0050_history_seed_authority`, joined by `0051_merge_run_inputs_fencing` → `0052_batch_continuation` → `0053_batch_recovery` (head).
+0053 adds nullable policy/attempt/dispatch data; NULL policy means retry. Stop
+workers for upgrades. Downgrade refuses active conservative batches or unknown
+outcomes.
 The preference revision uses an owner/key table with a cascading users FK;
 project documents use an owner-scoped shelf. MCP lease tokens, batch evidence,
 and run-idempotency identity add nullable columns without historical backfill or

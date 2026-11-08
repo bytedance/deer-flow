@@ -4,6 +4,54 @@ Optional fields extend the existing SQL-backed batch service. Omitting them keep
 independent batch execution. Items remain read-only or idempotent under the existing
 retry/recovery policy.
 
+## Conservative recovery (opt-in)
+
+Set `subagent_batches.recovery_policy: conservative` and restart the Gateway to
+apply conservative recovery to new batches. The default is `retry`. Admission
+persists the host-selected policy with the batch; changing the configuration
+later does not change existing batches, including after restart. This first
+slice is verified on a single Gateway with SQLite.
+
+Each claim persists a new `attempt_id` bound to its existing item, parent batch,
+thread/run and owner. Before launching the native child, the worker commits
+`dispatch_started_at` under that claim's lease. Recovery distinguishes:
+
+- No dispatch intent: the child was not launched through this path; expired
+  claims may retry within the existing limit.
+- Dispatch intent with no recorded outcome: the item becomes `outcome_unknown`,
+  retains its attempt identity, and cannot be automatically or manually retried.
+  The external operation may already have succeeded. Even a crash immediately
+  after intent commits, before launch, is conservatively unknown.
+- Recorded completion: retain the result and attempt; do not execute it again.
+
+An execution timeout or lost execution/result acknowledgement after dispatch
+also becomes unknown. A recorded failed execution is terminal under this policy,
+without an automatic retry; the existing explicit retry remains available for
+known failures. Proven admission rejection may requeue because execution did
+not start. The default retry policy keeps its existing behavior.
+
+Unknown items use no execution slot. Independent items may finish, but dependent
+items remain waiting and the batch cannot trigger its requested follow-up.
+The browser labels unknown outcomes and retains report inspection and export.
+Pause/resume never clears uncertainty. Cancelling the batch stops pending work
+and follow-up while retaining attempt evidence; cancellation does not undo or
+disprove an external write. This slice provides no reconciliation or unknown
+retry operation. Inspect the external system before arranging further work.
+
+Migration `0053_batch_recovery` adds nullable policy, attempt and dispatch fields;
+legacy batches retain `retry`. Upgrade all batch workers before enabling this
+policy. Downgrade is refused while conservative work or unknown outcomes remain
+outstanding. There is no guarantee of exactly-once external effects: the
+regression establishes that this crash recovery path does not repeat the write.
+
+`tests/test_batch_gateway_crash_recovery.py` runs an offline scripted model and
+fixed local tool through actual Gateway subprocesses and native batch execution.
+It commits a record to a separate SQLite database, kills the Gateway before the
+batch result commits, and reopens the same storage. It asserts one external
+write, an unknown item, waiting dependents and no follow-up, including across a
+second restart and a changed deployment policy. A committed-result control
+verifies normal completion and one follow-up.
+
 ## Dependencies
 
 Use `depends_on` to name prerequisite item keys in the same batch. Unknown keys,

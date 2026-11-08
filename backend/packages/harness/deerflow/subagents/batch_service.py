@@ -330,6 +330,7 @@ class SubagentBatchService:
             max_live_items=max_live,
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
+            recovery_policy=self._config.recovery_policy,
             execution_spec=request.execution_spec,
             **({"continuation": continuation} if continuation is not None else {}),
         )
@@ -409,6 +410,8 @@ class SubagentBatchService:
             "position": item.get("position"),
             "status": item.get("status"),
             "attempt": item.get("attempt"),
+            "attempt_id": item.get("attempt_id"),
+            "dispatch_started_at": item.get("dispatch_started_at"),
             "model_name": item.get("model_name"),
             "report": item.get("result"),
             "report_truncated": item.get("result_truncated") is True,
@@ -464,6 +467,8 @@ class SubagentBatchService:
     async def _execute_leased_item(self, item: dict[str, Any], lease: BatchItemLease) -> None:
         item_id = item["id"]
         execution_id: str | None = None
+        conservative = item["batch"].get("recovery_policy") == "conservative"
+        dispatch_attempted = False
         try:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
@@ -529,6 +534,13 @@ class SubagentBatchService:
                 **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
+            if conservative:
+                # Record intent before handing work to the isolated executor.
+                # Even a lost commit acknowledgement is uncertain; only the
+                # repository can determine whether dispatch was recorded.
+                dispatch_attempted = True
+                if not await self._repository.mark_item_dispatch_started(item_id, lease_owner=lease.owner, now=datetime.now(UTC)):
+                    return
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             marked_running = False
@@ -584,6 +596,14 @@ class SubagentBatchService:
                     now=datetime.now(UTC),
                 )
                 return
+            if conservative and result.status is SubagentStatus.TIMED_OUT:
+                await self._repository.mark_item_outcome_unknown(
+                    item_id,
+                    lease_owner=lease.owner,
+                    error="Execution timed out after dispatch; external effects may have occurred. Automatic replay is blocked.",
+                    now=datetime.now(UTC),
+                )
+                return
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None
@@ -619,13 +639,24 @@ class SubagentBatchService:
             )
         except asyncio.CancelledError:
             # Do not finalize on process shutdown. The durable lease expires and
-            # another worker reclaims the same stable item key.
+            # recovery applies the batch's persisted retry/conservative policy.
             raise
         except Exception as exc:
             logger.exception(
                 "Durable subagent batch item failed (item_id=%s)",
                 item_id,
             )
+            if conservative and dispatch_attempted:
+                # Do not convert missing execution state or a failed result
+                # acknowledgement into an ordinary retry. A committed result
+                # wins: this write cannot replace a terminal or newer attempt.
+                await self._repository.mark_item_outcome_unknown(
+                    item_id,
+                    lease_owner=lease.owner,
+                    error="Execution outcome could not be recorded after dispatch; external effects may have occurred. Automatic replay is blocked.",
+                    now=datetime.now(UTC),
+                )
+                return
             await self._repository.finalize_item(
                 item_id,
                 lease_owner=lease.owner,
