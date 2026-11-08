@@ -190,3 +190,24 @@ async def test_wecom_outbound_upload_does_not_block_event_loop(tmp_path: Path) -
     assert calls[0].args[1]["md5"] == hashlib.md5(payload).hexdigest()
     encoded_chunks = [call.args[1]["base64_data"] for call in calls[1:-1]]
     assert b"".join(base64.b64decode(chunk) for chunk in encoded_chunks) == payload
+
+
+async def test_wecom_send_file_does_not_report_success_when_disconnected(tmp_path: Path) -> None:
+    """send_file must return False, not True, when there is no upload path.
+
+    A non-final message (or one without a live WS client / thread frame) has
+    nothing uploaded, so reporting success would drop the attachment from the
+    'failed' feedback the user relies on.
+    """
+    path = tmp_path / "report.bin"
+    await asyncio.to_thread(path.write_bytes, b"payload")
+
+    channel = WeComChannel(MessageBus(), {})
+    # No _ws_client: there is no way to upload, so send_file must report False.
+    assert channel._ws_client is None
+
+    msg = _outbound("wecom")
+    # Explicitly non-final: this used to short-circuit with `return True` and
+    # report an upload that never happened.
+    msg.is_final = False
+    assert await channel.send_file(msg, _attachment(path, is_image=False)) is False

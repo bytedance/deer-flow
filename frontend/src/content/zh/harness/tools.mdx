@@ -95,18 +95,32 @@ task(agent="general-purpose", task="...", context="...")
 
 ```yaml
 tools:
-  - use: deerflow.sandbox.tools:ls_tool
-  - use: deerflow.sandbox.tools:read_file_tool
-  - use: deerflow.sandbox.tools:glob_tool
-  - use: deerflow.sandbox.tools:grep_tool
-  - use: deerflow.sandbox.tools:write_file_tool
-  - use: deerflow.sandbox.tools:str_replace_tool
-  - use: deerflow.sandbox.tools:bash_tool
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
 ```
 
 ## 社区工具
 
-社区工具将 Agent 连接到外部服务。在 `config.yaml` 的 `tools:` 下使用 `use:` 字段指定实现来配置。
+社区工具将 Agent 连接到外部服务。`config.yaml` 的 `tools:` 下每个条目都必须包含 `name`、`group` 和 `use`。`use` 指向工具实现。
 
 ### 网络搜索
 
@@ -114,14 +128,18 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.ddg_search.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.ddg_search.tools:web_search_tool
 ```
 无需 API Key。默认配置，适合开发和通用用途。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.tavily.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.tavily.tools:web_search_tool
     api_key: $TAVILY_API_KEY
 ```
 高质量搜索，带结构化结果。需要 [Tavily](https://tavily.com) API Key。
@@ -132,7 +150,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.brave.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.brave.tools:web_search_tool
     api_key: $BRAVE_SEARCH_API_KEY
 ```
 通过官方 [Brave Search API](https://brave.com/search/api/) 返回 Brave 独立索引的结果。需要 API Key，`max_results` 上限为 20。
@@ -143,7 +163,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.serply.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.serply.tools:web_search_tool
     api_key: $SERPLY_API_KEY
     # vertical: news   # 或 scholar；默认为普通 Google 搜索
 ```
@@ -155,7 +177,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.exa.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.exa.tools:web_search_tool
     api_key: $EXA_API_KEY
 ```
 带神经检索的语义搜索。需要 [Exa](https://exa.ai) API Key。设置 `base_url`（或 `EXA_BASE_URL`）可使用兼容 Exa 的端点。
@@ -166,7 +190,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.infoquest.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.infoquest.tools:web_search_tool
     api_key: $INFOQUEST_API_KEY
 ```
 InfoQuest 搜索集成。
@@ -174,7 +200,9 @@ InfoQuest 搜索集成。
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.firecrawl.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.firecrawl.tools:web_search_tool
     api_key: $FIRECRAWL_API_KEY
 ```
 Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) API Key。
@@ -182,7 +210,9 @@ Firecrawl 驱动的搜索和爬取。需要 [Firecrawl](https://firecrawl.dev) A
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.groundroute.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.groundroute.tools:web_search_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
 GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper、Brave、Exa、Tavily、Firecrawl、Perplexity）。为每个查询路由到满足质量门槛的最低成本引擎，并在引擎故障时自动切换。定价采用收益分成模式，您可保留约一半的缓存节省。
@@ -195,7 +225,9 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.sofya.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.sofya.tools:web_search_tool
     api_key: $SOFYA_API_KEY
 ```
 搜索结果包含每个页面的正文内容，而不仅是摘要。需要 [Sofya](https://sofya.co) API Key，`max_results` 上限为 20，每条结果的正文长度上限由 `contents_max_characters` 控制（默认 2000，设为 0 则不限制）。同时支持 `web_fetch`。
@@ -203,7 +235,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.youcom.tools:web_search_tool
+  - name: web_search
+    group: web
+    use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # 可选；不填则使用免密钥的免费额度
 ```
 返回 You.com 自有索引的结果，每条结果附带从页面提取的片段，而不只是一段元描述。未配置 Key 时使用免密钥端点（免费额度，目前为每天 100 次搜索）；配置 `YDC_API_KEY` 后自动切换到额度更高的完整 Search API。`max_results` 上限为 100。
@@ -221,7 +255,9 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.jina_ai.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
     api_key: $JINA_API_KEY # 可选；匿名使用有速率限制
 ```
 将网页转换为干净的 Markdown。无 API Key 也可使用，但有更严格的速率限制。
@@ -240,35 +276,45 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.exa.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.exa.tools:web_fetch_tool
     api_key: $EXA_API_KEY
 ```
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.infoquest.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.infoquest.tools:web_fetch_tool
     api_key: $INFOQUEST_API_KEY
 ```
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.firecrawl.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.firecrawl.tools:web_fetch_tool
     api_key: $FIRECRAWL_API_KEY
 ```
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.groundroute.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.groundroute.tools:web_fetch_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.sofya.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.sofya.tools:web_fetch_tool
     api_key: $SOFYA_API_KEY
 ```
 以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
@@ -276,7 +322,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.unbrowse.tools:web_fetch_tool
+  - name: web_fetch
+    group: web
+    use: deerflow.community.unbrowse.tools:web_fetch_tool
     api_key: $UNBROWSE_API_KEY
     # render: auto # auto | never（仅普通 HTTP）| always（云端浏览器）
 ```
@@ -312,14 +360,18 @@ Tailscale 使用）、其他非全局或云元数据地址的 URL；仅在确实
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.image_search.tools:image_search_tool
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
 ```
 无需 API Key。默认配置，适合开发和通用用途。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.infoquest.tools:image_search_tool
+  - name: image_search
+    group: web
+    use: deerflow.community.infoquest.tools:image_search_tool
     api_key: $INFOQUEST_API_KEY
 ```
 需要 InfoQuest API Key。
@@ -327,7 +379,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.serper.tools:image_search_tool
+  - name: image_search
+    group: web
+    use: deerflow.community.serper.tools:image_search_tool
     api_key: $SERPER_API_KEY
 ```
 通过 Serper 获取 Google 图片结果。需要 [Serper](https://serper.dev) API Key，与 Serper `web_search` 工具复用同一个 `SERPER_API_KEY`。
@@ -335,7 +389,9 @@ tools:
   <Tabs.Tab>
 ```yaml
 tools:
-  - use: deerflow.community.brave.tools:image_search_tool
+  - name: image_search
+    group: web
+    use: deerflow.community.brave.tools:image_search_tool
     api_key: $BRAVE_SEARCH_API_KEY
 ```
 通过 Brave Image Search 获取独立图片结果。需要 [Brave Search API](https://brave.com/search/api/) Key，与 Brave `web_search` 工具复用同一个 `BRAVE_SEARCH_API_KEY`。

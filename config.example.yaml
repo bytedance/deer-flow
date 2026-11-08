@@ -1395,9 +1395,8 @@ tools:
 
 tool_search:
   enabled: false
-  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
-  # matching deferred MCP tool schemas before a model call. This is the maximum
-  # number of matched schemas promoted per model call. Valid range: 1..5.
+  # Legacy compatibility setting (1..5). Routing keywords are advisory only;
+  # deferred schemas are exposed by explicit tool_search selection.
   auto_promote_top_k: 3
 
 # ============================================================================
@@ -1594,6 +1593,22 @@ read_before_write:
   # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
+
+# Optional pre-write syntax validation and targeted error remediation guard.
+# When enabled (write_verify_syntax: true), intercepts str_replace to validate
+# spliced .py (ast.parse) and .json (json.loads) syntax before disk I/O.
+# Also classifies tool error outputs (ModuleNotFoundError, SyntaxError,
+# FileNotFoundError, etc.) and injects actionable remediation hints directly into
+# tool results.
+harness_guard:
+  enabled: true
+  write_verify_syntax: false
+  block_on_syntax_error: true
+  targeted_hints_enabled: true
+  max_repeated_error_signatures: 2
+  detect_alternating_loops: true
+  max_loop_history: 20
+  max_tracked_scopes: 1000
 
 # ============================================================================
 # Projects
@@ -2790,6 +2805,16 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+  # With a fencing-capable SQL RunStore and DB event store:
+  # off: host-authorized writes still check Run incarnation, epoch and state;
+  #      stale Journal flushes after takeover or deletion may be rejected.
+  # strict: additionally checks raw SQL and unaware legacy writers via the
+  #         database trigger after an offline cutover.
+  # Restart-required; strict requires database.backend: postgres and backend: db.
+  # Stop every Gateway, activate the database policy, then restart all with the
+  # matching cutover ID. See README.md#configuration for the offline cutover.
+  producer_fencing: "off"
+  # producer_cutover_id: deployment-2026-10-27
 
 # ============================================================================
 # Agent Storage Configuration

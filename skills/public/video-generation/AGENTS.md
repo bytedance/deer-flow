@@ -15,3 +15,8 @@ Gemini media downloads attach `x-goog-api-key` only to the HTTPS
 manually, recomputing credentials per hop; external HTTPS media URLs receive no
 API key. Reject HTTP downgrades and embedded credentials, and bound redirects.
 Credential regressions mock the Requests transport, not its redirect handling.
+
+Omit blank MiniMax resolution and duration overrides from the request. Report
+invalid duration strings with a `ValueError` naming `MINIMAX_VIDEO_DURATION`
+before submission. The provider checks model-specific resolution and duration
+combinations. Clear both override variables in offline video test fixtures.

@@ -23,13 +23,14 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import { GatewayApiError } from "../api/errors";
 import { fetch } from "../api/fetcher";
 import { AuthQueryScopeContext } from "../auth/query-scope";
 import { getBackendBaseURL } from "../config";
 import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
-import { getMessageRunId } from "../messages/run-duration";
+import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
 import { indexToolResults } from "../messages/tool-result";
 import {
@@ -2472,6 +2473,17 @@ export function useThreadStream({
             });
             return accepted;
           }
+          // A conflict rejects this submission. Let the next user attempt
+          // target the current run, but retain the original identity for
+          // uncertain failures: the recent-input list may omit its receipt.
+          if (
+            !controller.signal.aborted &&
+            runInputAttemptRef.current === attempt &&
+            error instanceof GatewayApiError &&
+            error.status === 409
+          ) {
+            runInputAttemptRef.current = null;
+          }
           toast.error(t.inputBox.runInputUnavailable);
         }
         throw error;
@@ -2492,6 +2504,17 @@ export function useThreadStream({
     inputActiveRunId && !completedRunIdsRef.current.has(inputActiveRunId)
       ? inputActiveRunId
       : activeRunId;
+  // A run observed mid-flight (remount, chat switch, rejoin) started before
+  // this view did. Its record carries the same start that turn_duration uses.
+  const knownActiveRun = knownActiveRunId
+    ? runsQuery.data?.find((run) => run.run_id === knownActiveRunId)
+    : undefined;
+  const knownActiveRunStartedAt =
+    knownActiveRun &&
+    ACTIVE_RUN_STATUSES.has(String(knownActiveRun.status)) &&
+    !completedRunIdsRef.current.has(knownActiveRun.run_id)
+      ? parseRunStartTime(knownActiveRun.created_at)
+      : null;
 
   // reconnectOnMount only knows the run id stored in this tab's
   // sessionStorage. A reopened browser or a new tab has no pointer, so recover
@@ -3449,6 +3472,7 @@ export function useThreadStream({
     ),
     canSendInput: inputCapability && !!inputQuery.data?.active_run_id,
     activeRunId: knownActiveRunId,
+    activeRunStartedAt: knownActiveRunStartedAt,
   } as const;
 }
 

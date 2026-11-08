@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from deerflow.runtime.events.catalog import RUN_TERMINAL_EVENT
+from deerflow.runtime.events.producer import producer_scope, publisher_scope, takeover_authority
 from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEventStore, SessionAwareRunEventLifecycleGuard
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -48,6 +49,8 @@ class _RecoveryTargetIdentity:
     user_id: str | None
     operation_kind: str
     committed_status: str
+    run_incarnation: str | None = None
+    retention_revision: int = 0
 
 
 class RecoveryTerminalTarget:
@@ -64,6 +67,8 @@ class RecoveryTerminalTarget:
         operation_kind: str,
         committed_status: str,
         _issuer: object,
+        run_incarnation: str | None = None,
+        retention_revision: int = 0,
     ) -> None:
         if _issuer is not _RECOVERY_TARGET_ISSUER:
             raise TypeError("RecoveryTerminalTarget must be issued by RecoveryTerminalPublisher")
@@ -75,7 +80,7 @@ class RecoveryTerminalTarget:
             raise ValueError("Recovery terminal target requires thread_id and run_id")
         if user_id is not None and not isinstance(user_id, str):
             raise TypeError("Recovery terminal target user_id must be a string or None")
-        self._identity = _RecoveryTargetIdentity(thread_id, run_id, user_id, operation_kind, committed_status)
+        self._identity = _RecoveryTargetIdentity(thread_id, run_id, user_id, operation_kind, committed_status, run_incarnation, retention_revision)
         self._claim_state = _RecoveryTargetClaimState()
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -158,6 +163,8 @@ class RecoveryTerminalPublisher:
         run_id: str,
         user_id: str | None,
         operation_kind: str,
+        run_incarnation: str | None = None,
+        retention_revision: int = 0,
     ) -> RecoveryTerminalTarget | None:
         """Issue one-shot publication authority only for a committed run takeover."""
         if claimed is not True or operation_kind != "run":
@@ -169,6 +176,8 @@ class RecoveryTerminalPublisher:
             operation_kind=operation_kind,
             committed_status="error",
             _issuer=_RECOVERY_TARGET_ISSUER,
+            run_incarnation=run_incarnation,
+            retention_revision=retention_revision,
         )
 
     async def publish(self, target: RecoveryTerminalTarget) -> TerminalEventConfirmation:
@@ -176,6 +185,11 @@ class RecoveryTerminalPublisher:
         if not isinstance(target, RecoveryTerminalTarget):
             raise TypeError("RecoveryTerminalPublisher.publish requires a RecoveryTerminalTarget")
         identity = target._consume()
+        authority = takeover_authority(run_id=identity.run_id, thread_id=identity.thread_id, user_id=identity.user_id, run_incarnation=identity.run_incarnation, retention_revision=identity.retention_revision)
+        with producer_scope(authority):
+            return await self._publish_identity(identity)
+
+    async def _publish_identity(self, identity: _RecoveryTargetIdentity) -> TerminalEventConfirmation:
         guard = self.lifecycle_guard(thread_id=identity.thread_id, run_id=identity.run_id, user_id=identity.user_id)
         await self._ensure_delivery_receipt(identity, guard)
         try:
@@ -298,7 +312,8 @@ async def confirm_terminal_event(
             }
             if lifecycle_guard is not None:
                 put_kwargs["lifecycle_guard"] = lifecycle_guard
-            result = await store.put_if_absent(**put_kwargs)
+            with publisher_scope("run.terminal"):
+                result = await store.put_if_absent(**put_kwargs)
         except RunEventLifecycleRejected:
             return TerminalEventConfirmation.CONFLICT
         except Exception:

@@ -520,8 +520,8 @@ def build_middlewares(
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
-        mcp_routing_middleware: Optional PR2 middleware that auto-promotes
-            deferred MCP schemas before the deferred filter runs.
+        mcp_routing_middleware: Compatibility middleware for advisory MCP
+            capability metadata; schema selection requires tool_search.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time

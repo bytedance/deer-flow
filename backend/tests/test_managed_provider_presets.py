@@ -35,6 +35,7 @@ def store(tmp_path, monkeypatch):
         ("moonshot-cn", "https://api.moonshot.cn/v1", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("zai", "https://api.z.ai/api/paas/v4", "deerflow.models.patched_deepseek:PatchedChatDeepSeek"),
         ("minimax", "https://api.minimax.io/v1", "deerflow.models.patched_minimax:PatchedChatMiniMax"),
+        ("stepfun", "https://api.stepfun.com/v1", "deerflow.models.patched_stepfun:PatchedChatStepFun"),
     ],
 )
 def test_preset_routing_and_conservative_unknown_capabilities(provider, endpoint, adapter):
@@ -150,6 +151,7 @@ def test_preset_overrides_and_injected_config_remain_authoritative(store):
 @pytest.mark.asyncio
 async def test_provider_metadata_requires_admin():
     catalog = await router.list_model_providers(_ADMIN)
+    assert {"id": "stepfun", "display_name": "StepFun", "requires_api_key": True, "custom_endpoint": False} in catalog["providers"]
     assert {p["id"] for p in catalog["providers"]} == {p.id for p in PROVIDERS}
     assert all(set(p) == {"id", "display_name", "requires_api_key", "custom_endpoint"} for p in catalog["providers"])
     with pytest.raises(HTTPException) as exc:
@@ -333,7 +335,8 @@ def test_generated_name_collision_with_yaml_is_retried(store, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_preset_api_save_refresh_yaml_conflict_and_disable(store, tmp_path, monkeypatch):
+@pytest.mark.parametrize("provider", ["openai", "stepfun"])
+async def test_preset_api_save_refresh_yaml_conflict_and_disable(store, tmp_path, monkeypatch, provider):
     from unittest.mock import AsyncMock
 
     from app.gateway.routers import models as models_router
@@ -358,7 +361,7 @@ async def test_preset_api_save_refresh_yaml_conflict_and_disable(store, tmp_path
     snapshot = get_app_config()
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            create = await client.put("/api/managed-models", json={"config": {"provider": "openai", "model": "org/新 模型", "api_key": "private-test-key"}})
+            create = await client.put("/api/managed-models", json={"config": {"provider": provider, "model": "org/新 模型", "api_key": "private-test-key"}})
             assert create.status_code == 200
             saved = create.json()
             assert saved["enabled"] and saved["has_api_key"]
@@ -370,7 +373,7 @@ async def test_preset_api_save_refresh_yaml_conflict_and_disable(store, tmp_path
             assert snapshot.models[0].api_key == "yaml-test-key"
             assert len(snapshot.models) == 1
             assert len(next_snapshot.models) == 2
-            edit = {"config": {"name": saved["name"], "provider": "openai", "model": "new-model"}, "expected_revision": saved["revision"]}
+            edit = {"config": {"name": saved["name"], "provider": provider, "model": "new-model"}, "expected_revision": saved["revision"]}
             changed = await client.put("/api/managed-models", json=edit)
             assert changed.status_code == 200
             assert changed.json()["name"] == saved["name"]

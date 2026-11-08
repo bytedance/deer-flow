@@ -109,11 +109,11 @@ async def schedule_task(
 
     After creating a recurring report, digest or file task, you may offer one
     trial run in a single sentence in the user's language; in the web app the
-    card has a Run once now button. Call trial only when the current user
-    message directly asks to run the task now. An offer by itself is not
-    consent. A trial does not count toward max_runs or the automatic pause. If
-    the trial result has existing true, a run was already waiting to start and
-    no extra trial was added; say so.
+    card has a Run once now button. The trial action presents that card and
+    requires the authenticated user to click Run once now; it never dispatches
+    a run from natural-language consent. For text-only clients, direct the user
+    to /workspace/scheduled-tasks. Do not claim a trial has started from this
+    tool result. Manual trials do not count toward max_runs.
 
     Args:
         action: The operation: create, update, list, pause, resume, delete, note, or trial.
