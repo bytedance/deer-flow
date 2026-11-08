@@ -19,6 +19,9 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
+apply the read policy to the whole result, with value-free diagnostics.
+
 #### Main components
 
 - `manager.py` defines the backend-neutral `MemoryManager` contract.
@@ -186,6 +189,10 @@ Point operations can rebase only when all original fact preconditions still hold
 Snapshot operations must reload and recompute after a manifest conflict.
 Use the typed conflict classes instead of matching exception text.
 
+Replacement imports copy facts, validate supplied revisions as positive integers,
+and use live revisions for existing IDs. Omitted revisions stay valid. Preserve
+manifest, upsert, absence and delete preconditions.
+
 The weak lock cache must not retain inactive user scopes.
 Cache validation uses the manifest metadata and persisted revision.
 Unlocked `load()`/`reload()` compute that signature before reading the document.
@@ -286,7 +293,16 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
-An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
+Reject out-of-range `confidence` per item, including percentages. Warn with
+the raw value and keep the original scale. On reads and imports, treat
+`OverflowError` from large JSON integers (e.g. `10**400`) as unusable
+confidence in `_coerce_source_confidence`, dedup merge,
+`prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import
+normalization. Canonical loads still report invalid confidence as corruption.
+Filter invalid facts before storage's `[0, 1]` validation can abort the batch,
+keep its watermark unchanged, and repeat the paid call. Reject batches with
+`factsToRemove` if any new fact is dropped because `replacementFactIndex`
+refers to the original `newFacts` positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.

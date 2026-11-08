@@ -413,6 +413,90 @@ def check_config_loadable(config_path: Path) -> CheckResult:
         )
 
 
+def check_memory_backend_config(config_path: Path) -> CheckResult:
+    """Statically validate the selected memory backend's backend_config.
+
+    A stale backend_config (DeerMem-only keys left in place after switching
+    manager_class to openviking) used to surface only when MemoryMiddleware
+    constructed the manager mid-conversation, after model tokens had already
+    been spent. from_backend_config is side-effect-free, so the same errors
+    can be reported here before an agent turn is accepted.
+    """
+    if not config_path.exists():
+        return CheckResult("memory backend config", "skip")
+
+    try:
+        config = _load_app_config(config_path)
+    except Exception:
+        # check_config_loadable already reports load failures.
+        return CheckResult("memory backend config", "skip")
+
+    return _check_memory_backend_config(config)
+
+
+def _check_memory_backend_config(config: object) -> CheckResult:
+    memory = getattr(config, "memory", None)
+    manager_class = str(getattr(memory, "manager_class", "") or "").strip()
+    label = f"memory backend config ({manager_class or 'unspecified'})"
+    if memory is None or not getattr(memory, "enabled", True):
+        return CheckResult(label, "skip", "memory disabled")
+
+    backend_config = getattr(memory, "backend_config", None) or {}
+    if not _resolves_to_builtin_openviking(manager_class):
+        return CheckResult(label, "skip", "no static validator for this backend")
+
+    try:
+        from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
+    except Exception as exc:
+        # Importing the backend package executes openviking/__init__.py, which
+        # pulls pydantic and deerflow internals; a broken backend environment
+        # degrades to a skip instead of crashing the report (same policy as
+        # resolve_config_path).
+        return CheckResult(label, "skip", str(exc))
+
+    try:
+        OpenVikingConfig.from_backend_config(dict(backend_config))
+    except Exception as exc:
+        detail = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+        return CheckResult(label, "fail", detail, fix=_memory_backend_config_fix(detail))
+    return CheckResult(label, "ok")
+
+
+def _resolves_to_builtin_openviking(manager_class: str) -> bool:
+    """True when manager_class resolves to the built-in OpenViking manager.
+
+    Only the built-in backend's config contract is known here: a custom
+    ``OpenVikingMemoryManager`` subclass pointed at by a dotted path owns its
+    backend_config shape, so doctor must not reject it with the built-in
+    rules. Resolution failures are the factory's to report (it fails loudly
+    in get_memory_manager), not this check's.
+    """
+    try:
+        from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
+        from deerflow.agents.memory.manager import _resolve_manager_class
+    except Exception:
+        return False
+    try:
+        return _resolve_manager_class(manager_class) is OpenVikingMemoryManager
+    except Exception:
+        return False
+
+
+def _memory_backend_config_fix(detail: str) -> str | None:
+    """Remediation matched to the validator's failure modes; None lets the
+    verbatim error speak for itself."""
+    if "USER API key is missing; set" in detail:
+        var = detail.rsplit("set ", 1)[-1].strip().rstrip(".")
+        return f"Add {var}=<your-key> to your .env file"
+    if "Unknown OpenViking backend_config fields" in detail:
+        return "Remove the fields named in the error from memory.backend_config, or switch manager_class back"
+    if "trusted mode is no longer supported" in detail:
+        return "Use a USER API key (api_key_env) and configure owner_user_id instead of auth_mode/account"
+    if "custom HTTP client fields are no longer supported" in detail:
+        return "Remove the custom HTTP client fields from memory.backend_config"
+    return None
+
+
 def check_llm_api_key(config_path: Path) -> list[CheckResult]:
     """Check that each model's env var is set in the environment."""
     if not config_path.exists():
@@ -923,6 +1007,7 @@ def main() -> int:
         config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
+        check_memory_backend_config(config_path),
         check_models_configured(config_path),
     ]
     sections.append(("Configuration", cfg_checks))

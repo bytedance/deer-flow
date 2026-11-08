@@ -898,6 +898,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         run_events_config = getattr(config, "run_events", None)
         app.state.run_events_config = run_events_config
         app.state.run_event_store = make_run_event_store(run_events_config)
+        if sf is not None:
+            from deerflow.persistence.run.producer import validate_producer_fencing
+
+            # An activated database also forbids a memory/JSONL downgrade.
+            await validate_producer_fencing(
+                sf,
+                mode=getattr(run_events_config, "producer_fencing", "off"),
+                cutover_id=getattr(run_events_config, "producer_cutover_id", None),
+            )
         from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 
         app.state.recovery_terminal_publisher = RecoveryTerminalPublisher(app.state.run_event_store, app.state.run_store)
@@ -1236,13 +1245,15 @@ def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
     return frozenset(selected)
 
 
-def _run_completion_hook(*, scheduled_task_service: Any | None):
+def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuations: Any | None = None):
     """Notify the scheduler after ordinary run finalization."""
 
     async def handle(record: Any) -> None:
 
         if scheduled_task_service is not None:
             await scheduled_task_service.handle_run_completion(record)
+        if batch_continuations is not None:
+            await batch_continuations.source_finished(record)
 
     return handle
 
@@ -1277,6 +1288,7 @@ def get_run_context(request: Request) -> RunContext:
         on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
         on_run_completed=_run_completion_hook(
             scheduled_task_service=scheduled_task_service,
+            batch_continuations=getattr(request.app.state, "batch_continuations", None),
         ),
     )
 

@@ -2,7 +2,9 @@
 
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
-Studio retains sanitized creation metadata.
+[Viewer fence](../../../docs/full-stack-plugins.md).
+
+Studio keeps sanitized creation metadata.
 
 HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
 `_ensure_thread_metadata`; preserve await-free attachment and cancel/drain
@@ -198,7 +200,7 @@ run's workspace snapshots rather than a client request option (files
 created/modified under `/mnt/user-data/outputs`, minus internal
 process-feedback exclusions) and idempotently persists a run-scoped
 `run.delivery` receipt before the terminal run status; missing or
-unverifiable `present_files` coverage downgrades the run to error, while runs
+unverifiable `present_files`/`present_shared_artifact` coverage downgrades the run to error, while runs
 without changed outputs keep ordinary chat behavior. Journal mechanics
 (callback attribution, receipt idempotency and retries, orphan recovery):
 `packages/harness/deerflow/runtime/AGENTS.md`. Multi-worker deployments
@@ -253,6 +255,11 @@ failure policy rather than exposing the unfiltered user-scoped catalog.
 Cap edit reads at `MAX_EDITABLE_ARTIFACT_BYTES + 1` despite stale `lstat`.
 
 ### Route and skill authorization
+
+Role writes serialize protection of the last **active** admin. Disabled admins may
+be demoted before restoration; role-only writes preserve credentials and lifecycle
+fields. Regressions: `tests/test_admin_users_router.py` (SQLite/HTTP) and
+`tests/test_disabled_admin_demotion_auth.py` (login, JWT, CSRF, old/new sessions).
 
 `authz.authorize_model_use` shares the `model:use` decision between model details
 and follow-up suggestions, including the factory's first configured model when

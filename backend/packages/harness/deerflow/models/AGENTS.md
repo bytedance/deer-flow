@@ -78,7 +78,8 @@ generic `thinking_enabled` / `reasoning_effort` to it, and
 subagents, summarization, title, one-shot utilities): a required-thinking model
 never enters the disable branch, effort is mapped through aliases or the default
 and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
+template exists. For a top-level effort contract, a disabled template that sets
+`reasoning_effort: "none"` wins over explicit or default request effort. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
 byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
 OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
 the same policy first so run metadata reports the effective values. Design note:
@@ -266,6 +267,8 @@ provider settings/reasoning transforms as chat. Disable optional thinking for
 short probes; required thinking and unknown third-party models use automatic
 tool choice. MiniMax's existing adapter normalizes the OpenAI SDK's
 `max_completion_tokens` into MiniMax's documented `max_tokens` for both paths.
+The `stepfun` preset reuses `PatchedChatStepFun` for reasoning capture/replay and
+the same token-field normalization; its ordinary API route is distinct from Step Plan.
 Tests: `test_managed_models.py`, `test_managed_deepseek.py`,
 `test_managed_provider_presets.py` (real vendor SDKs with HTTP doubles), opt-in
 `test_managed_deepseek_live.py` / `test_managed_presets_live.py`, and

@@ -19,10 +19,19 @@ Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
 owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
 uses ordinary AgentRuns admission after the old worker finalizes. Steer releases
 a native `task()` wait without marking the child completed; the same executor
-owns cooperative pause, timeout and cancellation. Only direct-user input exposes
+owns cooperative pause, timeout and cancellation. A steer withdrawn before
+delivery resumes the children it paused, except those a delivered steer still
+holds. Only direct-user input exposes
 current-work control. Preserve permissions, pool caps and token/loop stops.
+A task finishing after Steer charges usage to its dispatch `AIMessage` when its
+receipt is delivered (newest `AIMessage` if compacted); budgets read only those.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
+
+Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
+before Run admission. Do not infer cancellation from a stale read or exception
+text; other admission errors and uncertain outcomes still stop dispatch for
+explicit reconciliation. Child Run wait failures still stop the queue.
 
 Run admission and assembly publication serialize per thread across Store I/O.
 Keep registry locks short; heartbeat snapshots must not queue on an
@@ -144,7 +153,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** `present_files` and `present_shared_artifact` count as verified presentation. Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -361,6 +370,8 @@ checkpoint/messages first. Each complete evaluator invocation keeps its own usag
 ID and observer call; one final decision updates Goal counters. Valid verdicts,
 length/safety stops, and transport/configuration errors are not format retries.
 
+Batch/job/task registration or a scheduled continuation is not Goal completion: require the requested result or artifact to exist or be delivered. This prevents asynchronous acceptance from being misread as delivery.
+
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer
 notification can fail. Critic tokens/cache reads and distinct calls belong to
@@ -389,6 +400,25 @@ JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
 
 ## Completed-evidence provenance
+
+SQL Run admissions return their incarnation/epoch from the committing transaction;
+Manager binds that snapshot without a later identity lookup. `run_agent` installs
+host authority in a private ContextVar, inherited by owned tasks and offloaded
+callbacks, never metadata/configurable. Strict DB admission enforces one Run per
+batch through all original write APIs. Terminal/delivery narrow the grant only
+after existing final ACK/one-shot takeover checks. Post-terminal audit grants
+name individual `audit.*` types and retain incarnation/retention fencing.
+History seeds use a separate host grant from a committed `checkpoint_write`
+reservation and captured ThreadMeta identity, permitting multiple synthetic turn
+IDs but only the three message event types. SQL admission and the strict trigger
+hold Thread fence → reservation row → ThreadMeta row through commit; validate
+owner, incarnation, epoch, state, retention revision and DB-clock lease after
+both row-lock waits. Missing legacy metadata is created under that reservation;
+never recapture a replacement incarnation after reading a checkpoint.
+Completion hooks remain legal after business terminal commit while the producer
+is open. The Worker explicitly closes after Journal drain and Subagent buffer
+completion; uncertain drains conservatively leave it open. Closure is explicit;
+elapsed time or business terminal status alone grants no recovery publication authority.
 
 Gateway admission and RunManager validate host-owned evidence origin against the shared `EVIDENCE_ORIGINS` in `runtime/runs/schemas.py`. Preserve the string values and reject client metadata as provenance; only trusted Python entry points set the admission argument.
 

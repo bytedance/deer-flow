@@ -7,6 +7,12 @@ key is scrubbed out of text before it reaches a log line or a tool error, and
 why a configured base URL must not carry userinfo. Two owners for one rule means
 a fix to one provider can silently leave the other one leaking.
 
+Search and fetch providers that read a key from config or the environment
+resolve it through ``resolve_api_key`` too. A key read from a file keeps its
+trailing newline, and putting that raw value into a header makes the HTTP
+transport refuse it with an error that quotes the whole header, key included
+(``tests/test_provider_api_key_whitespace.py``).
+
 The marker and the message are module constants because the strings are part of
 the contract: provider tests and operators' log grep patterns assert on them.
 """
@@ -20,7 +26,7 @@ URL_USERINFO_ERROR = "base_url must not contain username or password information
 
 
 def resolve_api_key(raw: str | SecretStr | None) -> str | None:
-    """Return the configured key with surrounding whitespace removed.
+    """Return the configured or environment key with surrounding whitespace removed.
 
     Blank or absent reads as ``None``: a missing key is not an error, it is an
     unconfigured provider. Unwrapping happens only here, so no provider can end

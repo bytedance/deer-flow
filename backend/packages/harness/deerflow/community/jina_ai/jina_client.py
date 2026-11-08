@@ -11,6 +11,8 @@ from email.utils import parsedate_to_datetime
 
 import httpx
 
+from deerflow.community.provider_credentials import resolve_api_key
+
 from .request_admission import JinaAdmissionError, get_admission
 
 logger = logging.getLogger(__name__)
@@ -162,8 +164,9 @@ class JinaClient:
                 "X-Return-Format": return_format,
                 "X-Timeout": str(timeout),
             }
-            if os.getenv("JINA_API_KEY"):
-                headers["Authorization"] = f"Bearer {os.getenv('JINA_API_KEY')}"
+            api_key = resolve_api_key(os.getenv("JINA_API_KEY"))
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
             elif not _api_key_warned:
                 _api_key_warned = True
                 logger.warning("Jina API key is not set. Provide your own key to access a higher rate limit. See https://jina.ai/reader for more information.")
