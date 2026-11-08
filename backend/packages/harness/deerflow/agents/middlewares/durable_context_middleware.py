@@ -27,6 +27,7 @@ from deerflow.agents.middlewares.delegation_ledger import extract_delegations, r
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES, find_delegation_key
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
@@ -66,6 +67,7 @@ _DELEGATION_STABLE_FIELDS = ("description", "subagent_type", "status", "run_id",
 
 
 def _delegation_identity(entry: dict) -> tuple[str | None, str | None, str | None]:
+    """Same identity as ``thread_state.delegation_key`` and the cap's ``_delegation_id``; keep them in step."""
     return entry.get("run_id") or None, entry.get("id"), entry.get("dispatch_message_id") or None
 
 
@@ -257,7 +259,14 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
     be assigned to the preceding user's run. Preserve unmarked runs with a
     matching reply even across repeated IDs; the reply's owner is ambiguous.
     Current task producers stamp metadata for extract_delegations to capture.
+
+    An entry that names its dispatching AIMessage is decided by that message's
+    own pairing, so a reply to another response reusing the call id neither
+    keeps it open nor closes it. The ID-based inference above is the fallback
+    for legacy entries and dispatches no longer in history.
     """
+    # (dispatch message id, call id) -> whether that response's call was answered.
+    dispatch_answered = {(occurrence.message.id, occurrence.call_id): occurrence.result is not None for occurrence in pair_tool_call_results(messages[:opening_index]) if isinstance(occurrence.message.id, str) and occurrence.message.id}
     answered: set[tuple[str | None, str]] = set()
     marked_run_ids: set[str] = set()
     replied_ids: set[str] = set()
@@ -279,12 +288,19 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
             continue
         entry_run_id = entry.get("run_id")
         entry_id = entry.get("id")
-        if entry_run_id in (None, run_id) or (entry_run_id, entry_id) in answered or (None, entry_id) in answered:
+        if entry_run_id in (None, run_id):
             continue
-        # Command(resume=...) can checkpoint a reply before ledger capture,
-        # without a HumanMessage carrying that run's id. Its owner is unknown.
-        if entry_run_id not in marked_run_ids and entry_id in replied_ids:
+        dispatch_id = entry.get("dispatch_message_id")
+        paired = dispatch_answered.get((dispatch_id, entry_id)) if dispatch_id else None
+        if paired:
             continue
+        if paired is None:
+            if (entry_run_id, entry_id) in answered or (None, entry_id) in answered:
+                continue
+            # Command(resume=...) can checkpoint a reply before ledger capture,
+            # without a HumanMessage carrying that run's id. Its owner is unknown.
+            if entry_run_id not in marked_run_ids and entry_id in replied_ids:
+                continue
         cancelled.append({**entry, "status": "cancelled"})
     return cancelled
 

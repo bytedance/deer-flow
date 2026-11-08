@@ -159,3 +159,28 @@ async def test_steered_result_records_the_same_delegation_the_graph_captured():
         ("call_0", "job 2", "completed", "result of job 2"),
     ]
     assert [entry.get("dispatch_message_id") for entry in control.delegations] == ["ai-2"]
+
+
+def test_a_new_turn_cancels_the_dangling_dispatch_of_a_reused_call_id():
+    # Run 1 dispatched call_0 twice and stopped while the second subagent ran.
+    run_1 = [HumanMessage("go", id="human-1", additional_kwargs={"run_id": "run-1"}), _dispatch(1), _result(1), _dispatch(2)]
+    ledger = merge_delegations([], [{**entry, "run_id": "run-1"} for entry in extract_delegations(run_1)])
+    messages = [*run_1, HumanMessage("next", id="human-2", additional_kwargs={"run_id": "run-2"})]
+
+    update = DurableContextMiddleware().before_model({"messages": messages, "delegations": ledger}, SimpleNamespace(context={"run_id": "run-2"}))
+
+    # job 1's reply answers its own response only; job 2 is closed, not left in_progress.
+    merged = merge_delegations(ledger, update["delegations"] if update else [])
+    assert _ledger_view(merged) == [
+        ("call_0", "job 1", "completed", "result of job 1"),
+        ("call_0", "job 2", "cancelled", None),
+    ]
+
+
+def test_runs_reusing_a_call_id_keep_separate_delegations():
+    first = {"id": "call_0", "run_id": "run-1", "dispatch_message_id": "ai-1", "description": "job 1", "subagent_type": "general-purpose", "status": "completed", "created_at": "2026-11-08T00:00:00Z"}
+    second = {**first, "run_id": "run-2", "dispatch_message_id": "ai-2", "description": "job 2", "status": "in_progress"}
+
+    merged = merge_delegations([first], [second])
+
+    assert [(entry["run_id"], entry["description"], entry["status"]) for entry in merged] == [("run-1", "job 1", "completed"), ("run-2", "job 2", "in_progress")]
