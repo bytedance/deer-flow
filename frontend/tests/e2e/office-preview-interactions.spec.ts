@@ -72,7 +72,7 @@ test("Excel finds across visible sheets, excludes hidden and truncated cells and
   await setup(page);
   const panel = await open(page, names[0]!);
   await expect(panel.getByRole("table", { name: "Navigation" })).toBeVisible();
-  await find(panel).fill("Search target");
+  await find(panel).fill("  Search target  ");
   await expect(
     panel.getByRole("status", { name: "Search matches" }),
   ).toHaveText("1 / 2");

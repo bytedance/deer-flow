@@ -6,7 +6,7 @@ export const MAX_BINARY_PREVIEW_BYTES = 25 * 1024 * 1024;
 export async function readPreviewFile(
   url: string,
   signal: AbortSignal,
-): Promise<ArrayBuffer> {
+): Promise<{ bytes: ArrayBuffer; etag: string | null }> {
   signal.throwIfAborted();
   const response = await fetch(url, { signal, cache: "no-store" });
   if (!response.ok) throw new Error(`Preview unavailable (${response.status})`);
@@ -43,5 +43,5 @@ export async function readPreviewFile(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return bytes.buffer;
+  return { bytes: bytes.buffer, etag: response.headers.get("etag") };
 }

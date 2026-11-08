@@ -45,6 +45,7 @@ rs.mock("@/components/workspace/artifacts/artifact-file-preview", () => ({
 }));
 
 import { PluginArtifactPreview } from "@/components/workspace/artifacts/plugin-artifact-preview";
+import type { ArtifactPreviewContext } from "@/core/extensions/contracts";
 
 function setup(viewerId = "owner", enabled = true) {
   state.user = { id: "owner" };
@@ -67,11 +68,15 @@ afterEach(() => {
   cleanup();
   state.mount.mockReset();
   state.read.mockReset();
+  rs.unstubAllGlobals();
 });
 
 test("switching files aborts, disposes and isolates the previous mount", async () => {
   setup();
-  state.read.mockResolvedValue(new ArrayBuffer(4));
+  state.read.mockResolvedValue({
+    bytes: new ArrayBuffer(4),
+    etag: '"revision"',
+  });
   const contexts: {
     signal: AbortSignal;
     onError: () => void;
@@ -117,6 +122,60 @@ test("switching files aborts, disposes and isolates the previous mount", async (
   view.unmount();
   expect(contexts[1]!.signal.aborted).toBe(true);
   expect(dispose).toHaveBeenCalledTimes(2);
+});
+
+for (const etag of ['"lan-revision"', null]) {
+  test(`reads on an insecure origin with ETag ${etag ?? "absent"}`, async () => {
+    setup();
+    rs.stubGlobal("crypto", { subtle: undefined });
+    const bytes = new ArrayBuffer(4);
+    state.read.mockResolvedValue({ bytes, etag });
+    const contexts: ArtifactPreviewContext[] = [];
+    state.mount.mockImplementation(
+      (_root: HTMLElement, context: ArtifactPreviewContext) => {
+        contexts.push(context);
+        return { dispose: rs.fn() };
+      },
+    );
+    const props = {
+      filepath: `/insecure-${etag ?? "absent"}.xlsx`,
+      threadId: "thread",
+    };
+    const view = render(<PluginArtifactPreview {...props} />);
+    await expect(contexts[0]!.readFile()).resolves.toBe(bytes);
+    contexts[0]!.saveReadingState?.({ sheet: 2 });
+    view.unmount();
+    render(<PluginArtifactPreview {...props} />);
+    await expect(contexts[1]!.readFile()).resolves.toBe(bytes);
+    expect(contexts[1]!.getReadingState?.()).toEqual(
+      etag ? { sheet: 2 } : undefined,
+    );
+    if (etag) {
+      state.read.mockResolvedValue({ bytes, etag: '"new-revision"' });
+      await contexts[1]!.readFile();
+      expect(contexts[1]!.getReadingState?.()).toBeUndefined();
+    }
+  });
+}
+
+test("a failed optional digest cannot fail the file read", async () => {
+  setup();
+  rs.stubGlobal("crypto", {
+    subtle: { digest: rs.fn().mockRejectedValue(new Error("unavailable")) },
+  });
+  const bytes = new ArrayBuffer(4);
+  state.read.mockResolvedValue({ bytes, etag: null });
+  let context: ArtifactPreviewContext;
+  state.mount.mockImplementation(
+    (_root: HTMLElement, value: ArtifactPreviewContext) => {
+      context = value;
+      return { dispose: rs.fn() };
+    },
+  );
+  render(
+    <PluginArtifactPreview filepath="/digest-failure.xlsx" threadId="thread" />,
+  );
+  await expect(context!.readFile()).resolves.toBe(bytes);
 });
 
 test("synchronous renderer failure shows a download fallback", () => {

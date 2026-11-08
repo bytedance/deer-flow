@@ -309,7 +309,7 @@ export async function mountOffice(root, context) {
     const paintSearch = () => {
       const groups = new Map();
       for (const td of paper.querySelectorAll("td"))
-        groups.set(td.dataset.address, highlightText(td, query.value));
+        groups.set(td.dataset.address, highlightText(td, query.value.trim()));
       return groups;
     };
     const renderSheet = (sheet) => {

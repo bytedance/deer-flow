@@ -1749,6 +1749,9 @@ adds read-only XLSX, DOCX and PPTX readers with search, worksheet/page navigatio
 Word outlines, PowerPoint thumbnails and per-file reading preferences. It requires
 the artifact-preview host contribution and operator installation; it is not enabled
 by a catalog entry alone. Legacy binary Office files retain the download fallback.
+Previews also work over LAN HTTP. Reading preferences use the file's ETag when
+available, with an optional content hash on secure origins; without either, files
+still open but reading preferences are not restored.
 
 ### Token usage dashboard
 
@@ -4357,6 +4360,8 @@ message draft are retained. File cards share format icons and preserve extension
 in long filenames. Sent attachments open in the right-hand artifact panel.
 Single-file downloads show preparation and retry feedback while preventing duplicate
 requests. Unsupported formats offer the original file for download.
+Public Showcase files keep their standalone viewer and download controls available
+without requiring sign-in.
 
 Deployments can add binary readers through the optional `artifactPreviews` browser
 contribution; see the [plugin contract](docs/full-stack-plugins.md#artifact-previews).

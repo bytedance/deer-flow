@@ -42,7 +42,9 @@ export async function generateMetadata({
  */
 async function requireViewerAccess(target: ArtifactViewerTarget | null) {
   if (target && !requiresAuthenticatedViewer(target)) {
-    return;
+    // Public access is not a confirmed logout. Keep the same provider boundary
+    // as private viewers without probing auth or clearing retained drafts.
+    return { user: null, unknown: true };
   }
   const result = await getServerSideUser();
   switch (result.tag) {
@@ -89,20 +91,15 @@ export default async function ArtifactViewerPage({
     );
   }
 
-  const viewer = (
-    <QueryClientProvider>
-      <ArtifactViewer
-        filepath={target.filepath}
-        threadId={target.threadId}
-        isMock={target.isMock}
-      />
-    </QueryClientProvider>
-  );
-  return auth ? (
+  return (
     <AuthProvider initialUser={auth.user} initialAuthUnknown={auth.unknown}>
-      {viewer}
+      <QueryClientProvider>
+        <ArtifactViewer
+          filepath={target.filepath}
+          threadId={target.threadId}
+          isMock={target.isMock}
+        />
+      </QueryClientProvider>
     </AuthProvider>
-  ) : (
-    viewer
   );
 }

@@ -58,19 +58,33 @@ function MountedPreview({
           if (!abort.signal.aborted) state?.set(value);
         },
         readFile: async () => {
-          const bytes = await readPreviewFile(
+          state = undefined;
+          const { bytes, etag } = await readPreviewFile(
             urlOfArtifact({ filepath, threadId, isMock }),
             abort.signal,
           );
-          const hash = Array.from(
-            new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
-            (byte) => byte.toString(16).padStart(2, "0"),
-          ).join("");
+          let version = etag ? `etag:${etag}` : undefined;
+          if (!version && globalThis.crypto?.subtle) {
+            try {
+              const digest = await globalThis.crypto.subtle.digest(
+                "SHA-256",
+                bytes,
+              );
+              version = `sha256:${Array.from(new Uint8Array(digest), (byte) =>
+                byte.toString(16).padStart(2, "0"),
+              ).join("")}`;
+            } catch {
+              // Reading preferences must never prevent a successful preview.
+            }
+          }
           abort.signal.throwIfAborted();
-          state = readingStateAccess(
-            viewerId,
-            JSON.stringify([threadId, filepath, rendererKey, hash]),
-          );
+          // LAN HTTP origins may have no Web Crypto. Without a version, skip
+          // restoring preferences rather than borrowing state from an older file.
+          if (version)
+            state = readingStateAccess(
+              viewerId,
+              JSON.stringify([threadId, filepath, rendererKey, version]),
+            );
           return bytes;
         },
       });

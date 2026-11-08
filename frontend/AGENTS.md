@@ -469,5 +469,8 @@ Optional `artifactPreviews` contributions use exact lowercase extensions and rem
 fenced to enabled registrations for the current viewer. `PluginArtifactPreview` owns
 abort/dispose and shadow-root styling; authenticated reads are capped at 25 MiB.
 Reading state is bounded JSON in memory, keyed by viewer, thread, file, renderer and
-content hash. Account changes clear it; obsolete mounts cannot write. Built-in text
-and media readers retain precedence. The standalone page owns auth/query providers.
+file version (Gateway ETag, or optional content hash). If neither is available,
+preview still works without reading-state restoration. Account changes clear it;
+obsolete mounts cannot write. Built-in text and media readers retain precedence.
+The standalone page always owns auth/query providers, including public Showcase
+targets; public access is unknown auth, not a confirmed logout.

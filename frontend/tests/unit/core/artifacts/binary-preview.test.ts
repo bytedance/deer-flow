@@ -16,9 +16,9 @@ test("reads authenticated bytes without a Content-Length", async () => {
     .spyOn(globalThis, "fetch")
     .mockResolvedValue(new Response(new Uint8Array([1, 2, 3])));
   const signal = new AbortController().signal;
-  expect(
-    new Uint8Array(await readPreviewFile("/protected-file", signal)),
-  ).toEqual(new Uint8Array([1, 2, 3]));
+  const result = await readPreviewFile("/protected-file", signal);
+  expect(new Uint8Array(result.bytes)).toEqual(new Uint8Array([1, 2, 3]));
+  expect(result.etag).toBeNull();
   expect(request).toHaveBeenCalledWith(
     "/protected-file",
     expect.objectContaining({
@@ -27,6 +27,17 @@ test("reads authenticated bytes without a Content-Length", async () => {
       cache: "no-store",
     }),
   );
+});
+
+test("preserves the Gateway ETag alongside bounded bytes", async () => {
+  rs.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(new Uint8Array([4, 5]), {
+      headers: { ETag: '"gateway-version"' },
+    }),
+  );
+  const result = await readPreviewFile("/file", new AbortController().signal);
+  expect(result.etag).toBe('"gateway-version"');
+  expect(new Uint8Array(result.bytes)).toEqual(new Uint8Array([4, 5]));
 });
 
 test("rejects authorization errors without consuming their body", async () => {
