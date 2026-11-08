@@ -155,7 +155,8 @@ class SubagentResult:
             ``persistent_shell_sessions`` flag resolved from the state that
             carried the evidence (``None`` when unidentifiable — the matcher
             fails closed on it).
-            Accumulated per chunk (merged by ``tool_call_id``) so
+            Accumulated per chunk (merged by result message id, ``tool_call_id``
+            only for entries without one) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
@@ -547,7 +548,7 @@ def _bash_evidence_key(execution: dict[str, Any]) -> tuple[str, str]:
 def _harvest_bash_executions(
     final_state: Any,
     *,
-    summary_cache: dict[str, tuple[str, str]] | None = None,
+    summary_cache: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -594,7 +595,7 @@ def _harvest_bash_executions(
         executions: list[dict[str, Any]] = []
         # Only retained executions need full-output parsing. The per-run cache
         # survives values chunks, but keeps at most the same newest 20 outputs.
-        next_cache: dict[str, tuple[str, str]] = {}
+        next_cache: dict[tuple[str, str], tuple[str, str]] = {}
         for occurrence in answered[-_BASH_EVIDENCE_MAX_ENTRIES:]:
             message = occurrence.result
             tool_call_id = occurrence.call_id
@@ -610,12 +611,14 @@ def _harvest_bash_executions(
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
-            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            result_id = message.id if isinstance(message.id, str) and message.id else None
+            cache_key = _bash_evidence_key({"result_id": result_id, "tool_call_id": tool_call_id})
+            cached = summary_cache.get(cache_key) if summary_cache is not None else None
             if cached is not None and (cached[0] is content or cached[0] == content):
                 test_summary = cached[1]
             else:
                 test_summary = summarize_test_output(content)
-            next_cache[tool_call_id] = (content, test_summary)
+            next_cache[cache_key] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -624,7 +627,7 @@ def _harvest_bash_executions(
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
-                    "result_id": message.id if isinstance(message.id, str) and message.id else None,
+                    "result_id": result_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
@@ -1807,7 +1810,7 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
-        bash_summary_cache: dict[str, tuple[str, str]] = {}
+        bash_summary_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.

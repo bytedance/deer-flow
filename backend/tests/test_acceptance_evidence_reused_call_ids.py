@@ -134,3 +134,42 @@ def test_merge_keeps_each_occurrence_of_a_reused_call_id(executor_module):
     assert [(entry["tool_call_id"], entry["status"]) for entry in result.bash_executions] == [("call_0", "error"), ("call_1", "success"), ("call_0", "error")]
     verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=result.bash_executions)
     assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (True, False), verdict
+
+
+def test_summary_cache_keeps_one_slot_per_run_of_a_reused_call_id(executor_module, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.subagents import acceptance_checks
+
+    classify = Mock(wraps=acceptance_checks.summarize_test_output)
+    monkeypatch.setattr(acceptance_checks, "summarize_test_output", classify)
+    messages = [
+        _bash_call("call_0", "pytest tests"),
+        ToolMessage(content=FAILED_RUN, tool_call_id="call_0", id="result-1"),
+        _bash_call("call_0", "pytest tests"),
+        ToolMessage(content=PASSED_RUN, tool_call_id="call_0", id="result-2"),
+    ]
+    cache = {}
+
+    for _ in range(3):
+        executor_module._harvest_bash_executions({"messages": messages}, summary_cache=cache)
+
+    # Each run is classified once; values chunks reuse both cached summaries.
+    assert classify.call_count == 2
+    assert list(cache) == [("result", "result-1"), ("result", "result-2")]
+
+
+@pytest.mark.parametrize("call_id", [None, ""])
+def test_a_call_without_an_id_records_no_evidence(executor_module, call_id):
+    # Pairing needs a call id. Without one the owner of a result is unknown,
+    # so the harvest records nothing and the leaf stays UNVERIFIED.
+    messages = [
+        AIMessage(content="", tool_calls=[{"name": "bash", "id": call_id, "args": {"command": "pytest tests"}}]),
+        ToolMessage(content=PASSED_RUN, tool_call_id=call_id or ""),
+    ]
+
+    executions = executor_module._harvest_bash_executions({"messages": messages})
+
+    assert executions == []
+    verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+    assert (verdict["leaves"][0]["checked"], verdict["all_hold"]) == (False, False), verdict
