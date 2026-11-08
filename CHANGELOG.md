@@ -61,6 +61,16 @@ This section accumulates work toward the **2.3.0** milestone
   preventing `OSError` failures on Windows hosts while keeping existing
   read and delete operations permissive.
 
+- **scheduler:** A stored `schedule_spec` that is JSON null, a list or a string
+  no longer aborts the scheduler poll. `stored_next_run_at` caught the value
+  errors from a dropped zone or a newer cron parser, but a non-object spec
+  fails on `.get`; the launch-failure handler recomputed it again, so the
+  `AttributeError` escaped `run_once`'s claimed-task loop. Such a task is now
+  paused with the reason, like the other unusable schedules. The poll loop also
+  isolates one task's dispatch failure from the rest of its claimed batch, so a
+  future per-record raise costs one tick instead of every other claimed task.
+  ([#7998])
+
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
   expression stopped working (a zone missing from the time zone database
@@ -16177,3 +16187,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
