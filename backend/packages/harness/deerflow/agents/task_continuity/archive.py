@@ -216,6 +216,7 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     parameters = [match, *batches, *([role] if role is not None else [])]
+                    # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
                     rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
