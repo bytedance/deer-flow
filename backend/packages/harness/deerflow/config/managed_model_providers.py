@@ -46,7 +46,7 @@ PROVIDERS = (
     ManagedModelProvider("zai", "Z.AI (International, API)", "https://api.z.ai/api/paas/v4", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("minimax", "MiniMax (International, API)", "https://api.minimax.io/v1", _MINIMAX, defaults={"temperature": 1.0}),
     ManagedModelProvider("minimax-cn", "MiniMax (China, API)", "https://api.minimaxi.com/v1", _MINIMAX, defaults={"temperature": 1.0}),
-    ManagedModelProvider("stepfun", "StepFun / 阶跃星辰", "https://api.stepfun.com/v1", _STEPFUN),
+    ManagedModelProvider("stepfun", "StepFun", "https://api.stepfun.com/v1", _STEPFUN),
     ManagedModelProvider("openai-compatible", "Custom OpenAI-compatible", None),
 )
 _PROVIDER_BY_ID = {provider.id: provider for provider in PROVIDERS}

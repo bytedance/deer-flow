@@ -21,6 +21,9 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### 修复
 
 - **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，

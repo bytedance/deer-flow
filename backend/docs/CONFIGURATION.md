@@ -334,7 +334,7 @@ are:
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
 | `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
 | `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
-| `stepfun` | StepFun / 阶跃星辰, ordinary API | `https://api.stepfun.com/v1` | Chat Completions / Bearer |
+| `stepfun` | StepFun, ordinary API | `https://api.stepfun.com/v1` | Chat Completions / Bearer |
 | `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
 
 Keys for different regions and Coding Plans are not interchangeable. These

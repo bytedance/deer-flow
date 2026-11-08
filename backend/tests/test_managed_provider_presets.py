@@ -151,7 +151,7 @@ def test_preset_overrides_and_injected_config_remain_authoritative(store):
 @pytest.mark.asyncio
 async def test_provider_metadata_requires_admin():
     catalog = await router.list_model_providers(_ADMIN)
-    assert {"id": "stepfun", "display_name": "StepFun / 阶跃星辰", "requires_api_key": True, "custom_endpoint": False} in catalog["providers"]
+    assert {"id": "stepfun", "display_name": "StepFun", "requires_api_key": True, "custom_endpoint": False} in catalog["providers"]
     assert {p["id"] for p in catalog["providers"]} == {p.id for p in PROVIDERS}
     assert all(set(p) == {"id", "display_name", "requires_api_key", "custom_endpoint"} for p in catalog["providers"])
     with pytest.raises(HTTPException) as exc:
