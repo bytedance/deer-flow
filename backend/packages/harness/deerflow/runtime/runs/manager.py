@@ -2537,6 +2537,36 @@ class RunManager:
         async with self._thread_registry_lock(thread_id):
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
+    async def discard_thread_runs(self, thread_id: str) -> int:
+        """Drop this worker's in-memory run records for *thread_id*.
+
+        A thread deletion removes the durable rows through
+        ``RunStore.delete_by_thread``, but ``get()`` and ``list_by_thread()``
+        answer from ``_runs`` / ``_runs_by_thread`` first. Leaving those copies
+        in place makes a deleted thread's runs — including ``kwargs`` with the
+        user's prompt — readable until the process restarts, even though the
+        thread itself already answers 404.
+
+        The caller must already hold the thread's exclusive admission, so no
+        run for it can be admitted concurrently here.
+        """
+        async with self._thread_registry_lock(thread_id):
+            run_ids = list(self._runs_by_thread.get(thread_id, {}))
+            dropped = 0
+            for run_id in run_ids:
+                record = self._runs.get(run_id)
+                if record is None or record.thread_id != thread_id:
+                    self._unindex_run_locked(run_id, thread_id)
+                    continue
+                # Historical runs only. Internal thread-operation rows are held
+                # by their own release path (this deletion holds one of them).
+                if record.operation_kind != ThreadOperationKind.run:
+                    continue
+                self._runs.pop(run_id, None)
+                self._unindex_run_locked(run_id, thread_id)
+                dropped += 1
+            return dropped
+
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay.
 
