@@ -299,8 +299,7 @@ multi-step tasks: one `in_progress` task, real-time updates. See
 
 ### Run Interaction Policy
 
-Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
-`hitl_approval` / `waiting_for_input`: [invariants](docs/RUN_INTERACTION_POLICY.md#hitl-tool-approval).
+Interaction/HITL rules: [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 
