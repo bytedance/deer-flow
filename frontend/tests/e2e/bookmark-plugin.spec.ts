@@ -230,10 +230,14 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
     await expect(
       page.getByRole("searchbox", { name: "Search bookmarks" }),
     ).toHaveCount(0);
+    await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
     await expect(
-      page.getByText("Enabled · Managed by your administrator", {
-        exact: true,
-      }),
+      page.getByText(
+        "Your administrator has enabled this extension. It is ready to use.",
+        {
+          exact: true,
+        },
+      ),
     ).toBeVisible();
     await libraryLink.click();
     await expect(page).toHaveURL(new RegExp(`${libraryURL}$`));
@@ -845,6 +849,6 @@ test("catalog remains discoverable when runtime discovery fails", async ({
     page.getByRole("heading", { name: "Knowledge scope example", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "Installation guide" }),
+    page.getByRole("link", { name: "Read the guide", exact: true }),
   ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
 });
