@@ -26,6 +26,10 @@
 
 ### 修复
 
+- **网关：** 创建对话时在元数据中带上 `step`、`source`、`writes` 或 `parents`，不再让该对话
+  损坏。此前这些键会覆盖对话首个检查点上 LangGraph 自己的值，错误的 `parents` 会让该对话的
+  历史记录永久返回 500，错误的 `step` 会让之后每一轮对话都失败。现在检查点始终保留 LangGraph
+  的值。([#8019])
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
@@ -12822,3 +12826,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019

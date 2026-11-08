@@ -28,6 +28,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** Creating a thread with `step`, `source`, `writes` or `parents`
+  in its metadata no longer leaves the thread broken. Those keys used to
+  replace LangGraph's own values on the thread's first checkpoint, so a bad
+  `parents` made the thread's history fail with 500 for good and a bad `step`
+  made every later turn fail. The checkpoint now always keeps LangGraph's
+  values. ([#8019])
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
@@ -16144,3 +16150,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019
