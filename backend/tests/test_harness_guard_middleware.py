@@ -595,6 +595,30 @@ class TestHarnessGuardMiddleware:
         assert json.loads(result.content) == {"rows": 3, "ok": True}
         assert HARNESS_GUARD_KEY not in result.additional_kwargs
 
+    @pytest.mark.parametrize(
+        "outcomes",
+        [
+            pytest.param([True, True, False, True], id="success-before-the-failure"),
+            pytest.param([True, False, True, True], id="success-mid-window"),
+            pytest.param([True, True, False, True, True], id="window-slid-past-break"),
+        ],
+    )
+    def test_window_containing_a_success_is_not_an_oscillation(self, outcomes):
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(detect_alternating_loops=True))
+        results = []
+        for index, failed in enumerate(outcomes):
+            name = ("web_fetch", "bash")[index % 2]
+            content = f"Error: attempt {index} failed" if failed else '{"ok": true}'
+            results.append(
+                middleware.wrap_tool_call(
+                    _make_request(name, {}, tool_call_id=f"call-{index}", thread_id="t-osc-break", run_id="r-osc-break"),
+                    lambda r, name=name, content=content, failed=failed: ToolMessage(content=content, tool_call_id=r.tool_call["id"], name=name, status="error" if failed else "success"),
+                )
+            )
+
+        assert all("OSCILLATION DETECTED" not in str(result.content) for result in results)
+        assert not any((result.additional_kwargs.get(HARNESS_GUARD_KEY) or {}).get("oscillation_warning") for result in results)
+
     @pytest.mark.asyncio
     async def test_async_awrap_tool_call(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig())
