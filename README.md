@@ -2746,6 +2746,8 @@ When loop detection, the run token budget, or a provider safety/output-length
 limit stops a run, unfinished todos are retained for a later user run; todo
 completion reminders do not restart model calls or tool execution after that stop.
 Safety-stopped partial text is preserved; it does not trigger a Todo retry.
+A provider safety or output-length stop applies to the response it ended: if an
+unmet goal continues the run, later continuation turns still get todo reminders.
 
 Optional `pii_redaction.enabled` redacts detected identifiers in user messages,
 remote tool results, compaction input, reinjected summaries, configured
