@@ -168,7 +168,7 @@ class ScheduledTaskRunRepository:
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
-        data = row.to_dict(exclude={"occurrence_seq", "launch_accounted"})
+        data = row.to_dict(exclude={"occurrence_seq", "launch_accounted", "traceparent"})
         for key in (
             "scheduled_for",
             "lease_expires_at",
@@ -265,6 +265,7 @@ class ScheduledTaskRunRepository:
         expected_task_updated_at: datetime | str | None = None,
         expected_task_lease_owner: str | None = None,
         release_task_lease_status: str | None = None,
+        traceparent: str | None = None,
     ) -> dict[str, Any]:
         row = ScheduledTaskRunRow(
             id=run_record_id,
@@ -274,6 +275,7 @@ class ScheduledTaskRunRepository:
             trigger=trigger,
             status=status,
             launch_accounted=False,
+            traceparent=traceparent,
             created_at=datetime.now(UTC),
         )
         async with self._sf() as session:
@@ -656,7 +658,9 @@ class ScheduledTaskRunRepository:
                 return None
             await session.commit()
             row = await session.get(ScheduledTaskRunRow, run_record_id)
-            return self._row_to_dict(row) if row is not None else None
+            if row is None:
+                return None
+            return {**self._row_to_dict(row), "traceparent": row.traceparent}
 
     async def requeue_claimed_run(
         self,

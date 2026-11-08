@@ -6,10 +6,11 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from deerflow.trace_context import TRACE_ID_HEADER, request_trace_context
+from deerflow.tracing.context import traceparent_scope
 
 
 class TraceMiddleware:
-    """Bind a trace id to every HTTP request and write it to the response.
+    """Bind request correlation and W3C trace context for each HTTP request.
 
     Deliberately ungated. The id has to exist on every path so that everything
     downstream -- the run worker's run metadata, delegated subagents, the
@@ -47,9 +48,11 @@ class TraceMiddleware:
             await self.app(scope, receive, send)
             return
 
-        incoming_trace_id = Headers(scope=scope).get(TRACE_ID_HEADER)
+        headers = Headers(scope=scope)
+        traceparents = headers.getlist("traceparent")
+        parent = traceparents[0] if len(traceparents) == 1 else None
 
-        with request_trace_context(incoming_trace_id) as trace_id:
+        with request_trace_context(headers.get(TRACE_ID_HEADER)) as trace_id, traceparent_scope(parent, prefer_current=True):
             response_started = False
 
             async def send_with_trace(message: Message) -> None:

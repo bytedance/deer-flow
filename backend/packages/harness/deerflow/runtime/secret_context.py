@@ -19,6 +19,7 @@ from typing import Any
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.tracing.context import TRACE_METADATA_KEYS
 
 # Reserved sub-key of the run context that holds request-scoped secrets supplied
 # by the caller. Source of truth for what a skill *may* receive.
@@ -239,22 +240,26 @@ def redact_config_secrets(config: Any) -> Any:
     if not isinstance(config, dict):
         return config
 
-    redacted = dict(config)
+    redacted = {key: value for key, value in config.items() if key not in TRACE_METADATA_KEYS}
     context = config.get("context")
     if isinstance(context, dict):
         scrubbed_context = redact_secret_context_keys(context)
         scrubbed_context.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        for key in TRACE_METADATA_KEYS:
+            scrubbed_context.pop(key, None)
         scrubbed_context.pop("client", None)
         redacted["context"] = scrubbed_context
 
     configurable = config.get("configurable")
-    if isinstance(configurable, dict) and "client" in configurable:
-        redacted["configurable"] = {key: value for key, value in configurable.items() if key != "client"}
+    if isinstance(configurable, dict):
+        redacted["configurable"] = {key: value for key, value in configurable.items() if key != "client" and key not in TRACE_METADATA_KEYS}
 
     metadata = config.get("metadata")
     if isinstance(metadata, dict):
         scrubbed_metadata = redact_metadata_secrets(metadata)
         scrubbed_metadata.pop(DEERFLOW_TRACE_METADATA_KEY, None)
+        for key in TRACE_METADATA_KEYS:
+            scrubbed_metadata.pop(key, None)
         redacted["metadata"] = scrubbed_metadata
 
     return redacted

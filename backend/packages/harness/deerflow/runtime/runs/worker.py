@@ -26,7 +26,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, ExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -38,6 +38,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Overwrite
+from opentelemetry.trace import Span
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
@@ -66,7 +67,7 @@ from deerflow.runtime.context_keys import (
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     PROJECT_CONTEXT_KEY,
-    checkpoint_agent_binding_metadata,
+    checkpoint_rewrite_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.events.producer import current_producer, publisher_scope, run_producer_context
@@ -107,6 +108,7 @@ from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS, register_s
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, SchedulerRunCapability
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.tracing.context import TRACE_METADATA_KEYS, TRACE_ORIGIN_RUN_KEY, TRACE_PARENT_KEY, annotate_execution, current_traceparent, execution_span, normalize_traceparent, traceparent_scope
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
@@ -639,6 +641,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+    | TRACE_METADATA_KEYS
 )
 
 
@@ -912,7 +915,7 @@ class _SubagentEventBuffer:
             raise cancellation
 
 
-def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
+def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any], trace_origin_run_id: str | None) -> str:
     """Record the current request trace id on the runtime context and metadata.
 
     The ContextVar is the only source. A ``deerflow_trace_id`` the caller sent
@@ -934,6 +937,16 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     # caller's request body.
     merged_metadata = dict(incoming_metadata) if isinstance(incoming_metadata, dict) else {}
     merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    for key in TRACE_METADATA_KEYS:
+        config.pop(key, None)
+        merged_metadata.pop(key, None)
+        if isinstance(config.get("configurable"), dict):
+            config["configurable"].pop(key, None)
+    traceparent = current_traceparent()
+    if traceparent is not None:
+        merged_metadata[TRACE_PARENT_KEY] = traceparent
+        if trace_origin_run_id is not None:
+            merged_metadata[TRACE_ORIGIN_RUN_KEY] = trace_origin_run_id
     config["metadata"] = merged_metadata
     return trace_id
 
@@ -997,6 +1010,44 @@ async def _drain_run_finalization(task: asyncio.Task[None], *, on_host_cancel: C
         raise deferred
 
 
+async def _recover_run_traceparent(
+    checkpointer: Any,
+    checkpoint_config: dict[str, Any],
+    mode: CheckpointChannelMode,
+    run_manager: RunManager,
+    record: RunRecord,
+) -> tuple[str, str] | None:
+    selected = checkpoint_config["configurable"]
+    # LangGraph enters the lead graph in the root namespace, and a root
+    # checkpoint_map entry overrides the direct ID. Delta mode can rewrite
+    # the direct selector first, so conflicting selectors have no stable
+    # trace parent at this point.
+    checkpoint_id = None if selected.get("checkpoint_ns") else selected.get("checkpoint_id")
+    checkpoint_map = selected.get("checkpoint_map")
+    if isinstance(checkpoint_map, Mapping) and "" in checkpoint_map:
+        mapped_id = checkpoint_map[""]
+        if mode == "delta" and checkpoint_id and mapped_id != checkpoint_id:
+            return None
+        checkpoint_id = mapped_id
+    read_config = {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}}
+    # A checkpoint can contain legacy caller metadata. Its run ID is only a
+    # selector. The admission row supplies the parent, with owner and thread
+    # checked even when RunManager returns an in-memory record.
+    try:
+        checkpoint = await checkpointer.aget_tuple(read_config)
+        metadata = getattr(checkpoint, "metadata", None)
+        source_id = metadata.get(TRACE_ORIGIN_RUN_KEY) if isinstance(metadata, Mapping) else None
+        if not isinstance(source_id, str) or not 0 < len(source_id) <= 64 or source_id == record.run_id:
+            return None
+        source = await run_manager.get(source_id, user_id=record.user_id)
+        if source is not None and source.thread_id == record.thread_id and source.user_id == record.user_id:
+            if (parent := normalize_traceparent((source.kwargs or {}).get(TRACE_PARENT_KEY))) is not None:
+                return parent, source.run_id
+    except Exception:
+        logger.debug("Could not recover trace parent for run %s", record.run_id, exc_info=True)
+    return None
+
+
 @run_producer_context
 async def run_agent(
     bridge: StreamBridge,
@@ -1041,6 +1092,8 @@ async def run_agent(
     )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    trace_stack = ExitStack()
+    run_span: Span | None = None
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
     deferred_finalization_interrupt: BaseException | None = None
@@ -1235,6 +1288,25 @@ async def run_agent(
             return
         started = True
 
+        checkpoint_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        configurable = config.get("configurable") or {}
+        selected_checkpoint_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": configurable.get("checkpoint_ns", ""),
+                **{key: configurable[key] for key in ("checkpoint_id", "checkpoint_map") if key in configurable},
+            }
+        }
+        parent = normalize_traceparent((record.kwargs or {}).get(TRACE_PARENT_KEY))
+        trace_origin_run_id = run_id if parent is not None else None
+        if parent is None and current_traceparent() is None and checkpointer is not None and (graph_input is None or _is_resume_command_input(graph_input)):
+            recovered = await _recover_run_traceparent(checkpointer, selected_checkpoint_config, ctx.checkpoint_channel_mode, run_manager, record)
+            if recovered is not None:
+                parent, trace_origin_run_id = recovered
+        if parent is not None:
+            trace_stack.enter_context(traceparent_scope(parent))
+        run_span = trace_stack.enter_context(execution_span("deerflow.run", {"deerflow.run.id": run_id}))
+
         goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
         if goal_wakeup is not None:
             if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
@@ -1279,35 +1351,10 @@ async def run_agent(
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
-        checkpoint_config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": "",
-            }
-        }
         if checkpointer is not None:
-            await aensure_checkpoint_mode_compatible(
-                checkpointer,
-                checkpoint_config,
-                mode,
-            )
-            configurable = config["configurable"]
-            selected_configurable = {
-                "thread_id": thread_id,
-                "checkpoint_ns": configurable.get("checkpoint_ns", ""),
-            }
-            for selector_key in ("checkpoint_id", "checkpoint_map"):
-                if selector_key in configurable:
-                    selected_configurable[selector_key] = configurable[selector_key]
-            selected_checkpoint_config = {
-                "configurable": selected_configurable,
-            }
+            await aensure_checkpoint_mode_compatible(checkpointer, checkpoint_config, mode)
             if selected_checkpoint_config != checkpoint_config:
-                await aensure_checkpoint_mode_compatible(
-                    checkpointer,
-                    selected_checkpoint_config,
-                    mode,
-                )
+                await aensure_checkpoint_mode_compatible(checkpointer, selected_checkpoint_config, mode)
 
         persist_completion = True
 
@@ -1375,7 +1422,7 @@ async def run_agent(
         _pin_admission_project_context(config, runtime_ctx)
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
-        deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
+        deerflow_trace_id = _bind_trace_id(config, runtime_ctx, trace_origin_run_id)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -2370,15 +2417,27 @@ async def run_agent(
 
         # The registered worker remains the owner until every terminal and
         # resource-cleanup await settles. Never cancel or detach this task.
-        finalizer = asyncio.create_task(finalize(), name=f"run-finalization-{run_id}")
-        if stream_producer_lease_started:
-            transfer_producer_lease = _declared_bridge_method(
-                bridge,
-                "transfer_producer_lease",
-            )
-            if transfer_producer_lease is not None:
-                transfer_producer_lease(run_id, finalizer)
-        await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
+        try:
+            finalizer = asyncio.create_task(finalize(), name=f"run-finalization-{run_id}")
+            if stream_producer_lease_started:
+                transfer_producer_lease = _declared_bridge_method(
+                    bridge,
+                    "transfer_producer_lease",
+                )
+                if transfer_producer_lease is not None:
+                    transfer_producer_lease(run_id, finalizer)
+            await _drain_run_finalization(finalizer, on_host_cancel=interrupt_completion_hook)
+        finally:
+            try:
+                if run_span is not None:
+                    annotate_execution(
+                        run_span,
+                        "deerflow.run.status",
+                        str(record.status),
+                        failed=record.status in (RunStatus.error, RunStatus.timeout),
+                    )
+            finally:
+                trace_stack.close()
 
 
 # ---------------------------------------------------------------------------
@@ -3194,7 +3253,7 @@ async def _linearize_delta_checkpoint_resume(
                 f"Run {run_id} cannot resume an older delta checkpoint {checkpoint_id}: the {location} checkpoint {inspected_id} has pending execution{pending_detail}. "
                 "Resume pending work from the latest checkpoint; to regenerate completed work, submit new input from the latest checkpoint."
             )
-    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
+    head_config["metadata"] = checkpoint_rewrite_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
     # middleware channel can be restored. Reducer channels need Overwrite to
@@ -3292,7 +3351,7 @@ async def _rollback_to_pre_run_checkpoint(
         }
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
 
-    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
+    restore_config["metadata"] = checkpoint_rewrite_metadata(rollback_point.metadata)
 
     restored_config = await mutation_accessor.aupdate(
         restore_config,

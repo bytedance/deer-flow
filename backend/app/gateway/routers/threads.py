@@ -64,7 +64,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
-from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
+from deerflow.runtime.context_keys import checkpoint_rewrite_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -82,6 +82,7 @@ from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.tracing.context import TRACE_METADATA_KEYS
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
 from deerflow.utils.thread_id import ThreadId, resolve_thread_id, validate_thread_id
@@ -126,7 +127,7 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY}) | TRACE_METADATA_KEYS
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -1196,7 +1197,7 @@ async def _branch_thread_with_reservation(
     # Stamp both synthetic checkpoints with the branch-creation time because
     # serializers fall back to metadata when snapshot.created_at is absent.
     checkpoint_metadata_updates = {
-        **checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None)),
+        **checkpoint_rewrite_metadata(getattr(snapshot, "metadata", None)),
         **branch_metadata,
         "source": "branch",
         "updated_at": now,
@@ -1735,7 +1736,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
             update_config = {
                 **read_config,
                 "configurable": dict(read_config.get("configurable", {})),
-                "metadata": checkpoint_agent_binding_metadata(source_metadata),
+                "metadata": checkpoint_rewrite_metadata(source_metadata),
             }
             updated_config = await accessor.aupdate(
                 update_config,

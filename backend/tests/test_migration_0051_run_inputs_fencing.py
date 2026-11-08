@@ -50,9 +50,14 @@ async def test_both_migration_branches_upgrade_to_one_head(tmp_path, backend, pr
                     lead_agent_tokens,subagent_tokens,middleware_tokens,created_at,updated_at
                 ) VALUES ('old','thread','alice','success','reject','{}','{}',0,0,0,0,0,0,0,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)""")
             )
+            await conn.execute(
+                text("""INSERT INTO scheduled_task_runs(id,task_id,thread_id,scheduled_for,trigger,status,created_at)
+                    VALUES ('queued','task','thread',CURRENT_TIMESTAMP,'manual','queued',CURRENT_TIMESTAMP)""")
+            )
         await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0052_batch_continuation"]
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0053_scheduled_traceparent"]
+            assert (await conn.execute(text("SELECT status,traceparent FROM scheduled_task_runs WHERE id='queued'"))).one() == ("queued", None)
             columns = await conn.run_sync(lambda sync: {c["name"] for c in inspect(sync).get_columns("runs")})
             assert {"run_inputs_json", "run_incarnation", "producer_epoch", "producer_state"} <= columns
             assert (await conn.execute(text("SELECT status,run_inputs_json,run_incarnation,producer_epoch,producer_state FROM runs WHERE run_id='old'"))).one() == ("success", None, None, None, None)

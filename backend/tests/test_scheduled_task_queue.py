@@ -10,6 +10,8 @@ import httpx
 import pytest
 import pytest_asyncio
 from _router_auth_helpers import make_authed_test_app
+from opentelemetry import context as otel_context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from sqlalchemy import func, select
 
 from app.gateway.auth.models import User
@@ -68,18 +70,25 @@ async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_pat
         run_repo = ScheduledTaskRunRepository(sf)
         now = datetime.now(UTC)
         task = await _seed_reuse_task(task_repo, task_id="task-queue", now=now)
-        attempts = 0
+        attempts = []
+        parent = "00-11111111111111111111111111111111-2222222222222222-01"
+        propagator = TraceContextTextMapPropagator()
 
         async def launch_run(**kwargs):
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
+            carrier = {}
+            propagator.inject(carrier)
+            attempts.append(carrier.get("traceparent"))
+            if len(attempts) == 1:
                 raise ConflictError("Thread thread-1 already has an active run")
             return {"run_id": "run-queued", "thread_id": kwargs["thread_id"]}
 
         service = _make_service(task_repo, run_repo, launch_run)
 
-        result = await service.dispatch_task(task, now=now, trigger="manual")
+        token = otel_context.attach(propagator.extract({"traceparent": parent}))
+        try:
+            result = await service.dispatch_task(task, now=now, trigger="manual")
+        finally:
+            otel_context.detach(token)
 
         assert result["outcome"] == "queued"
         rows = await run_repo.list_by_task("task-queue")
@@ -87,13 +96,14 @@ async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_pat
         assert rows[0]["status"] == "queued"
         assert rows[0]["attempt_count"] == 1
 
-        await service.run_once(now=now + timedelta(seconds=5))
+        restarted_service = _make_service(task_repo, ScheduledTaskRunRepository(sf), launch_run)
+        await restarted_service.run_once(now=now + timedelta(seconds=5))
 
         rows = await run_repo.list_by_task("task-queue")
         assert rows[0]["status"] == "running"
         assert rows[0]["run_id"] == "run-queued"
         assert rows[0]["attempt_count"] == 2
-        assert attempts == 2
+        assert attempts == [parent, parent]
     finally:
         await close_engine()
 

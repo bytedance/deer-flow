@@ -22,6 +22,7 @@ class ScheduledTaskRunRow(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     trigger: Mapped[str] = mapped_column(String(16))
     status: Mapped[str] = mapped_column(String(16), index=True)
+    traceparent: Mapped[str | None] = mapped_column(String(55), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     goal_objective: Mapped[str | None] = mapped_column(Text, nullable=True)
     goal_verdict: Mapped[dict | None] = mapped_column(JSON, nullable=True)

@@ -76,6 +76,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
       - [LangSmith Tracing](#langsmith-tracing)
       - [Langfuse Tracing](#langfuse-tracing)
       - [Monocle Tracing](#monocle-tracing)
+      - [Distributed Tracing with OpenTelemetry](#distributed-tracing-with-opentelemetry)
       - [Using Multiple Providers](#using-multiple-providers)
       - [Existing-Run Stream Actions](#existing-run-stream-actions)
       - [Personal Access Tokens](#personal-access-tokens)
@@ -1689,6 +1690,21 @@ OKAHU_API_KEY=okh_xxxxxxxx      # required only for the `okahu` exporter
 Each run writes one trace file to `.monocle/`; open it in the [Monocle VS Code extension](https://marketplace.visualstudio.com/items?itemName=OkahuAI.monocle-apptrace) to inspect the span timeline and token counts. Connect to [Okahu](https://www.okahu.ai), an agent-observability platform, to analyze traces across runs and run trace-based and agentic evaluations (via the `okahu` exporter).
 
 Traces capture span inputs and outputs verbatim — prompts, tool arguments, and model responses — plus token usage and timings. The `file` exporter keeps them on local disk and never rotates or cleans them up, so prune `.monocle/` periodically; the remote exporters (`okahu`, `s3`, `blob`, `gcs`) send that same data off-box, so enable only destinations you trust. Monocle is initialized once at Gateway startup: a configuration error (unknown exporter, missing `OKAHU_API_KEY`) is logged there and tracing stays off until the Gateway restarts.
+
+#### Distributed Tracing with OpenTelemetry
+
+Gateway accepts the W3C `traceparent` header alongside `X-Trace-Id`. Manual
+scheduled runs and native subagent batches carry the parent across queue
+retries. A checkpoint continuation without a new parent can use the parent
+from its source Run within the same thread and owner.
+
+Configure an OpenTelemetry SDK and exporter in your deployment to record
+`deerflow.run` and `deerflow.subagent` spans. Search by `deerflow.run.id`
+to find the execution. Instrument downstream clients and services to
+propagate context and record their spans in the same tracing backend.
+These execution spans carry IDs and status. Configure any capture of model
+or tool contents separately. At a public ingress, strip trace headers
+from callers whose trace context you do not trust.
 
 #### Using Multiple Providers
 

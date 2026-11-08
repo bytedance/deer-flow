@@ -28,6 +28,7 @@ from deerflow.subagents.executor import (
     request_cancel_background_task,
     run_on_isolated_subagent_loop,
 )
+from deerflow.tracing.context import TRACE_PARENT_KEY, current_traceparent, traceparent_scope
 from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,10 @@ class SubagentBatchService:
             if self._prepare_continuation is None or self._dispatch_continuation is None:
                 raise ValueError("Automatic follow-up requires an authorized Gateway runtime")
             continuation = await self._prepare_continuation(request)
+        execution_spec = {key: value for key, value in request.execution_spec.items() if key != TRACE_PARENT_KEY}
+        traceparent = current_traceparent()
+        if traceparent is not None:
+            execution_spec[TRACE_PARENT_KEY] = traceparent
         return await self._repository.create_batch(
             batch_id=f"subagent-batch-{uuid.uuid4().hex}",
             user_id=request.user_id,
@@ -330,13 +335,14 @@ class SubagentBatchService:
             max_live_items=max_live,
             max_running_items=max_running,
             max_attempts=self._config.max_attempts,
-            execution_spec=request.execution_spec,
+            execution_spec=execution_spec,
             **({"continuation": continuation} if continuation is not None else {}),
         )
 
     async def _continue_batch(self, batch, owner):
         try:
-            outcome = await self._dispatch_continuation(batch)
+            with traceparent_scope((batch.get("execution_spec") or {}).get(TRACE_PARENT_KEY)):
+                outcome = await self._dispatch_continuation(batch)
             if outcome and outcome.get("status") == "waiting":
                 # A question can stay open for hours: keep the claim until its
                 # lease expires instead of rereading the conversation every poll.
@@ -529,7 +535,8 @@ class SubagentBatchService:
                 **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
-            execution_id = executor.execute_async(prompt, task_id=item_id)
+            with traceparent_scope(spec.get(TRACE_PARENT_KEY)):
+                execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             marked_running = False
             status_poll_every = min(self._config.poll_interval_seconds, max(1.0, self._config.lease_seconds / 3))
