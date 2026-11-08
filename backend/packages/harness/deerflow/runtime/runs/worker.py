@@ -44,7 +44,7 @@ from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, DELIVERY_PRESENTATION_TOOL_NAMES, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
@@ -400,14 +400,15 @@ def _delivery_content_with_outputs(
             return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
         return content
 
-    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    by_tool = content.get("by_tool", {})
+    presented_paths = [path for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool_name, [])]
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
     return {
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
         "presented_paths": presented_paths,

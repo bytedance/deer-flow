@@ -1,5 +1,6 @@
 """Unit tests for SafetyFinishReasonMiddleware."""
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
@@ -100,19 +101,34 @@ class TestTriggerCriteria:
         patched = result["messages"][0]
         assert patched.tool_calls == []
 
-    def test_content_filter_without_tool_calls_passes_through(self):
-        """issue scope: when there are no tool calls the partial text is a
-        legitimate final response and should not be rewritten."""
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("content", ["partial response", [{"type": "text", "text": "partial response"}]])
+    def test_content_filter_without_tool_calls_preserves_text_and_stamps_stop(self, invoke_async, content):
+        """Partial text stays visible, but downstream hooks must see the stop."""
         mw = SafetyFinishReasonMiddleware()
-        state = {
-            "messages": [
-                _ai(
-                    content="partial response",
-                    response_metadata={"finish_reason": "content_filter"},
-                )
-            ]
-        }
-        assert mw._apply(state, _runtime()) is None
+        message = _ai(content=content, response_metadata={"finish_reason": "content_filter"}, additional_kwargs={"reasoning": "original"})
+        message.id = "partial-safety-response"
+        runtime = _runtime()
+        state = {"messages": [message]}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result is not None
+        patched = result["messages"][0]
+        assert patched.content == content
+        assert patched.id == message.id
+        assert patched.response_metadata == message.response_metadata
+        assert patched.additional_kwargs["reasoning"] == "original"
+        assert patched.additional_kwargs["safety_termination"]["suppressed_tool_call_count"] == 0
+        assert runtime.context["stop_reason"] == "safety_capped"
+        assert "safety_termination" not in message.additional_kwargs
+        assert message.content == content
+
+        next_runtime = _runtime()
+        second_state = {"messages": [patched]}
+        second = asyncio.run(mw.aafter_model(second_state, next_runtime)) if invoke_async else mw.after_model(second_state, next_runtime)
+        assert second is None
+        assert next_runtime.context["stop_reason"] == "safety_capped"
 
     def test_content_filter_blank_content_no_tool_calls_backfills(self):
         """#4393: an empty content_filter response with no tool calls would be
@@ -445,7 +461,7 @@ class TestMessageRewrite:
 
     def test_idempotent_on_already_cleared_message(self):
         # Re-running the middleware on a message we already cleared must not
-        # re-trigger (tool_calls is now empty → fast passthrough).
+        # re-trigger or replace the original suppression record.
         mw = SafetyFinishReasonMiddleware()
         state = {
             "messages": [
