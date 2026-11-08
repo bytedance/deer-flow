@@ -756,6 +756,84 @@ class TestWrapModelCallSpecialCases:
         assert "&lt;think&gt;" in merged
         assert processed[1] == image_block
 
+
+class TestEmptyTextItemsAreDropped:
+    """Empty text items cannot survive into the outgoing content list (#8037).
+
+    The extractor skips them to match ``message_content_to_text``, so the
+    rebuild must not re-emit them: a bare ``""`` in a Chat Completions content
+    list is not a typed content part, and schema-validating endpoints reject
+    the whole request.
+    """
+
+    @staticmethod
+    def _sent_content(mw, content):
+        msg = HumanMessage(content=deepcopy(content), id="msg-1")
+        captured = []
+        mw.wrap_model_call(_make_request([msg]), lambda req: captured.append(req) or "ok")
+        return captured[0].messages[0].content
+
+    def test_empty_bare_string_before_text_block_is_dropped(self):
+        processed = self._sent_content(
+            _make_middleware(),
+            ["", {"type": "text", "text": "Please summarize."}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert processed[0]["type"] == "text"
+        assert "Please summarize." in processed[0]["text"]
+
+    def test_empty_bare_string_between_bare_strings_is_dropped(self):
+        processed = self._sent_content(_make_middleware(), ["first", "", "second"])
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert "first" in processed[0]["text"]
+        assert "second" in processed[0]["text"]
+
+    def test_empty_text_block_is_dropped(self):
+        processed = self._sent_content(
+            _make_middleware(),
+            [{"type": "text", "text": ""}, {"type": "text", "text": "Hello"}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert "Hello" in processed[0]["text"]
+
+    def test_empty_only_list_collapses_to_single_typed_block(self):
+        # No text to sanitize, but the empty item still cannot reach the model
+        # as a bare content part.
+        processed = self._sent_content(_make_middleware(), [""])
+
+        assert isinstance(processed, list)
+        assert processed == [{"type": "text", "text": ""}]
+
+    def test_empty_items_do_not_disturb_non_text_blocks(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        processed = self._sent_content(
+            _make_middleware(),
+            ["", image_block, {"type": "text", "text": "caption"}],
+        )
+
+        assert isinstance(processed, list)
+        # Non-text blocks before the first text block keep their position.
+        assert processed[0] == image_block
+        assert processed[1]["type"] == "text"
+        assert "caption" in processed[1]["text"]
+        assert len(processed) == 2
+
+    def test_image_only_message_still_passes_through_untouched(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        msg = HumanMessage(content=[image_block], id="msg-1")
+        request = _make_request([msg])
+        captured = []
+
+        _make_middleware().wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0] is request
+
     def test_already_wrapped_no_override(self):
         mw = _make_middleware()
         already = _check_user_content("Hello")

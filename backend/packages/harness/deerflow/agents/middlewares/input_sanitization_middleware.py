@@ -267,11 +267,14 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
     """
 
     @staticmethod
-    def _extract_text_from_content(content: str | list) -> tuple[str, list | None]:
+    def _extract_text_from_content(content: str | list) -> tuple[str, list | None, bool]:
         """Extract concatenated text from a plain-string or content-block-list.
 
-        Returns ``(text, extracted_blocks)``. *extracted_blocks* is None when
-        *content* is a string, or the list of text-content blocks when a list.
+        Returns ``(text, extracted_blocks, has_empty_items)``. *extracted_blocks*
+        is None when *content* is a string, or the list of non-empty text-content
+        blocks when a list. *has_empty_items* reports whether the list carried
+        empty text items that extraction skipped; those are dropped on rebuild
+        because they cannot reach the model as bare content parts.
 
         A list can hold bare ``str`` items next to content-block dicts
         (``message_content_to_text`` treats both as text, and some IM/SDK
@@ -279,25 +282,44 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         skipping them would skip sanitization entirely for that message.
         """
         if isinstance(content, str):
-            return content, None
+            return content, None, False
         if not isinstance(content, list):
-            return "", None
+            return "", None, False
         text_parts: list[str] = []
         text_blocks: list[dict | str] = []
+        has_empty_items = False
         for block in content:
             if isinstance(block, str):
                 if not block:  # skip empty items — matches message_content_to_text behaviour
+                    has_empty_items = True
                     continue
                 text_parts.append(block)
                 text_blocks.append(block)
             elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
                 text = block["text"]
                 if not text:  # skip empty blocks — matches message_content_to_text behaviour
+                    has_empty_items = True
                     continue
                 text_parts.append(text)
                 text_blocks.append(block)
         # Preserve request-local provenance for a single already-framed block.
-        return (text_parts[0] if len(text_parts) == 1 else "\n".join(text_parts)), text_blocks
+        return (text_parts[0] if len(text_parts) == 1 else "\n".join(text_parts)), text_blocks, has_empty_items
+
+    @staticmethod
+    def _is_empty_text_item(block) -> bool:
+        """True for a text item that carries no text and was skipped by extraction.
+
+        ``_extract_text_from_content`` skips empty bare strings and empty
+        ``type: "text"`` blocks (matching ``message_content_to_text``). Those
+        items are still text-shaped, so leaving them in a list alongside the
+        merged block sends an untyped content part the Chat Completions schema
+        rejects.
+        """
+        if isinstance(block, str):
+            return not block
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            return not block["text"]
+        return False
 
     @staticmethod
     def _rebuild_content(
@@ -308,7 +330,10 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Replace text blocks with a single merged text block, preserving interleaved non-text blocks.
 
         For ``[text, image, text]`` the image block between the two text blocks
-        is kept in place — only the text blocks are collapsed into one.
+        is kept in place — only the text blocks are collapsed into one. Empty
+        text items are dropped rather than kept: they are not text blocks (the
+        extractor skipped them), and re-emitting them as-is leaves an untyped
+        content part in the model request.
         """
         text_block_ids = {id(b) for b in text_blocks}
         first = last = None
@@ -318,13 +343,20 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                     first = i
                 last = i
         if first is None:
-            return original_content
-        result: list = [*original_content[:first], {"type": "text", "text": processed_text}]
+            if not any(InputSanitizationMiddleware._is_empty_text_item(block) for block in original_content):
+                return original_content
+            # Only empty text items: keep one text slot so the rebuilt content
+            # is still a list of typed parts.
+            return [{"type": "text", "text": processed_text}]
+        result: list = [block for block in original_content[:first] if not InputSanitizationMiddleware._is_empty_text_item(block)]
+        result.append({"type": "text", "text": processed_text})
         # Re-insert any non-text blocks that sat between text blocks
         for i in range(first + 1, last + 1):
-            if id(original_content[i]) not in text_block_ids:
-                result.append(original_content[i])
-        result.extend(original_content[last + 1 :])
+            block = original_content[i]
+            if id(block) not in text_block_ids and not InputSanitizationMiddleware._is_empty_text_item(block):
+                result.append(block)
+        # Trailing empty text items are dropped too, not just leading ones.
+        result.extend(block for block in original_content[last + 1 :] if not InputSanitizationMiddleware._is_empty_text_item(block))
         return result
 
     def _sanitize_message(self, msg: HumanMessage) -> HumanMessage | None:
@@ -335,10 +367,12 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         message is never mutated.
         """
         content = msg.content
-        text_content, text_blocks = self._extract_text_from_content(content)
+        text_content, text_blocks, has_empty_items = self._extract_text_from_content(content)
 
-        # No text at all (e.g. image-only message) — pass through
-        if not text_content and not isinstance(content, str):
+        # No text at all (e.g. image-only message) — pass through. An empty
+        # text item is not "no text": it still has to leave the request, so
+        # the message keeps going and gets rebuilt without it.
+        if not text_content and not has_empty_items and not isinstance(content, str):
             logger.debug("_sanitize_message: no text content in message — passing through")
             return None
 
@@ -414,9 +448,14 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         else:
             processed = _check_user_content(text_content)  # fallback
 
-        if processed == text_content:
-            # Already clean / already wrapped — no override needed
-            return None
+        text_changed = processed != text_content
+        if not text_changed:
+            # Nothing to sanitize. A skipped empty text item still has to leave
+            # the request, but dropping it alone needs no metadata repair.
+            if not has_empty_items:
+                return None
+            new_content = self._rebuild_content(content, text_content, text_blocks or [])
+            return msg.model_copy(update={"content": deepcopy(new_content)})
 
         if text_blocks:
             new_content = self._rebuild_content(content, processed, text_blocks)
