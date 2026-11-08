@@ -124,6 +124,8 @@ is invocation-local and pruned to the newest 20 retained executions, so values
 chunks do not repeatedly run full-output regexes or retain compacted logs.
 Bounded diagnostic tails drop their first partial physical line when slicing
 cuts a line; otherwise a long test label can lose its reporter prefix.
+Providers may reuse call ids: pair results via `pair_tool_call_results` and
+merge chunks by result message ID (`tests/test_acceptance_evidence_reused_call_ids.py`).
 
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 **Handled LLM failures**: `LLMErrorHandlingMiddleware` deliberately converts provider/model exceptions into an `AIMessage` so the graph can end cleanly, stamping `additional_kwargs.deerflow_error_fallback=true` plus error metadata. Clean graph termination does not imply subagent success: `SubagentExecutor` inspects the last assistant message at terminalization and maps a marked fallback to `SubagentStatus.FAILED`, which then emits `task_failed` and the existing structured `subagent_error`. Only the marker is authoritative — error-looking assistant prose without it remains a normal completed result, so neither the executor nor frontend parses display text as a status protocol.

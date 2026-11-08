@@ -213,8 +213,9 @@ class SubagentResult:
     def update_bash_executions(self, executions: list[dict[str, Any]] | None) -> None:
         """Merge bash evidence from the latest yielded state while still running.
 
-        Entries merge by ``tool_call_id`` in first-seen order and are capped to
-        the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
+        Entries merge by their result message (``tool_call_id`` when it has no
+        id, since providers can reuse call ids across responses) in first-seen
+        order and are capped to the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
         ``final_state`` scan, accumulation survives summarization compacting
         earlier AI/ToolMessages out of the streamed history. ``None`` leaves
         the field untouched (no evidence this chunk); an empty list still
@@ -227,9 +228,9 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return
-            merged = {str(entry.get("tool_call_id")): entry for entry in (self.bash_executions or [])}
+            merged = {_bash_evidence_key(entry): entry for entry in (self.bash_executions or [])}
             for execution in executions:
-                merged[str(execution.get("tool_call_id"))] = dict(execution)
+                merged[_bash_evidence_key(execution)] = dict(execution)
             self.bash_executions = list(merged.values())[-_BASH_EVIDENCE_MAX_ENTRIES:]
 
     def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
@@ -531,6 +532,18 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
         return None
 
 
+def _bash_evidence_key(execution: dict[str, Any]) -> tuple[str, str]:
+    """Identify one recorded execution across values chunks.
+
+    A provider may reuse a call id in a later response, so the result message
+    id names the execution; entries without one keep the call-id identity.
+    """
+    result_id = execution.get("result_id")
+    if isinstance(result_id, str) and result_id:
+        return ("result", result_id)
+    return ("call", str(execution.get("tool_call_id")))
+
+
 def _harvest_bash_executions(
     final_state: Any,
     *,
@@ -564,38 +577,35 @@ def _harvest_bash_executions(
             summary_cache.clear()
         return None
     try:
+        from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
         from deerflow.subagents.acceptance_checks import summarize_test_output
 
-        commands: dict[str, tuple[str, str, bool]] = {}
-        for message in messages:
-            if not isinstance(message, AIMessage):
-                continue
-            for tool_call in message.tool_calls or []:
-                name = str(tool_call.get("name") or "")
-                if name not in _BASH_EVIDENCE_TOOL_NAMES:
-                    continue
-                tool_call_id = str(tool_call.get("id") or "")
-                args = tool_call.get("args")
-                command = args.get("command") if isinstance(args, dict) else None
-                command = command if isinstance(command, str) else ""
-                # A truncated command loses its suffix; the matcher must not
-                # treat shell-structure analysis of the prefix as proof (a
-                # selection-changing suffix like ``-k smoke`` could be cut).
-                commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
-        if not commands:
+        # Tool-call ids are unique per response, not per conversation: pair each
+        # result with the call of its own response, so a reused id never labels
+        # one command's output with another command.
+        bash_calls = [occurrence for occurrence in pair_tool_call_results(messages) if occurrence.name in _BASH_EVIDENCE_TOOL_NAMES]
+        if not bash_calls:
             if summary_cache is not None:
                 summary_cache.clear()
             return []
+        positions = {id(message): index for index, message in enumerate(messages)}
+        answered = sorted((occurrence for occurrence in bash_calls if occurrence.result is not None), key=lambda occurrence: positions[id(occurrence.result)])
         executions: list[dict[str, Any]] = []
         # Only retained executions need full-output parsing. The per-run cache
         # survives values chunks, but keeps at most the same newest 20 outputs.
-        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
         next_cache: dict[str, tuple[str, str]] = {}
-        for message in tool_messages:
-            tool_call_id = str(message.tool_call_id or "")
-            entry = commands[tool_call_id]
-            name, command, command_truncated = entry
+        for occurrence in answered[-_BASH_EVIDENCE_MAX_ENTRIES:]:
+            message = occurrence.result
+            tool_call_id = occurrence.call_id
+            name = occurrence.name
+            command = occurrence.args.get("command")
+            command = command if isinstance(command, str) else ""
+            # A truncated command loses its suffix; the matcher must not
+            # treat shell-structure analysis of the prefix as proof (a
+            # selection-changing suffix like ``-k smoke`` could be cut).
+            command_truncated = len(command) > _BASH_EVIDENCE_COMMAND_CHARS
+            command = command[:_BASH_EVIDENCE_COMMAND_CHARS]
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
@@ -614,6 +624,7 @@ def _harvest_bash_executions(
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
+                    "result_id": message.id if isinstance(message.id, str) and message.id else None,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
