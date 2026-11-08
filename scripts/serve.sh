@@ -450,6 +450,11 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
+# The pre-install upgrade intentionally skips a fresh checkout whose backend
+# environment does not exist yet. Run it again after dependency installation
+# so schema-required migrations land before the Gateway reads the config.
+bash "$REPO_ROOT/scripts/config-upgrade.sh"
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""

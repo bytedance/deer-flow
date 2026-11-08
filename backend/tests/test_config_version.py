@@ -676,6 +676,68 @@ def _write_outdated_config(path: Path) -> str:
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_runs_without_consulting_the_package_index(tmp_path):
+    """The upgrade uses the installed environment even with unusable indexes."""
+    checkout = tmp_path / "checkout"
+    _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(
+        checkout,
+        UV_DEFAULT_INDEX="http://127.0.0.1:9/simple",
+        UV_INDEX="http://127.0.0.1:9/simple",
+        UV_EXTRA_INDEX_URL="http://127.0.0.1:9/simple",
+        UV_INDEX_URL="http://127.0.0.1:9/simple",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == expected_version
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_config_upgrade_skips_when_the_backend_environment_is_absent(tmp_path):
+    """A fresh checkout must reach serve.sh's dependency-install step."""
+    checkout = tmp_path / "checkout"
+    original = _write_outdated_config(checkout / "config.yaml")
+
+    result = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "skipping the config upgrade" in result.stdout
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+def test_fresh_checkout_startup_upgrades_after_dependency_install(tmp_path):
+    """One startup upgrades the config after installing a missing environment."""
+    checkout = tmp_path / "checkout"
+    original = _write_outdated_config(checkout / "config.yaml")
+
+    skipped = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
+    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
+    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original
+
+    upgraded = _run_config_upgrade_in_checkout(checkout)
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
+    upgraded_config = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
+    assert upgraded_config["config_version"] == expected_version
+    AppConfig.model_validate(upgraded_config)
+
+
+def test_serve_reruns_config_upgrade_after_dependency_install() -> None:
+    """Pin the pre-install and pre-start upgrade ordering in serve.sh."""
+    lines = (Path(__file__).resolve().parents[2] / "scripts" / "serve.sh").read_text(encoding="utf-8").splitlines()
+    upgrade_calls = [index for index, line in enumerate(lines) if "config-upgrade.sh" in line and not line.lstrip().startswith("#")]
+    sync_line = next(index for index, line in enumerate(lines) if "uv sync --locked" in line)
+    startup_line = next(index for index, line in enumerate(lines) if "Starting DeerFlow" in line)
+
+    assert len(upgrade_calls) == 2
+    assert upgrade_calls[0] < sync_line < upgrade_calls[1] < startup_line
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_config_upgrade_targets_checkout_config_over_legacy_backend_copy(tmp_path):
     """With both copies present, upgrade the checkout config.yaml that `make dev` loads."""
     checkout = tmp_path / "checkout"

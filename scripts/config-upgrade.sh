@@ -5,6 +5,9 @@
 # 1. Runs version-specific migrations (value replacements, renames, etc.)
 # 2. Merges missing fields from the example into the user config
 # 3. Backs up config.yaml to config.yaml.bak before modifying.
+#
+# Both `uv run` invocations use --no-sync so upgrading configuration never
+# resolves packages or consults the operator's package indexes.
 
 set -e
 
@@ -17,6 +20,17 @@ else
     REPO_ROOT_WIN="$REPO_ROOT"
 fi
 
+# serve.sh calls this before installing dependencies so extras detection can
+# inspect the pre-upgrade config. A fresh checkout has no backend environment
+# yet; let the install proceed, then serve.sh reruns this script before startup.
+if ! (cd "$REPO_ROOT/backend" && uv run --no-sync python - >/dev/null 2>&1 <<'DEERFLOW_ENV_PROBE'
+import deerflow
+DEERFLOW_ENV_PROBE
+); then
+    echo "⚠ Backend environment not installed yet — skipping the config upgrade until dependencies are installed."
+    exit 0
+fi
+
 # Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
 # than copying its order: with both <checkout>/config.yaml and
 # backend/config.yaml present, `make dev` reads the checkout copy. The import
@@ -26,7 +40,7 @@ fi
 # python/uv resolve through pyenv-win shim layers, arguments cross a cmd.exe
 # reparse boundary that mangles multi-line argv (observed as a bogus
 # "IndentationError: unexpected indent" on '|| goto :error'). stdin is safe.
-CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
+CONFIG="$(cd "$REPO_ROOT/backend" && REPO_ROOT_WIN_PATH="$REPO_ROOT_WIN" uv run --no-sync python - <<'DEERFLOW_UPGRADE_PY'
 import os
 import sys
 
@@ -80,7 +94,7 @@ else
     EXAMPLE_WIN="$EXAMPLE"
 fi
 
-cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run python - <<'DEERFLOW_UPGRADE_PY'
+cd "$REPO_ROOT/backend" && CONFIG_WIN_PATH="$CONFIG_WIN" EXAMPLE_WIN_PATH="$EXAMPLE_WIN" uv run --no-sync python - <<'DEERFLOW_UPGRADE_PY'
 import os
 import sys, shutil, copy, re, secrets
 from pathlib import Path
