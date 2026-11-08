@@ -299,7 +299,7 @@ multi-step tasks: one `in_progress` task, real-time updates. See
 
 ### Run Interaction Policy
 
-Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
+HITL: [policy](docs/RUN_INTERACTION_POLICY.md); `approvals/`.
 
 ### Context Summarization
 

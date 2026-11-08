@@ -1775,6 +1775,21 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
+**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask, Auto,
+and Full access independently of reasoning mode. Ask presents the complete
+operation before execution. Auto makes a separate, tool-free review call using
+an existing model profile and requests human approval when risk or authorization
+is uncertain. Full skips individual reviews within the operator's policy.
+Mandatory guardrails and account permissions apply in every mode.
+
+Approval cards support allow, reject, edited arguments, and exact-operation chat
+grants that can be revoked from Tool permissions. Root approvals survive restart
+through checkpoints. A delegated call waits in its original execution; stopping
+its run, timing out, or restarting the worker invalidates that child approval.
+Unattended runs cannot wait for a human. The feature is disabled by default.
+See [HITL Tool Approval](backend/docs/CONFIGURATION.md#hitl-tool-approval) for
+configuration and safety semantics.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not

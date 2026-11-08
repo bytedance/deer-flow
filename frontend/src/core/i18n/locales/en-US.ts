@@ -623,6 +623,7 @@ export const enUS: Translations = {
       waitingForYou: "Waiting for you",
       waiting: "Waiting",
       paused: "Paused",
+      waitingApproval: "Waiting for approval",
       autoContinuedOnce: "Auto-continued once",
       autoContinuedMany: "Auto-continued {count} times",
       details: "Details",
@@ -654,6 +655,9 @@ export const enUS: Translations = {
           "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
         needsInputCard: "Answer the question above to continue.",
         needsInputReply: "Reply with the missing details to continue.",
+        needsApproval: "Review the tool approval above to continue.",
+        needsApprovalReload:
+          "Approval details failed to load. Use the reload-error panel above to try again.",
         external:
           "Goal check: waiting on something external. Send a message when it's ready.",
         unchecked: "{reason}. It's checked again after your next message.",
@@ -1922,6 +1926,50 @@ export const enUS: Translations = {
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
+    approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
+      title: "Tool approval required",
+      description:
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
+      waiting: "Waiting for approval",
+      loading: "Loading approval details...",
+      loadFailed:
+        "Approval details could not be loaded. This conversation is still waiting for approval; reload the details before continuing.",
+      reload: "Reload approval details",
+      approve: "Approve",
+      reject: "Reject",
+      approveAll: "Approve all",
+      rejectAll: "Reject all and finish",
+      submitDecisions: "Submit decisions",
+      reasonLabel: "Rejection reason (optional)",
+      reasonPlaceholder: "Tell the agent why it should not run these tools...",
+      submitFailed:
+        "The approval could not be submitted. Review your decisions and try again.",
+      submitTimeout:
+        "The approval submission timed out and was stopped. Review your decisions and try again.",
+      featureDisabled:
+        "Tool approval is now disabled. You can still reject all and finish safely.",
+      noPending:
+        "This approval is no longer pending. Reload the conversation before retrying.",
+    },
   },
 
   // Subtasks

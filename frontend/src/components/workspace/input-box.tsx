@@ -206,6 +206,7 @@ import {
   ModelPickerTrigger,
 } from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+import { ToolApprovalMode } from "./tool-approval-mode";
 import { Tooltip } from "./tooltip";
 import {
   normalizeGoalStatusRead,
@@ -362,6 +363,7 @@ export function InputBox({
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    tool_approval_mode?: "ask" | "auto" | "full";
     reasoning_effort?: ReasoningEffortValue;
   };
   extraHeader?: React.ReactNode;
@@ -3325,6 +3327,14 @@ export function InputBox({
                 )}
               </PromptInputButton>
             </Tooltip>
+            <ToolApprovalMode
+              value={context.tool_approval_mode}
+              onChange={(mode) =>
+                onContextChange?.({ tool_approval_mode: mode })
+              }
+              threadId={isWelcomeMode ? undefined : threadId}
+              disabled={composerLocked}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={

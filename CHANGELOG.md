@@ -11,6 +11,15 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
+  reasoning mode. Auto uses a separate tool-free review call with an existing
+  model profile; uncertain or high-risk operations require a human. Cards show
+  complete arguments and support approve, reject, edit and exact-operation chat
+  grants with revocation. Root approvals survive restart through checkpoints;
+  interactive subagents wait through an owner-scoped channel with cancellation
+  and expiry. Mandatory deployment rules and account permissions apply in every
+  mode. Personal/platform MCP connections, policy and arguments bind approvals.
+  Disabled by default; see the configuration guide. `config_version` 66.
 
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested

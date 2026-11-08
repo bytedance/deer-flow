@@ -36,3 +36,30 @@ remain runtime-only and are never copied into checkpoint-persisted
 `configurable`. Public run requests cannot use these keys to disable
 clarification, impersonate a webhook channel, or override a scheduled run back
 to interactive behavior.
+
+## HITL tool approval
+
+Tool permissions are independent of interaction and reasoning modes. The opt-in
+`hitl_approval` policy offers Ask, Auto and Full with mandatory deny/ask rules and
+an operator-controlled ceiling. Native tool calls pause at their execution boundary
+using LangGraph interrupts; the durable run becomes `waiting_for_input`. Resume
+consumption is compare-and-swap bound to every pending action's request ID, and
+parallel interrupts are routed by their individual graph IDs.
+
+Auto runs a separate, tool-free reviewer over the original user's intent and exact
+bound operation. Review preparation is checkpointed: resuming cannot obtain a new
+review verdict or silently replace the approved arguments. The model's result
+cannot override host policy or inner authorization. Invalid/uncertain review
+requires a human, and fails closed when the run cannot collect an answer.
+
+Interactive child calls wait through a parent-owned bridge with a time limit.
+They retain their original execution and use a session-authenticated, owner-scoped
+HTTP answer. Cancellation, expiry, ownership loss or worker restart invalidates
+these live requests. Unattended parent origins cannot open child approval waits.
+A child without this bridge fails closed. The legacy `non_interactive: allow`
+only bypasses Ask on explicitly configured unattended root runs.
+
+`waiting_for_input` is not terminal success or failure. Goals, delivery checks,
+and batch continuation must preserve a native pause. New runs cannot discard it.
+See [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for grant scoping,
+parameter editing, limits and persistence semantics.
