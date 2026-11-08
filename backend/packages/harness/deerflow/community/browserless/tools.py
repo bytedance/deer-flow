@@ -292,8 +292,8 @@ def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetc
     return f" (warning: target page responded {detail})"
 
 
-@tool("web_fetch", parse_docstring=True)
-async def web_fetch_tool(url: str) -> str:
+@tool("web_fetch", parse_docstring=True, response_format="content_and_artifact")
+async def web_fetch_tool(url: str) -> tuple[str, dict | None]:
     """Fetch the contents of a web page at a given URL using Browserless (headless Chrome).
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -314,11 +314,11 @@ async def web_fetch_tool(url: str) -> str:
             resolver=_resolve_host_addresses,
         )
         if url_error:
-            return url_error
+            return url_error, None
 
         backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
         if backend_error:
-            return backend_error
+            return backend_error, None
 
         wait_for_event = ""
         wait_for_timeout_ms = 0
@@ -344,14 +344,19 @@ async def web_fetch_tool(url: str) -> str:
         )
 
         if isinstance(result, str):
-            return result
+            return result, None
 
         article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
-        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
+        # Preserve target HTTP evidence outside page prose. Direct string callers
+        # still receive the same content; LangChain ToolMessages retain the artifact.
+        raw_status = result.target_status_code.strip()
+        status = int(raw_status) if len(raw_status) == 3 and raw_status.isascii() and raw_status.isdigit() else None
+        artifact = {"deerflow_http_response": {"status_code": status}} if status is not None and 100 <= status <= 599 else None
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}", artifact
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}", None
 
 
 @tool("web_capture", parse_docstring=True)

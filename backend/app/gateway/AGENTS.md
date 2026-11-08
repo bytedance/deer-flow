@@ -278,3 +278,5 @@ Personal MCP is owner-only; platform MCP shared.
 ### Web model provider presets
 
 Managed model routes expose provider metadata; routing stays server-owned. Align validation, probing, storage, keys, and revisions.
+
+Trials use authenticated cards.
