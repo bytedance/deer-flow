@@ -110,7 +110,7 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
-from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
@@ -720,6 +720,11 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
     return {**{key: item for key, item in value.items() if key != "last_batch_wakeup_run_id"}, "objective": objective}
 
 
+#: Statuses the ledger reducer and renderer understand: the runtime's terminal
+#: values plus the in-progress marker a live delegation carries.
+_DELEGATION_STATUSES = frozenset({"in_progress", *SUBAGENT_STATUS_VALUES})
+
+
 def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[str, Any]] | None:
     """Reject ledger entries the reducer and renderer cannot read.
 
@@ -728,6 +733,11 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
     ``description``/``subagent_type`` on every model call. A non-object entry or a
     missing field raises while the state update merges — failing the run with an
     unhandled ``TypeError``/``KeyError`` instead of a 400 at this boundary.
+
+    The id must be non-empty because it is the reducer's identity key (an empty id
+    can never be matched by the runtime's write-back and would linger until the
+    ledger cap evicts it), and the status must be one the runtime produces so a
+    caller cannot inject its own steering line into the model-visible ledger.
     """
     if value is None:
         return None
@@ -737,9 +747,14 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
     for index, entry in enumerate(value):
         if not isinstance(entry, Mapping):
             raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
-        for field in ("id", "description", "subagent_type", "status"):
+        for field in ("id", "description", "subagent_type"):
             if not isinstance(entry.get(field), str):
                 raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string")
+        if not entry["id"]:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].id must be non-empty")
+        status = entry.get("status")
+        if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
         normalized.append(dict(entry))
     return normalized
 

@@ -734,8 +734,11 @@ def test_normalize_input_strips_delegation_verdict_without_messages():
         ["oops"],
         [{"description": "write report"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
+        [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": ["completed"]}],
     ],
-    ids=["string-channel", "non-object-entry", "missing-id", "non-string-status"],
+    ids=["string-channel", "non-object-entry", "missing-id", "non-string-status", "empty-id", "unknown-status", "unhashable-status"],
 )
 def test_normalize_input_rejects_unusable_delegations_with_400(delegations):
     """A ledger entry the reducer cannot key or the renderer cannot read must be
@@ -752,6 +755,16 @@ def test_normalize_input_rejects_unusable_delegations_with_400(delegations):
     assert "input.delegations" in excinfo.value.detail
 
 
+@pytest.mark.parametrize("status", ["in_progress", "completed", "failed", "cancelled", "timed_out", "polling_timed_out"])
+def test_normalize_input_accepts_runtime_delegation_statuses(status):
+    """Every status the runtime produces (plus the in-progress marker) stays valid."""
+    from app.gateway.services import normalize_input
+
+    entry = {"id": "call-1", "description": "read docs", "subagent_type": "general", "status": status}
+
+    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
+
+
 def test_normalize_input_keeps_usable_delegation_entries():
     from app.gateway.services import normalize_input
 
@@ -762,14 +775,19 @@ def test_normalize_input_keeps_usable_delegation_entries():
     assert result["delegations"] == [entry]
 
 
-def test_state_values_reject_unusable_delegations_with_400():
+@pytest.mark.parametrize(
+    "delegations",
+    ["oops", [{"id": "call-1", "description": "write report", "subagent_type": "general"}]],
+    ids=["non-list", "missing-status"],
+)
+def test_state_values_reject_unusable_delegations_with_400(delegations):
     """The thread-state update path shares the ledger shape boundary."""
     from fastapi import HTTPException
 
     from app.gateway.services import strip_server_owned_state_metadata
 
     with pytest.raises(HTTPException) as excinfo:
-        strip_server_owned_state_metadata({"delegations": ["oops"]})
+        strip_server_owned_state_metadata({"delegations": delegations})
 
     assert excinfo.value.status_code == 400
     assert "values.delegations" in excinfo.value.detail
