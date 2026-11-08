@@ -3040,10 +3040,13 @@ For example, independent read-only research can run concurrently when the wall-c
 AIO runs commands from independent subagents concurrently, including Lark CLI
 and skill commands with per-call environment variables. Commands within one
 subagent stay ordered, and each environment-bearing call uses a fresh session.
-Each concurrently executing environment-bearing scope therefore adds one live
-transient Bash session; session demand grows with active scopes. Size the AIO
-server for that demand and verify its session/process capacity before increasing
-subagent concurrency. This client does not impose a separate transient-session cap.
+Environment-bearing calls share a per-sandbox Bash admission limit, configured
+by `sandbox.environment.AIO_BASH_MAX_SESSIONS` (positive integer, default `50`).
+Excess calls wait without creating a session and can be cancelled while waiting;
+the slot is retained through session cleanup. This pool is separate from
+`MAX_SHELL_SESSIONS`. Docker reuse checks the persisted container environment;
+K8s reuse checks the provisioner's Pod-reported Bash capacity. Upgrade the
+provisioner with the Gateway: missing capacity metadata blocks admission.
 Cancellation remains routed to the running command while scope release or
 sandbox close waits for it to finish and clean up.
 Scope release waits for in-flight execution and cleanup without a separate drain

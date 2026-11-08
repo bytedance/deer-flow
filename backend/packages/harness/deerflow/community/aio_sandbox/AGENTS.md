@@ -42,10 +42,13 @@ release/close reaches the active command and concurrent releases stay idempotent
 whole invocation, including retries. Release has no separate drain deadline;
 HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
 ownership until work drains before client detach or reuse can be safe.
-Each concurrently executing env scope adds one transient Bash session. There is
-no separate client session cap; deployments must budget server session/process
-capacity for the configured concurrency.
-Regressions: `tests/test_aio_scoped_env_concurrency.py`.
+All env calls share a cancellable Bash semaphore, held through cleanup. Scoped
+calls acquire it after the scope lock, then recheck registry admission; unscoped
+calls acquire it after the shared lock. `AIO_BASH_MAX_SESSIONS` (default 50) sets
+both provisioning and client limits. Docker reuse checks persisted env; remote
+reuse requires Pod-attested capacity. Unknown metadata defers, never proves a
+need for replacement. Keep this pool independent of persistent Shell capacity.
+Regressions: `tests/test_aio_scoped_env_concurrency.py`, `tests/test_aio_bash_capacity.py`.
 
 ## Readiness polling
 

@@ -1854,6 +1854,7 @@ sandbox:
 #   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
 #   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
+#   #   AIO_BASH_MAX_SESSIONS: "50"  # Separate Bash pool; excess env calls wait (cancellable)
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var

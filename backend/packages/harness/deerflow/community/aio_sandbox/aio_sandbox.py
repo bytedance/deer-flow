@@ -85,6 +85,7 @@ class AioSandbox(Sandbox):
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
         lark_cli_broker: bool | None = None,
+        max_bash_sessions: int = 50,
     ):
         """Initialize the AIO sandbox.
 
@@ -101,8 +102,13 @@ class AioSandbox(Sandbox):
                 sandbox fail-closed, so a construction site that forgets to
                 thread the attested value cannot silently authorize the
                 plaintext credential-mount overlay.
+            max_bash_sessions: Bash admission limit, no greater than the
+                admitted runtime's AIO_BASH_MAX_SESSIONS (default 50).
         """
         super().__init__(id)
+        if type(max_bash_sessions) is not int or max_bash_sessions <= 0:
+            raise ValueError("max_bash_sessions must be a positive integer")
+        self._bash_slots = threading.BoundedSemaphore(max_bash_sessions)
         self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
@@ -614,7 +620,7 @@ class AioSandbox(Sandbox):
                 )
                 if scoped.releasing:
                     raise RuntimeError("sandbox command scope is no longer active")
-            with command_lock(scoped.lock, current_command_scope(self)):
+            with command_lock(scoped.lock, current_command_scope(self)), command_lock(self._bash_slots, current_command_scope(self)) if env else nullcontext():
                 # Registration and command execution are separated by the
                 # per-scope wait.  Revalidate identity after that wait so a
                 # release/close which removed this exact scope is a hard
@@ -1140,7 +1146,7 @@ class AioSandbox(Sandbox):
         """Single bash.exec invocation in an explicitly released fresh session.
 
         ``scope_lock_held=True`` requires the caller to hold its registered
-        ``_ScopedShellSession.lock`` for this entire invocation. Release/close
+        ``_ScopedShellSession.lock`` and a Bash permit for this entire invocation. Release/close
         join that lock to drain work before detaching the client; the shared
         lock is skipped only under this precondition.
         """
@@ -1148,7 +1154,7 @@ class AioSandbox(Sandbox):
         # Scoped callers already hold their registered execution lock, which
         # close() and release_command_scope() drain before detaching the client.
         # Unscoped calls retain the shared lock for that lifecycle guarantee.
-        with nullcontext() if scope_lock_held else command_lock(self._lock, scope):
+        with nullcontext() if scope_lock_held else command_lock(self._lock, scope), nullcontext() if scope_lock_held else command_lock(self._bash_slots, scope):
             for attempt in range(2):
                 session_id: str | None = None
                 try:

@@ -200,7 +200,7 @@ class _ObservedScopeLock:
 
 
 @pytest.fixture
-def paused_env_command(monkeypatch):
+def paused_env_command(monkeypatch, request):
     aio = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox")
     entered = threading.Event()
     resume = threading.Event()
@@ -258,7 +258,8 @@ def paused_env_command(monkeypatch):
     sdk = SandboxClient(base_url="http://sandbox.invalid", httpx_client=http_client)
     monkeypatch.setattr(aio, "AioSandboxClient", lambda **_kwargs: sdk)
     monkeypatch.setattr(aio, "sandbox_http_trust_env", lambda _url: True)
-    sandbox = aio.AioSandbox("scoped-env-lifecycle", "http://sandbox.invalid")
+    options = {"max_bash_sessions": request.param} if hasattr(request, "param") else {}
+    sandbox = aio.AioSandbox("scoped-env-lifecycle", "http://sandbox.invalid", **options)
 
     def run(owner="first", value="one"):
         with command_owner(sandbox, owner):
