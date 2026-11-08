@@ -15,6 +15,58 @@ from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.read_snapshot import capture_read_snapshot, read_snapshot_requested, record_read_snapshot
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation", ["sync", "async"])
+@pytest.mark.parametrize(
+    "source,args,budget,status",
+    [
+        ("Error: example file text\n", {}, 50000, "success"),
+        ("example ... [truncated: showing 1 of 10 chars] ...", {}, 50000, "success"),
+        ("one\n\nthree\n", {"start_line": 2, "end_line": 2}, 50000, "success"),
+        ("one\n", {"start_line": 99}, 50000, "error"),
+        ("row=data\n" * 200, {}, 300, "partial_success"),
+        ("row=data\n" * 200, {"start_line": 2, "end_line": 100}, 300, "partial_success"),
+    ],
+)
+async def test_snapshot_preserves_producer_state_and_original_version(tmp_path, monkeypatch, invocation, source, args, budget, status):
+    path = "/mnt/user-data/workspace/report.txt"
+    target = tmp_path / "report.txt"
+    target.write_bytes(source.encode())
+    sandbox = LocalSandbox("snapshot-meta", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path))])
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(sandbox=SimpleNamespace(read_file_output_max_chars=budget)))
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    async def initialize_async(runtime):
+        return sandbox
+
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized_async", initialize_async)
+    request = _request(path, args)
+    request.runtime.tool_call_id = "read"
+    gate = ReadBeforeWriteMiddleware()
+
+    def finish(message):
+        # The external write occurs after the read but before mark attachment.
+        target.write_bytes(b"externally changed\n")
+        return message
+
+    if invocation == "sync":
+        result = gate.wrap_tool_call(request, lambda req: finish(tools.read_file_tool.func(runtime=req.runtime, **req.tool_call["args"])))
+    else:
+
+        async def execute(req):
+            return finish(await tools.read_file_tool.coroutine(runtime=req.runtime, **req.tool_call["args"]))
+
+        result = await gate.awrap_tool_call(request, execute)
+    assert isinstance(result, ToolMessage)
+    assert result.additional_kwargs["deerflow_tool_meta"]["status"] == status
+    assert result.additional_kwargs["deerflow_tool_meta"]["source"] == "tool_return"
+    assert result.status == ("error" if status == "error" else "success")
+    if status == "error":
+        assert READ_MARK_KEY not in result.additional_kwargs
+    else:
+        assert result.additional_kwargs[READ_MARK_KEY]["hash"] == hashlib.sha256(source.encode()).hexdigest()
+
+
 def _request(path, args=None, call_id="read"):
     state = {"sandbox": {"sandbox_id": "remote-snapshot"}, "messages": []}
     runtime = SimpleNamespace(state=state, context={"thread_id": "snapshot-tests", "user_id": "test-user"})

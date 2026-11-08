@@ -25,6 +25,8 @@ reference (including literal glob directory names). Structured references remain
 literal. See
 [tool artifact middleware](../agents/middlewares/TOOL_ARTIFACTS.md).
 
+MCP routing keywords are advisory and cannot promote schemas. `tool_search` is the explicit discovery path; deferred schema selection remains catalog- and turn-scoped. The retained `auto_promote_top_k` setting has no automatic promotion effect.
+
 Deferred-tool regex discovery uses `regex.VERSION0` with a shared 100 ms
 deadline per ranked query, including required-name scoring. Validate the bounded
 pattern with stdlib `re` first to preserve the invalid-regex literal fallback
@@ -90,12 +92,7 @@ Only standalone tool discovery without a model falls back to the base profile.
 The ordinary `task` boundary carries one narrow parent-loop middleware recorder into the isolated subagent runtime under separate loop-detection, tool-promotion, and tool-progress keys. It schedules only `record_middleware` calls back onto the loop that owns `RunJournal`, keeps an execution-local atomic promotion claim so parallel searches do not double-report one new schema, is fenced and drained once before `task` returns, and never exposes the journal or event store to the child loop. Durable batch tasks have no parent run journal and do not use this bridge.
 
 Scheduled-task runtime note:
-- Trial admission matches the entire current user turn, after at most two leading
-  acknowledgements and one trailing particle, against bounded English/Chinese
-  direct-run forms. Bare confirmations, task mentions, quotes and conditional or
-  compound text do not dispatch. Never interpolate titles into authorization text;
-  only fixed commands and opaque task-ID forms are accepted. This host gate is
-  deliberately conservative, not a general intent parser.
+- The chat tool's `trial` action only returns an owner-checked task card and `requires_user_action=run_once_now`; it never dispatches from text. The authenticated owner uses the card or scheduled-tasks page action, which calls the existing trigger endpoint. Preserve owner, thread and capability checks. Do not add natural-language authorization allowlists.
 - `schedule_task` parameters carry types only; value rules come back as the same
   coded results as REST (`contracts/scheduled_task_errors_contract.json`).
 - Scheduled background runs resolve to the `scheduled` interaction policy through trusted `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. The legacy `context.non_interactive=true` key remains accepted only for internally authenticated scheduler calls during migration; arbitrary HTTP/IM clients cannot set it.

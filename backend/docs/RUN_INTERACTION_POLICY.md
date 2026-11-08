@@ -5,6 +5,8 @@ as the single source for lead-agent tool visibility, clarification middleware
 behavior, sandbox network approval eligibility, and system-prompt guidance.
 The implementation lives in `../packages/harness/deerflow/agents/interaction_policy.py`.
 
+Interactive runs inspect available context and proceed with reversible assumptions or independent work when appropriate. Ask when essential information, consequential choices, or authorization for high-risk work is missing; a fixed clarify-plan-act sequence is not required. Clarification interrupts and trust boundaries remain unchanged.
+
 ## Modes and precedence
 
 Interactive runs may ask a human for clarification. Runs in `scheduled`,

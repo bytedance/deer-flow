@@ -22,9 +22,11 @@ What one line must contain (the payload the host already emits)
 Fields the collector must add (absent from the production payload today)
 -----------------------------------------------------------------------
 
-* ``trivial_only`` (bool) — the batch's turns were all trivial (``filter_trivial``).
-  The mandatory no-network baseline cannot be computed without it; coverage is
-  reported instead of assumed.
+* ``trivial_only`` (bool) — an external evaluation label that all turns in the
+  batch are trivial under the collector's documented criteria. DeerMem does not
+  emit this field or compute a triviality filter. The mandatory no-network
+  baseline cannot be computed without the label; coverage is reported instead
+  of assumed.
 * ``reviewed`` (bool) and optionally ``review_outcome`` (``worth_remembering`` |
   ``none_worth_remembering``) — the manual review that §5 gate 3 counts *and*
   whose verdict that gate reads: the review must confirm none of the reviewed
@@ -941,7 +943,7 @@ def build_report(
         "collector_contract": {
             "from the DeerMem extraction_callback payload": "prescreen.{mode,verdict,probability,skip_threshold,model,cached,digest,signals,message_count,batch_chars,duration_ms,fallback_reason}, success, token_usage, mutations_accepted",
             "must be added by the collector": {
-                "trivial_only": "bool - every turn in the batch was trivial (filter_trivial); the no-network baseline cannot be computed without it",
+                "trivial_only": "bool - external evaluation label that every turn is trivial under the collector's documented criteria; not emitted by DeerMem; required for the no-network baseline",
                 "reviewed": "bool - a human reviewed this skip verdict (design §5 gate 3)",
                 "review_outcome": "worth_remembering | none_worth_remembering (optional; a second ground-truth witness)",
                 "stratum": "identity | preference | correction (or a labels list); design §5 gate 2 subset",

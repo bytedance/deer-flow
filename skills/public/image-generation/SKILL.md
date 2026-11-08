@@ -53,6 +53,10 @@ Parameters:
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
 
+## Optional Templates
+
+Templates are examples for matching requests. Preserve the user's subject, characters, panel count, layout and style; do not import an example's content into unrelated images. Read only the relevant template.
+
 ## Character Generation Example
 
 User request: "Create a Tokyo street style woman character in 1990s"
