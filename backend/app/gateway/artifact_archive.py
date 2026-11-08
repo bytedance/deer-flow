@@ -204,6 +204,20 @@ def _copy_member(
         os.close(descriptor)
 
 
+def _validate_archive_entry_names(entries: Iterable[str]) -> None:
+    collision_keys = [unicodedata.normalize("NFC", entry).casefold() for entry in entries]
+    file_keys = set(collision_keys)
+    if len(collision_keys) != len(file_keys):
+        raise _reject()
+    for entry in collision_keys:
+        # A file can collide with an implicit directory after normalization.
+        parent = entry.rpartition("/")[0]
+        while parent:
+            if parent in file_keys:
+                raise _reject()
+            parent = parent.rpartition("/")[0]
+
+
 def build_artifact_archive(
     outputs_dir: Path,
     virtual_paths: Iterable[str],
@@ -242,17 +256,7 @@ def build_artifact_archive(
 
     reserved = frozenset(name.casefold() for name in {BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME, *extra_reserved_dir_names})
     members = [_member(root, path, reserved, deadline, root_components) for path in paths]
-    collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
-    file_keys = set(collision_keys)
-    if len(collision_keys) != len(file_keys):
-        raise _reject()
-    for entry in collision_keys:
-        # A file can collide with an implicit directory after normalization.
-        parent = entry.rpartition("/")[0]
-        while parent:
-            if parent in file_keys:
-                raise _reject()
-            parent = parent.rpartition("/")[0]
+    _validate_archive_entry_names(member.entry for member in members)
 
     sizes = [member.initial.st_size for member in members]
     if any(size > MAX_FILE_BYTES for size in sizes):

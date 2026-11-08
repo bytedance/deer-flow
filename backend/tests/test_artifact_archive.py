@@ -385,6 +385,27 @@ def test_archive_rejects_casefolded_entry_collisions(tmp_path, monkeypatch) -> N
     assert response.status_code == 409
 
 
+@pytest.mark.parametrize(
+    "entries",
+    [
+        ("Report", "report/slides/lesson.pptx"),
+        ("report/slides/lesson.pptx", "Report"),
+        ("Caf\u00e9", "Cafe\u0301/slides/lesson.pptx"),
+        ("Cafe\u0301/slides/lesson.pptx", "Caf\u00e9"),
+        ("week/Report", "week/report/slides/lesson.pptx"),
+        ("Report.txt", "report.txt"),
+    ],
+)
+def test_archive_entry_names_reject_portable_collisions(entries) -> None:
+    with pytest.raises(artifact_archive.ArtifactArchiveError) as exc_info:
+        artifact_archive._validate_archive_entry_names(entries)
+    assert exc_info.value.status_code == 409
+
+
+def test_archive_entry_names_accept_files_with_shared_directories() -> None:
+    artifact_archive._validate_archive_entry_names(("report/slides/lesson.pptx", "Report/notes.md"))
+
+
 @pytest.mark.parametrize("file_name,directory_name", [("Report", "report"), ("Caf\u00e9", "Cafe\u0301")])
 @pytest.mark.parametrize("directory_first", [False, True])
 def test_archive_rejects_portable_file_directory_collisions(tmp_path, monkeypatch, file_name, directory_name, directory_first) -> None:
