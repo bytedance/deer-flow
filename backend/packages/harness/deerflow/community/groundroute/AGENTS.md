@@ -25,7 +25,8 @@ would satisfy the thread assertion; the anchor records which client factory the
 provider reached for.
 
 Both tools resolve the key and `max_results` through `_resolve_tool_settings`, one
-config read per call. Do not add a second seam around that read: a wrapper with no
+config read per call. The config key and `GROUNDROUTE_API_KEY` both pass through
+`provider_credentials.resolve_api_key`. Do not add a second seam around that read: a wrapper with no
 production caller can drift from the real call path.
 
 `web_search` returns the structured `{"error": ..., "query": ...}` response; `web_fetch`

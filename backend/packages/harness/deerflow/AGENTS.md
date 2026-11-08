@@ -62,6 +62,10 @@ the SDK sentinel can hide timeouts. See `tests/test_image_search_errors.py`.
 
 Screenshot and session rules: [browser guidance](community/browser_automation/AGENTS.md).
 
+### Knowledge budgets
+
+`knowledge.sources.format_result` skips oversized hits within the first 100.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` embeds the harness without HTTP/FastAPI, sharing Gateway modules, config, data directories, and response schemas.
