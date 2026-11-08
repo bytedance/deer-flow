@@ -150,6 +150,8 @@ test("does not report a send whose attachment upload fails", async () => {
   expect(sendError).toBeInstanceOf(Error);
   expect(mocks.events).toEqual(["upload"]);
   expect(onSent).not.toHaveBeenCalled();
+  expect(result.current.thread.messages).toEqual([]);
+  expect(result.current.isUploading).toBe(false);
 });
 
 test("reports the send after its attachments upload, right before the run is submitted", async () => {
@@ -182,6 +184,12 @@ test("reports the send after its attachments upload, right before the run is sub
   });
   await flushFrames();
   expect(onSent).not.toHaveBeenCalled();
+  expect(result.current.isUploading).toBe(true);
+  expect(
+    result.current.thread.messages.some(
+      (message) => message.content === enUS.uploads.uploadingFiles,
+    ),
+  ).toBe(true);
 
   finishUpload();
   await act(async () => {
@@ -190,6 +198,22 @@ test("reports the send after its attachments upload, right before the run is sub
 
   expect(mocks.events).toEqual(["upload", "onSent", "submit"]);
   expect(onSent).toHaveBeenCalledTimes(1);
+  expect(result.current.isUploading).toBe(false);
+  // Upload completion retires only the status bubble. The human stays visible
+  // until its server echo is confirmed, even if that echo has not arrived yet.
+  expect(result.current.thread.messages).toHaveLength(1);
+  expect(result.current.thread.messages[0]).toMatchObject({
+    type: "human",
+    additional_kwargs: {
+      files: [
+        {
+          filename: "report.pdf",
+          path: "/mnt/user-data/uploads/report.pdf",
+          status: "uploaded",
+        },
+      ],
+    },
+  });
 });
 
 test("reports a text-only send before the run is submitted", async () => {
