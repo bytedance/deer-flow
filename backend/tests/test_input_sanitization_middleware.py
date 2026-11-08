@@ -756,6 +756,26 @@ class TestWrapModelCallSpecialCases:
         assert "&lt;think&gt;" in merged
         assert processed[1] == image_block
 
+    @pytest.mark.parametrize("empty_index", [0, 1, 2, 3, 4])
+    def test_empty_bare_strings_are_removed_without_mutating_original(self, empty_index):
+        mw = _make_middleware()
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        content = [image, {"type": "text", "text": "hello"}, "world", image]
+        content.insert(empty_index, "")
+        msg = HumanMessage(content=content, id="msg-1")
+        original = deepcopy(msg.content)
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[0].content == [
+            image,
+            {"type": "text", "text": f"{_USER_INPUT_BEGIN}\nhello\nworld\n{_USER_INPUT_END}"},
+            image,
+        ]
+        assert msg.content == original
+
     def test_already_wrapped_no_override(self):
         mw = _make_middleware()
         already = _check_user_content("Hello")

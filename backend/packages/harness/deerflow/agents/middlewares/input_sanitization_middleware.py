@@ -325,7 +325,9 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             if id(original_content[i]) not in text_block_ids:
                 result.append(original_content[i])
         result.extend(original_content[last + 1 :])
-        return result
+        # Empty bare strings were skipped during extraction, but are still
+        # text items rather than provider-compatible non-text blocks.
+        return [block for block in result if not (isinstance(block, str) and not block)]
 
     def _sanitize_message(self, msg: HumanMessage) -> HumanMessage | None:
         """Return a sanitized copy of *msg*, or None when nothing needs changing.
