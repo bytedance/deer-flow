@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm.attributes import flag_modified
 
+from deerflow.scheduler.schedules import pauses_unschedulable
+
 if TYPE_CHECKING:
     from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
     from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+
+logger = logging.getLogger(__name__)
 
 
 def can_project(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow) -> bool:
@@ -50,3 +55,16 @@ def account_launch(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow, run_
     # timestamp. Callers that also project a result explicitly set updated_at.
     flag_modified(task, "updated_at")
     return True
+
+
+def pause_unschedulable(task: ScheduledTaskRow, schedule_error: str | None) -> None:
+    """Pause a recurring task whose stored schedule no longer computes.
+
+    Its cursor is already cleared, so nothing would claim it again; the pause
+    and ``last_error`` say why. See ``stored_next_run_at``.
+    """
+    if not pauses_unschedulable(task.schedule_type, task.status, schedule_error):
+        return
+    logger.warning("Paused scheduled task %s: %s", task.id, schedule_error)
+    task.status = "paused"
+    task.last_error = schedule_error

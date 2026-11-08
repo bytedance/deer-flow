@@ -1,5 +1,6 @@
 """Unit tests for HarnessGuardMiddleware."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -571,6 +572,53 @@ class TestHarnessGuardMiddleware:
         assert "OSCILLATION DETECTED" in res_b2.content
         assert "between 'bash' and 'read_file'" in res_b2.content
 
+    def test_successful_result_that_ends_an_alternating_loop_is_not_rewritten(self):
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(detect_alternating_loops=True))
+        failures = [
+            ("web_fetch", "Error: upstream returned 503"),
+            ("bash", "boom\nExit Code: 1"),
+            ("web_fetch", "Error: upstream returned 503"),
+        ]
+        for index, (name, content) in enumerate(failures):
+            middleware.wrap_tool_call(
+                _make_request(name, {}, tool_call_id=f"call-{index}", thread_id="t-osc-ok", run_id="r-osc-ok"),
+                lambda r, name=name, content=content: ToolMessage(content=content, tool_call_id=r.tool_call["id"], name=name, status="error"),
+            )
+
+        payload = '{"rows": 3, "ok": true}'
+        result = middleware.wrap_tool_call(
+            _make_request("bash", {}, tool_call_id="call-ok", thread_id="t-osc-ok", run_id="r-osc-ok"),
+            lambda r: ToolMessage(content=payload, tool_call_id=r.tool_call["id"], name="bash"),
+        )
+
+        assert result.content == payload
+        assert json.loads(result.content) == {"rows": 3, "ok": True}
+        assert HARNESS_GUARD_KEY not in result.additional_kwargs
+
+    @pytest.mark.parametrize(
+        "outcomes",
+        [
+            pytest.param([True, True, False, True], id="success-before-the-failure"),
+            pytest.param([True, False, True, True], id="success-mid-window"),
+            pytest.param([True, True, False, True, True], id="window-slid-past-break"),
+        ],
+    )
+    def test_window_containing_a_success_is_not_an_oscillation(self, outcomes):
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(detect_alternating_loops=True))
+        results = []
+        for index, failed in enumerate(outcomes):
+            name = ("web_fetch", "bash")[index % 2]
+            content = f"Error: attempt {index} failed" if failed else '{"ok": true}'
+            results.append(
+                middleware.wrap_tool_call(
+                    _make_request(name, {}, tool_call_id=f"call-{index}", thread_id="t-osc-break", run_id="r-osc-break"),
+                    lambda r, name=name, content=content, failed=failed: ToolMessage(content=content, tool_call_id=r.tool_call["id"], name=name, status="error" if failed else "success"),
+                )
+            )
+
+        assert all("OSCILLATION DETECTED" not in str(result.content) for result in results)
+        assert not any((result.additional_kwargs.get(HARNESS_GUARD_KEY) or {}).get("oscillation_warning") for result in results)
+
     @pytest.mark.asyncio
     async def test_async_awrap_tool_call(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig())
@@ -618,3 +666,62 @@ class TestHarnessGuardMiddleware:
         )
         assert "[HARNESS GUARD]" in res.content
         assert "pip install torch_geometric" in res.content
+
+
+def _alternating_loop_graph(final_query_succeeds: bool):
+    """A real create_agent graph whose tools fail, alternate, then maybe recover."""
+    from _agent_e2e_helpers import FakeToolCallingModel
+    from langchain.agents import create_agent
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool
+
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    query_results = iter(["Error: database is locked", '{"rows": 3, "ok": true}' if final_query_succeeds else "Error: database is locked"])
+
+    @tool
+    def fetch_page(url: str) -> str:
+        """Fetch a page."""
+        return "Error: upstream returned 503"
+
+    @tool
+    def query_rows(sql: str) -> str:
+        """Query rows."""
+        return next(query_results)
+
+    calls = [("fetch_page", {"url": "https://example.com"}), ("query_rows", {"sql": "select 1"})] * 2
+    responses = [AIMessage(content="", tool_calls=[{"name": name, "args": args, "id": f"call-{index}", "type": "tool_call"}]) for index, (name, args) in enumerate(calls)]
+    responses.append(AIMessage(content="done"))
+    return create_agent(
+        model=FakeToolCallingModel(responses=responses),
+        tools=[fetch_page, query_rows],
+        middleware=[HarnessGuardMiddleware(HarnessGuardConfig()), ToolErrorHandlingMiddleware()],
+    )
+
+
+def _last_tool_message(state):
+    return [message for message in state["messages"] if isinstance(message, ToolMessage)][-1]
+
+
+class TestAlternatingLoopGraph:
+    @pytest.mark.asyncio
+    async def test_recovery_result_reaches_state_unchanged(self):
+        graph = _alternating_loop_graph(final_query_succeeds=True)
+        state = await graph.ainvoke({"messages": [("user", "count the rows")]}, context={"thread_id": "t-graph", "run_id": "r-graph"})
+
+        recovered = _last_tool_message(state)
+        assert recovered.name == "query_rows"
+        assert recovered.additional_kwargs[TOOL_META_KEY]["status"] == "success"
+        assert recovered.content == '{"rows": 3, "ok": true}'
+        assert json.loads(recovered.content) == {"rows": 3, "ok": True}
+        assert HARNESS_GUARD_KEY not in recovered.additional_kwargs
+
+    @pytest.mark.asyncio
+    async def test_failing_alternation_still_warns(self):
+        graph = _alternating_loop_graph(final_query_succeeds=False)
+        state = await graph.ainvoke({"messages": [("user", "count the rows")]}, context={"thread_id": "t-graph-fail", "run_id": "r-graph-fail"})
+
+        failed = _last_tool_message(state)
+        assert failed.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+        assert "OSCILLATION DETECTED" in failed.content
+        assert failed.additional_kwargs[HARNESS_GUARD_KEY]["oscillation_warning"] is True

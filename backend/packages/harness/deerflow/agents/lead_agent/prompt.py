@@ -576,12 +576,13 @@ A single subagent is justified only by material specialist or context-isolation 
         durable_batch_guidance = """
 ## Explicit durable batch mode
 
-`batch_task` is a separate execution mode for a large collection of independent,
-idempotent or read-only items. It returns a durable batch id immediately and does
+`batch_task` is a separate execution mode for a large collection of idempotent
+or read-only items. It returns a durable batch id immediately and does
 not consume the ordinary `task` per-run total. Never infer batch mode from item
 count and never emulate it by repeatedly calling `task`.
 
-- Every item must be self-contained and must not depend on another item's output.
+- Keep simultaneously runnable items independent. Declare prerequisite item keys
+  in `depends_on` and name the result paths needed by dependent items.
 - Give every item a stable unique key; retries reuse that key as idempotency identity.
 - Set total, live-window, and running concurrency separately. A high total never
   implies that all items become live or run at once.

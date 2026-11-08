@@ -68,8 +68,8 @@ async def test_web_fetch_uses_own_credentials(monkeypatch, search_provider, fetc
         mock_config.return_value.get_tool_config.side_effect = configs.get
         await web_fetch_tool.ainvoke({"url": "https://example.com/report"})
 
-    # web_fetch 用自己的 api_key 构造 client；配置缺省时传 None，交由 SDK 读取环境变量
-    mock_client_cls.assert_called_once_with(api_key=fetch_key)
+    # web_fetch 用自己的 api_key 构造 client；配置缺省时回退到去除首尾空白后的 TAVILY_API_KEY
+    mock_client_cls.assert_called_once_with(api_key=fetch_key or "env-key")
     mock_client_cls.return_value.extract.assert_called_once_with(["https://example.com/report"])
 
 
@@ -90,7 +90,7 @@ async def test_web_search_preserves_own_credentials(monkeypatch, search_key) -> 
         await web_search_tool.ainvoke({"query": "documentation"})
 
     # web_search 用自己的 api_key（search_key）构造 client，而不是 web_fetch 的 fetch-key
-    mock_client_cls.assert_called_once_with(api_key=search_key)
+    mock_client_cls.assert_called_once_with(api_key=search_key or "env-key")
     mock_client_cls.return_value.search.assert_called_once_with("documentation", max_results=5)
 
 
