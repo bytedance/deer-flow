@@ -58,11 +58,12 @@ _STDIN_SCRIPT_FLAGS = r"(?:--?[-\w]*\s+){0,4}"
 # between the assignment and the substitution, so value position stays allowed.
 # The repetition is bounded to keep the alternation from backtracking on long input.
 _COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
+_HOME_DIRECTORY_REFERENCE = r"(?:~|\$HOME|\$\{HOME\})"
 
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
-    re.compile(r"rm\s+-[^\s]*r[^\s]*\s+(/\*?|~/?\*?|/home\b|/root\b)\s*$"),
+    re.compile(rf"rm\s+-[^\s]*r[^\s]*\s+(/\*?|[\"']?{_HOME_DIRECTORY_REFERENCE}/?\*?[\"']?|/home\b|/root\b)\s*$"),
     re.compile(r"dd\s+if="),
     re.compile(r"mkfs"),
     re.compile(r"cat\s+/etc/shadow"),
@@ -85,7 +86,7 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- overwrite system binaries ---
     re.compile(r">+\s*(/usr/bin/|/bin/|/sbin/)"),
     # --- overwrite shell startup files ---
-    re.compile(r">+\s*~/?\.(bashrc|profile|zshrc|bash_profile)"),
+    re.compile(rf">+\s*[\"']?{_HOME_DIRECTORY_REFERENCE}/?\.(bashrc|profile|zshrc|bash_profile)[\"']?"),
     # --- process environment leakage ---
     re.compile(r"/proc/[^/]+/environ"),
     # --- dynamic linker hijack (one-step escalation) ---
