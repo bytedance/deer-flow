@@ -1765,6 +1765,15 @@ See [dashboard behavior and design](frontend/docs/token-usage-dashboard.md).
 
 ### Workspace
 
+Use **Search** in the sidebar or **⌘K / Ctrl+K** to find conversation titles and
+visible user/assistant message text, including code. Filter by conversations or
+messages and include archived chats. Results show matching excerpts; selecting a
+message opens its historical context, with earlier/later navigation and a **Return
+to latest messages** button. Type `>` for new chat, settings and keyboard commands.
+Title search is built in. Enable message search with the packaged
+[workspace search extension](examples/deerflow-extension-workspace-search/README.md).
+Its first search backfills existing history and shows progress while indexing.
+
 The workspace keeps a collapsed icon sidebar visible on narrow screens. Its
 toggle opens the full navigation drawer; closing the drawer returns to the icon
 bar without changing your saved desktop sidebar preference. Navigating to another

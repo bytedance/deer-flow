@@ -12,13 +12,13 @@ Dependencies: `@langchain/langgraph-sdk` ^1.5.3, `@langchain/core` ^1.1.15,
 `@tanstack/react-query` ^5.90.17. Registry UI: Shadcn, MagicUI, React Bits,
 Vercel AI SDK (see Code Style).
 
-`pnpm-workspace.yaml` pins vulnerable `@xmldom/xmldom` 0.9.x to patched
-0.9.12 (GHSA-965w-775f-mr7g) and Nextra 4.6.1's Zod dependencies to 4.3.6
-until upstream fixes missing-`children` validation. App schemas use Zod 4.6.6.
-Remove each override after its upstream fix; refresh the lockfile and test
-docs builds after changes.
+`pnpm-workspace.yaml` pins `@xmldom/xmldom` 0.9.12 (GHSA-965w-775f-mr7g)
+and Nextra 4.6.1's Zod 4.3.6 (missing-`children` validation); app Zod is 4.6.6.
+Remove overrides after upstream fixes; refresh the lock and test docs builds.
 
 ## Commands
+
+Search's `/messages/around` windows must stay separate from live stream history.
 
 Run from `frontend/`; host pnpm calls use `../scripts/pnpm.py`.
 

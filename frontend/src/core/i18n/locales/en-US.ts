@@ -104,6 +104,11 @@ export const enUS: Translations = {
         description:
           "Write long reports section by section and assemble them into a downloadable Markdown document.",
       },
+      workspaceSearch: {
+        title: "Conversation search",
+        description:
+          "Search historical message text and jump to the matching conversation turn.",
+      },
       agentTeams: {
         title: "Agent teams",
         description:
@@ -1991,6 +1996,39 @@ export const enUS: Translations = {
   },
 
   // Shortcuts
+  workspaceSearch: {
+    title: "Search conversations",
+    description: "Find conversations and messages, or run a command.",
+    placeholder: "Search titles and messages…",
+    open: "Search",
+    all: "All",
+    threads: "Conversations",
+    messages: "Messages",
+    includeArchived: "Include archived",
+    archived: "Archived",
+    recent: "Recent conversations",
+    searching: "Searching…",
+    indexing: "Preparing message search… Results will appear here shortly.",
+    unavailable:
+      "Message search is unavailable on this installation. You can search conversation titles.",
+    unsupported: "Search is unavailable in this view.",
+    error: "Search could not finish. Try again.",
+    empty: "No matches. Try another keyword or include archived conversations.",
+    more: "Show more results",
+    retry: "Try again",
+    hint: "↑ ↓ to navigate · Enter to open · > for commands",
+    user: "You",
+    assistant: "Assistant",
+    context: "Message context",
+    returnToLatest: "Return to latest messages",
+    loadingContext: "Loading message context…",
+    messageUnavailable:
+      "This message is no longer available. Return to the conversation to view its current history.",
+    matchedMessage: "Located message",
+    earlier: "Earlier messages",
+    later: "Later messages",
+    untitled: "Untitled conversation",
+  },
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",

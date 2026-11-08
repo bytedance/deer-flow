@@ -1,5 +1,14 @@
 ### Python Extension System (Runtime and Distribution)
 
+`registry.workspace_search(provider)` (extension-api 0.2.12) admits one async
+message search provider, with attribution/rollback matching other contributions.
+Gateway owns `/api/search`, title queries and `/api/threads/{id}/messages/around`.
+`GatewaySearchCorpus` projects only owner-visible messages through the shared
+conversation reader; the host rechecks each index candidate before returning text.
+`examples/deerflow-extension-workspace-search` owns the rebuildable SQL/FTS index
+and its service lifecycle. Declare `table_prefix: extension_workspace_search_`
+so host migrations exclude its tables. Tests: `tests/test_workspace_search.py`.
+
 `registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
 operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
 validates advertised async operations, attributes entries and rolls them back

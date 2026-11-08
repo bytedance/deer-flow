@@ -511,6 +511,8 @@ class ThreadCreateRequest(BaseModel):
 class ThreadSearchRequest(BaseModel):
     """Request body for searching threads."""
 
+    query: str | None = Field(default=None, max_length=256, description="Literal case-insensitive title substring")
+
     archived: bool | None = Field(default=None, strict=True, description="Archive filter; omitted includes all, false includes legacy unarchived threads")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata filter (exact match)")
     project_id: str | None = Field(default=None, description="Filter by project; explicit null = unassigned threads; omit key for all")
@@ -1314,6 +1316,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
     try:
         rows = await repo.search(
             metadata=body.metadata or None,
+            **({"query": body.query} if body.query is not None else {}),
             status=body.status,
             **({"archived": body.archived} if body.archived is not None else {}),
             project_id=project_filter,
