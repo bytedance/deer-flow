@@ -151,13 +151,18 @@ async def test_mark_approval_answered_has_single_cross_manager_winner():
     both_answer_attempts = asyncio.Event()
     attempts = 0
 
-    async def synchronized_answer(run_id, *, metadata, expected_metadata=None):
+    async def synchronized_answer(run_id, *, metadata, answered_updated_at, expected_request_id=None):
         nonlocal attempts
         attempts += 1
         if attempts == 2:
             both_answer_attempts.set()
         await asyncio.wait_for(both_answer_attempts.wait(), 1)
-        return await original_answer(run_id, metadata=metadata, expected_metadata=expected_metadata)
+        return await original_answer(
+            run_id,
+            metadata=metadata,
+            answered_updated_at=answered_updated_at,
+            expected_request_id=expected_request_id,
+        )
 
     store.answer_approval = synchronized_answer
 
@@ -212,6 +217,23 @@ async def test_stale_response_cannot_consume_newer_pause_across_managers():
     restored = await store.get(second.run_id)
     assert restored["metadata"] == metadata("approval-2")
     assert await peer.restore_approval_answer(second_answer) is False
+
+
+@pytest.mark.anyio
+async def test_restore_approval_answer_rejects_stale_committed_version():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    paused = await manager.create_or_reject("thread", metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True})
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+
+    answer = await manager.mark_approval_answered("thread")
+    assert answer is not None
+    committed = await store.get(paused.run_id)
+    assert answer.answered_updated_at == committed["updated_at"]
+
+    await store.put(paused.run_id, thread_id="thread", status="success", metadata={"retained": True})
+    assert await manager.restore_approval_answer(answer) is False
+    assert (await store.get(paused.run_id))["status"] == "success"
 
 
 @pytest.mark.anyio

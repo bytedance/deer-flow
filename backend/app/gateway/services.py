@@ -2833,6 +2833,11 @@ async def start_run(
 
                 async def admit_run() -> RunRecord:
                     try:
+                        if admitted_run is None and not (command and command.get("resume") is not None):
+                            # Validation above is intentionally early, but a pause can
+                            # appear while this request prepares its admission. Recheck
+                            # under the thread lock so a fresh input cannot replace it.
+                            await reject_new_run_when_approval_pending(request, thread_id)
                         return await run_mgr.create_or_reject(
                             thread_id,
                             body.assistant_id,
@@ -2911,7 +2916,7 @@ async def start_run(
                 answered_approval = None
                 try:
                     if command and command.get("resume") is not None:
-                        from app.gateway.hitl_approval import _all_reject, _responses_of, mark_approval_answered
+                        from app.gateway.hitl_approval import _all_reject, _responses_of, current_approval_request_ids, mark_approval_answered
 
                         responses = _responses_of(command)
                         answered_approval = await mark_approval_answered(
@@ -2919,11 +2924,22 @@ async def start_run(
                             thread_id,
                             expected_request_ids=(validated_approval_request_ids if responses is not None else None),
                         )
-                        if answered_approval is None and responses is not None and not _all_reject(responses):
-                            # Competing or stale approvals fail closed. All-reject
-                            # remains safe after a crash consumed the run row but
-                            # left the checkpoint pause unconsumed.
-                            raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                        if answered_approval is None and responses is not None:
+                            if not _all_reject(responses):
+                                # Competing or stale approvals fail closed.
+                                raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                            # A crashed attempt may have consumed the run row while
+                            # leaving the same checkpoint pause live. Only that exact
+                            # pause may use checkpoint-only recovery; a stale reject
+                            # must never dismiss a newer approval.
+                            current_request_ids = await current_approval_request_ids(
+                                request,
+                                thread_id,
+                                accessor=accessor,
+                                read_config=read_config,
+                            )
+                            if current_request_ids != validated_approval_request_ids:
+                                raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
                     # await-free so cancellation cannot strand a pending row.

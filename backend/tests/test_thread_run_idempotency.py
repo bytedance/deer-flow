@@ -1490,6 +1490,7 @@ async def test_all_reject_recovers_checkpoint_pause_after_resume_crash(_stub_app
     metadata = {
         "hitl_approval": {
             "kind": "hitl_approval",
+            "request_id": "approval-1",
             "pending_tool_call_ids": ["call-1"],
             "actions": [{"tool_call_id": "call-1", "request_id": "approval-1"}],
         }
@@ -1504,6 +1505,7 @@ async def test_all_reject_recovers_checkpoint_pause_after_resume_crash(_stub_app
     with (
         patch("app.gateway.services.resolve_agent_factory", return_value=object()),
         patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(return_value={"call-1": "approval-1"})),
+        patch("app.gateway.hitl_approval.current_approval_request_ids", new=AsyncMock(return_value={"call-1": "approval-1"})),
         patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
     ):
         retried = await start_run(body, "thread-1", request)
@@ -1537,12 +1539,17 @@ async def test_resume_persistence_failure_allows_same_key_retry_to_resume(_stub_
     original_answer = store.answer_approval
     paused_writes = 0
 
-    async def fail_paused_write(run_id, *, metadata, expected_metadata=None):
+    async def fail_paused_write(run_id, *, metadata, answered_updated_at, expected_request_id=None):
         nonlocal paused_writes
         if run_id == paused.run_id:
             paused_writes += 1
             raise sqlite3.OperationalError("database is locked")
-        return await original_answer(run_id, metadata=metadata, expected_metadata=expected_metadata)
+        return await original_answer(
+            run_id,
+            metadata=metadata,
+            answered_updated_at=answered_updated_at,
+            expected_request_id=expected_request_id,
+        )
 
     store.answer_approval = fail_paused_write
     body = RunCreateRequest(command={"resume": {"answer": "approve"}})

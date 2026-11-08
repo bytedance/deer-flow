@@ -189,13 +189,49 @@ async def find_pending_interrupts(
     return {}
 
 
+def _approval_request_ids(payload: dict[str, Any]) -> dict[str, str]:
+    """Extract and validate the action identity binding for one HITL pause."""
+    expected_ids = payload.get("pending_tool_call_ids")
+    if not isinstance(expected_ids, list) or any(not isinstance(call_id, str) for call_id in expected_ids) or len(set(expected_ids)) != len(expected_ids):
+        raise _error(422, "invalid_approval_response", "pending approval has invalid tool_call_ids")
+    expected_set = set(expected_ids)
+    actions = payload.get("actions")
+    if not isinstance(actions, list):
+        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+    expected_request_ids: dict[str, str] = {}
+    for action in actions:
+        if not isinstance(action, Mapping):
+            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+        call_id = action.get("tool_call_id")
+        request_id = action.get("request_id")
+        if not isinstance(call_id, str) or call_id not in expected_set or call_id in expected_request_ids or not isinstance(request_id, str) or not request_id:
+            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+        expected_request_ids[call_id] = request_id
+    if set(expected_request_ids) != expected_set:
+        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
+    return expected_request_ids
+
+
+async def current_approval_request_ids(
+    request: Any,
+    thread_id: str,
+    *,
+    accessor: Any,
+    read_config: dict[str, Any],
+) -> dict[str, str] | None:
+    """Read the current live pause's identity for checkpoint-only recovery."""
+    pending = await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=read_config)
+    payloads = hitl_approval_payloads(pending)
+    return _approval_request_ids(payloads[0]) if payloads else None
+
+
 async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> dict[str, str] | None:
     """Validate a command.resume against the current pause, or raise 409/422.
 
     Static breakpoints (next non-empty, no approval payload) pass through
-    unchanged. An all-reject response is always allowed: it can never execute a
-    tool, and it is the only way out when the feature was disabled or the
-    payload was lost (otherwise the thread would deadlock).
+    unchanged. All-reject remains the escape hatch for the validated pause when
+    the feature is disabled or the payload was lost; attachment later verifies
+    that checkpoint-only recovery still targets that same pause.
     """
     snapshot = await accessor.aget(read_config)
     responses = _responses_of(getattr(body, "command", None))
@@ -213,24 +249,9 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
 
     if responses is None:
         raise _error(422, "invalid_approval_response", "resume must carry a 'responses' list for hitl_approval")
-    expected_ids = payloads[0].get("pending_tool_call_ids")
-    if not isinstance(expected_ids, list) or any(not isinstance(call_id, str) for call_id in expected_ids) or len(set(expected_ids)) != len(expected_ids):
-        raise _error(422, "invalid_approval_response", "pending approval has invalid tool_call_ids")
+    expected_request_ids = _approval_request_ids(payloads[0])
+    expected_ids = list(expected_request_ids)
     expected_set = set(expected_ids)
-    actions = payloads[0].get("actions")
-    if not isinstance(actions, list):
-        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
-    expected_request_ids: dict[str, str] = {}
-    for action in actions:
-        if not isinstance(action, Mapping):
-            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
-        call_id = action.get("tool_call_id")
-        request_id = action.get("request_id")
-        if not isinstance(call_id, str) or call_id not in expected_set or call_id in expected_request_ids or not isinstance(request_id, str) or not request_id:
-            raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
-        expected_request_ids[call_id] = request_id
-    if set(expected_request_ids) != expected_set:
-        raise _error(422, "invalid_approval_response", "pending approval has invalid actions")
     if len(responses) != len(expected_ids):
         raise _error(422, "invalid_approval_response", f"expected {len(expected_ids)} responses, got {len(responses)}")
     seen_ids: set[str] = set()

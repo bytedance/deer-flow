@@ -264,6 +264,14 @@ def _approval_request_ids(metadata: Mapping[str, Any]) -> dict[str, str] | None:
     return request_ids
 
 
+def _approval_request_id(metadata: Mapping[str, Any]) -> str | None:
+    payload = metadata.get("hitl_approval")
+    if not isinstance(payload, Mapping):
+        return None
+    request_id = payload.get("request_id")
+    return request_id if isinstance(request_id, str) else None
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -344,6 +352,7 @@ class ApprovalAnswerHandle:
     run_id: str
     original_metadata: dict[str, Any]
     answered_metadata: dict[str, Any]
+    answered_updated_at: str
     record: RunRecord = field(repr=False, compare=False)
     previous_updated_at: str = field(repr=False, compare=False)
     previous_terminal_proof: TerminalCommitProof | None = field(repr=False, compare=False)
@@ -560,25 +569,39 @@ class RunManager:
                 delay = min(policy.max_delay, delay * policy.backoff_factor if delay else policy.initial_delay)
                 attempt += 1
 
-    async def _persist_snapshot_to_store(self, run_id: str, payload: dict[str, Any]) -> bool:
+    async def _persist_snapshot_to_store(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        *,
+        on_persisted: Callable[[dict[str, Any] | None], None] | None = None,
+    ) -> bool:
         """Best-effort persist a previously captured run snapshot."""
         if self._store is None:
             return True
         try:
-            await self._call_store_with_retry(
+            admitted = await self._call_store_with_retry(
                 "put",
                 run_id,
                 lambda: self._store.put(run_id, **payload),
             )
+            if on_persisted is not None:
+                on_persisted(admitted)
             return True
         except Exception:
             logger.warning("Failed to persist run %s to store", run_id, exc_info=True)
             return False
 
-    async def _persist_snapshot_with_reconciliation(self, run_id: str, payload: dict[str, Any]) -> bool:
+    async def _persist_snapshot_with_reconciliation(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        *,
+        on_persisted: Callable[[dict[str, Any] | None], None] | None = None,
+    ) -> bool:
         """Persist a snapshot, repairing it if the live record advances during store I/O."""
         while True:
-            if not await self._persist_snapshot_to_store(run_id, payload):
+            if not await self._persist_snapshot_to_store(run_id, payload, on_persisted=on_persisted):
                 return False
             async with self._lock:
                 record = self._runs.get(run_id)
@@ -1566,6 +1589,9 @@ class RunManager:
 
         previous_status = record.status
         previous_metadata = copy.deepcopy(record.metadata or {})
+        expected_request_id = _approval_request_id(previous_metadata) if expected_request_ids is not None else None
+        if expected_request_ids is not None and expected_request_id is None:
+            return None
         previous_updated_at = record.updated_at
         previous_terminal_proof = record.terminal_commit_proof
         previous_terminal_revision = record.terminal_status_revision
@@ -1579,7 +1605,7 @@ class RunManager:
                 current = self._runs.get(record.run_id)
                 if current is not record or current.status != RunStatus.waiting_for_input:
                     return None
-            if expected_request_ids is not None and _approval_request_ids(record.metadata) != expected_request_ids:
+            if expected_request_ids is not None and (_approval_request_ids(record.metadata) != expected_request_ids or _approval_request_id(record.metadata) != expected_request_id):
                 return None
             metadata = dict(previous_metadata)
             metadata.pop("hitl_approval", None)
@@ -1612,6 +1638,8 @@ class RunManager:
                     record.terminal_status_persisted = previous_terminal_persisted
                     record.terminal_commit_pending = previous_terminal_commit_pending
 
+        persisted_snapshots: list[dict[str, Any] | None] = []
+        answered_updated_at = record.updated_at
         try:
             if self._store is not None:
                 answered = await self._call_store_with_retry(
@@ -1620,13 +1648,22 @@ class RunManager:
                     lambda: self._store.answer_approval(
                         record.run_id,
                         metadata=metadata,
-                        expected_metadata=previous_metadata if expected_request_ids is not None else None,
+                        answered_updated_at=record.updated_at,
+                        expected_request_id=expected_request_id,
                     ),
                 )
                 if not answered:
                     await restore_local_record()
                     return None
-            persisted = True if record.store_only else await self._persist_snapshot_with_reconciliation(record.run_id, payload)
+            persisted = (
+                True
+                if record.store_only
+                else await self._persist_snapshot_with_reconciliation(
+                    record.run_id,
+                    payload,
+                    on_persisted=persisted_snapshots.append,
+                )
+            )
         except Exception as exc:
             await restore_local_record()
             raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered") from exc
@@ -1640,10 +1677,13 @@ class RunManager:
             async with self._lock:
                 if self._runs.get(record.run_id) is record and record.terminal_status_revision == staged_revision and record.terminal_commit_proof == outcome:
                     record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
+        if persisted_snapshots and persisted_snapshots[-1] is not None:
+            answered_updated_at = persisted_snapshots[-1]["updated_at"]
         return ApprovalAnswerHandle(
             run_id=record.run_id,
             original_metadata=previous_metadata,
             answered_metadata=copy.deepcopy(metadata),
+            answered_updated_at=answered_updated_at,
             record=record,
             previous_updated_at=previous_updated_at,
             previous_terminal_proof=previous_terminal_proof,
@@ -1675,7 +1715,7 @@ class RunManager:
                     lambda: self._store.restore_approval(
                         record.run_id,
                         metadata=answer.original_metadata,
-                        expected_metadata=answer.answered_metadata,
+                        expected_updated_at=answer.answered_updated_at,
                     ),
                 )
             except Exception as exc:

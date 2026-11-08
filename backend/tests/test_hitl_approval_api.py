@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -220,6 +223,69 @@ def test_approval_pause_then_approve_executes(isolated_app):
         assert duplicate.json()["detail"]["code"] == "no_pending_approval"
 
 
+def test_fresh_run_rechecks_pending_approval_at_durable_admission(isolated_app):
+    """A pause created after the early guard still blocks fresh admission."""
+    _enable_approval()
+    model_started = threading.Event()
+    release_model = threading.Event()
+    admission_started = threading.Event()
+    release_admission = threading.Event()
+
+    class _GatedModel(_StateAwareModel):
+        def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+            model_started.set()
+            if not release_model.wait(20):
+                raise TimeoutError("test did not release the model")
+            return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    def _gated_model(*args, **kwargs):
+        return _GatedModel(responses=[])
+
+    from app.gateway import services
+
+    original_resolve = services.resolve_project_context
+
+    async def _gate_fresh_admission(*args, **kwargs):
+        if model_started.is_set() and not admission_started.is_set():
+            admission_started.set()
+            if not await asyncio.to_thread(release_admission.wait, 20):
+                raise TimeoutError("test did not release fresh admission")
+        return await original_resolve(*args, **kwargs)
+
+    with (
+        patch(_MODEL_PATCH, new=_gated_model),
+        patch("app.gateway.services.resolve_project_context", new=_gate_fresh_admission),
+        TestClient(isolated_app) as client,
+    ):
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
+        assert initial.status_code == 200, initial.text
+        assert model_started.wait(20)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fresh = pool.submit(_run, client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "replace"}]}))
+            try:
+                # The fresh request has passed its early check but not durable
+                # admission. Only now let the other run expose its pause.
+                assert admission_started.wait(20)
+                release_model.set()
+                _wait_for_approval(client, tid)
+                release_admission.set()
+                conflict = fresh.result(timeout=20)
+            finally:
+                release_model.set()
+                release_admission.set()
+
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["detail"]["code"] == "approval_pending"
+        assert _wait_run_status(client, tid, initial.json()["run_id"], "waiting_for_input")["status"] == "waiting_for_input"
+
+        cleanup = _resume(client, csrf, tid, "reject")
+        assert cleanup.status_code == 200, cleanup.text
+        _wait_run_terminal(client, tid, cleanup.json()["run_id"])
+
+
 def test_approval_reject_returns_reason_without_execution(isolated_app):
     _enable_approval()
     with patch(_MODEL_PATCH, new=_fake_model), TestClient(isolated_app) as client:
@@ -400,6 +466,63 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert len(tool_messages) == 2
         assert all(message.get("status") == "error" for message in tool_messages)
         assert "OK" not in [message.get("content") for message in tool_messages]
+
+
+def test_stale_all_reject_cannot_dismiss_newer_pause(isolated_app):
+    """Checkpoint-only recovery is limited to the pause that was validated."""
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_two_step_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write twice"}]}))
+        assert initial.status_code == 200, initial.text
+        _wait_for_approval(client, tid)
+        first_request_id = _approval_request_id(client, tid, "call_hitl_1")
+
+        reject_validated = threading.Event()
+        release_reject = threading.Event()
+        from app.gateway import services
+
+        original_resolve = services.resolve_project_context
+
+        async def _queue_reject_before_admission(*args, **kwargs):
+            if not reject_validated.is_set():
+                # resolve_project_context runs after resume validation but before
+                # the per-thread admission lock, so P1 can still be approved.
+                reject_validated.set()
+                if not await asyncio.to_thread(release_reject.wait, 20):
+                    raise TimeoutError("test did not release stale rejection")
+            return await original_resolve(*args, **kwargs)
+
+        with (
+            patch("app.gateway.services.resolve_project_context", new=_queue_reject_before_admission),
+            ThreadPoolExecutor(max_workers=1) as pool,
+        ):
+            stale_reject = pool.submit(_resume, client, csrf, tid, "reject", tool_call_id="call_hitl_1", request_id=first_request_id)
+            try:
+                assert reject_validated.wait(20)
+                approved = _resume(client, csrf, tid, "approve", request_id=first_request_id)
+                assert approved.status_code == 200, approved.text
+                second_run_id = approved.json()["run_id"]
+                assert _wait_run_status(client, tid, second_run_id, "waiting_for_input")["status"] == "waiting_for_input"
+                second_request_id = _approval_request_id(client, tid, "call_hitl_2")
+                assert second_request_id != first_request_id
+
+                release_reject.set()
+                conflict = stale_reject.result(timeout=20)
+            finally:
+                release_reject.set()
+
+        assert conflict.status_code == 409, conflict.text
+        assert conflict.json()["detail"]["code"] == "no_pending_approval"
+        assert client.get(f"/api/threads/{tid}/runs/{second_run_id}").json()["status"] == "waiting_for_input"
+        state = _wait_for_approval(client, tid)
+        payloads = [item for group in state["interrupts"].values() for item in group]
+        assert payloads[0]["value"]["pending_tool_call_ids"] == ["call_hitl_2"]
+
+        cleanup = _resume(client, csrf, tid, "reject", tool_call_id="call_hitl_2", request_id=second_request_id)
+        assert cleanup.status_code == 200, cleanup.text
+        _wait_run_terminal(client, tid, cleanup.json()["run_id"])
 
 
 @pytest.mark.asyncio
