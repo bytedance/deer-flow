@@ -28,6 +28,7 @@ class _BotAPI(BaseRequest):
         self.always_limited = False
         self.retry_after = 30
         self.transient_failures = 0
+        self.retry_hints = None
 
     @property
     def read_timeout(self):
@@ -50,6 +51,9 @@ class _BotAPI(BaseRequest):
         if self.transient_failures:
             self.transient_failures -= 1
             return 500, json.dumps({"ok": False, "error_code": 500, "description": "Internal Server Error"}).encode()
+        if self.retry_hints:
+            remaining = self.retry_hints.pop(0)
+            return 429, json.dumps({"ok": False, "error_code": 429, "description": "Too Many Requests", "parameters": {"retry_after": remaining}}).encode()
         if self.limit_after is not None and self.blocked_until is None and len(self.delivered) >= self.limit_after:
             self.blocked_until = self.now + 30
         if self.always_limited or (self.blocked_until is not None and self.now < self.blocked_until):
@@ -84,6 +88,22 @@ async def delivery(monkeypatch):
 
 def _reply(text="Complete report", **kwargs):
     return OutboundMessage(channel_name="telegram", chat_id="12345", thread_id="offline-thread", text=text, **kwargs)
+
+
+class _OtherChannel(base_module.Channel):
+    """Stand-in for a non-Telegram provider that shares ``_send_with_retry``."""
+
+    def __init__(self, bus: MessageBus) -> None:
+        super().__init__(name="other", bus=bus, config={})
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def send(self, msg: OutboundMessage) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -215,3 +235,39 @@ async def test_network_errors_keep_exponential_backoff(delivery):
     assert api.sleeps == [1, 2]
     assert api.delivered == ["Complete report"]
     assert len(api.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_each_attempt_uses_that_response_hint(delivery):
+    channel, api = delivery
+    api.retry_hints = [5, 20]
+
+    await channel.send(_reply())
+
+    assert api.sleeps == [5, 20]
+    assert api.delivered == ["Complete report"]
+    assert len(api.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_other_channels_keep_ignoring_retry_after(monkeypatch):
+    sleeps: list[float] = []
+
+    async def track_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(base_module.asyncio, "sleep", track_sleep)
+    channel = _OtherChannel(MessageBus())
+    attempts = {"n": 0}
+
+    async def flaky():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RetryAfter(retry_after=50)
+        return "sent"
+
+    result = await channel._send_with_retry(flaky, max_retries=3)
+
+    assert result == "sent"
+    assert attempts["n"] == 3
+    assert sleeps == [1, 2]
