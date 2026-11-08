@@ -267,14 +267,20 @@ class RunStore(abc.ABC):
         """
         pass
 
-    async def answer_approval(self, run_id: str, *, metadata: dict[str, Any]) -> bool:
+    async def answer_approval(self, run_id: str, *, metadata: dict[str, Any], expected_metadata: dict[str, Any] | None = None) -> bool:
         """Atomically answer one ``waiting_for_input`` run.
 
         Implementations must condition the write on the row still being paused,
         remove the consumed approval through *metadata*, and return ``True`` only
-        for the single winning transition. Legacy stores fail closed.
+        for the single winning transition. When supplied, *expected_metadata*
+        fences the transition to the exact validated pause snapshot. Legacy
+        stores fail closed.
         """
         raise NotImplementedError("Store must implement atomic approval answering")
+
+    async def restore_approval(self, run_id: str, *, metadata: dict[str, Any], expected_metadata: dict[str, Any]) -> bool:
+        """Conditionally restore an answered run to its exact prior pause."""
+        raise NotImplementedError("Store must implement conditional approval restoration")
 
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:

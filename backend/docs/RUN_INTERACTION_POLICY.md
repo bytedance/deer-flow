@@ -45,6 +45,12 @@ checkpoint. Scheduled, webhook, autonomous, IM, extension, and MCP notification
 runs follow `hitl_approval.non_interactive`. Subagents and graphs without resume
 support always fail closed, including when that setting is `allow`.
 
+Resume consumption is a store-level compare-and-swap bound to the validated
+action `request_id` mapping; the middleware recomputes those IDs from the live
+AI message before applying any decision. If worker attachment fails after
+consumption, the Gateway conditionally restores that exact answered run to
+`waiting_for_input` so a valid response or all-reject can retry safely.
+
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
 artifact delivery checks, and batch continuation cancellation must not treat a
 pending approval as a completed source run. Pending approvals do not expire and

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
@@ -16,6 +16,9 @@ from app.gateway.checkpoint_lineage import hitl_approval_payloads
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from deerflow.runtime.runs.manager import ApprovalAnswerHandle
 
 
 def _error(status: int, code: str, message: str) -> HTTPException:
@@ -82,8 +85,8 @@ async def has_waiting_for_input_run(request: Any, thread_id: str) -> bool:
     return any(run.get("status") == "waiting_for_input" for run in runs)
 
 
-async def mark_approval_answered(request: Any, thread_id: str) -> bool:
-    """Mark the paused run as answered so a duplicate resume is rejected."""
+async def mark_approval_answered(request: Any, thread_id: str, *, expected_request_ids: dict[str, str] | None = None) -> ApprovalAnswerHandle | None:
+    """Mark the validated paused run as answered and return its recovery handle."""
     from app.gateway.deps import get_run_manager, get_run_store
 
     try:
@@ -99,9 +102,9 @@ async def mark_approval_answered(request: Any, thread_id: str) -> bool:
             run_manager = RunManager(store=get_run_store(request))
         except (HTTPException, AttributeError) as store_exc:
             if isinstance(store_exc, AttributeError) or store_exc.status_code == 503:
-                return False
+                return None
             raise
-    return await run_manager.mark_approval_answered(thread_id)
+    return await run_manager.mark_approval_answered(thread_id, expected_request_ids=expected_request_ids)
 
 
 async def _interrupt_from_checkpoint_history(accessor: Any, read_config: dict[str, Any], payload: dict[str, Any]) -> tuple[str, Any] | None:
@@ -186,7 +189,7 @@ async def find_pending_interrupts(
     return {}
 
 
-async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> None:
+async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> dict[str, str] | None:
     """Validate a command.resume against the current pause, or raise 409/422.
 
     Static breakpoints (next non-empty, no approval payload) pass through
@@ -206,7 +209,7 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
         raise _error(409, "no_pending_approval", "No resumable pause exists for this thread")
 
     if not payloads:
-        return
+        return None
 
     if responses is None:
         raise _error(422, "invalid_approval_response", "resume must carry a 'responses' list for hitl_approval")
@@ -246,7 +249,7 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
             raise _error(422, "invalid_approval_response", "unsupported option_id; expected 'approve' or 'reject'")
 
     if all_reject:
-        return
+        return expected_request_ids
 
     if not enabled:
         raise _error(409, "hitl_approval_disabled", "hitl_approval is currently disabled; resume with all-reject to clear the pause")
@@ -257,6 +260,7 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
         requested_checkpoint_id = body_checkpoint.get("checkpoint_id")
     if requested_checkpoint_id and head_checkpoint_id and str(requested_checkpoint_id) != str(head_checkpoint_id):
         raise _error(422, "checkpoint_not_head", "A resume must target the current head checkpoint, never an older pause checkpoint")
+    return expected_request_ids
 
 
 async def reject_new_run_when_approval_pending(

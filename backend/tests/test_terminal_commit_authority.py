@@ -125,7 +125,7 @@ async def test_mark_approval_answered_retries_and_updates_memory_and_store():
         return await original_put(run_id, **kwargs)
 
     store.put = fail_once
-    assert await manager.mark_approval_answered("thread") is True
+    assert await manager.mark_approval_answered("thread") is not None
 
     assert attempts == 2
     assert paused.status == RunStatus.success
@@ -151,13 +151,13 @@ async def test_mark_approval_answered_has_single_cross_manager_winner():
     both_answer_attempts = asyncio.Event()
     attempts = 0
 
-    async def synchronized_answer(run_id, *, metadata):
+    async def synchronized_answer(run_id, *, metadata, expected_metadata=None):
         nonlocal attempts
         attempts += 1
         if attempts == 2:
             both_answer_attempts.set()
         await asyncio.wait_for(both_answer_attempts.wait(), 1)
-        return await original_answer(run_id, metadata=metadata)
+        return await original_answer(run_id, metadata=metadata, expected_metadata=expected_metadata)
 
     store.answer_approval = synchronized_answer
 
@@ -166,10 +166,52 @@ async def test_mark_approval_answered_has_single_cross_manager_winner():
         second.mark_approval_answered("thread"),
     )
 
-    assert sorted(results) == [False, True]
+    assert sorted(result is not None for result in results) == [False, True]
     answered = await store.get(paused.run_id)
     assert answered["status"] == "success"
     assert answered["metadata"] == {"retained": True}
+
+
+@pytest.mark.anyio
+async def test_stale_response_cannot_consume_newer_pause_across_managers():
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+
+    def metadata(request_id):
+        return {
+            "hitl_approval": {
+                "kind": "hitl_approval",
+                "request_id": request_id,
+                "pending_tool_call_ids": ["call-1"],
+                "actions": [{"tool_call_id": "call-1", "request_id": request_id}],
+            },
+            "retained": True,
+        }
+
+    first = await owner.create_or_reject("thread", metadata=metadata("approval-1"))
+    await owner.set_status(first.run_id, RunStatus.waiting_for_input)
+    first_answer = await owner.mark_approval_answered("thread", expected_request_ids={"call-1": "approval-1"})
+    assert first_answer is not None
+
+    second = await owner.create_or_reject("thread", metadata=metadata("approval-2"))
+    await owner.set_status(second.run_id, RunStatus.waiting_for_input)
+
+    # The peer has no process-local record or lock in common with the owner.
+    # Its response was validated against P1, but the newest durable pause is P2.
+    assert await peer.mark_approval_answered("thread", expected_request_ids={"call-1": "approval-1"}) is None
+    assert (await store.get(second.run_id))["status"] == "waiting_for_input"
+    assert (await store.get(second.run_id))["metadata"] == metadata("approval-2")
+
+    second_answer = await peer.mark_approval_answered("thread", expected_request_ids={"call-1": "approval-2"})
+    assert second_answer is not None
+    assert second_answer.record.store_only
+    assert (await store.get(second.run_id))["status"] == "success"
+
+    assert await peer.restore_approval_answer(second_answer) is True
+    restored = await store.get(second.run_id)
+    assert restored["metadata"] == metadata("approval-2")
+    assert await peer.restore_approval_answer(second_answer) is False
 
 
 @pytest.mark.anyio
@@ -197,7 +239,7 @@ async def test_mark_approval_answered_acknowledges_worker_finalization_before_st
         assert manager.terminal_event_status(paused) == "success"
         assert not paused.terminal_status_persisted
         release_answered_put.set()
-        assert await asyncio.wait_for(answered, 1) is True
+        assert await asyncio.wait_for(answered, 1) is not None
     finally:
         release_answered_put.set()
         await finish(answered)
@@ -235,7 +277,7 @@ async def test_stale_paused_status_ack_cannot_replace_answered_proof():
     worker_commit = asyncio.create_task(manager.set_status_if_not_cancelled(paused.run_id, RunStatus.waiting_for_input))
     try:
         await asyncio.wait_for(committed.wait(), 1)
-        assert await manager.mark_approval_answered("thread") is True
+        assert await manager.mark_approval_answered("thread") is not None
         assert paused.terminal_status_revision == paused_revision + 1
         assert paused.terminal_commit_proof is not None
         assert paused.terminal_commit_proof.status == RunStatus.success
@@ -273,7 +315,7 @@ async def test_worker_waiting_metadata_put_cannot_resurrect_answered_run():
     worker_persist = asyncio.create_task(manager.persist_metadata(paused.run_id))
     try:
         await asyncio.wait_for(stale_put_started.wait(), 1)
-        assert await manager.mark_approval_answered("thread") is True
+        assert await manager.mark_approval_answered("thread") is not None
         assert (await store.get(paused.run_id))["status"] == RunStatus.success.value
         release_stale_put.set()
         assert await asyncio.wait_for(worker_persist, 1) is True
@@ -309,7 +351,7 @@ async def test_mark_approval_answered_reconciles_newer_local_state():
         await asyncio.wait_for(answered_put_started.wait(), 1)
         await manager.set_status(paused.run_id, RunStatus.error, error="newer terminal state", persist=False)
         release_answered_put.set()
-        assert await asyncio.wait_for(answered, 1) is True
+        assert await asyncio.wait_for(answered, 1) is not None
     finally:
         release_answered_put.set()
         await finish(answered)

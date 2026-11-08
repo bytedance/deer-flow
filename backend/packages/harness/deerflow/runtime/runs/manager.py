@@ -9,7 +9,7 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -248,6 +248,22 @@ class TerminalCommitProof:
     goal_verdict: dict[str, Any] | None
 
 
+def _approval_request_ids(metadata: Mapping[str, Any]) -> dict[str, str] | None:
+    payload = metadata.get("hitl_approval")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("actions"), list):
+        return None
+    request_ids: dict[str, str] = {}
+    for action in payload["actions"]:
+        if not isinstance(action, Mapping):
+            return None
+        call_id = action.get("tool_call_id")
+        request_id = action.get("request_id")
+        if not isinstance(call_id, str) or not isinstance(request_id, str) or call_id in request_ids:
+            return None
+        request_ids[call_id] = request_id
+    return request_ids
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -319,6 +335,23 @@ class RunRecord:
     idempotency_reused: bool = False
     evidence_origin: str = "unknown"
     evidence_agent_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalAnswerHandle:
+    """The exact answered pause needed to roll back a failed worker attachment."""
+
+    run_id: str
+    original_metadata: dict[str, Any]
+    answered_metadata: dict[str, Any]
+    record: RunRecord = field(repr=False, compare=False)
+    previous_updated_at: str = field(repr=False, compare=False)
+    previous_terminal_proof: TerminalCommitProof | None = field(repr=False, compare=False)
+    previous_terminal_revision: int = field(repr=False, compare=False)
+    previous_terminal_persisted: bool = field(repr=False, compare=False)
+    previous_terminal_commit_pending: bool = field(repr=False, compare=False)
+    previous_paused_worker_proof: TerminalCommitProof | None = field(repr=False, compare=False)
+    answered_revision: int = field(repr=False, compare=False)
 
 
 class RunStartOutcome(StrEnum):
@@ -1522,15 +1555,17 @@ class RunManager:
             )
         return persisted
 
-    async def mark_approval_answered(self, thread_id: str) -> bool:
-        """Atomically answer the newest paused run; return False after another winner."""
+    async def mark_approval_answered(self, thread_id: str, *, expected_request_ids: dict[str, str] | None = None) -> ApprovalAnswerHandle | None:
+        """Atomically answer the validated pause; return ``None`` for a stale response or another winner."""
         records = await self.list_by_thread(thread_id, limit=5)
         record = next((item for item in records if item.status == RunStatus.waiting_for_input), None)
         if record is None:
-            return False
+            return None
+        if expected_request_ids is not None and _approval_request_ids(record.metadata) != expected_request_ids:
+            return None
 
         previous_status = record.status
-        previous_metadata = record.metadata
+        previous_metadata = copy.deepcopy(record.metadata or {})
         previous_updated_at = record.updated_at
         previous_terminal_proof = record.terminal_commit_proof
         previous_terminal_revision = record.terminal_status_revision
@@ -1543,8 +1578,10 @@ class RunManager:
             if not record.store_only:
                 current = self._runs.get(record.run_id)
                 if current is not record or current.status != RunStatus.waiting_for_input:
-                    return False
-            metadata = dict(record.metadata or {})
+                    return None
+            if expected_request_ids is not None and _approval_request_ids(record.metadata) != expected_request_ids:
+                return None
+            metadata = dict(previous_metadata)
             metadata.pop("hitl_approval", None)
             record.metadata = metadata
             record.status = RunStatus.success
@@ -1580,11 +1617,15 @@ class RunManager:
                 answered = await self._call_store_with_retry(
                     "answer_approval",
                     record.run_id,
-                    lambda: self._store.answer_approval(record.run_id, metadata=metadata),
+                    lambda: self._store.answer_approval(
+                        record.run_id,
+                        metadata=metadata,
+                        expected_metadata=previous_metadata if expected_request_ids is not None else None,
+                    ),
                 )
                 if not answered:
                     await restore_local_record()
-                    return False
+                    return None
             persisted = True if record.store_only else await self._persist_snapshot_with_reconciliation(record.run_id, payload)
         except Exception as exc:
             await restore_local_record()
@@ -1599,6 +1640,60 @@ class RunManager:
             async with self._lock:
                 if self._runs.get(record.run_id) is record and record.terminal_status_revision == staged_revision and record.terminal_commit_proof == outcome:
                     record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
+        return ApprovalAnswerHandle(
+            run_id=record.run_id,
+            original_metadata=previous_metadata,
+            answered_metadata=copy.deepcopy(metadata),
+            record=record,
+            previous_updated_at=previous_updated_at,
+            previous_terminal_proof=previous_terminal_proof,
+            previous_terminal_revision=previous_terminal_revision,
+            previous_terminal_persisted=previous_terminal_persisted,
+            previous_terminal_commit_pending=previous_terminal_commit_pending,
+            previous_paused_worker_proof=previous_paused_worker_proof,
+            answered_revision=staged_revision,
+        )
+
+    async def restore_approval_answer(self, answer: ApprovalAnswerHandle) -> bool:
+        """Restore only the exact success transition created by *answer*."""
+        record = answer.record
+        if not record.store_only:
+            async with self._lock:
+                current = self._runs.get(record.run_id)
+                if current is not None and current is not record:
+                    return False
+                if current is record and (record.status != RunStatus.success or record.metadata != answer.answered_metadata or record.terminal_status_revision != answer.answered_revision):
+                    return False
+                if current is None and self._store is None:
+                    return False
+
+        if self._store is not None:
+            try:
+                restored = await self._call_store_with_retry(
+                    "restore_approval",
+                    record.run_id,
+                    lambda: self._store.restore_approval(
+                        record.run_id,
+                        metadata=answer.original_metadata,
+                        expected_metadata=answer.answered_metadata,
+                    ),
+                )
+            except Exception as exc:
+                raise RunStartupError(f"Failed to restore approval run {record.run_id} after worker attachment failed") from exc
+            if not restored:
+                return False
+
+        if not record.store_only:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record and record.status == RunStatus.success and record.metadata == answer.answered_metadata and record.terminal_status_revision == answer.answered_revision:
+                    record.status = RunStatus.waiting_for_input
+                    record.metadata = copy.deepcopy(answer.original_metadata)
+                    record.updated_at = answer.previous_updated_at
+                    record.terminal_commit_proof = answer.previous_terminal_proof
+                    record.paused_worker_terminal_proof = answer.previous_paused_worker_proof
+                    record.terminal_status_revision = answer.previous_terminal_revision
+                    record.terminal_status_persisted = answer.previous_terminal_persisted
+                    record.terminal_commit_pending = answer.previous_terminal_commit_pending
         return True
 
     async def persist_metadata(self, run_id: str) -> bool:

@@ -480,7 +480,7 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
-    async def answer_approval(self, run_id, *, metadata) -> bool:
+    async def answer_approval(self, run_id, *, metadata, expected_metadata=None) -> bool:
         async with self._sf() as session:
             values = {
                 "status": "success",
@@ -488,7 +488,29 @@ class RunRepository(RunStore):
                 "updated_at": datetime.now(UTC),
                 "change_seq": await self._next_change_seq(session),
             }
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "waiting_for_input").values(**values))
+            conditions = [RunRow.run_id == run_id, RunRow.status == "waiting_for_input"]
+            if expected_metadata is not None:
+                conditions.append(RunRow.metadata_json == (self._safe_json(expected_metadata) or {}))
+            result = await session.execute(update(RunRow).where(*conditions).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def restore_approval(self, run_id, *, metadata, expected_metadata) -> bool:
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "success",
+                    RunRow.metadata_json == (self._safe_json(expected_metadata) or {}),
+                )
+                .values(
+                    status="waiting_for_input",
+                    metadata_json=self._safe_json(metadata) or {},
+                    updated_at=datetime.now(UTC),
+                    change_seq=await self._next_change_seq(session),
+                )
+            )
             await session.commit()
             return result.rowcount != 0
 

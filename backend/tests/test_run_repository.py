@@ -244,20 +244,31 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_answer_approval_is_single_winner_and_replaces_metadata(self, tmp_path):
+    async def test_answer_approval_is_single_winner_and_restores_exact_pause(self, tmp_path):
         repo = await _make_repo(tmp_path)
+        original_metadata = {"hitl_approval": {"request_id": "approval-1"}, "retained": True}
+        answered_metadata = {"retained": True}
         await repo.put(
             "paused-run",
             thread_id="t1",
             status="waiting_for_input",
-            metadata={"hitl_approval": {"request_id": "approval-1"}, "retained": True},
+            metadata=original_metadata,
         )
 
-        assert await repo.answer_approval("paused-run", metadata={"retained": True}) is True
-        assert await repo.answer_approval("paused-run", metadata={"retained": True}) is False
+        stale_metadata = {"hitl_approval": {"request_id": "approval-0"}, "retained": True}
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, expected_metadata=stale_metadata) is False
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, expected_metadata=original_metadata) is True
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, expected_metadata=original_metadata) is False
         row = await repo.get("paused-run")
         assert row["status"] == "success"
-        assert row["metadata"] == {"retained": True}
+        assert row["metadata"] == answered_metadata
+
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_metadata={"retained": False}) is False
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_metadata=answered_metadata) is True
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_metadata=answered_metadata) is False
+        restored = await repo.get("paused-run")
+        assert restored["status"] == "waiting_for_input"
+        assert restored["metadata"] == original_metadata
         await _cleanup()
 
     @pytest.mark.anyio

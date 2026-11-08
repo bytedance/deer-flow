@@ -197,6 +197,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         target_ids = [tc["id"] for tc in targets]
         if any(not isinstance(call_id, str) for call_id in target_ids) or len(set(target_ids)) != len(target_ids):
             return self._deny_all(targets, _invalid_response_reason())
+        ai_message_id = last.id or ""
+        expected_request_ids = {call_id: f"hitl_approval:{ai_message_id}:{call_id}" for call_id in target_ids}
         responses = resume_value.get("responses") if isinstance(resume_value, Mapping) else None
         if not isinstance(responses, list) or len(responses) != len(target_ids):
             return self._deny_all(targets, _invalid_response_reason())
@@ -208,6 +210,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
                 return self._deny_all(targets, _invalid_response_reason())
             response_id = response.get("tool_call_id")
             if not isinstance(response_id, str) or response_id in seen_ids or response_id not in by_id:
+                return self._deny_all(targets, _invalid_response_reason())
+            if response.get("request_id") != expected_request_ids[response_id]:
                 return self._deny_all(targets, _invalid_response_reason())
             seen_ids.add(response_id)
             call = by_id[response_id]

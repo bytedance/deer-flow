@@ -263,11 +263,23 @@ class MemoryRunStore(RunStore):
         self._mark_changed(run)
         return True
 
-    async def answer_approval(self, run_id, *, metadata):
+    async def answer_approval(self, run_id, *, metadata, expected_metadata=None):
         run = self._runs.get(run_id)
         if run is None or run["status"] != "waiting_for_input":
             return False
+        if expected_metadata is not None and (run.get("metadata") or {}) != expected_metadata:
+            return False
         run["status"] = "success"
+        run["metadata"] = copy.deepcopy(metadata)
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
+        return True
+
+    async def restore_approval(self, run_id, *, metadata, expected_metadata):
+        run = self._runs.get(run_id)
+        if run is None or run["status"] != "success" or (run.get("metadata") or {}) != expected_metadata:
+            return False
+        run["status"] = "waiting_for_input"
         run["metadata"] = copy.deepcopy(metadata)
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)

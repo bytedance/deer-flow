@@ -460,7 +460,7 @@ async def test_answered_ack_lets_paused_worker_finish_committed_terminal(evidenc
     paused.task = worker
     try:
         await asyncio.wait_for(terminal_committed.wait(), 1)
-        assert await manager.mark_approval_answered(paused.thread_id) is True
+        assert await manager.mark_approval_answered(paused.thread_id) is not None
         assert paused.status == RunStatus.success
         release_terminal.set()
         await asyncio.wait_for(worker, 1)

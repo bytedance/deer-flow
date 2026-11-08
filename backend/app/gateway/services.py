@@ -2303,6 +2303,7 @@ async def start_run(
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
+    validated_approval_request_ids: dict[str, str] | None = None
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -2398,7 +2399,7 @@ async def start_run(
                     request,
                     thread_id=thread_id,
                 )
-                await validate_resume_request(
+                validated_approval_request_ids = await validate_resume_request(
                     request=request,
                     thread_id=thread_id,
                     accessor=accessor,
@@ -2907,15 +2908,21 @@ async def start_run(
                     else:
                         return record
                 worker = run_after_metadata(record)
+                answered_approval = None
                 try:
                     if command and command.get("resume") is not None:
-                        from app.gateway.hitl_approval import _responses_of, mark_approval_answered
+                        from app.gateway.hitl_approval import _all_reject, _responses_of, mark_approval_answered
 
-                        answered = await mark_approval_answered(request, thread_id)
-                        if not answered and _responses_of(command) is not None:
-                            # Validation predates the per-thread admission lock. A
-                            # competing resume may have consumed the pause while this
-                            # caller waited, so only the transition winner may attach.
+                        responses = _responses_of(command)
+                        answered_approval = await mark_approval_answered(
+                            request,
+                            thread_id,
+                            expected_request_ids=(validated_approval_request_ids if responses is not None else None),
+                        )
+                        if answered_approval is None and responses is not None and not _all_reject(responses):
+                            # Competing or stale approvals fail closed. All-reject
+                            # remains safe after a crash consumed the run row but
+                            # left the checkpoint pause unconsumed.
                             raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
@@ -2933,13 +2940,27 @@ async def start_run(
                             )
                         producer_lease_handed_off = True
                 except BaseException as exc:
-                    worker.close()
-                    await asyncio.shield(
-                        run_mgr.fail_start_if_pending(
+                    attachment_error = f"Failed to attach run worker: {exc}"
+                    task = record.task
+                    if task is None:
+                        worker.close()
+
+                    async def cleanup_failed_attachment() -> None:
+                        if task is not None:
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                            if record.task is task:
+                                record.task = None
+                        await run_mgr.fail_start_if_pending(
                             record.run_id,
-                            error=f"Failed to attach run worker: {exc}",
+                            error=attachment_error,
                         )
-                    )
+                        if answered_approval is not None:
+                            restored = await run_mgr.restore_approval_answer(answered_approval)
+                            if not restored:
+                                raise RuntimeError(f"Failed to restore approval run {answered_approval.run_id} after worker attachment failed")
+
+                    await asyncio.shield(cleanup_failed_attachment())
                     raise
         except ConflictError as exc:
             raise BusyThreadConflict(str(exc)) from exc
