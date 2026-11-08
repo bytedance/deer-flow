@@ -760,6 +760,8 @@ class ScheduledTaskService:
                 metadata=metadata,
                 origin=origin,
                 title=title,
+                # An id that differs from the task's stored thread was minted at enqueue time.
+                **({"thread_is_new": True} if execution_thread_id != task.get("thread_id") else {}),
             )
             launch_succeeded = True
             launched_run_id = result["run_id"]

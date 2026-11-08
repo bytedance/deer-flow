@@ -31,7 +31,7 @@ def _stub_app_config():
     reset_app_config()
 
 
-def _post(body: dict, caplog):
+def _post(body: dict, caplog, path: str = "/api/runs/stream"):
     app = make_authed_test_app(user_factory=lambda: USER)
     app.include_router(runs.router)
     app.state.thread_store = MemoryThreadMetaStore(InMemoryStore())
@@ -47,7 +47,7 @@ def _post(body: dict, caplog):
     run_manager.create_or_reject = AsyncMock(side_effect=ConflictError("sentinel"))
     app.state.run_manager = run_manager
     with caplog.at_level(logging.WARNING), TestClient(app) as client:
-        response = client.post("/api/runs/stream", json=body)
+        response = client.post(path, json=body)
     return response
 
 
@@ -55,13 +55,15 @@ def _hits(caplog) -> int:
     return sum(1 for r in caplog.records if MARKER in r.getMessage() and r.exc_info and CAUSE in str(r.exc_info[1]))
 
 
-def test_new_thread_without_thread_id_logs_no_resolution_failure(caplog):
-    response = _post({}, caplog)
+@pytest.mark.parametrize("path", ["/api/runs/stream", "/api/runs/wait"])
+def test_new_thread_without_thread_id_logs_no_resolution_failure(caplog, path):
+    response = _post({}, caplog, path)
     assert response.status_code == 409
     assert _hits(caplog) == 0
 
 
-def test_caller_supplied_missing_thread_still_warns(caplog):
-    response = _post({"config": {"configurable": {"thread_id": "never-created-thread"}}}, caplog)
+@pytest.mark.parametrize("path", ["/api/runs/stream", "/api/runs/wait"])
+def test_caller_supplied_missing_thread_still_warns(caplog, path):
+    response = _post({"config": {"configurable": {"thread_id": "never-created-thread"}}}, caplog, path)
     assert response.status_code == 409
     assert _hits(caplog) == 1

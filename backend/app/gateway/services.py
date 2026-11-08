@@ -3024,6 +3024,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    thread_is_new: bool = False,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -3105,6 +3106,7 @@ async def launch_scheduled_thread_run(
                 idempotency_key=idempotency_key,
                 evidence_origin="scheduled",
                 scheduled_task_runtime=scheduled_task_runtime,
+                **({"thread_is_new": True} if thread_is_new else {}),
             )
         except HTTPException as exc:
             if isinstance(exc.detail, dict) and exc.detail.get("code") == "approval_pending":
