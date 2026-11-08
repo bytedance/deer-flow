@@ -293,7 +293,16 @@ Extraction labels proposals with `scope`, `durability`, and `authority`.
 Automatic writes accept only user-scoped, durable, descriptive facts.
 Summary prose must be user-scoped and descriptive.
 Missing labels reject that item without stopping unrelated updates.
-An out-of-range `confidence` (including a model-emitted percentage) is rejected per item with a warning that names the raw value, and is never rescaled: a silent scale rewrite would change the confidence-threshold semantics. Stored facts are editable JSON: a `confidence` such as `10**400` is a valid JSON integer, and every fact-confidence coercion on a read or import path (`_coerce_source_confidence`, the dedup merge comparison, `prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import normalization) must treat the resulting `OverflowError` like any other unusable value. Canonical storage still rejects an out-of-range confidence as corruption at load time; these helpers cover values reaching them through editable or legacy paths. Storage's own `[0, 1]` validation must not fail the batch, because a failed batch keeps the extraction watermark and repeats the same paid call. A batch that also proposes `factsToRemove` still fails closed when any new fact is dropped, because removal `replacementFactIndex` values refer to newFacts positions.
+Reject out-of-range `confidence` per item, including percentages. Warn with
+the raw value and keep the original scale. On reads and imports, treat
+`OverflowError` from large JSON integers (e.g. `10**400`) as unusable
+confidence in `_coerce_source_confidence`, dedup merge,
+`prompt._coerce_confidence`, `relevance._coerce_confidence`, and legacy import
+normalization. Canonical loads still report invalid confidence as corruption.
+Filter invalid facts before storage's `[0, 1]` validation can abort the batch,
+keep its watermark unchanged, and repeat the paid call. Reject batches with
+`factsToRemove` if any new fact is dropped because `replacementFactIndex`
+refers to the original `newFacts` positions.
 
 Contradiction removals include `id`, `scope`, `reason`, and optional `replacementFactIndex`.
 Task-scoped and project-scoped removals fail closed.
