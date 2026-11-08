@@ -24,6 +24,20 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **community:** A search or fetch API key that ends in a newline no longer
+  leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
+  Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
+  header as read, so a key from a file (a Kubernetes Secret created with
+  `--from-file`) made the transport fail with `Illegal header value b'Bearer
+  <key>\n'`. That message, key included, became the tool result the model and
+  the conversation history kept, and four of them also logged it. Keys now go
+  through `provider_credentials.resolve_api_key` like the other providers', and
+  a blank configured key falls back to the environment for Tavily, Exa,
+  Firecrawl and fastCRW. fastCRW without a key of its own no longer lets the
+  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
+  `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
+  instead of reaching the SDK as is. ([#7981])
+  
 - **docker:** Images built from a checkout no longer contain its local
   configuration. `.dockerignore` did not exclude `config.yaml`,
   `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
@@ -16086,3 +16100,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981

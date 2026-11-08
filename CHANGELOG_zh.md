@@ -23,6 +23,17 @@
 
 ### 修复
 
+- **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
+  （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
+  Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
+  `--from-file` 创建的 Kubernetes Secret）会让传输层报出 `Illegal header value
+  b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
+  其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
+  `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
+  的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
+  `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
 - **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
   `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
@@ -12796,3 +12807,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981

@@ -143,7 +143,7 @@ class TestFirecrawlBaseUrl:
         result = await web_fetch_tool.ainvoke({"url": "https://example.com"})
 
         assert result == "# Fetched Page\n\nFetched markdown"
-        mock_firecrawl_cls.assert_called_once_with(api_key=None, api_url="http://192.168.0.47:3002")
+        mock_firecrawl_cls.assert_called_once_with(api_key="", api_url="http://192.168.0.47:3002")
 
     @patch("deerflow.community.firecrawl.tools.AsyncFirecrawlApp")
     @patch("deerflow.community.firecrawl.tools.get_app_config")
