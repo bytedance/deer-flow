@@ -23,10 +23,10 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
-@pytest.fixture(params=["utf-8", "cp936"])
-def subprocess_default_encoding(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exercise real child output with both modern and legacy host decoders."""
-    monkeypatch.setattr(subprocess, "_text_encoding", lambda: request.param)
+@pytest.fixture
+def legacy_subprocess_default_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the explicit UTF-8 decode load-bearing against a cp936 host default."""
+    monkeypatch.setattr(subprocess, "_text_encoding", lambda: "cp936")
 
 
 def _deploy_fixture(tmp_path: Path, *, docker_script: str) -> tuple[Path, dict[str, str]]:
@@ -80,7 +80,7 @@ def test_production_gateway_has_a_real_readiness_probe() -> None:
 
 
 @requires_script_bash
-def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path, subprocess_default_encoding: None) -> None:
+def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path, legacy_subprocess_default_encoding: None) -> None:
     capture = tmp_path / "docker-args.txt"
     worktree, env = _deploy_fixture(
         tmp_path,
@@ -107,7 +107,7 @@ def test_deploy_waits_for_gateway_readiness_before_success(tmp_path: Path, subpr
 
 
 @requires_script_bash
-def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path, subprocess_default_encoding: None) -> None:
+def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_path: Path, legacy_subprocess_default_encoding: None) -> None:
     capture = tmp_path / "docker-calls.txt"
     worktree, env = _deploy_fixture(
         tmp_path,
