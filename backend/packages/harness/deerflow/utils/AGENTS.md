@@ -124,19 +124,26 @@ One-shot input-polish, follow-up-suggestion, and project-file-summary helpers,
 skill moderation (`scan_skill_content`), the goal evaluator, thread title
 generation, and in-graph context compaction build providers through
 `run_assembly` before awaiting inference; the run worker calls its cached
-evaluator factory the same way. Provider construction can read local
-credentials; keep it off the event loop and the default executor while
-preserving request context. Cancellation during construction must not start
-inference. A scan without `app_config` (in-graph `skill_manage`) reads the live
-config in the same pool, and its fail-closed fallback reuses that config rather
-than reading it again on the loop. Other model construction is separate and
-not covered here: manual compaction (`compact_thread_context` builds the
-summarization middleware and its models inline) and, inside graph runs,
-subagent construction.
-Coverage: `tests/blocking_io/test_oneshot_llm_offloop.py`,
+evaluator factory the same way. Manual compaction (`compact_thread_context`)
+builds its summarization middleware and eager models there too. Provider
+construction can read local credentials; keep it off the event loop and the
+default executor while preserving request context. Cancellation during
+construction must not start inference. A scan without `app_config`
+(in-graph `skill_manage`) reads the live config in the same pool, and its
+fail-closed fallback reuses that config rather than reading it again on the
+loop. Manual compaction without `app_config` (the `/compact` route) reads
+the live config in that pool as well. A subagent builds its chat model there
+too: `SubagentExecutor._create_agent` is awaited from `_aexecute` on the
+persistent isolated subagent loop every concurrent delegated task shares (not
+the Gateway request loop), so its `create_chat_model` call goes through
+`run_assembly`; the rest of its middleware and graph assembly is a separate
+boundary.
+Coverage includes `tests/blocking_io/test_oneshot_llm_offloop.py`,
 `tests/blocking_io/test_system_model_offloop.py`,
-`tests/blocking_io/test_title_model_offloop.py` and
-`tests/blocking_io/test_summarization_model_offloop.py`.
+`tests/blocking_io/test_title_model_offloop.py`,
+`tests/blocking_io/test_summarization_model_offloop.py`,
+`tests/blocking_io/test_compaction_model_offloop.py` and
+`tests/blocking_io/test_subagent_model_offloop.py`.
 
 `start_run` also resolves the factory through `run_assembly` before admission:
 cold imports cannot occupy the loop or its default pool, and import errors

@@ -71,6 +71,7 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
+from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
@@ -1801,8 +1802,15 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     content = events[0].get("content")
     by_tool = content.get("by_tool") if isinstance(content, dict) else None
-    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
-    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+    if not isinstance(by_tool, dict):
+        raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+    presented: list[str] = []
+    for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES:
+        paths = by_tool.get(tool_name, [])
+        if not isinstance(paths, list):
+            raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+        presented.extend(paths)
+    if not presented or any(not isinstance(path, str) for path in presented):
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     return presented
 
