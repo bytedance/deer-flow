@@ -150,6 +150,13 @@ class TestDetectors:
         [
             pytest.param(lambda n: "a" * n, id="letters"),
             pytest.param(lambda n: ("0123456789abcdef" * n)[:n], id="hex"),
+            # One worst shape per other detector, so the AGENTS.md rule that
+            # every detector stays linear is pinned, not only stated.
+            pytest.param(lambda n: ("sk-ghp_xoxb-AIzaAKIA" * n)[:n], id="api-key-prefixes"),
+            pytest.param(lambda n: "1" * n, id="digits"),
+            pytest.param(lambda n: ("1 1-1." * n)[:n], id="digit-separators"),
+            pytest.param(lambda n: ("+1 (212) " * n)[:n], id="phone-prefixes"),
+            pytest.param(lambda n: ("ABCD123456" * n)[:n], id="rfc-letters-digits"),
         ],
     )
     def test_redaction_stays_linear_on_whitespace_free_text(self, make_payload):

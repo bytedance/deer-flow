@@ -182,7 +182,8 @@ _EMAIL_PATTERN = re.compile(rf"[{_EMAIL_LOCAL_CHARS}]+@[A-Za-z0-9-]+(?:\.[A-Za-z
 # loop, on every model call). The local part must reach the run's end, so a
 # match exists anywhere in a run only if it exists at the run's start, which is
 # all this spelling tries.
-_EMAIL_RUN_START_PATTERN = re.compile(rf"(?<![{_EMAIL_LOCAL_CHARS}]){_EMAIL_PATTERN.pattern}")
+# The group keeps the lookbehind on every alternative should the pattern grow one.
+_EMAIL_RUN_START_PATTERN = re.compile(rf"(?<![{_EMAIL_LOCAL_CHARS}])(?:{_EMAIL_PATTERN.pattern})")
 
 
 def _iter_email_matches(text: str) -> Iterator[re.Match[str]]:
