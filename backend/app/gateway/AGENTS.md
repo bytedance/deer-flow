@@ -200,7 +200,7 @@ run's workspace snapshots rather than a client request option (files
 created/modified under `/mnt/user-data/outputs`, minus internal
 process-feedback exclusions) and idempotently persists a run-scoped
 `run.delivery` receipt before the terminal run status; missing or
-unverifiable `present_files` coverage downgrades the run to error, while runs
+unverifiable `present_files`/`present_shared_artifact` coverage downgrades the run to error, while runs
 without changed outputs keep ordinary chat behavior. Journal mechanics
 (callback attribution, receipt idempotency and retries, orphan recovery):
 `packages/harness/deerflow/runtime/AGENTS.md`. Multi-worker deployments
@@ -278,3 +278,5 @@ Personal MCP is owner-only; platform MCP shared.
 ### Web model provider presets
 
 Managed model routes expose provider metadata; routing stays server-owned. Align validation, probing, storage, keys, and revisions.
+
+Trials use authenticated cards.

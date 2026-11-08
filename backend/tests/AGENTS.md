@@ -26,6 +26,11 @@ ownership and capture cleanup. Retain the real XLSX conversion coverage.
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+Todo production-chain regressions bind their explicit config through the runtime
+AppConfig context, isolate sandbox/path singletons, and clean up the test provider.
+Keep the missing ambient config path so a developer's `config.yaml` cannot mask
+an invocation-time dependency; retain the real sandbox and middleware chain.
+
 `test_threads_router.py::test_goal_mutations_reject_run_owned_by_another_worker`
 feeds real PUT/DELETE 409 errors into the IM classifier. Keep this contract check
 so Gateway wording changes cannot silently remove localized busy feedback.

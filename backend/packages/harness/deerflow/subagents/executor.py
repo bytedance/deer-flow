@@ -61,6 +61,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
@@ -1141,7 +1142,10 @@ class SubagentExecutor:
         except ReasoningPolicyError as exc:
             raise ValueError(f"Model {self.model_name}: {exc}") from exc
         # Preserve the original request for the factory's validation and logs.
-        model = create_chat_model(
+        # Provider construction can read local credentials (the Codex provider
+        # loads the CLI auth.json), so keep the build off the event loop.
+        model = await run_assembly(
+            create_chat_model,
             name=self.model_name,
             thinking_enabled=self.thinking_enabled,
             reasoning_effort=self.reasoning_effort,
