@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -49,20 +50,28 @@ def _get_tool_config(tool_name: str) -> dict | None:
 def _coerce_timeout(value: object, default: float) -> float:
     """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
-    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
-    does not become ``0.0`` and time out every request against a healthy server, and a
-    typo'd value does not raise out of tool construction.
+    Mirrors ``crawl4ai._coerce_timeout``: booleans and non-numeric strings fall
+    back to the default, so ``timeout_s: off`` (YAML ``False``) does not become
+    ``0.0`` and time out every request against a healthy server, and a typo'd
+    value does not raise out of tool construction.
+
+    A number ``httpx`` cannot use as a deadline falls back too, because the result
+    goes straight to ``httpx.AsyncClient(timeout=...)``: ``0`` and negatives fail
+    every fetch and capture with ``ConnectTimeout`` against a healthy backend,
+    ``nan`` raises ``ValueError: deadline must not be NaN``, and ``inf`` leaves the
+    request without a deadline so it never completes. Falling back to the documented
+    default is better than silently disabling the provider.
     """
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(value, (int, float, str)):
         try:
-            return float(value)
-        except ValueError:
-            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+            timeout = float(value)
+        except (TypeError, ValueError, OverflowError):
+            timeout = 0.0
+        if math.isfinite(timeout) and timeout > 0:
+            return timeout
+    logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
     return default
 
 

@@ -442,6 +442,47 @@ class TestBrowserlessTools:
         """YAML `timeout_s: off` parses as False; 0.0 would time out every request."""
         assert self._client_with_config({"timeout_s": False}).timeout_s == 30.0
 
+    @pytest.mark.parametrize(
+        "value",
+        [
+            0,
+            0.0,
+            -1,
+            -0.5,
+            float("inf"),
+            float("-inf"),
+            float("nan"),
+            "0",
+            "-1",
+            "inf",
+            "-inf",
+            "nan",
+            "1e400",
+            pytest.param(10**400, id="int-overflow"),
+        ],
+    )
+    async def test_unusable_timeout_falls_back_to_default(self, value):
+        """A value `httpx` cannot use as a deadline must never reach it.
+
+        Measured with httpx 0.28.1 against a backend that accepts the connection
+        and then never answers: `0` and the negatives fail every fetch with
+        `ConnectTimeout`, `nan` raises `ValueError: deadline must not be NaN`,
+        and `inf` leaves the request without a deadline so it never completes.
+        Either way a healthy Browserless backend looks broken.
+        """
+        assert self._client_with_config({"timeout_s": value}).timeout_s == 30.0
+
+    @pytest.mark.parametrize("value", [1, 0.001, 45, 12.5, "1", "45", "12.5"])
+    async def test_usable_timeout_is_kept(self, value):
+        """Rejecting unusable deadlines must not narrow the values that work."""
+        assert self._client_with_config({"timeout_s": value}).timeout_s == float(value)
+
+    async def test_unusable_timeout_warns(self, caplog):
+        """Swapping in the default silently would hide the operator's typo."""
+        with caplog.at_level("WARNING", logger="deerflow.community.browserless.tools"):
+            assert self._client_with_config({"timeout_s": 0}).timeout_s == 30.0
+        assert "invalid timeout 0" in caplog.text
+
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_success(self, mock_get_client):
         """web_fetch_tool successfully fetches and extracts content."""
