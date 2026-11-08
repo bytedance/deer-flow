@@ -267,6 +267,8 @@ provider settings/reasoning transforms as chat. Disable optional thinking for
 short probes; required thinking and unknown third-party models use automatic
 tool choice. MiniMax's existing adapter normalizes the OpenAI SDK's
 `max_completion_tokens` into MiniMax's documented `max_tokens` for both paths.
+The `stepfun` preset reuses `PatchedChatStepFun` for reasoning capture/replay and
+the same token-field normalization; its ordinary API route is distinct from Step Plan.
 Tests: `test_managed_models.py`, `test_managed_deepseek.py`,
 `test_managed_provider_presets.py` (real vendor SDKs with HTTP doubles), opt-in
 `test_managed_deepseek_live.py` / `test_managed_presets_live.py`, and

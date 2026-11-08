@@ -83,6 +83,10 @@ class PatchedChatStepFun(ChatOpenAI):
         """Restore ``reasoning_content`` on historical assistant messages."""
         original_messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # StepFun documents max_tokens; ChatOpenAI emits the newer OpenAI name.
+        # Preserve the configured output bound on probes and ordinary chat calls.
+        if "max_completion_tokens" in payload:
+            payload["max_tokens"] = payload.pop("max_completion_tokens")
 
         restore_assistant_payloads(
             payload.get("messages", []),

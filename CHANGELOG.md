@@ -22,6 +22,10 @@ This section accumulates work toward the **2.3.0** milestone
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **models:** Administrators can select StepFun in **Settings → Models** and
+  connect an ordinary StepFun API account with an API key and model ID.
+  ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### Fixed
 
 - **gateway:** Deleting a thread no longer reports success while its
@@ -32,6 +36,15 @@ This section accumulates work toward the **2.3.0** milestone
   `/history` and `/goal`, and the owner could not retry. The delete now
   returns a 500 and keeps the thread, so the owner can delete it again.
   ([#7992])
+  
+- **scheduler:** One scheduled task whose saved schedule can no longer be
+  computed no longer stops every other task. When a stored timezone or cron
+  expression stopped working (a zone missing from the time zone database
+  after an upgrade, a cron expression a newer croniter rejects), recomputing
+  its next run raised inside the scheduler poll; once its launch lease
+  expired, every later poll failed before admitting any due task. That task
+  is now paused with the reason as its last error, and resuming it reports
+  the problem until the schedule is fixed. ([#7993])
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
@@ -86,7 +99,20 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
-  
+
+- **skills:** A custom skill name that is a Windows reserved device name
+  (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
+  `skill_manage` `create` and `.skill` archive install — on every platform. The
+  hyphen-case grammar admitted such names, and the skill name becomes a
+  directory under `custom/`, so creating one "succeeded" on Windows without
+  producing a directory and the first write inside it failed with
+  `FileNotFoundError`; on Linux the install succeeded but could never be
+  copied, mounted or exported to a Windows host. The archive path also refuses
+  member path segments that cannot be created on every host, matching support
+  file writes. Reading and deleting an existing skill stay permissive, so a
+  skill an older release created on a Linux host can still be inspected and
+  removed. ([#7945])
+
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
   call. Existing sandbox bindings and providers that require skill uploads
@@ -16106,7 +16132,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993

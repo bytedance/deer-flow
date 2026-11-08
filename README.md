@@ -335,7 +335,7 @@ fences, including unclosed fences, in complete and streamed replies.
    Administrators can open **Settings → Models** to select a provider and enter
    only its **API Key** and **model ID**. Endpoints, authentication and adapters are
    backend presets for OpenAI, Anthropic, DeepSeek, Alibaba Cloud Bailian/Qwen,
-   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI and MiniMax. Region and plan-specific
+   Volcengine/Doubao, Moonshot/Kimi, Zhipu/Z.AI, MiniMax and StepFun. Region and plan-specific
    entries are explicitly distinguished. Arbitrary model IDs are accepted; internal
    names are generated automatically and remain stable when a model ID changes.
    Newly saved models are enabled and immediately refresh existing chat and Agent
@@ -1467,6 +1467,7 @@ Notes:
 - Slack stop waits up to five seconds for an in-flight Socket Mode connection and its cleanup. If cleanup is still pending, the previous instance stays tracked and a restart can be retried after it finishes. SDK cleanup failures report their original error and remain retryable.
 - In Telegram private chats, text, attachment and streaming replies (including "Working on it...") can still be delivered if their referenced user or bot message was deleted, such as after clearing chat history during a run. Group reply-target requirements remain unchanged to preserve forum routing.
 - In Telegram groups, replying to a delivered bot response or attachment continues its DeerFlow conversation. Reply mappings survive restarts and stay scoped to the user's connection when one is bound. New, unrelated group messages still start separate conversations; private-chat routing is unchanged.
+- New Telegram final-reply sends use the bot API's rate-limit wait up to 60 seconds per retry. Missing, invalid, or shorter hints use the usual backoff. The "Working on it..." acknowledgment is best effort.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 - Streaming IM channels treat backend `error` events like transport failures and follow the same reply and retry path. The channel logs the error type and message for diagnosis.
 
@@ -2974,6 +2975,9 @@ slot. For a user-requested summary or delivery after background work, the option
 keeps ownership when active. See [batch dependencies and follow-up](backend/docs/BATCH_CONTINUATION.md)
 for authorization, cancellation, recovery and result semantics.
 
+When a source run fails or hits a hard stop, the Gateway attempts each batch
+cancellation independently. A failed cancellation logs the batch and run IDs.
+
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand and opens a selected item’s stored report and captured evidence for review. Citations open the matching saved excerpt without contacting the provider, and an open result refreshes until the item finishes and when the item list observes a later retry. Closed result dialogs do not fetch full details. Bulk stored results remain available through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
 Queued requests finish removing their queue entry and returning any transferred
@@ -3032,6 +3036,12 @@ Native workers support per-subagent `thinking_enabled` and `reasoning_effort` th
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ### Sandbox & File System
+
+With local host bash enabled, the path guard permits division in simple shell
+arithmetic and recognized single-quoted Python, Node.js and Perl programs.
+Variable-built paths remain checked even when the filename is numeric or a
+glob precedes the slash. This is a best-effort guard; host filesystem isolation
+requires an isolated sandbox provider.
 
 Local `grep` reports file permission and I/O failures as errors rather than
 successful empty or partial searches. Binary files and files that disappear
@@ -3925,6 +3935,7 @@ Current MVP capabilities:
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
+- A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks

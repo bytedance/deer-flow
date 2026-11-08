@@ -21,6 +21,9 @@
   Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
   Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
 
+- **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### 修复
 
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
@@ -28,6 +31,12 @@
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
   `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
   可以再次删除。([#7992])
+  
+- **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
+  已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
+  不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
+  之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
+  在修复计划之前，恢复该任务会提示具体问题。([#7993])
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -12814,3 +12823,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993
