@@ -22,12 +22,48 @@ This section accumulates work toward the **2.3.0** milestone
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **models:** Administrators can select StepFun in **Settings → Models** and
+  connect an ordinary StepFun API account with an API key and model ID.
+  ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### Fixed
 
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
 
+- **community:** A search or fetch API key that ends in a newline no longer
+  leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
+  Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
+  header as read, so a key from a file (a Kubernetes Secret created with
+  `--from-file`) made the transport fail with `Illegal header value b'Bearer
+  <key>\n'`. That message, key included, became the tool result the model and
+  the conversation history kept, and four of them also logged it. Keys now go
+  through `provider_credentials.resolve_api_key` like the other providers', and
+  a blank configured key falls back to the environment for Tavily, Exa,
+  Firecrawl and fastCRW. fastCRW without a key of its own no longer lets the
+  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
+  `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
+  instead of reaching the SDK as is. ([#7981])
+  
+- **docker:** Images built from a checkout no longer contain its local
+  configuration. `.dockerignore` did not exclude `config.yaml`,
+  `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
+  checkout that keeps them in the legacy `backend/` location baked its model
+  API keys and MCP credentials into every gateway image layer through
+  `COPY backend ./backend`. `frontend/.env.local` reached the frontend image the
+  same way. They are now excluded at the root and in `backend/`, along with
+  `.env*.local` at any depth, `frontend/*.pem`, and the credential files the
+  extension manager refuses inside extension snapshots. A locally built
+  frontend image no longer inlines `NEXT_PUBLIC_*` values from
+  `frontend/.env.local`; the Docker stack's single nginx origin needs none of
+  them. Published CI images were not affected; rebuild local images that were
+  pushed or shared. ([#7958])
+  
+- **agents:** Unfinished todos no longer trigger additional model calls or
+  tool execution after a loop-detection, run token-budget, provider-safety, or
+  model output-length stop. Todo state is preserved so users can continue in a
+  later run. ([#7953])
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
@@ -38,7 +74,7 @@ This section accumulates work toward the **2.3.0** milestone
   fits, and a longer final answer continues in up to 10 cards replied to the
   same message, split at line breaks; a retry resumes after the cards already
   delivered. ([#7798])
-
+  
 - **channels:** WeCom group messages now have their own conversation. Every
   message used the sender's userid as both chat and topic ID, so a member's
   private chat and every group they wrote in shared one DeerFlow thread
@@ -50,6 +86,19 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
+
+- **skills:** A custom skill name that is a Windows reserved device name
+  (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
+  `skill_manage` `create` and `.skill` archive install — on every platform. The
+  hyphen-case grammar admitted such names, and the skill name becomes a
+  directory under `custom/`, so creating one "succeeded" on Windows without
+  producing a directory and the first write inside it failed with
+  `FileNotFoundError`; on Linux the install succeeded but could never be
+  copied, mounted or exported to a Windows host. The archive path also refuses
+  member path segments that cannot be created on every host, matching support
+  file writes. Reading and deleting an existing skill stay permissive, so a
+  skill an older release created on a Linux host can still be inspected and
+  removed. ([#7945])
 
 - **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
   longer create or acquire a sandbox before the first sandbox-backed tool
@@ -87,7 +136,7 @@ This section accumulates work toward the **2.3.0** milestone
   returns as if it succeeded, so neither the text running reply nor the
   `sampleMarkdown` fallback for the final answer ever ran. The channel now
   sends card requests itself and falls back when one fails. ([#7781])
-
+  
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -108,7 +157,7 @@ This section accumulates work toward the **2.3.0** milestone
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
   earlier turns remain running. ([#7772])
-
+  
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named
@@ -4848,9 +4897,7 @@ This release closes that milestone with **1068 merged pull requests**.
 - **sandbox:** Remote sandbox providers number `read_file` line ranges the
   same way `LocalSandbox` does. The E2B, BoxLite, Tenki and OpenSandbox
   providers sliced ranged reads with `str.splitlines()`, which also ends
-  lines at a bare `\r`, `\f`, `\v`, `\x85`, `
-`/`
-` and other
+  lines at a bare `\r`, `\f`, `\v`, `\x85`, ` `/` ` and other
   control separators, so line N was a different line than on the local
   sandbox: a progress log whose updates end in a bare `\r` reads
   truncated with a marker naming `start_line=30`, and
@@ -16072,3 +16119,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7945]: https://github.com/bytedance/deer-flow/issues/7945
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
