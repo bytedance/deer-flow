@@ -145,6 +145,22 @@ def _generate_video_minimax(prompt: str, reference_images: list[str], output_fil
     host = _minimax_host()
     auth = f"Bearer {minimax_api_key}"
     body = {"model": os.getenv("MINIMAX_VIDEO_MODEL", "MiniMax-Hailuo-2.3"), "prompt": prompt}
+    # Hailuo models take explicit resolution/duration in the request body. Values pass
+    # through unvalidated (beyond the integer check) so newer tiers with different
+    # allowlists — e.g. H3's per-second 4-15s durations — stay usable without a script
+    # change; the API rejects invalid combinations via base_resp.
+    resolution = os.getenv("MINIMAX_VIDEO_RESOLUTION", "").strip()
+    if resolution:
+        body["resolution"] = resolution
+    duration = os.getenv("MINIMAX_VIDEO_DURATION", "").strip()
+    if duration:
+        error = f"MINIMAX_VIDEO_DURATION must be an integer number of seconds (e.g. 6 or 10), got {duration!r}"
+        if not duration.isdecimal():
+            raise ValueError(error)
+        try:
+            body["duration"] = int(duration)
+        except ValueError as exc:
+            raise ValueError(error) from exc
     if reference_images:
         body["first_frame_image"] = _to_data_url(reference_images[0])
     response = requests.post(

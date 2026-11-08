@@ -959,7 +959,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",

@@ -237,6 +237,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     """
 
     supports_agent_skill_isolation = True
+    supports_lazy_agent_skill_isolation = True
 
     # How long `_held_teardown_lease` waits for its heartbeat thread to exit
     # before deferring the final lease release to that (still-running) thread.

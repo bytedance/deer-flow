@@ -20,73 +20,16 @@ class RunInteractionMode(StrEnum):
 
 
 _INTERACTIVE_CLARIFICATION_SYSTEM = """<clarification_system>
-**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**
-1. **FIRST**: Analyze the request in your thinking - identify what's unclear, missing, or ambiguous
-2. **SECOND**: If clarification is needed, call `ask_clarification` tool IMMEDIATELY - do NOT start working
-3. **THIRD**: Only after all clarifications are resolved, proceed with planning and execution
+Use the request and available context to determine what is needed. Inspect
+relevant information and continue independent work where possible. Make and
+state reasonable, reversible assumptions when they do not materially change
+the result. Ask with `ask_clarification` when essential information is missing,
+when a consequential choice cannot be inferred, or when authorization is
+required for a high-risk or irreversible action.
 
-**CRITICAL RULE: Clarification ALWAYS comes BEFORE action. Never start working and clarify mid-execution.**
-
-**MANDATORY Clarification Scenarios - You MUST call ask_clarification BEFORE starting work when:**
-
-1. **Missing Information** (`missing_info`): Required details not provided
-   - Example: User says "create a web scraper" but doesn't specify the target website
-   - Example: "Deploy the app" without specifying environment
-   - **REQUIRED ACTION**: Call ask_clarification to get the missing information
-
-2. **Ambiguous Requirements** (`ambiguous_requirement`): Multiple valid interpretations exist
-   - Example: "Optimize the code" could mean performance, readability, or memory usage
-   - Example: "Make it better" is unclear what aspect to improve
-   - **REQUIRED ACTION**: Call ask_clarification to clarify the exact requirement
-
-3. **Approach Choices** (`approach_choice`): Several valid approaches exist
-   - Example: "Add authentication" could use JWT, OAuth, session-based, or API keys
-   - Example: "Store data" could use database, files, cache, etc.
-   - **REQUIRED ACTION**: Call ask_clarification to let user choose the approach
-
-4. **Risky Operations** (`risk_confirmation`): Destructive actions need confirmation
-   - Example: Deleting files, modifying production configs, database operations
-   - Example: Overwriting existing code or data
-   - **REQUIRED ACTION**: Call ask_clarification to get explicit confirmation
-
-5. **Suggestions** (`suggestion`): You have a recommendation but want approval
-   - Example: "I recommend refactoring this code. Should I proceed?"
-   - **REQUIRED ACTION**: Call ask_clarification to get approval
-
-**STRICT ENFORCEMENT:**
-- ❌ DO NOT start working and then ask for clarification mid-execution - clarify FIRST
-- ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
-- ❌ DO NOT make assumptions when information is missing - ALWAYS ask
-- ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
-- ❌ DO NOT call any other tool in the same turn as ask_clarification — sibling calls are dropped
-- ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
-- ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- ✅ After calling ask_clarification, execution will be interrupted automatically
-- ✅ Wait for user response - do NOT continue with assumptions
-
-**How to Use:**
-```python
-ask_clarification(
-    question="Your specific question here?",
-    clarification_type="missing_info",  # or other type
-    context="Why you need this information",  # optional but recommended
-    options=["option1", "option2"]  # optional, for choices
-)
-```
-
-**Example:**
-User: "Deploy the application"
-You (thinking): Missing environment info - I MUST ask for clarification
-You (action): ask_clarification(
-    question="Which environment should I deploy to?",
-    clarification_type="approach_choice",
-    context="I need to know the target environment for proper configuration",
-    options=["development", "staging", "production"]
-)
-[Execution stops - wait for user response]
-
-User: "staging"
-You: "Deploying to staging..." [proceed]
+Once `ask_clarification` is called, execution is interrupted and sibling tool
+calls in that turn are dropped. Wait for the user's answer before work that
+depends on it.
 </clarification_system>"""
 
 _AUTONOMOUS_CLARIFICATION_SYSTEM = """<clarification_system>
@@ -126,7 +69,7 @@ class RunInteractionPolicy:
     @property
     def thinking_guidance(self) -> str:
         if self.allows_clarification:
-            return "- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**"
+            return "- **INTERACTION CHECK: Use available context and reasonable reversible assumptions; ask when essential information or authorization is missing.**"
         return "- **INTERACTION CHECK: This run has no synchronous human. Resolve ambiguity with the run context, choose the lowest-risk reversible path, and record material assumptions.**"
 
     @property
@@ -139,7 +82,7 @@ class RunInteractionPolicy:
     @property
     def clarification_reminder(self) -> str:
         if self.allows_clarification:
-            return "- **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess"
+            return "- **Clarification**: Continue independent work and ask when an essential decision or authorization is missing."
         return "- **Autonomous Interaction**: Do not wait for a human response; make minimal reversible assumptions, list them, or return a structured `BLOCKED` result for high-risk ambiguity"
 
     @classmethod

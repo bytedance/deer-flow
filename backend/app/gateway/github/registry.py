@@ -95,7 +95,7 @@ def _build_index(agents: list[tuple[str, AgentConfig]]) -> _Registry:
                     # it is here, so this branch is unreachable. Keep the
                     # guard for type-checker happiness.
                     continue
-                index.setdefault((binding.repo, event), []).append(GitHubAgentMatch(user_id=user_id, agent=cfg, trigger=resolved))
+                index.setdefault((binding.repo.lower(), event), []).append(GitHubAgentMatch(user_id=user_id, agent=cfg, trigger=resolved))
     return index
 
 
@@ -145,4 +145,4 @@ def lookup_agents(
     and the pre-resolved trigger config for this specific event, so the
     caller does not need to walk the agent's ``bindings`` again.
     """
-    return registry.get((repo, event), [])
+    return registry.get((repo.lower(), event), [])

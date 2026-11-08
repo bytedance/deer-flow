@@ -1010,7 +1010,18 @@ def test_composed_write_authorization_deny_is_not_swallowed(monkeypatch, is_asyn
     """The gate's generic fail-open path must never turn an authz deny into allow."""
     import asyncio
 
+    import deerflow.agents.middlewares.read_before_write_middleware as read_before_write_module
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    stamped_exceptions = []
+    original_stamp_exception_meta = read_before_write_module.stamp_exception_meta
+
+    def record_stamped_exception(message, exc_info):
+        stamped_exceptions.append(exc_info)
+        return original_stamp_exception_meta(message, exc_info)
+
+    monkeypatch.setattr(read_before_write_module, "stamp_exception_meta", record_stamped_exception)
 
     provider, sandbox, runtime = _install_composed_file_authz(monkeypatch, allow=False)
     path = "/mnt/user-data/outputs/report.md"
@@ -1034,6 +1045,8 @@ def test_composed_write_authorization_deny_is_not_swallowed(monkeypatch, is_asyn
 
     assert result.status == "error"
     assert "not permitted" in str(result.content).lower()
+    assert len(stamped_exceptions) == 1
+    assert isinstance(stamped_exceptions[0], SandboxAuthorizationError)
     handler.assert_not_called()
     sandbox.read_file.assert_not_called()
 

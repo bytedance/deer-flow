@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationInfo, fi
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.extensions_config import extensions_config_file_lock
 from deerflow.config.file_signature import get_config_signature
-from deerflow.config.managed_model_providers import get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
+from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider, resolve_managed_model_provider, resolve_preset_model
 from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.runtime_paths import runtime_home
 from deerflow.config.secret_file import read_or_create_secret_file
@@ -121,7 +121,22 @@ class ManagedModel(BaseModel):
                 settings.pop("when_thinking_enabled", None)
             if self.reasoning.thinking == "required":
                 settings.pop("when_thinking_disabled", None)
-            settings["reasoning"] = self.reasoning
+            # Preset effort defaults must also obey the explicit contract.
+            # Keep compatible defaults and non-effort protocol parameters.
+            effort = self.reasoning.effort
+            for field in ("when_thinking_enabled", "when_thinking_disabled"):
+                template = settings.get(field)
+                if template and "reasoning_effort" in template:
+                    if effort is None or effort.path != "reasoning_effort" or template["reasoning_effort"] not in effort.values:
+                        template.pop("reasoning_effort")
+                        if not template:
+                            settings.pop(field)
+            reasoning = self.reasoning
+            if self.provider == "openai" and self.model in OPENAI_GPT6_MODELS and effort is not None:
+                # The preset owns Responses routing. Translate stored wire paths
+                # on a runtime copy; ChatOpenAI serializes this as reasoning.effort.
+                reasoning = reasoning.model_copy(update={"effort": effort.model_copy(update={"path": "reasoning_effort"})})
+            settings["reasoning"] = reasoning
         if self.supports_vision is not None:
             settings["supports_vision"] = self.supports_vision
         if self.max_tokens is not None:
