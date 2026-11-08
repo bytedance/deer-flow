@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import threading
 import time
@@ -34,6 +35,9 @@ TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
 # Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
 TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS = 4.0
 TELEGRAM_BRIDGE_DRAIN_TIMEOUT_SECONDS = 1.0
+# Outbound listeners await sends inline. Bound each flood wait while still
+# allowing a full group rate-limit window.
+TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 60.0
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
 # Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
 # so stream edits there must pace well below the private-chat 1 msg/s guideline.
@@ -968,10 +972,22 @@ class TelegramChannel(Channel):
         }
 
     def _send_retry_delay(self, exc: Exception, attempt: int) -> float:
+        """Extend the shared backoff for new plain or Rich final-reply sends.
+
+        Only sends through ``_send_with_retry`` use this policy. The running
+        acknowledgment and intermediate stream updates are best effort. Final
+        edits have their own retry path.
+        """
         delay = super()._send_retry_delay(exc, attempt)
-        if self._is_retry_after(exc):
-            return max(delay, self._retry_after_seconds(exc))
-        return delay
+        if not self._is_retry_after(exc):
+            return delay
+        try:
+            hint = self._retry_after_seconds(exc)
+        except (TypeError, ValueError, OverflowError):
+            return delay
+        if not math.isfinite(hint):
+            return delay
+        return max(delay, min(hint, TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
 
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:

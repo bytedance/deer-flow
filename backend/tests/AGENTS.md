@@ -4,6 +4,8 @@
 Bot API responses and a virtual sleep clock. New sends honor `RetryAfter` seconds
 or timedelta without shortening backoff. Preserve attempt limits, cancellation,
 reply chaining and each delivered chunk exactly once, including preview overflow.
+Flood waits are capped at 60 seconds per retry; unusable hints (inf, NaN,
+non-numeric, wrong type, overflow) fall back to the local exponential backoff.
 
 `test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.

@@ -126,15 +126,17 @@ async def test_limited_overflow_preserves_every_chunk_once(delivery, with_previe
 
 
 @pytest.mark.asyncio
-async def test_persistent_flood_control_keeps_attempt_limit(delivery):
+@pytest.mark.parametrize(("retry_after", "expected_sleeps"), [(30, [30, 30]), (120, [60, 60])])
+async def test_persistent_flood_control_keeps_attempt_limit(delivery, retry_after, expected_sleeps):
     channel, api = delivery
     api.always_limited = True
+    api.retry_after = retry_after
 
     with pytest.raises(RetryAfter):
         await channel.send(_reply(), _max_retries=3)
 
     assert len(api.calls) == 3
-    assert api.sleeps == [30, 30]
+    assert api.sleeps == expected_sleeps
     assert api.delivered == []
 
 
@@ -149,6 +151,18 @@ async def test_short_server_delay_does_not_shorten_local_backoff(delivery):
 
     assert api.sleeps == [1, 2]
     assert len(api.calls) == 3
+
+
+@pytest.mark.parametrize(
+    "bad_hint",
+    [float("inf"), float("nan"), "invalid", {}, 10**400],
+    ids=["infinite", "nan", "nonnumeric", "wrong-type", "overflow"],
+)
+def test_unusable_hint_keeps_local_backoff(bad_hint):
+    exc = SimpleNamespace(retry_after=bad_hint)
+    channel = TelegramChannel.__new__(TelegramChannel)
+    # attempt=2 -> base backoff 2**2=4; an unusable hint must not change it.
+    assert channel._send_retry_delay(exc, 2) == 4
 
 
 @pytest.mark.asyncio
