@@ -9,6 +9,7 @@ execution chain (validated by the design spike).
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from typing import Any
 
@@ -79,6 +80,20 @@ def _addressable(calls: list[dict[str, Any]]) -> bool:
     """
     ids = [call.get("id") for call in calls]
     return all(isinstance(call_id, str) and call_id for call_id in ids) and len(set(ids)) == len(ids)
+
+
+def _unambiguous_ids(last: AIMessage, calls: list[dict[str, Any]]) -> bool:
+    """Whether every targeted call has an id no other call in the response shares.
+
+    ``_addressable`` only asks whether a ``ToolMessage`` can answer the targeted
+    calls. An id shared with an ordinary call makes the approval ambiguous in
+    both directions: approving or rejecting one call would also answer the other
+    by id. Such a group is denied before pausing.
+    """
+    if not _addressable(calls):
+        return False
+    response_ids = Counter(tool_call.get("id") for tool_call in last.tool_calls)
+    return all(response_ids[call.get("id")] == 1 for call in calls)
 
 
 def _deny_message(tool_call: Mapping[str, Any], reason: str) -> ToolMessage:
@@ -206,8 +221,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         # with a null or duplicate id with 422, and a pending pause blocks new
         # runs with 409, so pausing here would wedge the thread permanently.
         # Fail closed instead of interrupting.
-        if not _addressable(targets):
-            return self._deny_all(last, targets, _unaddressable_reason())
+        if not _unambiguous_ids(last, targets):
+            return _strip_calls(last, targets, _unaddressable_reason())
         actions = [
             {
                 "tool_call_id": tc["id"],
@@ -244,8 +259,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         resume_value: Any,
     ) -> dict[str, Any]:
         target_ids = [tc["id"] for tc in targets]
-        if not _addressable(targets):
-            return self._deny_all(last, targets, _invalid_response_reason())
+        if not _unambiguous_ids(last, targets):
+            return _strip_calls(last, targets, _invalid_response_reason())
         ai_message_id = last.id or ""
         expected_request_ids = {call_id: f"hitl_approval:{ai_message_id}:{call_id}" for call_id in target_ids}
         responses = resume_value.get("responses") if isinstance(resume_value, Mapping) else None
