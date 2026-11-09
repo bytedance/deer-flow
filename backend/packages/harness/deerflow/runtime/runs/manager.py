@@ -343,6 +343,12 @@ class RunRecord:
     idempotency_reused: bool = False
     evidence_origin: str = "unknown"
     evidence_agent_id: str | None = None
+    # Set by a thread deletion that arrived while this record's worker task was
+    # still running its finalize tail. The record stays registered so that tail
+    # keeps a target for its manager-mediated writes, but every public read
+    # treats it as gone and the task's completion evicts it immediately instead
+    # of waiting for ``cleanup()``'s delay.
+    evicted: bool = field(default=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -422,6 +428,9 @@ class RunManager:
         self._lease_checks: dict[str, asyncio.Task[None]] = {}
         self._lease_operations: dict[str, asyncio.Task] = {}
         self._lease_deadlines: dict[str, asyncio.TimerHandle] = {}
+        # Evictions queued by a deleted thread's finishing finalize tail. Held so
+        # the loop cannot garbage-collect them before they drop the record.
+        self._tail_evictions: set[asyncio.Task] = set()
 
     @asynccontextmanager
     async def _admission_scope(self, thread_id: str, run_id: str) -> AsyncIterator[None]:
@@ -1176,8 +1185,13 @@ class RunManager:
         """
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
-        if record is not None:
+        if record is not None and not record.evicted:
             return record
+        # A hidden record is authoritative for "this run is deleted", so never
+        # resurrect it from a stale store read. Settle that before any store call
+        # so the read stays side-effect free and store-less managers stop here.
+        if record is not None and record.evicted:
+            return None
         if self._store is None:
             return None
         try:
@@ -1191,9 +1205,9 @@ class RunManager:
         # in-memory record while the store call was in flight.
         async with self._run_registry_lock(run_id):
             record = self._runs.get(run_id)
-        if record is not None:
+        if record is not None and not record.evicted:
             return record
-        if row is None:
+        if record is not None or row is None:
             return None
         try:
             return self._record_from_store(row)
@@ -1263,6 +1277,7 @@ class RunManager:
                 record
                 for record in self._thread_records_locked(thread_id)
                 if record.operation_kind == ThreadOperationKind.run
+                and not record.evicted
                 and run_is_before_cursor(
                     record.created_at,
                     record.run_id,
@@ -1290,7 +1305,15 @@ class RunManager:
             return _page(memory_records)
         for row in rows:
             run_id = row.get("run_id")
-            if run_id and run_id not in records_by_id:
+            if not run_id:
+                continue
+            known = self._runs.get(run_id)
+            # A hidden record means this thread was deleted while the record
+            # still had a live finalize tail; the durable row is already gone,
+            # so a store row here can only be a stale or partial read.
+            if known is not None and known.evicted:
+                continue
+            if run_id not in records_by_id:
                 try:
                     records_by_id[run_id] = self._record_from_store(row)
                 except Exception:
@@ -1313,7 +1336,7 @@ class RunManager:
         """
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.list_successful_regenerate_sources")
         async with self._thread_registry_lock(thread_id):
-            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and (resolved_user_id is None or record.user_id == resolved_user_id)]
+            memory_records = [record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and not record.evicted and (resolved_user_id is None or record.user_id == resolved_user_id)]
 
         sources = set(await self._store.list_successful_regenerate_sources(thread_id, user_id=resolved_user_id)) if self._store is not None else set()
         # _thread_records_locked preserves the insertion order of the thread
@@ -1384,7 +1407,7 @@ class RunManager:
                 records_by_id[record.run_id] = record
 
         async with self._thread_registry_lock(thread_id):
-            memory_records = [record for record in self._thread_records_locked(thread_id) if resolved_user_id is None or record.user_id == resolved_user_id]
+            memory_records = [record for record in self._thread_records_locked(thread_id) if not record.evicted and (resolved_user_id is None or record.user_id == resolved_user_id)]
         for record in memory_records:
             records_by_id[record.run_id] = record
 
@@ -1475,12 +1498,22 @@ class RunManager:
         resolved_user_id = resolve_user_id(user_id, method_name="RunManager.get_many_by_thread")
         async with self._thread_registry_lock(thread_id):
             records_by_id = {
-                record.run_id: record for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
+                record.run_id: record
+                for record in self._thread_records_locked(thread_id)
+                if record.operation_kind == ThreadOperationKind.run and not record.evicted and record.run_id in run_ids and (resolved_user_id is None or record.user_id == resolved_user_id)
             }
         if self._store is None:
             return records_by_id
 
         remaining = run_ids - records_by_id.keys()
+        if not remaining:
+            return records_by_id
+        # Mirror ``list_by_thread``: a hidden record means the thread was deleted
+        # while its finalize tail was live, so a store row for it can only be a
+        # stale or partial read and must never be rebuilt into a visible record.
+        async with self._thread_registry_lock(thread_id):
+            hidden_run_ids = {record.run_id for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.evicted}
+        remaining -= hidden_run_ids
         if not remaining:
             return records_by_id
         try:
@@ -2790,6 +2823,94 @@ class RunManager:
         """Return ``True`` if *thread_id* has a pending or running run."""
         async with self._thread_registry_lock(thread_id):
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
+
+    async def discard_thread_runs(self, thread_id: str) -> int:
+        """Drop this worker's in-memory run records for *thread_id*.
+
+        A thread deletion removes the durable rows through
+        ``RunStore.delete_by_thread``, but ``get()`` and ``list_by_thread()``
+        answer from ``_runs`` / ``_runs_by_thread`` first. Leaving those copies
+        in place makes a deleted thread's runs — including ``kwargs`` with the
+        user's prompt — readable until the process restarts, even though the
+        thread itself already answers 404.
+
+        The caller must already hold the thread's exclusive admission, so no
+        run for it can be admitted concurrently here. A finished record can
+        still own a live finalize tail (``worker.py`` clears ``finalizing``,
+        then publishes the terminal frame, closes the journal and releases the
+        sandbox lease before scheduling ``cleanup()``), so records whose
+        ``task`` is still running stay indexed here: the bound is one final
+        tail, and later manager-mediated writes land on a record whose durable
+        rows are already gone.
+
+        This covers this worker only. A Gateway peer that admitted the same
+        thread keeps its own ``_runs`` copies until its deferred
+        ``cleanup(run_id)`` fires (the default 300s delay), so a DELETE served
+        elsewhere bounds multi-worker residues rather than removing them.
+        """
+        async with self._thread_registry_lock(thread_id):
+            run_ids = list(self._runs_by_thread.get(thread_id, {}))
+            dropped = 0
+            deferred: list[asyncio.Task] = []
+            for run_id in run_ids:
+                record = self._runs.get(run_id)
+                if record is None or record.thread_id != thread_id:
+                    self._unindex_run_locked(run_id, thread_id)
+                    continue
+                # Historical runs only. Internal thread-operation rows are held
+                # by their own release path (this deletion holds one of them).
+                if record.operation_kind != ThreadOperationKind.run:
+                    continue
+                task = record.task
+                if task is not None and not task.done():
+                    # A finalize tail still owns this record. Hide it from every
+                    # public read now, and let the task's own completion evict
+                    # it — otherwise the run and its prompt stay readable
+                    # through the run endpoints until ``cleanup()``'s delay.
+                    record.evicted = True
+                    deferred.append(task)
+                    continue
+                self._runs.pop(run_id, None)
+                self._unindex_run_locked(run_id, thread_id)
+                dropped += 1
+        for task in deferred:
+            task.add_done_callback(lambda completed: self._evict_after_task(thread_id, completed))
+        return dropped
+
+    def _evict_after_task(self, thread_id: str, completed: asyncio.Task) -> None:
+        """Evict a record shielded only by *completed*, once its tail is done.
+
+        ``discard_thread_runs`` flags a record instead of popping it so the
+        finalize tail keeps a write target. The tail is the record's ``task``,
+        so its completion is the earliest point at which popping is safe;
+        ``cleanup()``'s 300s delay is far too late for a deleted thread.
+
+        Eviction runs as its own task because this callback cannot await the
+        registry lock. The loop holds only weak references to tasks, so the
+        eviction is tracked here until it settles.
+        """
+        try:
+            task = asyncio.get_running_loop().create_task(self._evict_completed_tail(thread_id))
+        except RuntimeError:
+            # Fail-closed: the record stays hidden from reads because it is
+            # still flagged, and the next discard pass evicts it outright.
+            logger.debug("No running loop to evict the thread %s finalize tail", thread_id, exc_info=True)
+            return
+        self._tail_evictions.add(task)
+        task.add_done_callback(self._tail_evictions.discard)
+
+    async def _evict_completed_tail(self, thread_id: str) -> None:
+        """Drop records a deletion marked ``evicted`` once their tail is done."""
+        async with self._thread_registry_lock(thread_id):
+            for run_id, record in list(self._runs.items()):
+                if record.thread_id != thread_id or not record.evicted:
+                    continue
+                if record.operation_kind != ThreadOperationKind.run:
+                    continue
+                if record.task is not None and not record.task.done():
+                    continue
+                self._runs.pop(run_id, None)
+                self._unindex_run_locked(run_id, thread_id)
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay.

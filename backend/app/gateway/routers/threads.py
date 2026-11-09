@@ -810,6 +810,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     approval_store = getattr(request.app.state, "approval_store", None)
     if approval_store is not None:
@@ -834,14 +835,15 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         # being deleted under a run that has just been admitted.
         response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
-    # Remove checkpoints (best-effort)
+    # Retain ownership if a configured checkpointer cannot delete the thread.
+    # Read routes treat rowless checkpoints as untracked legacy threads.
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
         try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+            await checkpointer.adelete_thread(thread_id)
+        except Exception as exc:
+            logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
 
     # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
     # are deleted, so the durable thread-operation reservation protecting this
@@ -853,6 +855,16 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             await delete_runs(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Drop this worker's in-memory copies too. ``RunManager.get()`` and
+    # ``list_by_thread()`` answer from the process-local registry before the
+    # store, so without this the deleted thread's runs — including ``kwargs``
+    # with the user's prompt — stay readable through ``GET /threads/{id}/runs``
+    # until the Gateway restarts, while the thread itself already 404s.
+    try:
+        await run_manager.discard_thread_runs(thread_id)
+    except Exception:
+        logger.debug("Could not evict in-memory runs for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted
@@ -1034,7 +1046,15 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
-        # A duplicate-key error with no row we can read back is a real failure.
+        # The same-owner reconciliation above found nothing, yet the insert hit
+        # a duplicate primary key — so the surviving row belongs to *another*
+        # user. That is the ownership-conflict case, which the route already
+        # maps ``ThreadOwnershipConflictError`` to: a non-disclosing 404. Read
+        # the row back bypassing the owner scope to confirm a foreign row
+        # exists before collapsing to a 500.
+        if await thread_store.get(thread_id, user_id=None) is not None:
+            raise HTTPException(status_code=404, detail="Thread not found") from None
+        # A duplicate-key error with no surviving row is a real failure.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
     except Exception:

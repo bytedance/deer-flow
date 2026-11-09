@@ -3290,7 +3290,6 @@ export function InputBox({
               </PromptInputButton>
             </Tooltip>
             <AddAttachmentsButton
-              onOpen={openMentions}
               className="px-2!"
               disabled={composerLocked}
               uploadLimits={uploadLimits}
@@ -3875,9 +3874,7 @@ function AddAttachmentsButton({
   className,
   disabled,
   uploadLimits,
-  onOpen,
 }: {
-  onOpen?: () => void;
   className?: string;
   disabled?: boolean;
   uploadLimits?: UploadLimits;
@@ -3898,7 +3895,7 @@ function AddAttachmentsButton({
         className={cn("px-2!", className)}
         data-testid="add-attachments-button"
         disabled={disabled}
-        onClick={onOpen ?? (() => attachments.openFileDialog())}
+        onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />
       </PromptInputButton>

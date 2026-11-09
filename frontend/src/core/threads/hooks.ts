@@ -30,6 +30,7 @@ import { getBackendBaseURL } from "../config";
 import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
+import type { Translations } from "../i18n/locales";
 import {
   extractHitlApprovalRequests,
   type HitlApprovalRequest,
@@ -2069,6 +2070,30 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function getStreamErrorToastMessage(
+  error: unknown,
+  t: Translations,
+  showApprovalErrors = false,
+): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500 && status < 600) {
+    console.warn("Chat stream request failed:", getStreamErrorMessage(error));
+    return t.conversation.streamServerError(status);
+  }
+
+  const message = getStreamErrorMessage(error);
+  if (showApprovalErrors) {
+    const errorText = `${JSON.stringify(error) ?? ""} ${message}`;
+    if (errorText.includes("hitl_approval_disabled")) {
+      return t.humanInput.approval.featureDisabled;
+    }
+    if (errorText.includes("no_pending_approval")) {
+      return t.humanInput.approval.noPending;
+    }
+  }
+  return message;
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -2545,16 +2570,7 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      const streamErrorText = `${JSON.stringify(error) ?? ""} ${getStreamErrorMessage(
-        error,
-      )}`;
-      toast.error(
-        streamErrorText.includes("hitl_approval_disabled")
-          ? t.humanInput.approval.featureDisabled
-          : streamErrorText.includes("no_pending_approval")
-            ? t.humanInput.approval.noPending
-            : getStreamErrorMessage(error),
-      );
+      toast.error(getStreamErrorToastMessage(error, t, true));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -3338,7 +3354,7 @@ export function useThreadStream({
             };
             toast.error(t.humanInput.approval.submitTimeout);
             void stopThread().catch((error: unknown) => {
-              toast.error(getStreamErrorMessage(error));
+              toast.error(getStreamErrorToastMessage(error, t));
             });
           }
         }, HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS);
@@ -3383,16 +3399,7 @@ export function useThreadStream({
         if (pendingApprovalSubmissionRef.current === submission) {
           settlePendingApproval(false);
         }
-        const serialized = `${JSON.stringify(error) ?? ""} ${getStreamErrorMessage(
-          error,
-        )}`;
-        toast.error(
-          serialized.includes("hitl_approval_disabled")
-            ? t.humanInput.approval.featureDisabled
-            : serialized.includes("no_pending_approval")
-              ? t.humanInput.approval.noPending
-              : getStreamErrorMessage(error),
-        );
+        toast.error(getStreamErrorToastMessage(error, t, true));
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -3549,7 +3556,7 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -3561,6 +3568,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       queryClient,
+      t,
       thread,
       visibleHistory,
     ],

@@ -1538,6 +1538,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    streamServerError: (status) =>
+      `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",
     outlineAttachmentFallback: "图片或文件消息",
   },

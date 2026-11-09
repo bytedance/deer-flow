@@ -26,10 +26,17 @@
 
 ### 修复
 
+- **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
+  `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
+  返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
+  `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
+  可以再次删除。([#7992])
+
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
   且脱敏的地址与此前完全相同。([#8006])
+
 - **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
   已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
@@ -45,6 +52,12 @@
   的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
   把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
   `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
   
 - **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
@@ -12826,5 +12839,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043

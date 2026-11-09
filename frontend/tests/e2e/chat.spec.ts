@@ -1210,6 +1210,37 @@ test.describe("Chat workspace", () => {
     });
   });
 
+  test("opens local files directly from the attachment button and keeps references under @", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await page.getByTestId("add-attachments-button").click();
+    const fileChooser = await fileChooserPromise;
+    await expect(page.getByTestId("mention-picker")).toBeHidden();
+    await fileChooser.setFiles({
+      name: "local-report.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Local attachment"),
+    });
+    await expect(
+      page.locator("form").getByText("local-report.txt"),
+    ).toBeVisible();
+
+    await page.getByTestId("mention-button").click();
+    const picker = page.getByTestId("mention-picker");
+    await expect(picker).toBeVisible();
+    await expect(
+      picker.getByRole("option", { name: "Upload a file" }),
+    ).toBeAttached();
+    await expect(
+      picker.getByRole("group", { name: "Skills", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.locator("form").getByText("local-report.txt"),
+    ).toBeVisible();
+  });
+
   test("shows gateway upload limits on the attachment entry point", async ({
     page,
   }) => {

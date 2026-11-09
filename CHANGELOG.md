@@ -37,6 +37,26 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
+
+- **gateway:** Deleting a thread no longer reports success while its
+  conversation stays readable. When the checkpoint store failed during
+  `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
+  thread's metadata row and returned success; any signed-in user could then
+  read the leftover title and messages through `GET /threads/{id}`, `/state`,
+  `/history` and `/goal`, and the owner could not retry. The delete now
+  returns a 500 and keeps the thread, so the owner can delete it again.
+  ([#7992])
+
+- **gateway:** Creating a thread with a caller-supplied `thread_id` that
+  already belongs to another user now returns a non-disclosing 404
+  (`Thread not found`) instead of a 500. The duplicate-key recovery path reads
+  the surviving row back bypassing the owner scope so the cross-owner case
+  mirrors `ThreadOwnershipConflictError`; a duplicate key with no surviving row
+  is still surfaced as a 500. ([#8057])
+
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
@@ -50,6 +70,16 @@ This section accumulates work toward the **2.3.0** milestone
   Gateway `/api/subagents` boundary before attempting filesystem writes,
   preventing `OSError` failures on Windows hosts while keeping existing
   read and delete operations permissive.
+
+- **scheduler:** A stored `schedule_spec` that is JSON null, a list or a string
+  no longer aborts the scheduler poll. `stored_next_run_at` caught the value
+  errors from a dropped zone or a newer cron parser, but a non-object spec
+  fails on `.get`; the launch-failure handler recomputed it again, so the
+  `AttributeError` escaped `run_once`'s claimed-task loop. Such a task is now
+  paused with the reason, like the other unusable schedules. The poll loop also
+  isolates one task's dispatch failure from the rest of its claimed batch, so a
+  future per-record raise costs one tick instead of every other claimed task.
+  ([#7998])
 
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
@@ -73,6 +103,15 @@ This section accumulates work toward the **2.3.0** milestone
   Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
   `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
   instead of reaching the SDK as is. ([#7981])
+  
+- **community:** Browserless is the last search/fetch provider that read its
+  token raw. A `BROWSERLESS_TOKEN` or configured `token` from a file kept its
+  trailing newline and became the auth query parameter, so every `web_fetch`
+  and `web_capture` request failed authentication while the key was correct.
+  Both now go through `provider_credentials.resolve_api_key`, and only an
+  omitted `token` key falls back to the environment: an explicit `""` or
+  `null` keeps opting a self-hosted capture endpoint out of authentication.
+  ([#8043])
   
 - **docker:** Images built from a checkout no longer contain its local
   configuration. `.dockerignore` did not exclude `config.yaml`,
@@ -114,6 +153,18 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
+  
+- **memory:** An agent-scoped memory write whose `agent_name` is a Windows
+  reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
+  on the two routes that create that scope, `POST /memory/facts` and
+  `POST /memory/import`. DeerMem resolves the scope to
+  `{storage}/users/{uid}/agents/{name}/facts` and creates it on the first write;
+  the character-class check admitted such names, so the write raised
+  `FileNotFoundError` and the endpoint answered an opaque `500`. The check reuses
+  `windows_incompatible_segment()` and applies on every platform. Read and delete
+  routes stay permissive, so a scope with a reserved-name identifier that an
+  older release stored on a Linux host can still be exported and cleared.
+  ([#7941])
 
 - **skills:** A custom skill name that is a Windows reserved device name
   (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
@@ -16147,9 +16198,14 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7941]: https://github.com/bytedance/deer-flow/pull/7941
 [#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8057]: https://github.com/bytedance/deer-flow/pull/8057
