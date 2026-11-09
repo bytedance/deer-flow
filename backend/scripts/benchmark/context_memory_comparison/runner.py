@@ -1,554 +1,291 @@
+"""Run synthetic prompt checks through the local Gateway and real SQLite."""
+
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import subprocess
-import tempfile
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from contextlib import chdir
+from contextvars import ContextVar
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import Any, ClassVar
+from unittest.mock import patch
 
-from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, HumanMessage
-
-from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig, DeerMemModelConfig
-from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens, format_memory_for_injection
-from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory, create_storage
-from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
-from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
-from deerflow.projects.context import render_documents_block, render_project_block
-from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
-
-from .contract import Protocol, ScopeIsolationCase, TokenOverheadCase, TurnInvalidationCase
+from fastapi.testclient import TestClient
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 
 ROOT = Path(__file__).resolve().parent
-BACKEND_ROOT = ROOT.parents[2]
-ROW_SCHEMA_VERSION = 1
-MARKER_SCHEMA_VERSION = 1
-PROMPT_PATH = "DynamicContextMiddleware.wrap_model_call"
+MANIFEST = ROOT / "manifest.json"
+REPLY = "Offline benchmark response."
+DAY = "2026-11-09, Monday"
+_EMPTY_UPDATE = {"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}
+_SCRIPTED_UPDATE: ContextVar[dict[str, Any] | None] = ContextVar("offline_memory_update", default=None)
 
 
-@dataclass(frozen=True)
-class RunReport:
-    reused: int
-    executed: int
+class OfflineModel(BaseChatModel):
+    """Capture agent requests and return fixed replies for both model roles."""
+
+    model: str
+    temperature: float = 0.0
+    requests: ClassVar[list[list[BaseMessage]]] = []
+
+    @property
+    def _llm_type(self) -> str:
+        return "context-memory-offline"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        if self.model == "extract":
+            content = json.dumps(_SCRIPTED_UPDATE.get() or _EMPTY_UPDATE)
+        else:
+            self.requests.append(list(messages))
+            content = REPLY
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
 
-class _StaticModel:
-    def __init__(self, output: dict[str, Any]):
-        self.output = output
-        self.prompt_sha256: str | None = None
-
-    def invoke(self, prompt: Any, config: dict[str, Any] | None = None) -> Any:
-        self.prompt_sha256 = _sha256_json(_prompt_projection(prompt))
-        return SimpleNamespace(content=json.dumps(self.output), usage_metadata={})
+def _request(client: TestClient, method: str, path: str, **kwargs) -> dict:
+    response = client.request(method, path, **kwargs)
+    response.raise_for_status()
+    return response.json()
 
 
-def _prompt_projection(prompt: Any) -> list[dict[str, str]]:
-    if not isinstance(prompt, (list, tuple)):
-        return [{"type": "raw", "content": str(prompt)}]
-    return [{"type": str(getattr(message, "type", "unknown")), "content": str(getattr(message, "content", message))} for message in prompt]
+def _thread(client: TestClient, project_id: str | None = None) -> str:
+    return _request(client, "POST", "/api/threads", json={"project_id": project_id})["thread_id"]
 
 
-def _sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
-
-
-def _sha256_json(value: Any) -> str:
-    return _sha256_bytes(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
-
-
-def _atomic_write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
-def _git_revision() -> str | None:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=BACKEND_ROOT, capture_output=True, text=True, check=False)
-    return result.stdout.strip() if result.returncode == 0 else None
-
-
-def protocol_artifacts(manifest_path: Path) -> dict[str, str | None]:
-    return {
-        "manifest_sha256": sha256_file(manifest_path),
-        "source_revision": _git_revision(),
-        "prompt_path": PROMPT_PATH,
-    }
-
-
-def _marker(mode: str, protocol: Protocol, manifest_path: Path) -> dict[str, Any]:
-    return {
-        "schema_version": MARKER_SCHEMA_VERSION,
-        "protocol_id": protocol.protocol_id,
-        "mode": mode,
-        "artifacts": protocol_artifacts(manifest_path),
-        "model": {"provider": "deterministic-static", "model": "offline-fixture", "temperature": 0.0},
-    }
-
-
-def ensure_run_identity(
-    output_dir: Path,
-    *,
-    mode: str,
-    protocol: Protocol,
-    manifest_path: Path,
-) -> dict[str, Any]:
-    expected = _marker(mode, protocol, manifest_path)
-    marker_path = output_dir / "run.json"
-    if marker_path.exists():
-        actual = json.loads(marker_path.read_text(encoding="utf-8"))
-        comparable = {key: actual.get(key) for key in expected}
-        if comparable != expected:
-            raise ValueError(f"{marker_path} belongs to a different protocol, source revision, or mode")
-        return actual
-    marker = dict(expected)
-    marker["created_at"] = datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z"
-    _atomic_write_json(marker_path, marker)
-    return marker
-
-
-def _case_fingerprint(suite: str, case_data: dict[str, Any], marker: dict[str, Any]) -> str:
-    return _sha256_json(
-        {
-            "protocol_id": marker["protocol_id"],
-            "mode": marker["mode"],
-            "artifacts": marker["artifacts"],
-            "suite": suite,
-            "case": case_data,
-        }
+def _prompt(client: TestClient, thread_id: str, question: str, assistant_id: str = "lead_agent") -> list[BaseMessage]:
+    OfflineModel.requests.clear()
+    result = _request(
+        client,
+        "POST",
+        f"/api/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "input": {"messages": [{"role": "user", "content": question}]},
+            "config": {"configurable": {"model_name": "record", "thinking_enabled": False}},
+        },
     )
+    messages = result.get("messages") or []
+    if len(OfflineModel.requests) != 1 or not messages or messages[-1].get("content") != REPLY:
+        raise RuntimeError("Gateway run did not complete with exactly one recorded model request")
+    return OfflineModel.requests.pop()
 
 
-def _row_path(output_dir: Path, row_id: str) -> Path:
-    return output_dir / "rows" / f"{row_id}.json"
+def _present(text: str, canaries: set[str]) -> list[str]:
+    return sorted(canary for canary in canaries if canary in text)
 
 
-def row_result_sha256(row: dict[str, Any]) -> str:
-    return _sha256_json({key: value for key, value in row.items() if key != "result_sha256"})
+def _observe(messages: list[BaseMessage], canaries: set[str], expected: set[str]) -> dict:
+    from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_tokens
+    from deerflow.projects.context import is_project_context_message
 
-
-def _seal_row(row: dict[str, Any]) -> dict[str, Any]:
-    sealed = dict(row)
-    sealed["result_sha256"] = row_result_sha256(sealed)
-    return sealed
-
-
-def row_is_intact(row: dict[str, Any]) -> bool:
-    digest = row.get("result_sha256")
-    return isinstance(digest, str) and digest == row_result_sha256(row)
-
-
-def _load_reusable_row(path: Path, fingerprint: str) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        row = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(row, dict) or row.get("schema_version") != ROW_SCHEMA_VERSION or row.get("request_fingerprint") != fingerprint or not row_is_intact(row):
-        return None
-    return row
-
-
-def _config(storage_path: Path) -> DeerMemConfig:
-    return DeerMemConfig(
-        storage_path=str(storage_path),
-        retrieval_adapter="",
-        token_counting="char",
-        staleness_review_enabled=False,
-        consolidation_enabled=False,
-        model=DeerMemModelConfig(model="offline-fixture", temperature=0.0),
-    )
-
-
-def _assemble_thread_prompt(
-    updater: MemoryUpdater,
-    *,
-    thread_id: str,
-    user_id: str,
-    agent_name: str,
-    project_context: dict[str, Any] | None,
-    query_text: str = "Test prompt",
-) -> tuple[str, list[Any]]:
-    memory_data = updater.get_memory_data(agent_name=agent_name, user_id=user_id)
-    memory_text = format_memory_for_injection(memory_data, use_tiktoken=False)
-    memory_block = f"<memory>\n{memory_text}\n</memory>" if memory_text.strip() else None
-
-    orig_msg = HumanMessage(content=query_text, id=f"msg-{thread_id}")
-    reminder_content = "<system-reminder>\n<current_date>2026-11-06, Friday</current_date>\n</system-reminder>"
-    messages = DynamicContextMiddleware._make_reminder_and_user_messages(
-        orig_msg,
-        reminder_content=reminder_content,
-        memory_content=memory_block,
-        reminder_date="2026-11-06, Friday",
-    )
-
-    runtime_context = {PROJECT_CONTEXT_KEY: project_context} if project_context is not None else {}
-    runtime = SimpleNamespace(context=runtime_context)
-    request = ModelRequest(model=SimpleNamespace(), messages=messages, runtime=runtime)
-
-    assembled_messages: list[Any] = []
-
-    def _capture_handler(req: ModelRequest) -> ModelResponse:
-        assembled_messages.extend(req.messages)
-        return ModelResponse(result=[AIMessage(content="offline-stub")])
-
-    mw = DynamicContextMiddleware(agent_name=agent_name)
-    mw.wrap_model_call(request, _capture_handler)
-
-    full_text = "\n\n".join(str(getattr(m, "content", "")) for m in assembled_messages)
-    return full_text, assembled_messages
-
-
-def _storage_contains_canary(memory: dict[str, Any], canary: str) -> bool:
-    for fact in memory.get("facts", []):
-        if isinstance(fact, dict) and canary in str(fact.get("content", "")):
-            return True
-    for group in ("user", "history"):
-        sections = memory.get(group, {})
-        if not isinstance(sections, dict):
+    present = _present("\n".join(str(message.content) for message in messages), canaries)
+    blocks = {"memory": [], "project": [], "documents": []}
+    for message in messages:
+        if not isinstance(message, HumanMessage) or not isinstance(message.content, str):
             continue
-        for section in sections.values():
-            if isinstance(section, dict) and canary in str(section.get("summary", "")):
-                return True
-    return False
+        if message.content.startswith("<memory>"):
+            blocks["memory"].append(message.content)
+        if is_project_context_message(message):
+            for tag in ("project", "documents"):
+                blocks[tag].extend(re.findall(rf"<{tag}(?:\s[^>]*)?>.*?</{tag}>", message.content, flags=re.DOTALL))
+    return {
+        "passed": set(present) == expected,
+        "present": present,
+        "context_token_estimate": {name: sum(_count_tokens(block, use_tiktoken=False) for block in values) for name, values in blocks.items()},
+    }
 
 
-def _run_scope_isolation_case(
-    case: ScopeIsolationCase,
-    marker: dict[str, Any],
-) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="deerflow-bench-iso-") as td:
-        storage_path = Path(td)
-        config = _config(storage_path)
+def _extract(thread_id: str, instruction: str, *, new_facts: list[dict], removals: list[dict]) -> bool:
+    from deerflow.agents.memory import get_memory_manager
+    from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET
+    from deerflow.runtime.user_context import DEFAULT_USER_ID
 
-        contam_output = case.contamination_turn.get("offline_output", {}) if case.contamination_turn else {}
-        model = _StaticModel(contam_output)
-        updater = MemoryUpdater(config, create_storage(config), llm=model)
-
-        # Seed global memory
-        if case.seed_facts:
-            seed_mem = create_empty_memory()
-            seed_mem["facts"] = [dict(f) for f in case.seed_facts]
-            updater.import_memory_data(seed_mem, user_id=case.thread_a.user_id, agent_name=case.thread_a.agent_name)
-            if case.thread_b.user_id != case.thread_a.user_id:
-                updater.import_memory_data(seed_mem, user_id=case.thread_b.user_id, agent_name=case.thread_b.agent_name)
-
-        # Assemble prompt for Thread A via production DynamicContextMiddleware
-        prompt_a, _ = _assemble_thread_prompt(
-            updater,
-            thread_id=case.thread_a.thread_id,
-            user_id=case.thread_a.user_id,
-            agent_name=case.thread_a.agent_name,
-            project_context=case.thread_a.project_context,
-            query_text="Thread A question",
-        )
-
-        # Assemble prompt for Thread B via production DynamicContextMiddleware
-        prompt_b, _ = _assemble_thread_prompt(
-            updater,
-            thread_id=case.thread_b.thread_id,
-            user_id=case.thread_b.user_id,
-            agent_name=case.thread_b.agent_name,
-            project_context=case.thread_b.project_context,
-            query_text="Thread B question",
-        )
-
-        crosstalk_leaks: list[str] = []
-
-        # Contamination turn test in Thread A
-        persisted_pollutions: list[str] = []
-        if case.contamination_turn is not None:
-            msg_data = case.contamination_turn.get("messages", [])
-            messages = [HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"]) for m in msg_data]
-            updater.update_memory(
-                messages,
-                thread_id=case.thread_a.thread_id,
-                user_id=case.thread_a.user_id,
-                agent_name=case.thread_a.agent_name,
-                bypass_watermark=True,
-            )
-            mem_after_a = updater.get_memory_data(agent_name=case.thread_a.agent_name, user_id=case.thread_a.user_id)
-            mem_after_b = updater.get_memory_data(agent_name=case.thread_b.agent_name, user_id=case.thread_b.user_id)
-            persisted_pollutions = [canary for canary in case.expected_rejected_canaries if _storage_contains_canary(mem_after_a, canary) or _storage_contains_canary(mem_after_b, canary)]
-            # Verify Thread B prompt assembly after Thread A's contamination turn
-            prompt_b_after, _ = _assemble_thread_prompt(
-                updater,
-                thread_id=case.thread_b.thread_id,
-                user_id=case.thread_b.user_id,
-                agent_name=case.thread_b.agent_name,
-                project_context=case.thread_b.project_context,
-                query_text="Thread B follow-up question",
-            )
-            for canary in case.expected_rejected_canaries:
-                if canary in prompt_b_after:
-                    crosstalk_leaks.append(f"leak_rejected_to_thread_b:{canary}")
-
-        # Scan canaries
-        present_a = [c for c in case.expected_thread_a_canaries if c in prompt_a]
-        present_b = [c for c in case.expected_thread_b_canaries if c in prompt_b]
-
-        # Crosstalk detection: thread A must not contain thread B specific canaries, and vice-versa
-        th_b_specific = [c for c in case.expected_thread_b_canaries if c not in case.expected_thread_a_canaries]
-        th_a_specific = [c for c in case.expected_thread_a_canaries if c not in case.expected_thread_b_canaries]
-
-        for c in th_b_specific:
-            if c in prompt_a:
-                crosstalk_leaks.append(f"leak_b_to_a:{c}")
-        for c in th_a_specific:
-            if c in prompt_b:
-                crosstalk_leaks.append(f"leak_a_to_b:{c}")
-
-        case_dict = {
-            "id": case.case_id,
-            "thread_a": case.thread_a.__dict__,
-            "thread_b": case.thread_b.__dict__,
-            "expected_thread_a_canaries": case.expected_thread_a_canaries,
-            "expected_thread_b_canaries": case.expected_thread_b_canaries,
-            "expected_rejected_canaries": case.expected_rejected_canaries,
-        }
-
-        return _seal_row(
-            {
-                "schema_version": ROW_SCHEMA_VERSION,
-                "suite": "scope_isolation",
-                "row_id": case.case_id,
-                "description": case.description,
-                "request_fingerprint": _case_fingerprint("scope_isolation", case_dict, marker),
-                "expected_thread_a_canaries": list(case.expected_thread_a_canaries),
-                "expected_thread_b_canaries": list(case.expected_thread_b_canaries),
-                "expected_rejected_canaries": list(case.expected_rejected_canaries),
-                "thread_a_canaries_present": present_a,
-                "thread_b_canaries_present": present_b,
-                "crosstalk_canaries_leaked": crosstalk_leaks,
-                "persisted_rejected_canaries": persisted_pollutions,
-            }
-        )
-
-
-def _run_turn_invalidation_case(
-    case: TurnInvalidationCase,
-    marker: dict[str, Any],
-) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="deerflow-bench-inv-") as td:
-        storage_path = Path(td)
-        config = _config(storage_path)
-        model = _StaticModel(case.offline_output)
-        updater = MemoryUpdater(config, create_storage(config), llm=model)
-
-        # Seed turn 1
-        if case.seed_facts:
-            seed_mem = create_empty_memory()
-            seed_mem["facts"] = [dict(f) for f in case.seed_facts]
-            updater.import_memory_data(seed_mem, user_id=case.user_id, agent_name=case.agent_name)
-
-        # Turn 1 prompt assembly via production DynamicContextMiddleware
-        prompt_t1, _ = _assemble_thread_prompt(
-            updater,
-            thread_id=f"thread-{case.case_id}-t1",
-            user_id=case.user_id,
-            agent_name=case.agent_name,
-            project_context=None,
-            query_text="Turn 1 prompt",
-        )
-        t1_present = [c for c in case.expected_turn_1_canaries if c in prompt_t1]
-
-        # Execute Turn 1 memory update (e.g. deletion or atomic replacement)
-        update_msgs = [HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"]) for m in case.update_messages]
-        succeeded = updater.update_memory(
-            update_msgs,
-            thread_id=f"thread-{case.case_id}-t1",
-            user_id=case.user_id,
-            agent_name=case.agent_name,
+    token = _SCRIPTED_UPDATE.set({**_EMPTY_UPDATE, "newFacts": new_facts, "factsToRemove": removals})
+    try:
+        # Execute the production write synchronously so its outcome precedes
+        # the next Gateway run. Ordinary background extractions are no-ops.
+        return get_memory_manager()._updater.update_memory(
+            [HumanMessage(content=instruction), AIMessage(content="Understood.")],
+            thread_id=thread_id,
+            user_id=DEFAULT_USER_ID,
+            agent_name=DEFAULT_AGENT_BUCKET,
             bypass_watermark=True,
         )
-        if not succeeded:
-            raise RuntimeError(f"memory update failed for turn invalidation case {case.case_id}")
-
-        # Turn 2 prompt assembly (next turn) via production DynamicContextMiddleware
-        prompt_t2, _ = _assemble_thread_prompt(
-            updater,
-            thread_id=f"thread-{case.case_id}-t2",
-            user_id=case.user_id,
-            agent_name=case.agent_name,
-            project_context=None,
-            query_text="Turn 2 prompt",
-        )
-
-        stale_present = [c for c in case.expected_turn_2_absent_canaries if c in prompt_t2]
-        fresh_present = [c for c in case.expected_turn_2_present_canaries if c in prompt_t2]
-
-        case_dict = {
-            "id": case.case_id,
-            "user_id": case.user_id,
-            "agent_name": case.agent_name,
-            "seed_facts": case.seed_facts,
-            "expected_turn_1_canaries": case.expected_turn_1_canaries,
-            "expected_turn_2_present_canaries": case.expected_turn_2_present_canaries,
-            "expected_turn_2_absent_canaries": case.expected_turn_2_absent_canaries,
-        }
-
-        return _seal_row(
-            {
-                "schema_version": ROW_SCHEMA_VERSION,
-                "suite": "turn_invalidation",
-                "row_id": case.case_id,
-                "description": case.description,
-                "request_fingerprint": _case_fingerprint("turn_invalidation", case_dict, marker),
-                "expected_turn_1_canaries": list(case.expected_turn_1_canaries),
-                "expected_turn_2_present_canaries": list(case.expected_turn_2_present_canaries),
-                "expected_turn_2_absent_canaries": list(case.expected_turn_2_absent_canaries),
-                "turn_1_canaries_present": t1_present,
-                "turn_2_fresh_canaries_present": fresh_present,
-                "turn_2_stale_canaries_present": stale_present,
-            }
-        )
+    finally:
+        _SCRIPTED_UPDATE.reset(token)
 
 
-def _run_token_overhead_case(
-    case: TokenOverheadCase,
-    marker: dict[str, Any],
-) -> dict[str, Any]:
-    # Measure user facts alone
-    user_mem = create_empty_memory()
-    user_mem["facts"] = [dict(f) for f in case.user_facts]
-    user_text = format_memory_for_injection(user_mem, use_tiktoken=False)
-    user_facts_tokens = _count_tokens(user_text, use_tiktoken=False) if user_text else 0
+def _fact(content: str) -> dict:
+    return {"content": content, "category": "preference", "confidence": 0.99}
 
-    # Measure agent facts alone
-    agent_mem = create_empty_memory()
-    agent_mem["facts"] = [dict(f) for f in case.agent_facts]
-    agent_text = format_memory_for_injection(agent_mem, use_tiktoken=False)
-    agent_facts_tokens = _count_tokens(agent_text, use_tiktoken=False) if agent_text else 0
 
-    # Measure combined memory data
-    all_mem = create_empty_memory()
-    all_mem["facts"] = [dict(f) for f in (*case.user_facts, *case.agent_facts)]
-    combined_mem_text = format_memory_for_injection(all_mem, use_tiktoken=False)
-    memory_total_tokens = _count_tokens(combined_mem_text, use_tiktoken=False) if combined_mem_text else 0
+def _extracted_fact(content: str, scope: str) -> dict:
+    return {**_fact(content), "scope": scope, "durability": "durable", "authority": "descriptive"}
 
-    # Measure project context layers rendered identically to DynamicContextMiddleware
-    proj_inst_tokens = 0
-    proj_shelf_tokens = 0
-    proj_total_tokens = 0
 
-    if case.project_context is not None:
-        p_blk = render_project_block(case.project_context)
-        if p_blk is not None:
-            proj_inst_tokens = _count_tokens(p_blk, use_tiktoken=False)
-        d_blk = render_documents_block(case.project_context, max_entries=10, max_bytes=4096)
-        if d_blk is not None:
-            proj_shelf_tokens = _count_tokens(d_blk, use_tiktoken=False)
-        combined_proj = "\n".join(b for b in (p_blk, d_blk) if b)
-        if combined_proj:
-            proj_total_tokens = _count_tokens(combined_proj, use_tiktoken=False)
+def _scope_isolation(client: TestClient, fixture: dict) -> dict:
+    default_fact = fixture["default_fact"]
+    agent = fixture["agent"]
+    agent_fact = fixture["agent_fact"]
+    rejected = fixture["project_only_fact"]
+    _request(client, "POST", "/api/memory/facts", json=_fact(default_fact))
+    _request(client, "POST", "/api/agents", json={"name": agent, "model": "record", "soul": "Synthetic benchmark agent."})
+    _request(client, "POST", "/api/memory/facts", params={"agent_name": agent}, json=_fact(agent_fact))
 
-    total_context_tokens = memory_total_tokens + proj_total_tokens
+    threads = {}
+    project_canaries = {}
+    for label, project in fixture["projects"].items():
+        project_id = _request(client, "POST", "/api/projects", json={"name": label, "instructions": project["instructions"]})["id"]
+        document = project["document"]
+        _request(client, "POST", f"/api/projects/{project_id}/documents", files={"file": (document, document.encode("utf-8"), "text/plain")})
+        threads[label] = _thread(client, project_id)
+        project_canaries[label] = {project["instructions"], document}
 
-    case_dict = {
-        "id": case.case_id,
-        "user_id": case.user_id,
-        "agent_name": case.agent_name,
-        "user_facts": case.user_facts,
-        "agent_facts": case.agent_facts,
-        "project_context": case.project_context,
+    canaries = {default_fact, agent_fact, rejected}.union(*project_canaries.values())
+    question = fixture["question"]
+    observations = {label: _observe(_prompt(client, thread, question), canaries, {default_fact, *project_canaries[label]}) for label, thread in threads.items()}
+    observations["unassigned"] = _observe(_prompt(client, _thread(client), question), canaries, {default_fact})
+    observations["custom_agent"] = _observe(_prompt(client, _thread(client), question, agent), canaries, {agent_fact})
+
+    updated = _extract(
+        threads["alpha"],
+        "Apply this preference only in the current project.",
+        new_facts=[_extracted_fact(rejected, "project")],
+        removals=[],
+    )
+    project_fact = {"update_succeeded": updated, "passed": False}
+    if updated:
+        stored = bool(_present(json.dumps(_request(client, "GET", "/api/memory")), {rejected}))
+        beta = _observe(_prompt(client, threads["beta"], question), canaries, {default_fact, *project_canaries["beta"]})
+        project_fact.update({"stored": stored, "other_thread": beta, "passed": not stored and beta["passed"]})
+
+    return {
+        "passed": all(turn["passed"] for turn in observations.values()) and project_fact["passed"],
+        "threads": observations,
+        "project_only_fact": project_fact,
     }
 
-    return _seal_row(
-        {
-            "schema_version": ROW_SCHEMA_VERSION,
-            "suite": "token_overhead",
-            "row_id": case.case_id,
-            "description": case.description,
-            "request_fingerprint": _case_fingerprint("token_overhead", case_dict, marker),
-            "token_breakdown": {
-                "user_facts_tokens": user_facts_tokens,
-                "agent_facts_tokens": agent_facts_tokens,
-                "memory_total_tokens": memory_total_tokens,
-                "project_instructions_tokens": proj_inst_tokens,
-                "project_shelf_tokens": proj_shelf_tokens,
-                "project_total_tokens": proj_total_tokens,
-                "total_context_tokens": total_context_tokens,
+
+def _invalidation(client: TestClient, fixture: dict, case: dict) -> dict:
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory
+
+    old = case["old"]
+    new = case.get("new")
+    control = fixture["default_fact"]
+    history = fixture["thread_history_control"]
+    canaries = {old, control, history}
+    after = {control}
+    removal = {"id": "superseded-fact", "scope": "user", "reason": "The user invalidated the old preference."}
+    new_facts = []
+    if new is not None:
+        canaries.add(new)
+        after.add(new)
+        removal["replacementFactIndex"] = 0
+        new_facts.append(_extracted_fact(new, "user"))
+
+    seed = create_empty_memory()
+    seed["facts"] = [
+        {**_fact(old), "id": removal["id"], "source": "synthetic"},
+        {**_fact(control), "id": "control-fact", "source": "synthetic"},
+    ]
+    _request(client, "POST", "/api/memory/import", json=seed)
+    original = _thread(client)
+    question = fixture["question"]
+    before = _observe(_prompt(client, original, f"{question} {history}"), canaries, {old, control, history})
+    updated = _extract(original, "Forget the old preference.", new_facts=new_facts, removals=[removal])
+    if not updated:
+        return {"passed": False, "update_succeeded": False, "before": before}
+
+    stored = _present(json.dumps(_request(client, "GET", "/api/memory")), canaries)
+    same = _observe(_prompt(client, original, question), canaries, after | {history})
+    fresh = _observe(_prompt(client, _thread(client), question), canaries, after)
+    return {
+        "passed": before["passed"] and set(stored) == after and same["passed"] and fresh["passed"],
+        "update_succeeded": True,
+        "before": before,
+        "stored": stored,
+        "same_thread": same,
+        "new_thread": fresh,
+    }
+
+
+def _config() -> dict:
+    return {
+        # DeerMem uses the first configured model for extraction. Runs
+        # explicitly select the recording model so these calls stay separate.
+        "models": [{"name": name, "use": f"{__name__}:OfflineModel", "model": name, "temperature": 0, "supports_tool_calling": True} for name in ("extract", "record")],
+        "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        "database": {"backend": "sqlite", "sqlite_dir": "db"},
+        "run_events": {"backend": "db"},
+        "log_level": "WARNING",
+        "title": {"enabled": False},
+        "summarization": {"enabled": False},
+        "agents_api": {"enabled": True},
+        "memory": {
+            "backend_config": {
+                "token_counting": "char",
+                "retrieval_adapter": "",
+                "staleness_review_enabled": False,
+                "consolidation_enabled": False,
             },
-        }
-    )
+        },
+        "skills": {"path": "skills"},
+    }
 
 
-def run(
-    protocol: Protocol,
-    *,
-    manifest_path: Path,
-    output_dir: Path,
-    mode: str = "offline",
-) -> RunReport:
-    if mode != "offline":
-        raise ValueError("only offline mode is supported for context-memory comparison benchmark")
+def run_offline() -> dict:
+    """Use a disposable Gateway config and data directory in a standalone process."""
+    fixture_bytes = MANIFEST.read_bytes()
+    fixture = json.loads(fixture_bytes)
+    canaries = [fixture[key] for key in ("default_fact", "agent_fact", "project_only_fact", "thread_history_control")]
+    canaries.extend(value for project in fixture["projects"].values() for value in project.values())
+    canaries.extend(value for case in fixture["invalidation"].values() for value in case.values())
+    if len(set(canaries)) != len(canaries):
+        raise ValueError("Synthetic canaries must be distinct")
 
-    marker = ensure_run_identity(output_dir, mode=mode, protocol=protocol, manifest_path=manifest_path)
-    reused = 0
-    executed = 0
+    config_bytes = json.dumps(_config(), sort_keys=True).encode("utf-8")
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
 
-    # 1. Run Scope Isolation Cases
-    for case in protocol.scope_isolation_cases:
-        path = _row_path(output_dir, case.case_id)
-        case_dict = {
-            "id": case.case_id,
-            "thread_a": case.thread_a.__dict__,
-            "thread_b": case.thread_b.__dict__,
-            "expected_thread_a_canaries": case.expected_thread_a_canaries,
-            "expected_thread_b_canaries": case.expected_thread_b_canaries,
-            "expected_rejected_canaries": case.expected_rejected_canaries,
-        }
-        fp = _case_fingerprint("scope_isolation", case_dict, marker)
-        if _load_reusable_row(path, fp) is not None:
-            reused += 1
-            continue
-        _atomic_write_json(path, _run_scope_isolation_case(case, marker))
-        executed += 1
+    with TemporaryDirectory(prefix="deerflow-context-memory-", ignore_cleanup_errors=True) as directory:
+        root = Path(directory).resolve()
+        (root / "config.yaml").write_bytes(config_bytes)
+        (root / "extensions.json").write_text("{}", encoding="utf-8")
+        (root / "empty.env").touch()
+        env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR") if key in os.environ}
+        env.update(
+            DEER_FLOW_AUTH_DISABLED="1",
+            DEER_FLOW_HOME=str(root / "home"),
+            DEER_FLOW_PROJECT_ROOT=str(root),
+            DEER_FLOW_CONFIG_PATH=str(root / "config.yaml"),
+            DEER_FLOW_EXTENSIONS_CONFIG_PATH=str(root / "extensions.json"),
+            DEER_FLOW_ENV_FILE=str(root / "empty.env"),
+        )
+        with patch.dict(os.environ, env, clear=True), chdir(root):
+            from app.gateway.app import app
 
-    # 2. Run Turn Invalidation Cases
-    for case in protocol.turn_invalidation_cases:
-        path = _row_path(output_dir, case.case_id)
-        case_dict = {
-            "id": case.case_id,
-            "user_id": case.user_id,
-            "agent_name": case.agent_name,
-            "seed_facts": case.seed_facts,
-            "expected_turn_1_canaries": case.expected_turn_1_canaries,
-            "expected_turn_2_present_canaries": case.expected_turn_2_present_canaries,
-            "expected_turn_2_absent_canaries": case.expected_turn_2_absent_canaries,
-        }
-        fp = _case_fingerprint("turn_invalidation", case_dict, marker)
-        if _load_reusable_row(path, fp) is not None:
-            reused += 1
-            continue
-        _atomic_write_json(path, _run_turn_invalidation_case(case, marker))
-        executed += 1
+            with patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value=DAY), TestClient(app) as client:
+                scope = _scope_isolation(client, fixture)
+                invalidation = {name: _invalidation(client, fixture, case) for name, case in fixture["invalidation"].items()}
 
-    # 3. Run Token Overhead Cases
-    for case in protocol.token_overhead_cases:
-        path = _row_path(output_dir, case.case_id)
-        case_dict = {
-            "id": case.case_id,
-            "user_id": case.user_id,
-            "agent_name": case.agent_name,
-            "user_facts": case.user_facts,
-            "agent_facts": case.agent_facts,
-            "project_context": case.project_context,
-        }
-        fp = _case_fingerprint("token_overhead", case_dict, marker)
-        if _load_reusable_row(path, fp) is not None:
-            reused += 1
-            continue
-        _atomic_write_json(path, _run_token_overhead_case(case, marker))
-        executed += 1
-
-    return RunReport(reused=reused, executed=executed)
+    return {
+        "source_revision": revision,
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "fixture_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+        "config_sha256": hashlib.sha256(config_bytes).hexdigest(),
+        "dataset": fixture["dataset"],
+        "prompt_path": "Gateway runs/wait to recording model",
+        "checkpoint_backend": "sqlite",
+        "token_estimate_method": "character estimate of injected blocks",
+        "date": DAY,
+        "passed": scope["passed"] and all(case["passed"] for case in invalidation.values()),
+        "scope_isolation": scope,
+        "invalidation": invalidation,
+    }

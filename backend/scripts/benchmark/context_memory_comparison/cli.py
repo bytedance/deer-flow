@@ -1,60 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from .contract import load_protocol
-from .report import write_report
-from .runner import ROOT, run
-
-DEFAULT_MANIFEST = ROOT / "manifest.json"
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DeerFlow Issue #7884 Offline Memory vs Project Context Comparison Benchmark")
-    parser.set_defaults(manifest=DEFAULT_MANIFEST)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    validate = subparsers.add_parser("validate", help="Validate committed synthetic manifest without network calls")
-    validate.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-
-    offline = subparsers.add_parser(
-        "run-offline",
-        help="Run deterministic offline benchmarks for scope isolation, turn invalidation, and token overhead",
-    )
-    offline.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    offline.add_argument("--output-dir", type=Path, required=True)
-
-    report = subparsers.add_parser("report", help="Recompute metrics and generate report.json from executed rows")
-    report.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    report.add_argument("--output-dir", type=Path, required=True)
-
-    return parser
+from .runner import run_offline
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    protocol = load_protocol(args.manifest)
+    parser = argparse.ArgumentParser(description="Compare DeerMem and project context through an offline Gateway.")
+    parser.add_argument("command", choices=["run-offline"])
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args(argv)
 
-    if args.command == "validate":
-        print(
-            f"Validated {len(protocol.scope_isolation_cases)} scope isolation cases, {len(protocol.turn_invalidation_cases)} turn invalidation cases, and {len(protocol.token_overhead_cases)} token overhead cases for {protocol.protocol_id}"
-        )
-        return 0
-
-    if args.command == "run-offline":
-        result = run(protocol, manifest_path=args.manifest, output_dir=args.output_dir, mode="offline")
-        print(f"Offline execution complete: {result.executed} executed, {result.reused} reused")
-        return 0
-
-    if args.command == "report":
-        target = write_report(protocol, manifest_path=args.manifest, output_dir=args.output_dir)
-        print(f"Wrote benchmark report to {target}")
-        return 0
-
-    raise AssertionError(f"unhandled command: {args.command}")
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    report = run_offline()
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / "report.json"
+    with TemporaryDirectory(dir=output_dir) as staging:
+        path = Path(staging) / target.name
+        path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        path.replace(target)
+    print(f"Wrote {target}")
+    return 0 if report["passed"] else 1

@@ -43,6 +43,10 @@ vars; `summarize` and pytest are offline. See its README for the protocol.
 Benchmarks in `scripts/benchmark/` must be standalone and reproducible. Import
 production functions; never duplicate them or introduce an alternative runtime.
 
+`scripts/benchmark/context_memory_comparison/` runs the local Gateway with
+SQLite and scripted models. Keep the original-thread and fresh-thread results
+separate, and measure only the injected blocks recorded at the model boundary.
+
 Sandbox benchmarks reuse production lifecycle. Reject negative/NaN timing values
 before provider creation, export no secrets, and fail on final cleanup errors.
 See the sandbox benchmark README for supported options and tests.

@@ -1,43 +1,33 @@
-# DeerFlow Offline Memory vs. Project Context Comparison Benchmark
+# Offline memory and project context comparison
 
-**Issue**: bytedance/deer-flow#7884 (Release Smoke Matrix)  
-**Slice**: Offline memory vs. project-context comparison (PR First Pass)
+This synthetic benchmark for [#7884](https://github.com/bytedance/deer-flow/issues/7884)
+starts a disposable Gateway in process with SQLite. It creates projects, shelf
+documents, threads and memory through the real API. A fixed model records the
+messages passed to it, and DeerMem receives scripted extraction responses.
 
-This benchmark suite implements deterministic, offline regression verification for the boundary between long-term memory (DeerMem) and run-level project context (instructions and document shelf).
+Run this command from the backend directory of a Git checkout.
 
-## Core Verification Checks
-
-1. **Scope Isolation across Unrelated Threads**:
-   - Asserts strict boundary between project-scoped context (instructions, document shelf) and user/agent memory facts across unrelated threads.
-   - Guarantees zero cross-thread crosstalk and zero project constraint contamination into global memory.
-2. **Instant Deletion & Invalidation on Next Turn**:
-   - Simulates multi-turn lifecycle replay: verifies that deleted or replaced facts (`factsToRemove`) are completely purged from prompt assembly on the very next turn.
-   - Enforces zero stale prompt injection (`stale_prompt_injection_rate == 0.0`).
-3. **Per-turn Prompt Token Overhead Measurement**:
-   - Fine-grained breakdown and measurement of token overhead across each context layer:
-     - User facts (global user preferences & facts)
-     - Agent-scoped facts (agent-specific instructions & constraints)
-     - Project instructions (`<project>` block)
-     - Document shelf index (`<documents>` block)
-   - Outputs clear layer aggregates and percentage breakdowns.
-
-## Usage
-
-From `backend/`:
-
-```bash
-# 1. Validate synthetic fixture contract
-python -m scripts.benchmark.context_memory_comparison validate
-
-# 2. Run deterministic offline benchmark
-python -m scripts.benchmark.context_memory_comparison run-offline --output-dir scripts/benchmark/context_memory_comparison/runs/offline-v1
-
-# 3. Generate summary report
-python -m scripts.benchmark.context_memory_comparison report --output-dir scripts/benchmark/context_memory_comparison/runs/offline-v1
+```sh
+uv run python -m scripts.benchmark.context_memory_comparison run-offline --output-dir /tmp/context-memory
 ```
 
-## Reproducibility & Security
+The command runs the committed fixtures and writes one `report.json` with
+the source revision, benchmark and fixture hashes, and the observations below.
 
-- **Strict Offline Mode**: Pinned synthetic fixtures with canary assertions. Zero online network calls, zero provider credential leakage.
-- **Self-Authenticating Row Hashes**: Rows are sealed with `result_sha256` and bound to source revision and manifest sha256. Tampered rows are rejected.
-- **Idempotent Resumption**: Re-running an existing output directory safely reuses valid, un-tampered rows.
+- Two projects and an unassigned thread must see only their own context and
+  the default memory bucket. A custom agent must see its own memory bucket.
+  The project-only fact must be rejected by DeerMem and absent from the other
+  thread. A failed extraction makes that check fail.
+- Replacement and deletion are observed in the store, in the original thread's
+  next turn, and in a fresh thread. A first-turn canary verifies checkpoint reuse.
+  The fresh thread is a control. If the original thread keeps a memory block
+  from its checkpoint, the report records
+  the stale fact and marks that check failed.
+- Each recorded turn includes character-based token estimates for the
+  `<memory>`, `<project>` and `<documents>` blocks in its actual model request.
+  The default and custom-agent observations identify the memory bucket being
+  measured. These are estimates for the injected blocks.
+
+The exit code is 0 when all behavioral checks pass and 1 when any fail.
+The benchmark uses synthetic data and fixed model responses. Gateway state is
+temporary, and the report contains canary IDs and counts rather than full prompts.
