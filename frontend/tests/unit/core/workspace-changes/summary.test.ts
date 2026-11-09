@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  classifyWorkspaceDiffLines,
   getChangedFileCount,
   getWorkspaceChangeBadgeLabel,
   getWorkspaceChangeLineClass,
@@ -93,6 +94,24 @@ describe("workspace change summary helpers", () => {
   test("treats content lines beginning with +++/--- as add/remove, not meta", () => {
     expect(getWorkspaceChangeLineClass("+++foo")).toBe("addition");
     expect(getWorkspaceChangeLineClass("---bar")).toBe("deletion");
+  });
+
+  test("treats hunk lines that look like file headers as add/remove", () => {
+    // Deleting the SQL comment "-- get users" and adding "++ counter" give the
+    // hunk lines "--- get users" and "+++ counter". Only the two lines before
+    // the first "@@" are file headers (the backend counts lines the same way).
+    const diff = [
+      "--- a/q.sql",
+      "+++ b/q.sql",
+      "@@ -1,2 +1,2 @@",
+      "--- get users",
+      " SELECT 1",
+      "+++ counter",
+    ];
+
+    expect(
+      classifyWorkspaceDiffLines(diff).map(({ lineClass }) => lineClass),
+    ).toEqual(["meta", "meta", "hunk", "deletion", "context", "addition"]);
   });
 
   test("ranks a symlink-created entry with modified files, not before created or after deleted", () => {

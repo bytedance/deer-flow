@@ -23,15 +23,16 @@ export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
 
 export function getWorkspaceChangeLineClass(
   line: string,
+  inHunk = false,
 ): WorkspaceChangeLineClass {
-  // Unified-diff file headers are "+++ " / "--- " with a trailing space. A bare
-  // "+++"/"---" prefix would also match real content lines that begin with those
-  // sequences (e.g. an added line "+++foo"), styling them as meta by mistake.
-  if (line.startsWith("+++ ") || line.startsWith("--- ")) {
-    return "meta";
-  }
   if (line.startsWith("@@")) {
     return "hunk";
+  }
+  // Unified-diff file headers are "+++ " / "--- " with a trailing space, and
+  // they only appear before the first hunk. Inside a hunk the same prefix is
+  // content: deleting the SQL comment "-- get users" yields "--- get users".
+  if (!inHunk && (line.startsWith("+++ ") || line.startsWith("--- "))) {
+    return "meta";
   }
   if (line.startsWith("+")) {
     return "addition";
@@ -40,6 +41,20 @@ export function getWorkspaceChangeLineClass(
     return "deletion";
   }
   return "context";
+}
+
+/** Classify every line of one unified diff, tracking whether a hunk has started. */
+export function classifyWorkspaceDiffLines(
+  lines: readonly string[],
+): { line: string; lineClass: WorkspaceChangeLineClass }[] {
+  let inHunk = false;
+  return lines.map((line) => {
+    const lineClass = getWorkspaceChangeLineClass(line, inHunk);
+    if (lineClass === "hunk") {
+      inHunk = true;
+    }
+    return { line, lineClass };
+  });
 }
 
 export function sortWorkspaceChanges(files: WorkspaceFileChange[]) {
