@@ -158,6 +158,7 @@ class ClaudeChatModel(ChatAnthropic):
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
 
         if self._is_oauth:
+            self._merge_oauth_betas(payload)
             self._apply_oauth_billing(payload)
 
         if self.enable_prompt_caching:
@@ -209,6 +210,21 @@ class ClaudeChatModel(ChatAnthropic):
                     "session_id": session_id,
                 }
             )
+
+    def _merge_oauth_betas(self, payload: dict) -> None:
+        """Merge the OAuth betas into the payload's request betas.
+
+        A request `betas` list makes langchain-anthropic send a per-request
+        anthropic-beta header that replaces the client default holding the
+        OAuth betas - Anthropic then rejects the OAuth token (issue #8060).
+        Merging keeps the OAuth betas first and appends the request's own.
+        """
+        from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
+
+        betas = payload.get("betas")
+        request_betas = [str(beta) for beta in betas] if isinstance(betas, (list, tuple)) else []
+        merged = [beta for beta in OAUTH_ANTHROPIC_BETAS.split(",") if beta not in request_betas]
+        payload["betas"] = [*merged, *request_betas]
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system, recent messages, and last tool definition.

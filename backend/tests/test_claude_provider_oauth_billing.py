@@ -152,3 +152,56 @@ def test_async_create_strips_cache_control_from_oauth_payload(model):
     assert "cache_control" not in sent_payload["system"][0]
     assert "cache_control" not in sent_payload["messages"][0]["content"][0]
     assert "cache_control" not in sent_payload["tools"][0]
+
+
+# ---------------------------------------------------------------------------
+# OAuth beta merging (issue #8060)
+# ---------------------------------------------------------------------------
+
+
+def _oauth_betas() -> list[str]:
+    from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
+
+    return OAUTH_ANTHROPIC_BETAS.split(",")
+
+
+def test_request_betas_merge_oauth_betas(model):
+    payload: dict = {"betas": ["context-1m-2025-08-07"]}
+    model._merge_oauth_betas(payload)
+    assert payload["betas"] == [*_oauth_betas(), "context-1m-2025-08-07"]
+
+
+def test_empty_request_betas_still_carries_oauth_betas(model):
+    payload: dict = {"betas": []}
+    model._merge_oauth_betas(payload)
+    assert payload["betas"] == _oauth_betas()
+
+
+def test_missing_request_betas_gets_oauth_betas(model):
+    payload: dict = {}
+    model._merge_oauth_betas(payload)
+    assert payload["betas"] == _oauth_betas()
+
+
+def test_request_already_carrying_an_oauth_beta_is_not_duplicated(model):
+    payload: dict = {"betas": ["oauth-2025-04-20"]}
+    model._merge_oauth_betas(payload)
+    assert payload["betas"].count("oauth-2025-04-20") == 1
+    assert set(_oauth_betas()) <= set(payload["betas"])
+
+
+def test_api_key_model_never_merges_oauth_betas():
+    """_get_request_payload only merges betas in the OAuth branch: an API-key
+    model's configured betas pass through untouched."""
+    from unittest.mock import MagicMock, patch
+
+    from langchain_core.messages import HumanMessage
+
+    with patch.object(ClaudeChatModel, "model_post_init"):
+        m = ClaudeChatModel(model="claude-sonnet-4-6", anthropic_api_key="sk-ant-api03-real-key")  # type: ignore[call-arg]
+    m._is_oauth = False
+    m._merge_oauth_betas = MagicMock()
+
+    payload = m._get_request_payload([HumanMessage(content="hi")])
+    m._merge_oauth_betas.assert_not_called()
+    assert payload.get("betas") is None
