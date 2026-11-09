@@ -3,44 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 import requests
+
+from deerflow.utils.http_policy import control_plane_trust_env
 
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
-
-def sandbox_http_trust_env(sandbox_url: str) -> bool:
-    """Whether HTTP clients for *sandbox_url* should inherit proxy settings.
-
-    Local Docker, DooD, and Kubernetes sandbox endpoints are control-plane
-    connections, not internet traffic. Sending them through ``HTTP_PROXY`` can
-    produce a misleading proxy-generated 502 even though the sandbox container
-    is healthy (#3441). External fully-qualified hosts retain normal environment
-    proxy behavior.
-    """
-    try:
-        hostname = (urlparse(sandbox_url).hostname or "").rstrip(".").lower()
-    except ValueError:
-        return True
-    if not hostname:
-        return True
-    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".docker.internal") or hostname.endswith(".containers.internal"):
-        return False
-    try:
-        address = ipaddress.ip_address(hostname)
-    except ValueError:
-        return "." in hostname
-    return not (address.is_loopback or address.is_private or address.is_link_local)
+# The policy lives in ``deerflow.utils.http_policy`` so Gateway-side callers can
+# apply it without importing this package (whose ``__init__`` loads the whole
+# sandbox provider stack). Kept as a module-level name for the existing sandbox
+# call sites and for tests that patch it here.
+sandbox_http_trust_env = control_plane_trust_env
 
 
 # The readiness deadline the local-container provider paths (sync and async)

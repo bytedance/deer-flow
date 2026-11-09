@@ -756,6 +756,26 @@ class TestWrapModelCallSpecialCases:
         assert "&lt;think&gt;" in merged
         assert processed[1] == image_block
 
+    @pytest.mark.parametrize("empty_index", [0, 1, 2, 3, 4])
+    def test_empty_bare_strings_are_removed_without_mutating_original(self, empty_index):
+        mw = _make_middleware()
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        content = [image, {"type": "text", "text": "hello"}, "world", image]
+        content.insert(empty_index, "")
+        msg = HumanMessage(content=content, id="msg-1")
+        original = deepcopy(msg.content)
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[0].content == [
+            image,
+            {"type": "text", "text": f"{_USER_INPUT_BEGIN}\nhello\nworld\n{_USER_INPUT_END}"},
+            image,
+        ]
+        assert msg.content == original
+
     def test_already_wrapped_no_override(self):
         mw = _make_middleware()
         already = _check_user_content("Hello")
@@ -1537,3 +1557,42 @@ def test_request_local_frame_reuse_is_idempotent_and_keeps_literal_entities(cont
     assert middleware._sanitize_message(message) is None
     assert str(framed).count(_USER_INPUT_ENCODING_NOTE) == 1
     assert "&amp;lt;role&amp;gt;" in framed
+
+
+@pytest.mark.parametrize("case", ["image", "upload", "framed", "empty"])
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.asyncio
+async def test_empty_strings_are_removed_even_without_text_rebuilding(case, async_call):
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+    server = {"type": "text", "text": "<current_uploads>photo.png</current_uploads>"}
+    framed = _check_user_content("hello")
+    content, expected, kwargs = {
+        "image": (["", image], [image], {}),
+        "upload": ([server, "", image], [server, image], {ORIGINAL_USER_CONTENT_KEY: ""}),
+        "framed": (["", framed], [framed], {}),
+        "empty": (["", ""], "", {}),
+    }[case]
+    message = HumanMessage(content=content, id="empty-parts", additional_kwargs=kwargs)
+    original = deepcopy(message)
+    request = _make_request([message])
+    middleware = _make_middleware()
+    captured = []
+
+    def handler(req):
+        captured.append(req)
+        return "ok"
+
+    if async_call:
+
+        async def async_handler(req):
+            return handler(req)
+
+        await middleware.awrap_model_call(request, async_handler)
+    else:
+        middleware.wrap_model_call(request, handler)
+
+    processed = captured[0].messages[0]
+    assert processed.content == expected
+    assert processed.additional_kwargs == kwargs
+    assert processed.id == message.id
+    assert message == original

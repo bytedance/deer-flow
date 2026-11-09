@@ -320,3 +320,25 @@ async def test_invalid_path_name_returns_422(operation: str):
         else:
             await router.delete_managed_subagent("../planner", _request("admin"))
     assert excinfo.value.status_code == 422
+
+
+@pytest.mark.parametrize("name", ["nul", "NUL", "Nul", "con", "prn", "aux", "com1", "lpt9"])
+async def test_create_managed_subagent_rejects_windows_reserved_names(name: str):
+    with pytest.raises(HTTPException) as excinfo:
+        await router.create_managed_subagent(
+            _request("admin"),
+            router.ManagedSubagentCreateRequest(
+                name=name,
+                description="Reserved name",
+                system_prompt="Should fail.",
+            ),
+        )
+    assert excinfo.value.status_code == 422
+    assert "reserved Windows device name" in str(excinfo.value.detail)
+
+
+@pytest.mark.parametrize("name", ["nul", "con", "com1"])
+async def test_delete_managed_subagent_allows_windows_reserved_names(name: str):
+    with pytest.raises(HTTPException) as excinfo:
+        await router.delete_managed_subagent(name, _request("admin"))
+    assert excinfo.value.status_code == 404
