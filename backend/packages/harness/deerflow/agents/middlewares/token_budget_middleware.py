@@ -6,6 +6,8 @@ Detection strategy:
   1. Confirm each observed model response in graph state and count its native
      usage once. Scan per-message usage deltas for later subagent additions;
      provider message IDs alone cannot identify distinct model calls.
+     Attempts discarded by outer retry middleware are intentionally not charged;
+     this budget tracks accepted responses, not all billable provider attempts.
   2. If the highest fraction (input, output, or total) >= warn_threshold,
      queue a warning.
   3. If the highest fraction >= hard_stop_threshold, strip unexecuted calls
@@ -480,6 +482,8 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         object), then by provider message ID (covers ``model_copy`` and
         in-place reducer replacement).  Content alone is never compared: two
         independent calls can produce identical text.
+        The ID fallback assumes the observed response entered graph state; it
+        cannot distinguish a discarded response from historical same-ID state.
         """
         if message is pending.message:
             return True
