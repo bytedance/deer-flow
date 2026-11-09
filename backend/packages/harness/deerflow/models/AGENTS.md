@@ -160,6 +160,19 @@ in `tests/test_codex_retry_after.py` includes public sync/async HTTP retries.
 - `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
 - `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
 
+### Claude OAuth Betas (`claude_provider.py`)
+
+OAuth requests need `OAUTH_ANTHROPIC_BETAS` (including `oauth-2025-04-20`) in
+`anthropic-beta`; without it Anthropic rejects the Bearer token. `model_post_init`
+sets them as the client's default header, but request `betas` replace that header
+(the precedence the thinking budget resolves below). `_get_request_payload`
+therefore puts the OAuth betas first in any request `betas` list, including an
+empty one, before the thinking budget reads the header. Requests without `betas`
+keep the default header. Rebuild the list: the payload's `betas` can be
+`self.betas`. `tests/test_claude_provider_oauth_betas.py` checks the sent header
+for configured, per-call and server-tool betas through the model's SDK clients
+with offline transports.
+
 ### Claude Retry Delays (`claude_provider.py`)
 
 `_calc_backoff_ms` uses `utils.retry_after.bounded_retry_after_ms` for integer-second
