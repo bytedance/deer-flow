@@ -348,7 +348,7 @@ def test_substring_fallback_searches_every_fact_of_a_large_scope(tmp_path: Path)
 
 @pytest.mark.parametrize("top_k", [1, 5])
 @pytest.mark.parametrize("reversal", ["confidence", "time_decay"])
-def test_engine_selects_composite_top_k_before_truncating(top_k: int, reversal: str) -> None:
+def test_engine_selects_composite_top_k_before_truncating(top_k: int, reversal: str, caplog: pytest.LogCaptureFixture) -> None:
     from datetime import UTC, datetime, timedelta
 
     now = datetime.now(UTC)
@@ -376,8 +376,10 @@ def test_engine_selects_composite_top_k_before_truncating(top_k: int, reversal: 
         assert complete[0]["bm25_score"] < complete[1]["bm25_score"]
         assert complete[0]["score"] > complete[1]["score"]
 
-        limited = engine.search("Python", top_k=top_k)
+        with caplog.at_level("DEBUG", logger=FTS5Retrieval.__module__):
+            limited = engine.search("Python", top_k=top_k)
         assert [fact["id"] for fact in limited] == [fact["id"] for fact in complete[:top_k]]
+        assert any(f"matched=31 retained={top_k}" in message for message in caplog.messages)
     finally:
         engine.close()
 
