@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig, DeerMemModelConfig
@@ -17,7 +18,8 @@ from deerflow.agents.memory.backends.deermem.deermem.core.prompt import _count_t
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import create_empty_memory, create_storage
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
-from deerflow.projects.context import build_project_context_message, render_documents_block, render_project_block
+from deerflow.projects.context import render_documents_block, render_project_block
+from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 
 from .contract import Protocol, ScopeIsolationCase, TokenOverheadCase, TurnInvalidationCase
 
@@ -25,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = ROOT.parents[2]
 ROW_SCHEMA_VERSION = 1
 MARKER_SCHEMA_VERSION = 1
+PROMPT_PATH = "DynamicContextMiddleware.wrap_model_call"
 
 
 @dataclass(frozen=True)
@@ -46,10 +49,7 @@ class _StaticModel:
 def _prompt_projection(prompt: Any) -> list[dict[str, str]]:
     if not isinstance(prompt, (list, tuple)):
         return [{"type": "raw", "content": str(prompt)}]
-    return [
-        {"type": str(getattr(message, "type", "unknown")), "content": str(getattr(message, "content", message))}
-        for message in prompt
-    ]
+    return [{"type": str(getattr(message, "type", "unknown")), "content": str(getattr(message, "content", message))} for message in prompt]
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -80,6 +80,7 @@ def protocol_artifacts(manifest_path: Path) -> dict[str, str | None]:
     return {
         "manifest_sha256": sha256_file(manifest_path),
         "source_revision": _git_revision(),
+        "prompt_path": PROMPT_PATH,
     }
 
 
@@ -126,8 +127,8 @@ def _case_fingerprint(suite: str, case_data: dict[str, Any], marker: dict[str, A
     )
 
 
-def _row_path(output_dir: Path, suite: str, row_id: str) -> Path:
-    return output_dir / "rows" / suite / f"{row_id}.json"
+def _row_path(output_dir: Path, row_id: str) -> Path:
+    return output_dir / "rows" / f"{row_id}.json"
 
 
 def row_result_sha256(row: dict[str, Any]) -> str:
@@ -190,20 +191,21 @@ def _assemble_thread_prompt(
         reminder_date="2026-11-06, Friday",
     )
 
-    if project_context is not None:
-        p_blk = render_project_block(project_context)
-        d_blk = render_documents_block(project_context, max_entries=10, max_bytes=4096)
-        if p_blk is not None:
-            combined_block = p_blk if d_blk is None else f"{p_blk}\n{d_blk}"
-            proj_msg = build_project_context_message(combined_block, run_id=f"run-{thread_id}")
-            user_idx = next(
-                (i for i, m in enumerate(messages) if isinstance(m, HumanMessage) and str(m.id or "").endswith("__user")),
-                len(messages),
-            )
-            messages = [*messages[:user_idx], proj_msg, *messages[user_idx:]]
+    runtime_context = {PROJECT_CONTEXT_KEY: project_context} if project_context is not None else {}
+    runtime = SimpleNamespace(context=runtime_context)
+    request = ModelRequest(model=SimpleNamespace(), messages=messages, runtime=runtime)
 
-    full_text = "\n\n".join(str(getattr(m, "content", "")) for m in messages)
-    return full_text, messages
+    assembled_messages: list[Any] = []
+
+    def _capture_handler(req: ModelRequest) -> ModelResponse:
+        assembled_messages.extend(req.messages)
+        return ModelResponse(result=[AIMessage(content="offline-stub")])
+
+    mw = DynamicContextMiddleware(agent_name=agent_name)
+    mw.wrap_model_call(request, _capture_handler)
+
+    full_text = "\n\n".join(str(getattr(m, "content", "")) for m in assembled_messages)
+    return full_text, assembled_messages
 
 
 def _storage_contains_canary(memory: dict[str, Any], canary: str) -> bool:
@@ -240,7 +242,7 @@ def _run_scope_isolation_case(
             if case.thread_b.user_id != case.thread_a.user_id:
                 updater.import_memory_data(seed_mem, user_id=case.thread_b.user_id, agent_name=case.thread_b.agent_name)
 
-        # Assemble prompt for Thread A
+        # Assemble prompt for Thread A via production DynamicContextMiddleware
         prompt_a, _ = _assemble_thread_prompt(
             updater,
             thread_id=case.thread_a.thread_id,
@@ -250,7 +252,7 @@ def _run_scope_isolation_case(
             query_text="Thread A question",
         )
 
-        # Assemble prompt for Thread B
+        # Assemble prompt for Thread B via production DynamicContextMiddleware
         prompt_b, _ = _assemble_thread_prompt(
             updater,
             thread_id=case.thread_b.thread_id,
@@ -266,10 +268,7 @@ def _run_scope_isolation_case(
         persisted_pollutions: list[str] = []
         if case.contamination_turn is not None:
             msg_data = case.contamination_turn.get("messages", [])
-            messages = [
-                HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"])
-                for m in msg_data
-            ]
+            messages = [HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"]) for m in msg_data]
             updater.update_memory(
                 messages,
                 thread_id=case.thread_a.thread_id,
@@ -279,11 +278,7 @@ def _run_scope_isolation_case(
             )
             mem_after_a = updater.get_memory_data(agent_name=case.thread_a.agent_name, user_id=case.thread_a.user_id)
             mem_after_b = updater.get_memory_data(agent_name=case.thread_b.agent_name, user_id=case.thread_b.user_id)
-            persisted_pollutions = [
-                canary
-                for canary in case.expected_rejected_canaries
-                if _storage_contains_canary(mem_after_a, canary) or _storage_contains_canary(mem_after_b, canary)
-            ]
+            persisted_pollutions = [canary for canary in case.expected_rejected_canaries if _storage_contains_canary(mem_after_a, canary) or _storage_contains_canary(mem_after_b, canary)]
             # Verify Thread B prompt assembly after Thread A's contamination turn
             prompt_b_after, _ = _assemble_thread_prompt(
                 updater,
@@ -355,7 +350,7 @@ def _run_turn_invalidation_case(
             seed_mem["facts"] = [dict(f) for f in case.seed_facts]
             updater.import_memory_data(seed_mem, user_id=case.user_id, agent_name=case.agent_name)
 
-        # Turn 1 prompt assembly
+        # Turn 1 prompt assembly via production DynamicContextMiddleware
         prompt_t1, _ = _assemble_thread_prompt(
             updater,
             thread_id=f"thread-{case.case_id}-t1",
@@ -367,10 +362,7 @@ def _run_turn_invalidation_case(
         t1_present = [c for c in case.expected_turn_1_canaries if c in prompt_t1]
 
         # Execute Turn 1 memory update (e.g. deletion or atomic replacement)
-        update_msgs = [
-            HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"])
-            for m in case.update_messages
-        ]
+        update_msgs = [HumanMessage(content=m["content"]) if m.get("role") == "user" else AIMessage(content=m["content"]) for m in case.update_messages]
         succeeded = updater.update_memory(
             update_msgs,
             thread_id=f"thread-{case.case_id}-t1",
@@ -381,7 +373,7 @@ def _run_turn_invalidation_case(
         if not succeeded:
             raise RuntimeError(f"memory update failed for turn invalidation case {case.case_id}")
 
-        # Turn 2 prompt assembly (next turn)
+        # Turn 2 prompt assembly (next turn) via production DynamicContextMiddleware
         prompt_t2, _ = _assemble_thread_prompt(
             updater,
             thread_id=f"thread-{case.case_id}-t2",
@@ -443,7 +435,7 @@ def _run_token_overhead_case(
     combined_mem_text = format_memory_for_injection(all_mem, use_tiktoken=False)
     memory_total_tokens = _count_tokens(combined_mem_text, use_tiktoken=False) if combined_mem_text else 0
 
-    # Measure project context layers
+    # Measure project context layers rendered identically to DynamicContextMiddleware
     proj_inst_tokens = 0
     proj_shelf_tokens = 0
     proj_total_tokens = 0
@@ -506,7 +498,7 @@ def run(
 
     # 1. Run Scope Isolation Cases
     for case in protocol.scope_isolation_cases:
-        path = _row_path(output_dir, "scope_isolation", case.case_id)
+        path = _row_path(output_dir, case.case_id)
         case_dict = {
             "id": case.case_id,
             "thread_a": case.thread_a.__dict__,
@@ -524,7 +516,7 @@ def run(
 
     # 2. Run Turn Invalidation Cases
     for case in protocol.turn_invalidation_cases:
-        path = _row_path(output_dir, "turn_invalidation", case.case_id)
+        path = _row_path(output_dir, case.case_id)
         case_dict = {
             "id": case.case_id,
             "user_id": case.user_id,
@@ -543,7 +535,7 @@ def run(
 
     # 3. Run Token Overhead Cases
     for case in protocol.token_overhead_cases:
-        path = _row_path(output_dir, "token_overhead", case.case_id)
+        path = _row_path(output_dir, case.case_id)
         case_dict = {
             "id": case.case_id,
             "user_id": case.user_id,

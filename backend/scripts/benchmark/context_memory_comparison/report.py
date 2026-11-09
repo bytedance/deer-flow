@@ -40,7 +40,7 @@ def collect_rows(
     # 1. Scope isolation rows
     scope_rows: list[dict[str, Any]] = []
     for case in protocol.scope_isolation_cases:
-        row_path = output_dir / "rows" / "scope_isolation" / f"{case.case_id}.json"
+        row_path = output_dir / "rows" / f"{case.case_id}.json"
         row = _read_row(row_path)
         case_dict = {
             "id": case.case_id,
@@ -59,7 +59,7 @@ def collect_rows(
     # 2. Turn invalidation rows
     inv_rows: list[dict[str, Any]] = []
     for case in protocol.turn_invalidation_cases:
-        row_path = output_dir / "rows" / "turn_invalidation" / f"{case.case_id}.json"
+        row_path = output_dir / "rows" / f"{case.case_id}.json"
         row = _read_row(row_path)
         case_dict = {
             "id": case.case_id,
@@ -79,7 +79,7 @@ def collect_rows(
     # 3. Token overhead rows
     tok_rows: list[dict[str, Any]] = []
     for case in protocol.token_overhead_cases:
-        row_path = output_dir / "rows" / "token_overhead" / f"{case.case_id}.json"
+        row_path = output_dir / "rows" / f"{case.case_id}.json"
         row = _read_row(row_path)
         case_dict = {
             "id": case.case_id,
@@ -128,11 +128,7 @@ def write_report(
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     if marker.get("mode") != "offline":
         raise ValueError(f"{marker_path} has an invalid execution mode")
-    if (
-        marker.get("schema_version") != MARKER_SCHEMA_VERSION
-        or marker.get("protocol_id") != protocol.protocol_id
-        or marker.get("artifacts") != protocol_artifacts(manifest_path)
-    ):
+    if marker.get("schema_version") != MARKER_SCHEMA_VERSION or marker.get("protocol_id") != protocol.protocol_id or marker.get("artifacts") != protocol_artifacts(manifest_path):
         raise ValueError(f"{marker_path} no longer matches the current protocol or source revision")
 
     target = output_dir / "report.json"

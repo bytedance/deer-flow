@@ -12,9 +12,7 @@ DEFAULT_MANIFEST = ROOT / "manifest.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="DeerFlow Issue #7884 Offline Memory vs Project Context Comparison Benchmark"
-    )
+    parser = argparse.ArgumentParser(description="DeerFlow Issue #7884 Offline Memory vs Project Context Comparison Benchmark")
     parser.set_defaults(manifest=DEFAULT_MANIFEST)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -41,9 +39,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "validate":
         print(
-            f"Validated {len(protocol.scope_isolation_cases)} scope isolation cases, "
-            f"{len(protocol.turn_invalidation_cases)} turn invalidation cases, and "
-            f"{len(protocol.token_overhead_cases)} token overhead cases for {protocol.protocol_id}"
+            f"Validated {len(protocol.scope_isolation_cases)} scope isolation cases, {len(protocol.turn_invalidation_cases)} turn invalidation cases, and {len(protocol.token_overhead_cases)} token overhead cases for {protocol.protocol_id}"
         )
         return 0
 

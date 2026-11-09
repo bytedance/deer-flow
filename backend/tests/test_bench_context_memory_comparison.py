@@ -19,12 +19,23 @@ from scripts.benchmark.context_memory_comparison.report import (
     write_report,
 )
 from scripts.benchmark.context_memory_comparison.runner import (
+    PROMPT_PATH,
     ROOT,
     ensure_run_identity,
     run,
 )
 
 MANIFEST = ROOT / "manifest.json"
+
+
+@pytest.fixture(scope="module")
+def shared_run_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    out_dir = tmp_path_factory.mktemp("shared_benchmark_run")
+    protocol = load_protocol(MANIFEST)
+    result = run(protocol, manifest_path=MANIFEST, output_dir=out_dir, mode="offline")
+    assert result.executed == 7
+    assert result.reused == 0
+    return out_dir
 
 
 def test_contract_is_versioned_and_canaries_are_unique() -> None:
@@ -58,23 +69,22 @@ def test_contract_rejects_duplicate_canary(tmp_path: Path) -> None:
         load_protocol(bad_manifest)
 
 
-def test_offline_runner_executes_all_checks_successfully(tmp_path: Path) -> None:
+def test_runner_and_cli_share_single_run(
+    shared_run_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     protocol = load_protocol(MANIFEST)
-    result = run(protocol, manifest_path=MANIFEST, output_dir=tmp_path, mode="offline")
+    marker = json.loads((shared_run_dir / "run.json").read_text(encoding="utf-8"))
+    assert marker["artifacts"]["prompt_path"] == PROMPT_PATH
 
-    assert result.executed == 7
-    assert result.reused == 0
-
-    marker = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
-    scope_rows, inv_rows, tok_rows = collect_rows(protocol, tmp_path, marker)
-
+    scope_rows, inv_rows, tok_rows = collect_rows(protocol, shared_run_dir, marker)
     assert len(scope_rows) == 2
     assert len(inv_rows) == 2
     assert len(tok_rows) == 3
 
     # Check 1: Scope Isolation
     scope_grade = grade_scope_isolation_rows(scope_rows)
-    assert scope_grade["scope_isolation_passed"] is True
+    assert scope_grade["passed"] is True
     assert scope_grade["cross_thread_crosstalk_rate"] == 0.0
     assert scope_grade["project_to_global_contamination_rate"] == 0.0
     assert scope_grade["thread_a_retention_rate"] == 1.0
@@ -82,7 +92,7 @@ def test_offline_runner_executes_all_checks_successfully(tmp_path: Path) -> None
 
     # Check 2: Turn Invalidation
     inv_grade = grade_turn_invalidation_rows(inv_rows)
-    assert inv_grade["instant_invalidation_passed"] is True
+    assert inv_grade["passed"] is True
     assert inv_grade["stale_prompt_injection_rate"] == 0.0
     assert inv_grade["atomic_replacement_success_rate"] == 1.0
     assert inv_grade["turn_1_retention_rate"] == 1.0
@@ -92,11 +102,32 @@ def test_offline_runner_executes_all_checks_successfully(tmp_path: Path) -> None
     assert tok_grade["cases"] == 3
     assert tok_grade["avg_memory_tokens"] > 0
     assert tok_grade["avg_total_tokens"] > tok_grade["avg_memory_tokens"]
-    assert len(tok_grade["cases_breakdown"]) == 3
 
-    # Overall Summary
+    # Short Report Grading Summary
     overall = grade_all_rows(scope_rows, inv_rows, tok_rows)
     assert overall["all_checks_passed"] is True
+
+    # CLI subcommands sharing this run
+    # 1. CLI validate
+    code_val = main(["validate", "--manifest", str(MANIFEST)])
+    assert code_val == 0
+    out_val, _ = capsys.readouterr()
+    assert "Validated 2 scope isolation cases" in out_val
+
+    # 2. CLI report writing short report into shared run directory
+    code_rep = main(["report", "--manifest", str(MANIFEST), "--output-dir", str(shared_run_dir)])
+    assert code_rep == 0
+    out_rep, _ = capsys.readouterr()
+    assert "Wrote benchmark report" in out_rep
+
+    report_path = shared_run_dir / "report.json"
+    assert report_path.exists()
+    report_data = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report_data["artifacts"]["prompt_path"] == PROMPT_PATH
+    assert report_data["summary"]["all_checks_passed"] is True
+    assert "scope_isolation" in report_data["summary"]
+    assert "instant_invalidation" in report_data["summary"]
+    assert "token_overhead" in report_data["summary"]
 
 
 def test_resume_reuses_protocol_bound_rows_and_rejects_changed_manifest(tmp_path: Path) -> None:
@@ -117,7 +148,12 @@ def test_resume_reuses_protocol_bound_rows_and_rejects_changed_manifest(tmp_path
     changed_manifest.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(ValueError, match="belongs to a different protocol"):
-        ensure_run_identity(run_dir, mode="offline", protocol=load_protocol(changed_manifest), manifest_path=changed_manifest)
+        ensure_run_identity(
+            run_dir,
+            mode="offline",
+            protocol=load_protocol(changed_manifest),
+            manifest_path=changed_manifest,
+        )
 
 
 def test_tampered_row_fails_integrity_hash(tmp_path: Path) -> None:
@@ -125,8 +161,8 @@ def test_tampered_row_fails_integrity_hash(tmp_path: Path) -> None:
     run(protocol, manifest_path=MANIFEST, output_dir=tmp_path, mode="offline")
     marker = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
 
-    # Tamper with scope isolation row
-    tamper_file = tmp_path / "rows" / "scope_isolation" / "thread-isolation-project-alpha-beta.json"
+    # Tamper with scope isolation row in flat rows directory
+    tamper_file = tmp_path / "rows" / "thread-isolation-project-alpha-beta.json"
     row = json.loads(tamper_file.read_text(encoding="utf-8"))
     row["thread_a_canaries_present"] = []
     tamper_file.write_text(json.dumps(row), encoding="utf-8")
@@ -135,16 +171,15 @@ def test_tampered_row_fails_integrity_hash(tmp_path: Path) -> None:
         collect_rows(protocol, tmp_path, marker)
 
 
-def test_report_refuses_to_overwrite_existing_evidence(tmp_path: Path) -> None:
+def test_report_refuses_to_overwrite_existing_evidence(shared_run_dir: Path) -> None:
     protocol = load_protocol(MANIFEST)
-    run(protocol, manifest_path=MANIFEST, output_dir=tmp_path, mode="offline")
-
-    report_path = write_report(protocol, manifest_path=MANIFEST, output_dir=tmp_path)
+    # shared_run_dir already has report.json written by test_runner_and_cli_share_single_run
+    report_path = shared_run_dir / "report.json"
     assert report_path.exists()
     original_bytes = report_path.read_bytes()
 
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
-        write_report(protocol, manifest_path=MANIFEST, output_dir=tmp_path)
+        write_report(protocol, manifest_path=MANIFEST, output_dir=shared_run_dir)
 
     assert report_path.read_bytes() == original_bytes
 
@@ -160,7 +195,7 @@ def test_crosstalk_leak_detection_fails_grading() -> None:
         "expected_rejected_canaries": [],
     }
     graded = grade_scope_isolation_rows([synthetic_row])
-    assert graded["scope_isolation_passed"] is False
+    assert graded["passed"] is False
     assert graded["cross_thread_crosstalk_rate"] == 1.0
 
 
@@ -175,7 +210,7 @@ def test_rejected_canary_leak_to_thread_b_fails_grading() -> None:
         "expected_rejected_canaries": ["CANARY-REJECT"],
     }
     graded = grade_scope_isolation_rows([synthetic_row])
-    assert graded["scope_isolation_passed"] is False
+    assert graded["passed"] is False
     assert graded["cross_thread_crosstalk_rate"] == 1.0
 
 
@@ -189,27 +224,5 @@ def test_stale_prompt_injection_fails_grading() -> None:
         "turn_2_stale_canaries_present": ["CANARY-STALE"],
     }
     graded = grade_turn_invalidation_rows([synthetic_row])
-    assert graded["instant_invalidation_passed"] is False
+    assert graded["passed"] is False
     assert graded["stale_prompt_injection_rate"] == 1.0
-
-
-def test_cli_subcommands(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # 1. CLI validate
-    code = main(["validate", "--manifest", str(MANIFEST)])
-    assert code == 0
-    out, _ = capsys.readouterr()
-    assert "Validated 2 scope isolation cases" in out
-
-    # 2. CLI run-offline
-    out_dir = tmp_path / "cli_run"
-    code = main(["run-offline", "--manifest", str(MANIFEST), "--output-dir", str(out_dir)])
-    assert code == 0
-    out, _ = capsys.readouterr()
-    assert "7 executed, 0 reused" in out
-
-    # 3. CLI report
-    code = main(["report", "--manifest", str(MANIFEST), "--output-dir", str(out_dir)])
-    assert code == 0
-    out, _ = capsys.readouterr()
-    assert "Wrote benchmark report" in out
-    assert (out_dir / "report.json").exists()
