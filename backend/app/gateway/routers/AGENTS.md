@@ -1,5 +1,11 @@
 # Router contracts
 
+Artifact range validators and bytes come from one opened file. POSIX streams
+the descriptor. Windows copies only the selected response bytes into a
+private temporary file and closes the public handle before sending headers.
+Preserve the ZIP single-link checks and drain preparation before cancellation
+can release an artifact response's resources.
+
 Trash listing resolves the live retention configuration off-loop before its
 best-effort sweep. Configuration failures skip automatic cleanup and preserve
 the listing; never substitute a default policy for an unreadable one. Resolve
@@ -126,3 +132,13 @@ Workspace search jumps resolve one owned thread rather than listing the corpus.
 Search snippets and historical windows resolve the latest visible message ID
 across pages; stale sequence hints return 404. Checkpoint-only legacy history
 uses `ensure_checkpoint_history_seeded` and its existing write reservation.
+
+Agent-scoped memory routes take `agent_name` and validate it with
+`AGENT_NAME_PATTERN`; the backend must also declare
+`supports_agent_scoped_management` or the route answers 501. The two routes that
+create the scope — `POST /memory/facts` and `POST /memory/import` — additionally
+reject Windows reserved device names through `windows_incompatible_segment()`.
+The scope is a host directory (`agents/{name}/facts`), so the character class
+alone let the first write fail with `FileNotFoundError` and answer 500. Keep
+reads and deletes permissive: a scope an older release stored under a reserved
+name must stay exportable and clearable. Tests: `test_memory_router.py`.

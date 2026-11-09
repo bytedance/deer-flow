@@ -146,7 +146,7 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
 
 Authorization identity is independent of enforcement. Gateway strips client identity overrides: only the server auth source sets `is_internal`, and only authenticated IM `body.context` supplies `channel_user_id` (never `body.config`). `build_principal_from_context` applies role defaults, strict provenance, and copied attributes; RBAC rejects unknown defaults. Delegation and `GuardrailMiddleware` share this identity. Layer 1 precedes deferred assembly across agent paths and its provider is reused for Layer 2; framework skill/memory ordering stays stable. Trusted `DeerFlowClient.stream()` accepts identity overrides. Its graph key always includes effective storage `user_id` and, when enforced, the full Principal; nested attributes are copied so mutation cannot hide stale cache state.
 
-Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-listing-authorization). Runtime skill activation remains a separate layer.
+Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-authorization). Runtime skill activation remains a separate layer.
 
 Model authorization uses `authz.py::resolve_model_authorization()` (same cached-provider, internal-role, and principal-building path as route authorization) as the Gateway integration point for the `models` router: `list_models` filters names through `filter_resources(principal, "model", ...)`, and `get_model` enforces `authorize(resource="model", action="use")` with a deny surfacing as 403; provider errors follow `authorization.fail_closed` (fail-open returns the unfiltered list / proceeds). At runtime, `lead_agent/agent.py::_authorize_model_name` — called from `_make_lead_agent` and from `DeerFlowClient._ensure_agent` — applies the same `model:use` check to the resolved model name. On deny it scans the `filter_resources`-visible names (excluding the denied model), re-verifying each candidate with `authorize("model", "use")` before falling back, because a custom provider may allow `list` while denying `use`; no usable fallback raises under `fail_closed` and keeps the original model under fail-open. The built-in RBAC provider maps this to the per-role `models` policy key. Tests: `tests/test_models_authorization.py`.
 
@@ -203,3 +203,19 @@ chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_llm_error_handling_middleware.py`.
 
 Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
+
+InputSanitization removes empty bare strings from genuine user content lists before
+text-related early returns; all-empty string lists become an empty string. Request
+copies preserve metadata and leave persisted history untouched.
+
+Scope / known provider compatibility limits (#8038 review):
+- On the upload extraction-disagreement (`rfind` failure) fallback, non-empty
+  bare strings are framed individually but remain untyped list parts. Strict
+  Chat Completions endpoints can still reject them; typing those parts is deferred.
+- Empty typed text blocks (`{"type": "text", "text": ""}`) remain unchanged:
+  this fix targets untyped empty strings, not all provider-specific validation.
+  Anthropic can still reject those empty typed blocks.
+- All-empty bare-string lists become `content=""`; this middleware replaces
+  messages in place rather than dropping turns. This is not a guarantee of
+  Anthropic compatibility: an empty user turn can still be rejected. No upstream
+  Gateway / IM empty-turn handling is assumed by this normalization.

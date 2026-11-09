@@ -137,12 +137,10 @@ Read the nearest scoped `AGENTS.md` for subsystem ownership.
 Read-only knowledge: [contract](docs/KNOWLEDGE.md) covers independent retrieval
 tools, scope intersection and extension-owned providers.
 HTTPX clients for several community providers, including RAGFlow, LightRAG,
-You.com, GroundRoute, Webz, Crawl4AI, Browserless, InfoQuest and Jsonify, use
-`asyncio.to_thread` for synchronous TLS setup; requests and cleanup stay on-loop,
-and Browserless and Jsonify own construction as a task so cancellation during
-setup still closes the client it builds.
-The list is non-exhaustive: SearXNG and Jina still construct their clients on
-the loop and should follow the same rule when touched.
+You.com, GroundRoute, Webz, Crawl4AI, Browserless, InfoQuest, Jsonify, SearXNG
+and Jina, use `asyncio.to_thread` for synchronous TLS setup; requests and cleanup
+stay on-loop, and Browserless and Jsonify own construction as a task so
+cancellation during setup still closes the client it builds.
 
 ### Harness / App Split
 
@@ -299,7 +297,7 @@ multi-step tasks: one `in_progress` task, real-time updates. See
 
 ### Run Interaction Policy
 
-Interaction-sensitive changes must follow [policy](docs/RUN_INTERACTION_POLICY.md).
+Interaction/HITL rules: [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 

@@ -492,6 +492,7 @@ export interface Translations {
       waitingForYou: string;
       waiting: string;
       paused: string;
+      waitingApproval: string;
       autoContinuedOnce: string;
       autoContinuedMany: string;
       details: string;
@@ -513,6 +514,8 @@ export interface Translations {
         runFailed: string;
         needsInputCard: string;
         needsInputReply: string;
+        needsApproval: string;
+        needsApprovalReload: string;
         external: string;
         unchecked: string;
         unknown: string;
@@ -1327,6 +1330,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;
   };
@@ -1592,6 +1596,25 @@ export interface Translations {
     requiredA11yLabel: string;
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
+    approval: {
+      title: string;
+      description: string;
+      waiting: string;
+      loading: string;
+      loadFailed: string;
+      reload: string;
+      approve: string;
+      reject: string;
+      approveAll: string;
+      rejectAll: string;
+      submitDecisions: string;
+      reasonLabel: string;
+      reasonPlaceholder: string;
+      submitFailed: string;
+      submitTimeout: string;
+      featureDisabled: string;
+      noPending: string;
+    };
   };
 
   // Uploads

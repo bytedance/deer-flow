@@ -1458,7 +1458,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ### Thread Cleanup
 
-Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
+Delete a thread's checkpoint data and DeerFlow-managed files and metadata.
 
 ```http
 DELETE /api/threads/{thread_id}
@@ -1475,6 +1475,14 @@ DELETE /api/threads/{thread_id}
 **Error behavior:**
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+- `500` with `{"detail": "Failed to delete thread checkpoints."}` when a configured
+  checkpointer cannot delete the thread's checkpoints. The owner row is retained
+  for a retry.
+- `409` with `Thread has work in flight. Delete it after the work finishes.` when
+  thread work blocks deletion. After a checkpoint error, a retry can also return
+  this response until the durable delete reservation is released or reconciled.
+  In a single-worker deployment with ownership heartbeats disabled, a stranded
+  reservation is reconciled at Gateway startup.
 
 Deleting a thread also removes every user's read marker for it.
 
