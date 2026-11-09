@@ -208,3 +208,33 @@ def test_api_key_model_never_merges_oauth_betas():
     payload = m._get_request_payload([HumanMessage(content="hi")])
     m._merge_oauth_betas.assert_not_called()
     assert payload.get("betas") is None
+
+
+def test_request_payload_merges_betas_on_oauth_path():
+    """_get_request_payload itself must merge OAuth betas when the request
+    carries per-request betas, so the tests catch a regression in the
+    request path (not just errors inside the helper)."""
+    from unittest.mock import patch
+
+    from langchain_core.messages import HumanMessage
+
+    m = _make_model()
+
+    with patch.object(ClaudeChatModel, "model_post_init"):
+        pass  # _make_model already patched model_post_init
+
+    payload = m._get_request_payload(
+        [HumanMessage(content="hi")], betas=["context-1m-2025-08-07"]
+    )
+    assert payload["betas"] == [*_oauth_betas(), "context-1m-2025-08-07"]
+
+
+def test_request_payload_without_betas_stays_on_default_path():
+    """_get_request_payload must not introduce betas when the request carries
+    none: the payload stays untouched so langchain-anthropic keeps the client
+    default header path."""
+    from langchain_core.messages import HumanMessage
+
+    m = _make_model()
+    payload = m._get_request_payload([HumanMessage(content="hi")])
+    assert "betas" not in payload
