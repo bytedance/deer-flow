@@ -73,13 +73,22 @@ class MemoryFactRevisionConflict(MemoryRevisionConflict):
 
 
 class RetrievalPort(Protocol):
-    """Storage-facing adapter implemented by the independent retrieval module."""
+    """Storage-facing adapter implemented by the independent retrieval module.
+
+    Contract for ``search``: return ``[]`` only when the query genuinely has no
+    matches. When the derived index cannot answer -- locked, corrupt, or its
+    schema drifted from this adapter -- raise ``sqlite3.OperationalError`` so
+    the caller can log the outage and fall back to canonical Markdown facts.
+    An index failure must never be reported as "no matching memory".
+    """
 
     def upsert(self, fact: dict[str, Any], *, scope: dict[str, str | None], path: str) -> None: ...
 
     def remove(self, fact_id: str, *, scope: dict[str, str | None]) -> None: ...
 
-    def search(self, query: str, *, scopes: list[dict[str, str | None]], top_k: int, mode: str, filters: dict[str, Any] | None) -> list[dict[str, Any]]: ...
+    def search(self, query: str, *, scopes: list[dict[str, str | None]], top_k: int, mode: str, filters: dict[str, Any] | None) -> list[dict[str, Any]]:
+        """Return matches, or raise ``sqlite3.OperationalError`` if the index is unavailable."""
+        ...
 
     def clear(self, *, scopes: list[dict[str, str | None]] | None = None) -> None: ...
 
