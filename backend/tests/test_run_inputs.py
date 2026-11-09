@@ -322,3 +322,80 @@ async def test_http_input_admission_and_status_are_owner_scoped(input_store, mon
         user = User(id=uuid4(), email="other@example.com", password_hash="unused")
         assert (await client.post(url, json=body)).status_code == 404
         assert (await client.get("/api/threads/thread/inputs")).json() == {"items": [], "active_run_id": None}
+
+
+@pytest.mark.asyncio
+async def test_list_thread_inputs_keeps_retryable_inputs_ahead_of_terminal_receipts(monkeypatch):
+    """Regression for #7972: 32 recent receipts must not hide an older retryable input."""
+    from app.gateway import run_inputs as gateway_run_inputs
+
+    def entry(index: int, status: str):
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
+
+    # The store returns runs newest-first; list_thread_inputs reverses them.
+    failed_row = {
+        "run_id": "run-failed",
+        "status": "failed",
+        "stop_reason": "error",
+        "run_inputs": {"items": [entry(0, "pending")]},
+    }
+    later_rows = []
+    for run_index in (1, 2):
+        items = [entry(run_index * 16 + i, "applied" if i % 16 else "cancelled") for i in range(16)]
+        later_rows.append({"run_id": f"run-{run_index}", "status": "success", "run_inputs": {"items": items}})
+    rows = list(reversed(later_rows)) + [failed_row]
+
+    class _FakeStore:
+        async def list_input_runs(self, thread_id, *, user_id):
+            return rows
+
+        async def active_input_run(self, thread_id, *, user_id):
+            return "run-2"
+
+    async def _current_user(_request):
+        return USER_ID
+
+    monkeypatch.setattr(gateway_run_inputs, "get_current_user", _current_user)
+    monkeypatch.setattr(gateway_run_inputs, "_store", lambda _request: _FakeStore())
+
+    result = await gateway_run_inputs.list_thread_inputs("thread", SimpleNamespace())
+    items = result["items"]
+    assert len(items) == 32
+    assert items[0]["id"] == "input-000" and items[0]["status"] == "not_applied"
+    assert items[-1]["id"] == "input-047"
+    assert [i["id"] for i in items] == sorted(i["id"] for i in items)
+    assert "context" not in items[0]
+    assert result["active_run_id"] == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_list_thread_inputs_starves_receipts_when_all_inputs_are_unresolved(monkeypatch):
+    """Record the deliberate trade-off: >32 unresolved inputs leave no receipt slots."""
+    from app.gateway import run_inputs as gateway_run_inputs
+
+    def entry(index: int, status: str):
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
+
+    rows = [
+        {"run_id": "run-a", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(i, "pending") for i in range(16)]}},
+        {"run_id": "run-b", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(16 + i, "pending") for i in range(16)]}},
+        {"run_id": "run-c", "status": "success", "run_inputs": {"items": [entry(32, "applied")]}},
+    ]
+
+    class _FakeStore:
+        async def list_input_runs(self, thread_id, *, user_id):
+            return rows
+
+        async def active_input_run(self, thread_id, *, user_id):
+            return None
+
+    async def _current_user(_request):
+        return USER_ID
+
+    monkeypatch.setattr(gateway_run_inputs, "get_current_user", _current_user)
+    monkeypatch.setattr(gateway_run_inputs, "_store", lambda _request: _FakeStore())
+
+    items = (await gateway_run_inputs.list_thread_inputs("thread", SimpleNamespace()))["items"]
+    assert len(items) == 32
+    assert all(i["status"] == "not_applied" for i in items)
+    assert not any(i["id"] == "input-032" for i in items)

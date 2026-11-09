@@ -250,6 +250,10 @@ to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
+FTS5 scores all SQL-filtered matches before selecting composite `top_k`.
+Do not pre-limit by BM25 alone. A streaming heap bounds retained Python
+rows, not SQLite ranking work.
+
 The SQLite index is rebuildable derived data below `retrieval_index_path`
 (empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
 `paths.retrieval_index_directory` is the one resolver). Instances sharing
