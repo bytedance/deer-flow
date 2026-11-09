@@ -433,3 +433,54 @@ def test_summarize_args_preserves_high_semantic_fields():
     assert "chars omitted" in summary["content"]
     assert summary["content"].startswith("xxxx")
     assert summary["content"].endswith("xxxx")
+
+
+def _visible_text(content):
+    if isinstance(content, str):
+        return content
+    return chr(10).join(block.get("text", "") for block in content if isinstance(block, dict))
+
+
+def _assert_stripped_without_pausing(out):
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    # No result can be paired with an unaddressable call, so the call is removed
+    # instead of answered: nothing may execute and nothing may pause.
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert not any("OK" in _visible_text(message.content) for message in messages)
+    answers = [message for message in messages if isinstance(message, AIMessage)]
+    assert all(not message.tool_calls for message in answers)
+    assert any("no usable id" in _visible_text(message.content) for message in answers)
+
+
+def test_null_tool_call_id_is_denied_instead_of_pausing():
+    """A provider can emit a tool call without an id; pausing would wedge the thread.
+
+    The Gateway resume validator rejects a payload whose ``pending_tool_call_ids``
+    contains a non-string with 422, while a pending pause blocks new runs with
+    409, so an interrupt created here could never be cleared.
+    """
+    calls = [{"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": None}]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)
+
+
+def test_duplicate_tool_call_ids_are_denied_instead_of_pausing():
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_dup"},
+        {"name": "write_file", "args": {"path": "/tmp/b.txt", "content": "b"}, "id": "call_dup"},
+    ]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)
+
+
+def test_empty_tool_call_id_is_denied_instead_of_pausing():
+    calls = [{"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": ""}]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)

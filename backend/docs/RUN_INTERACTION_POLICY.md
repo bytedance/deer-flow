@@ -59,6 +59,12 @@ tool callback; rejections have none, so the journal reconciles them under the
 resume run like other middleware-written results (#4666). Results from other
 earlier runs are not re-attributed.
 
+A call that cannot carry a tool result — no id, an empty id, or an id shared by
+two calls in one response — is never paused for approval: the resume validator
+could never match it, and a pending pause blocks new runs, so the middleware
+removes those calls from the model response and appends a visible rejection note
+instead. The tool is never executed, and the thread stays usable.
+
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
 artifact delivery checks, and batch continuation cancellation must not treat a
 pending approval as a completed source run. Pending approvals do not expire and
