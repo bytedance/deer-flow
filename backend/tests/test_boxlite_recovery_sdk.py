@@ -18,6 +18,9 @@ from deerflow.community.boxlite.provider import BoxliteProvider
 def sdk_runtime(monkeypatch):
     sdk = pytest.importorskip("boxlite", reason="Install deerflow-harness[boxlite] on a supported SDK platform")
     exec_signature = inspect.signature(sdk.Box.exec)
+    list_signature = inspect.signature(sdk.Boxlite.list_info)
+    get_signature = inspect.signature(sdk.Boxlite.get)
+    stop_signature = inspect.signature(sdk.Box.stop)
     events = []
     commands = []
 
@@ -68,16 +71,19 @@ def sdk_runtime(monkeypatch):
             return NativeExecution(health_check, bound.arguments["command"] == "wait-error")
 
         async def stop(self):
+            stop_signature.bind(self)
             events.append(("stop", asyncio.get_running_loop(), threading.get_ident()))
 
     class NativeRuntime:
         existing = True
 
         async def list_info(self):
+            list_signature.bind(self)
             events.append(("list", asyncio.get_running_loop(), threading.get_ident()))
             return [SimpleNamespace(name="deer-flow-boxlite-existing"), SimpleNamespace(name="foreign-box")]
 
         async def get(self, name):
+            get_signature.bind(self, name)
             assert name == "deer-flow-boxlite-existing"
             events.append(("get", asyncio.get_running_loop(), threading.get_ident()))
             return native_box if self.existing else None
