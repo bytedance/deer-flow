@@ -66,13 +66,16 @@ def _bounded_text(value: Any) -> str:
 
 
 def _addressable(calls: list[dict[str, Any]]) -> bool:
-    """Whether every call can be answered by a ToolMessage.
+    """Whether every call can carry a stable approval decision.
 
     ``ToolMessage`` requires a non-empty string ``tool_call_id``. A pause whose
-    payload carries a null or duplicate call id can never be validated either:
-    the Gateway resume validator answers 422 while a pending pause blocks new
-    runs with 409, so pausing would wedge the thread permanently. These calls
-    are denied by removing them from the model response instead of by result.
+    payload carries a null or duplicated call id can never be validated: the
+    Gateway resume validator answers 422 (all-reject included) while a pending
+    pause blocks new runs with 409, so pausing would wedge the thread forever.
+    An empty id is technically resumable end to end, but strict providers reject
+    it when the conversation is replayed, so it is denied by the same rule.
+    These calls are denied by removing them from the model response instead of
+    by result.
     """
     ids = [call.get("id") for call in calls]
     return all(isinstance(call_id, str) and call_id for call_id in ids) and len(set(ids)) == len(ids)
@@ -232,7 +235,7 @@ class HitlApprovalMiddleware(AgentMiddleware):
         resume_value: Any,
     ) -> dict[str, Any]:
         target_ids = [tc["id"] for tc in targets]
-        if any(not isinstance(call_id, str) for call_id in target_ids) or len(set(target_ids)) != len(target_ids):
+        if not _addressable(targets):
             return self._deny_all(last, targets, _invalid_response_reason())
         ai_message_id = last.id or ""
         expected_request_ids = {call_id: f"hitl_approval:{ai_message_id}:{call_id}" for call_id in target_ids}

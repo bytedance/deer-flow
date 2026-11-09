@@ -59,11 +59,16 @@ tool callback; rejections have none, so the journal reconciles them under the
 resume run like other middleware-written results (#4666). Results from other
 earlier runs are not re-attributed.
 
-A call that cannot carry a tool result — no id, an empty id, or an id shared by
-two calls in one response — is never paused for approval: the resume validator
-could never match it, and a pending pause blocks new runs, so the middleware
-removes those calls from the model response and appends a visible rejection note
-instead. The tool is never executed, and the thread stays usable.
+A call that cannot carry a stable approval decision is never paused. A null or
+duplicated call id can never match the resume validator and would block new runs
+forever; an empty id is technically matchable, but it is denied as well because
+strict providers reject an empty tool-call id when the conversation is replayed.
+The middleware removes those calls from the model response with a visible
+rejection note instead of pausing, so the tool is never executed and the thread
+stays usable. A pause stored by an older release with a null or duplicated id is
+**not** cleared by this: every resume, including all-reject, is still rejected,
+so continue the work in a new thread. In-place recovery is tracked in
+[#8071](https://github.com/bytedance/deer-flow/issues/8071).
 
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
 artifact delivery checks, and batch continuation cancellation must not treat a

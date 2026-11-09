@@ -49,12 +49,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
-  (`None`), emits an empty one, or repeats an id within one response made the
-  middleware pause with an approval payload the Gateway can never validate:
-  every resume answered 422 and every new run stayed 409-blocked, including
-  all-reject. Such calls are now removed from the model response with a visible
-  rejection note instead of pausing, and deny paths no longer build an invalid
-  `ToolMessage` for a null id. ([#8069])
+  (`None`) or repeats one within a response made the middleware pause with an
+  approval payload the Gateway can never validate: every resume answered 422
+  and every new run stayed 409-blocked, all-reject included. An empty id was
+  technically resumable but is denied as well, since strict providers reject it
+  when the conversation is replayed. Such calls are now removed from the model
+  response with a visible rejection note instead of pausing, and deny paths no
+  longer build an invalid `ToolMessage` for a null id. A pause stored before
+  this change stays unresolvable; in-place recovery is tracked in [#8071].
+  ([#8069])
 
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's
@@ -16267,4 +16270,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
+[#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
