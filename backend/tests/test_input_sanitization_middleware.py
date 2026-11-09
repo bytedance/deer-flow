@@ -776,6 +776,39 @@ class TestWrapModelCallSpecialCases:
         ]
         assert msg.content == original
 
+    def test_already_wrapped_no_override(self):
+        mw = _make_middleware()
+        already = _check_user_content("Hello")
+        msg = HumanMessage(content=already, id="msg-1")
+        request = _make_request([msg])
+        captured = []
+
+        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0] is request
+
+    def test_propagates_graph_bubble_up(self):
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="Hi", id="m1")])
+
+        def handler(_req):
+            raise GraphBubbleUp("test")
+
+        with pytest.raises(GraphBubbleUp):
+            mw.wrap_model_call(request, handler)
+
+    def test_fail_open_on_processing_error(self):
+        mw = _make_middleware()
+        request = _make_request([HumanMessage(content="Hi", id="m1")])
+        captured = []
+
+        mw._process_request = Mock(side_effect=RuntimeError("boom"))
+
+        result = mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0] is request
+        assert result == "ok"
+
 
 class TestEmptyTextBlockItemsAreDropped:
     """Empty typed text blocks cannot reach the model as content parts (#8037).
@@ -834,6 +867,29 @@ class TestEmptyTextBlockItemsAreDropped:
 
         assert captured[0].messages[0].content == [image_block]
 
+    def test_whitespace_only_text_is_kept_as_a_typed_block(self):
+        """Only empty text is swept: a whitespace part still keeps the turn alive."""
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        processed = self._sent_content(
+            _make_middleware(),
+            [image_block, {"type": "text", "text": " "}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 2
+        assert processed[0] == image_block
+        assert processed[1]["type"] == "text"
+        assert processed[1]["text"].strip() == ""
+
+    def test_whitespace_only_bare_string_is_kept(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        processed = self._sent_content(_make_middleware(), [image_block, " "])
+
+        assert isinstance(processed, list)
+        assert len(processed) == 2
+        assert processed[0] == image_block
+        assert processed[1].strip() == ""
+
     def test_image_only_message_still_passes_through_untouched(self):
         image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
         msg = HumanMessage(content=[image_block], id="msg-1")
@@ -843,39 +899,6 @@ class TestEmptyTextBlockItemsAreDropped:
         _make_middleware().wrap_model_call(request, lambda req: captured.append(req) or "ok")
 
         assert captured[0] is request
-
-    def test_already_wrapped_no_override(self):
-        mw = _make_middleware()
-        already = _check_user_content("Hello")
-        msg = HumanMessage(content=already, id="msg-1")
-        request = _make_request([msg])
-        captured = []
-
-        mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
-
-        assert captured[0] is request
-
-    def test_propagates_graph_bubble_up(self):
-        mw = _make_middleware()
-        request = _make_request([HumanMessage(content="Hi", id="m1")])
-
-        def handler(_req):
-            raise GraphBubbleUp("test")
-
-        with pytest.raises(GraphBubbleUp):
-            mw.wrap_model_call(request, handler)
-
-    def test_fail_open_on_processing_error(self):
-        mw = _make_middleware()
-        request = _make_request([HumanMessage(content="Hi", id="m1")])
-        captured = []
-
-        mw._process_request = Mock(side_effect=RuntimeError("boom"))
-
-        result = mw.wrap_model_call(request, lambda req: captured.append(req) or "ok")
-
-        assert captured[0] is request
-        assert result == "ok"
 
 
 # ---------------------------------------------------------------------------
