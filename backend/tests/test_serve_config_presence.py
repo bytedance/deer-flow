@@ -26,7 +26,11 @@ python3() { "$TEST_PYTHON" "$@"; }
 env() {
     if [ "$1" = python3 ]; then shift; python3 "$@"; else command env "$@"; fi
 }
-uv() { printf '%s\\n' "$@" > "$TEST_UV_ARGS"; return 73; }
+uv() {
+    if [ "$1" = run ]; then cat >/dev/null; return 0; fi
+    printf '%s\\n' "$@" > "$TEST_UV_ARGS"
+    return 73
+}
 source "$1" "$2"
 """
 

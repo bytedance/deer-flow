@@ -209,8 +209,10 @@ defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
 `DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
 Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
 Its `uv run --no-sync` calls never resolve packages or consult configured
-indexes. On a fresh checkout, the pre-install call skips with a warning and
-`serve.sh` reruns it after dependency installation, before Gateway startup.
+indexes. A pristine checkout can copy the example without a Python environment;
+other standalone failures remain errors. `serve.sh` alone may defer its
+pre-install call, because it reruns the upgrade after dependency installation
+and before Gateway startup.
 `backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
 
 ## Multi-Instance Dev Harness

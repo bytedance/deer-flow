@@ -696,34 +696,30 @@ def test_config_upgrade_runs_without_consulting_the_package_index(tmp_path):
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
-def test_config_upgrade_skips_when_the_backend_environment_is_absent(tmp_path):
-    """A fresh checkout must reach serve.sh's dependency-install step."""
+def test_config_upgrade_fails_when_the_backend_environment_is_absent(tmp_path):
+    """Standalone upgrades must not silently defer an unavailable environment."""
     checkout = tmp_path / "checkout"
     original = _write_outdated_config(checkout / "config.yaml")
 
     result = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "skipping the config upgrade" in result.stdout
+    assert result.returncode != 0
+    assert "skipping the config upgrade" not in result.stdout
     assert (checkout / "config.yaml").read_text(encoding="utf-8") == original
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
-def test_fresh_checkout_startup_upgrades_after_dependency_install(tmp_path):
-    """One startup upgrades the config after installing a missing environment."""
+def test_config_upgrade_creates_default_without_a_backend_environment(tmp_path):
+    """A pristine checkout can copy the example before dependencies are installed."""
+    if any(path.exists() for path in _legacy_config_candidates()):
+        pytest.skip("the resolver's legacy fallback would find this repository's own config.yaml")
     checkout = tmp_path / "checkout"
-    original = _write_outdated_config(checkout / "config.yaml")
 
-    skipped = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
-    assert skipped.returncode == 0, skipped.stdout + skipped.stderr
-    assert (checkout / "config.yaml").read_text(encoding="utf-8") == original
+    result = _run_config_upgrade_in_checkout(checkout, UV_PROJECT_ENVIRONMENT=str(tmp_path / "absent-venv"))
 
-    upgraded = _run_config_upgrade_in_checkout(checkout)
-    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
-    expected_version = yaml.safe_load((checkout / "config.example.yaml").read_text(encoding="utf-8"))["config_version"]
-    upgraded_config = yaml.safe_load((checkout / "config.yaml").read_text(encoding="utf-8"))
-    assert upgraded_config["config_version"] == expected_version
-    AppConfig.model_validate(upgraded_config)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "creating from example" in result.stdout
+    assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()
 
 
 def test_serve_reruns_config_upgrade_after_dependency_install() -> None:

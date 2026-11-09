@@ -410,7 +410,18 @@ if ! { \
     exit 1
 fi
 
-bash "$REPO_ROOT/scripts/config-upgrade.sh"
+# A fresh checkout has no installed harness for config resolution yet. Only
+# this startup path may defer the upgrade: dependency installation below is
+# followed by an unconditional rerun before Gateway startup. When available,
+# upgrade now so extras detection inspects the upgraded config before install.
+if (cd "$REPO_ROOT/backend" && uv run --no-sync python - >/dev/null 2>&1 <<'DEERFLOW_ENV_PROBE'
+import deerflow
+DEERFLOW_ENV_PROBE
+); then
+    bash "$REPO_ROOT/scripts/config-upgrade.sh"
+else
+    echo "⚠ Backend environment unavailable — deferring the config upgrade until after dependency installation."
+fi
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
@@ -450,9 +461,9 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
-# The pre-install upgrade intentionally skips a fresh checkout whose backend
-# environment does not exist yet. Run it again after dependency installation
-# so schema-required migrations land before the Gateway reads the config.
+# The pre-install upgrade may be deferred on a fresh checkout. Run it again
+# after dependency installation so schema-required migrations land before the
+# Gateway reads the config. Standalone config-upgrade calls never defer errors.
 bash "$REPO_ROOT/scripts/config-upgrade.sh"
 
 # ── Banner ───────────────────────────────────────────────────────────────────

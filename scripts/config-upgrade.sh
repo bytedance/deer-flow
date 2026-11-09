@@ -14,21 +14,30 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
+if [ ! -f "$EXAMPLE" ]; then
+    echo "✗ config.example.yaml not found at $EXAMPLE"
+    exit 1
+fi
+
+# A pristine checkout needs no Python environment to copy the example. Do not
+# take this shortcut when environment selectors may point the Gateway at a
+# different config; those cases must use the authoritative harness resolver.
+if [ ! -f "$REPO_ROOT/config.yaml" ] && \
+    [ ! -f "$REPO_ROOT/backend/config.yaml" ] && \
+    [ ! -f "$REPO_ROOT/.env" ] && \
+    [ -z "${DEER_FLOW_ENV_FILE:-}" ] && \
+    [ -z "${DEER_FLOW_CONFIG_PATH:-}" ] && \
+    [ -z "${DEER_FLOW_PROJECT_ROOT:-}" ]; then
+    echo "No config.yaml found — creating from example..."
+    cp "$EXAMPLE" "$REPO_ROOT/config.yaml"
+    echo "OK config.yaml created. Please review and set your API keys."
+    exit 0
+fi
+
 if command -v cygpath >/dev/null 2>&1; then
     REPO_ROOT_WIN="$(cygpath -w "$REPO_ROOT")"
 else
     REPO_ROOT_WIN="$REPO_ROOT"
-fi
-
-# serve.sh calls this before installing dependencies so extras detection can
-# inspect the pre-upgrade config. A fresh checkout has no backend environment
-# yet; let the install proceed, then serve.sh reruns this script before startup.
-if ! (cd "$REPO_ROOT/backend" && uv run --no-sync python - >/dev/null 2>&1 <<'DEERFLOW_ENV_PROBE'
-import deerflow
-DEERFLOW_ENV_PROBE
-); then
-    echo "⚠ Backend environment not installed yet — skipping the config upgrade until dependencies are installed."
-    exit 0
 fi
 
 # Upgrade the config.yaml the Gateway loads. Ask the harness resolver rather
@@ -72,11 +81,6 @@ except ValueError as exc:
     sys.exit(f'ERROR {exc}')
 DEERFLOW_UPGRADE_PY
 )"
-
-if [ ! -f "$EXAMPLE" ]; then
-    echo "✗ config.example.yaml not found at $EXAMPLE"
-    exit 1
-fi
 
 if [ -z "$CONFIG" ]; then
     echo "No config.yaml found — creating from example..."
