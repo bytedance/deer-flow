@@ -114,6 +114,15 @@ This section accumulates work toward the **2.3.0** milestone
   `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
   instead of reaching the SDK as is. ([#7981])
   
+- **community:** Browserless is the last search/fetch provider that read its
+  token raw. A `BROWSERLESS_TOKEN` or configured `token` from a file kept its
+  trailing newline and became the auth query parameter, so every `web_fetch`
+  and `web_capture` request failed authentication while the key was correct.
+  Both now go through `provider_credentials.resolve_api_key`, and only an
+  omitted `token` key falls back to the environment: an explicit `""` or
+  `null` keeps opting a self-hosted capture endpoint out of authentication.
+  ([#8043])
+  
 - **docker:** Images built from a checkout no longer contain its local
   configuration. `.dockerignore` did not exclude `config.yaml`,
   `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
@@ -16208,4 +16217,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
