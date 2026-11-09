@@ -67,6 +67,13 @@ This section accumulates work toward the **2.3.0** milestone
   returns a 500 and keeps the thread, so the owner can delete it again.
   ([#7992])
 
+- **gateway:** Creating a thread with a caller-supplied `thread_id` that
+  already belongs to another user now returns a non-disclosing 404
+  (`Thread not found`) instead of a 500. The duplicate-key recovery path reads
+  the surviving row back bypassing the owner scope so the cross-owner case
+  mirrors `ThreadOwnershipConflictError`; a duplicate key with no surviving row
+  is still surfaced as a 500. ([#8057])
+
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
@@ -16218,4 +16225,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+
