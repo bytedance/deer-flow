@@ -611,6 +611,7 @@ class TelegramChannel(Channel):
                 except BadRequest as exc:
                     if str(exc).casefold() not in {"photo_invalid_dimensions", "image_process_failed"}:
                         raise
+                    logger.info("[Telegram] photo rejected (%s); delivering as document: %s", exc, attachment.filename)
                     # A rejected photo can still be delivered unchanged as a file.
                     # Keep the reply target and reuse the already loaded bytes.
                     kwargs["document"] = kwargs.pop("photo")
