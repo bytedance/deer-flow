@@ -32,6 +32,7 @@ from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ER
 from deerflow.scheduler.schedules import pauses_unschedulable, should_advance_schedule_cursor, stored_next_run_at
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
+from deerflow.tracing.context import current_traceparent, traceparent_scope
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -632,6 +633,7 @@ class ScheduledTaskService:
                 scheduled_for=now,
                 trigger=trigger,
                 status="queued",
+                traceparent=current_traceparent() if trigger == "manual" else None,
                 coordinate_with_task=True,
                 expected_task_user_id=task.get("user_id"),
                 expected_task_status=task.get("status") if trigger == "manual" else None,
@@ -752,15 +754,16 @@ class ScheduledTaskService:
                 if previous is not None and previous.get("thread_id") != execution_thread_id:
                     metadata["scheduled_previous_thread_id"] = previous["thread_id"]
             origin, title = await self._launch_provenance(task, queued, now=now)
-            result = await self._launch_run(
-                thread_id=execution_thread_id,
-                assistant_id=task.get("assistant_id"),
-                prompt=prompt,
-                owner_user_id=task.get("user_id"),
-                metadata=metadata,
-                origin=origin,
-                title=title,
-            )
+            with traceparent_scope(claimed.get("traceparent")):
+                result = await self._launch_run(
+                    thread_id=execution_thread_id,
+                    assistant_id=task.get("assistant_id"),
+                    prompt=prompt,
+                    owner_user_id=task.get("user_id"),
+                    metadata=metadata,
+                    origin=origin,
+                    title=title,
+                )
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]

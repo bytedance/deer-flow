@@ -17,7 +17,7 @@ import re
 import threading
 import uuid
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
@@ -112,6 +112,7 @@ from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
+from deerflow.tracing.context import TRACE_METADATA_KEYS, TRACE_PARENT_KEY, current_traceparent, execution_span
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.goal_objective import normalize_goal_objective
@@ -301,7 +302,7 @@ async def _ensure_thread_metadata_locked(
             # membership key: run admission never modifies project membership —
             # the column is written only by POST /api/threads and
             # /threads/{id}/move — so the key must not persist either.
-            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY) and key not in TRACE_METADATA_KEYS
         }
         # A run that names its thread in the input (a scheduled run) creates it
         # named: the worker copies the title to the thread list only when the
@@ -2366,7 +2367,8 @@ async def start_run(
         if origin is not None:
             run_metadata[DEERFLOW_ORIGIN_KEY] = origin
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
-
+        for key in TRACE_METADATA_KEYS:
+            run_metadata.pop(key, None)
         try:
             config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         except ValueError as exc:
@@ -2377,6 +2379,11 @@ async def start_run(
             config["metadata"].pop(DEERFLOW_ORIGIN_KEY, None)
             if origin is not None:
                 config["metadata"][DEERFLOW_ORIGIN_KEY] = origin
+        for key in TRACE_METADATA_KEYS:
+            config.pop(key, None)
+            for section in ("metadata", "context", "configurable"):
+                if isinstance(config.get(section), dict):
+                    config[section].pop(key, None)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -2760,33 +2767,41 @@ async def start_run(
                             sanitize_log_param(admission_run_id),
                         )
                 try:
-                    record = await run_mgr.create_or_reject(
-                        thread_id,
-                        body.assistant_id,
-                        on_disconnect=disconnect,
-                        metadata=run_metadata,
-                        # Persist a redacted copy of the config: the run record is
-                        # written to runs.kwargs_json and echoed by the run API, so a
-                        # request-scoped secret (#3861) or client hint must not ride along.
-                        # The live config built above keeps them for the actual run.
-                        kwargs={
-                            "input": run_record_input,
-                            **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                            "config": redact_config_secrets(body.config),
-                            **({"conversation_references": conversation_references} if conversation_references else {}),
-                        },
-                        idempotency_request=idempotency_request,
-                        multitask_strategy=body.multitask_strategy,
-                        model_name=model_name,
-                        user_id=owner_user_id,
-                        idempotency_key=idempotency_key,
-                        evidence_origin=admitted_origin,
-                        # Canonical agent keys, not routing aliases or display names.
-                        # Bootstrap and unresolved legacy identities stay read-only.
-                        evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
-                        run_id=admission_run_id,
-                        **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
-                    )
+                    # A fresh turn can start its own trace when an SDK is
+                    # installed. An untraced continuation lets the Worker
+                    # resolve the prior admission after the startup barrier.
+                    traceparent = current_traceparent()
+                    trace_scope = execution_span("deerflow.run.admit", {"deerflow.run.id": admission_run_id}) if traceparent is None and isinstance(graph_input, dict) else nullcontext()
+                    with trace_scope:
+                        traceparent = current_traceparent()
+                        record = await run_mgr.create_or_reject(
+                            thread_id,
+                            body.assistant_id,
+                            on_disconnect=disconnect,
+                            metadata=run_metadata,
+                            # Persist a redacted copy of the config: the run record is
+                            # written to runs.kwargs_json and echoed by the run API, so a
+                            # request-scoped secret (#3861) or client hint must not ride along.
+                            # The live config built above keeps them for the actual run.
+                            kwargs={
+                                "input": run_record_input,
+                                **({TRACE_PARENT_KEY: traceparent} if traceparent is not None else {}),
+                                **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                                "config": redact_config_secrets(body.config),
+                                **({"conversation_references": conversation_references} if conversation_references else {}),
+                            },
+                            idempotency_request=idempotency_request,
+                            multitask_strategy=body.multitask_strategy,
+                            model_name=model_name,
+                            user_id=owner_user_id,
+                            idempotency_key=idempotency_key,
+                            evidence_origin=admitted_origin,
+                            # Canonical agent keys, not routing aliases or display names.
+                            # Bootstrap and unresolved legacy identities stay read-only.
+                            evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
+                            run_id=admission_run_id,
+                            **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
+                        )
                 except RunIdempotencyUnsupported as exc:
                     raise HTTPException(status_code=503, detail=str(exc)) from exc
                 except RunIdempotencyKeyMismatch as exc:

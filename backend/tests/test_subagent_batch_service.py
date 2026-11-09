@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from opentelemetry import context as otel_context
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -317,7 +319,8 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
         token_usage_records=None,
     )
 
-    execution_spec = dict(_request().execution_spec)
+    parent = "00-11111111111111111111111111111111-2222222222222222-01"
+    execution_spec = {**_request().execution_spec, "deerflow_traceparent": parent}
     if thread_incarnation is not _MISSING:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
@@ -364,6 +367,9 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
 
         def execute_async(self, _prompt, task_id=None):
             assert task_id == "item-1"
+            carrier = {}
+            TraceContextTextMapPropagator().inject(carrier)
+            assert carrier["traceparent"] == parent
             return "execution-1"
 
     repository = Repository()
@@ -1225,3 +1231,34 @@ async def test_terminal_item_cleanup_fence_budget_does_not_renew_forever(monkeyp
         execution_done.set()
         await asyncio.gather(*workers, return_exceptions=True)
         registry.cleanup("execution-1")
+
+
+@pytest.mark.asyncio
+async def test_batch_submission_and_followup_share_the_admitted_trace_parent():
+    repository = SimpleNamespace(
+        create_batch=AsyncMock(return_value={"id": "batch-1"}),
+        finish_continuation=AsyncMock(return_value=True),
+    )
+    propagator = TraceContextTextMapPropagator()
+    parent = "00-11111111111111111111111111111111-2222222222222222-01"
+    observed = {}
+
+    async def dispatch(_batch):
+        propagator.inject(observed)
+        return {"run_id": "followup"}
+
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(),
+        dispatch_continuation=dispatch,
+    )
+    token = otel_context.attach(propagator.extract({"traceparent": parent}))
+    try:
+        await service.submit(_request(execution_spec={"deerflow_traceparent": "forged"}))
+    finally:
+        otel_context.detach(token)
+
+    spec = repository.create_batch.call_args.kwargs["execution_spec"]
+    await service._continue_batch({"id": "batch-1", "execution_spec": spec}, "worker")
+    assert observed == {"traceparent": parent}

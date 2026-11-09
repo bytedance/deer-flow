@@ -6153,3 +6153,52 @@ async def test_start_run_forwards_sanitized_client_context_to_runtime_context_on
     assert stored["kwargs"]["config"] == expected_stored_config
     assert record.kwargs["config"] == expected_stored_config
     assert body.config == original_config
+
+
+@pytest.mark.anyio
+async def test_run_admission_only_persists_the_bound_w3c_parent(_stub_app_config):
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+
+    key = "deerflow_traceparent"
+    parent = "00-11111111111111111111111111111111-2222222222222222-01"
+    forged = "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+    body = _run_create_request(
+        metadata={key: forged},
+        config={key: forged, **{section: {key: forged} for section in ("metadata", "context", "configurable")}},
+    )
+
+    token = otel_context.attach(TraceContextTextMapPropagator().extract({"traceparent": parent}))
+    try:
+        record, config = await _start_run_capturing_config(body, "thread-w3c-parent")
+    finally:
+        otel_context.detach(token)
+
+    assert record.kwargs[key] == parent
+    assert key not in record.metadata
+    assert key not in config and key not in record.kwargs["config"]
+    assert all(key not in config.get(section, {}) for section in ("metadata", "context", "configurable"))
+    assert all(key not in record.kwargs["config"].get(section, {}) for section in ("metadata", "context", "configurable"))
+
+
+@pytest.mark.anyio
+async def test_fresh_run_can_be_resumed_with_a_provider_and_no_upstream_parent(_stub_app_config, monkeypatch):
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer", provider.get_tracer)
+    try:
+        record, _ = await _start_run_capturing_config(_run_create_request(), "thread-w3c-new-root")
+        parent = record.kwargs["deerflow_traceparent"]
+        [span] = exporter.get_finished_spans()
+    finally:
+        provider.shutdown()
+
+    assert span.name == "deerflow.run.admit"
+    assert span.parent is None
+    assert parent.split("-")[1:3] == [f"{span.context.trace_id:032x}", f"{span.context.span_id:016x}"]

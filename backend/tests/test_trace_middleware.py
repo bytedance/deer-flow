@@ -3,6 +3,8 @@ import asyncio
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import Response, StreamingResponse
+from opentelemetry import baggage, trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from starlette.testclient import TestClient
 
 from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS
@@ -228,3 +230,23 @@ def test_midstream_exception_propagates_without_second_response_start() -> None:
     assert starts[0]["status"] == 200
     header_names = {name.lower() for name, _ in starts[0]["headers"]}
     assert TRACE_ID_HEADER.lower().encode("latin-1") in header_names
+
+
+def test_gateway_propagates_w3c_parent_without_importing_baggage():
+    app = _make_app()
+
+    @app.get("/span-context")
+    async def span_context():
+        carrier = {}
+        TraceContextTextMapPropagator().inject(carrier)
+        return {"traceparent": carrier.get("traceparent"), "baggage": baggage.get_baggage("secret")}
+
+    parent = "00-11111111111111111111111111111111-2222222222222222-01"
+    with TestClient(app) as client:
+        traced = client.get("/span-context", headers={"traceparent": parent, "baggage": "secret=example"})
+        malformed = client.get("/span-context", headers={"traceparent": "bad-parent"})
+        untraced = client.get("/span-context")
+
+    assert traced.json() == {"traceparent": parent, "baggage": None}
+    assert malformed.json() == untraced.json() == {"traceparent": None, "baggage": None}
+    assert not trace.get_current_span().get_span_context().is_valid

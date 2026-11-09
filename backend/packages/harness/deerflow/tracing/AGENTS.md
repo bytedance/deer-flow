@@ -1,5 +1,23 @@
 ### Tracing System (`packages/harness/deerflow/tracing/`)
 
+
+Gateway accepts a W3C `traceparent` and keeps the active server span when ASGI
+is already instrumented. Strip untrusted trace headers at the deployment
+ingress if clients should only start new traces. The host persists the
+canonical parent with Run admission and manual scheduled occurrences, and
+captures it in durable batch execution specs. Client JSON cannot set this
+field. A continuation with no active parent resolves the selected checkpoint
+after the Worker startup barrier. Its source Run reference selects the
+admission parent only within the same owner and thread. Only span identity
+and flags cross durable boundaries.
+
+A fresh Gateway run without a parent starts a `deerflow.run.admit` span.
+The Worker and native subagents emit `deerflow.run` and `deerflow.subagent`
+through the same OpenTelemetry tracer provider. Without an SDK provider
+this is propagation only. Use the existing task lifecycle and model
+observers for extensions. Collector setup, downstream HTTP instrumentation,
+and export policy belong to the deployment.
+
 LangSmith and Langfuse are both supported. The wiring lives in two layers:
 
 - `factory.py::build_tracing_callbacks()` — returns the LangChain `CallbackHandler` list for the providers currently enabled via env vars (`LANGSMITH_TRACING`, `LANGFUSE_TRACING`, etc.). The handlers are attached at the **graph invocation root** for in-graph runs (`make_lead_agent` and `DeerFlowClient.stream` both append them to `config["callbacks"]` before invoking the graph) so a single run produces one trace with all node / LLM / tool calls as child spans. Standalone callers — anything that invokes a model outside such a graph (e.g. `MemoryUpdater`) — keep `create_chat_model`'s default `attach_tracing=True`, which falls back to model-level callback attachment.
