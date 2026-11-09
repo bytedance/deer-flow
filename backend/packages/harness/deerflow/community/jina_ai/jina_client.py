@@ -128,12 +128,19 @@ async def _protect_response_cleanup(response: httpx.Response):
 async def _admission_client(options):
     # Keep one client across retries, matching the default transport behavior.
     # Cleanup is still shielded so cancellation always propagates after close.
-    client = httpx.AsyncClient(**options)
+    client = await asyncio.to_thread(httpx.AsyncClient, **options)
     try:
         client.event_hooks["response"].append(_protect_response_cleanup)
         yield client
     finally:
         await _finish_cleanup(client.aclose())
+
+
+@asynccontextmanager
+async def _plain_client(options):
+    """Build the default client off the loop; keep requests and cleanup on it."""
+    async with await asyncio.to_thread(httpx.AsyncClient, **options) as client:
+        yield client
 
 
 class JinaClient:
@@ -192,7 +199,7 @@ class JinaClient:
                     client_kwargs: dict[str, object] = {"trust_env": trust_env, "follow_redirects": True}
                     if proxy:
                         client_kwargs["proxy"] = proxy
-                    async with _admission_client(client_kwargs) if admission else httpx.AsyncClient(**client_kwargs) as client:
+                    async with _admission_client(client_kwargs) if admission else _plain_client(client_kwargs) as client:
                         delay = 0.5
                         for attempt in range(max_retries + 1):
                             remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else None

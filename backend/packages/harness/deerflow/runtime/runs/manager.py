@@ -9,7 +9,7 @@ import logging
 import socket
 import sqlite3
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -248,6 +248,30 @@ class TerminalCommitProof:
     goal_verdict: dict[str, Any] | None
 
 
+def _approval_request_ids(metadata: Mapping[str, Any]) -> dict[str, str] | None:
+    payload = metadata.get("hitl_approval")
+    if not isinstance(payload, Mapping) or not isinstance(payload.get("actions"), list):
+        return None
+    request_ids: dict[str, str] = {}
+    for action in payload["actions"]:
+        if not isinstance(action, Mapping):
+            return None
+        call_id = action.get("tool_call_id")
+        request_id = action.get("request_id")
+        if not isinstance(call_id, str) or not isinstance(request_id, str) or call_id in request_ids:
+            return None
+        request_ids[call_id] = request_id
+    return request_ids
+
+
+def _approval_request_id(metadata: Mapping[str, Any]) -> str | None:
+    payload = metadata.get("hitl_approval")
+    if not isinstance(payload, Mapping):
+        return None
+    request_id = payload.get("request_id")
+    return request_id if isinstance(request_id, str) else None
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -307,6 +331,10 @@ class RunRecord:
     # An interrupted ACK does not authorize completion of an unfinished rollback.
     rollback_finalization_pending: bool = False
     terminal_commit_proof: TerminalCommitProof | None = field(default=None, repr=False)
+    # A paused worker may still be confirming its waiting_for_input event when
+    # an answered ACK supersedes that outcome. Only that active worker may use
+    # this prior proof to finish its already-started finalization.
+    paused_worker_terminal_proof: TerminalCommitProof | None = field(default=None, repr=False)
     terminal_status_revision: int = field(default=0, repr=False)
     idempotency_key: str | None = None
     idempotency_request: dict[str, Any] | None = None
@@ -315,6 +343,24 @@ class RunRecord:
     idempotency_reused: bool = False
     evidence_origin: str = "unknown"
     evidence_agent_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalAnswerHandle:
+    """The exact answered pause needed to roll back a failed worker attachment."""
+
+    run_id: str
+    original_metadata: dict[str, Any]
+    answered_metadata: dict[str, Any]
+    answered_updated_at: str
+    record: RunRecord = field(repr=False, compare=False)
+    previous_updated_at: str = field(repr=False, compare=False)
+    previous_terminal_proof: TerminalCommitProof | None = field(repr=False, compare=False)
+    previous_terminal_revision: int = field(repr=False, compare=False)
+    previous_terminal_persisted: bool = field(repr=False, compare=False)
+    previous_terminal_commit_pending: bool = field(repr=False, compare=False)
+    previous_paused_worker_proof: TerminalCommitProof | None = field(repr=False, compare=False)
+    answered_revision: int = field(repr=False, compare=False)
 
 
 class RunStartOutcome(StrEnum):
@@ -523,20 +569,48 @@ class RunManager:
                 delay = min(policy.max_delay, delay * policy.backoff_factor if delay else policy.initial_delay)
                 attempt += 1
 
-    async def _persist_snapshot_to_store(self, run_id: str, payload: dict[str, Any]) -> bool:
+    async def _persist_snapshot_to_store(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        *,
+        on_persisted: Callable[[dict[str, Any] | None], None] | None = None,
+    ) -> bool:
         """Best-effort persist a previously captured run snapshot."""
         if self._store is None:
             return True
         try:
-            await self._call_store_with_retry(
+            admitted = await self._call_store_with_retry(
                 "put",
                 run_id,
                 lambda: self._store.put(run_id, **payload),
             )
+            if on_persisted is not None:
+                on_persisted(admitted)
             return True
         except Exception:
             logger.warning("Failed to persist run %s to store", run_id, exc_info=True)
             return False
+
+    async def _persist_snapshot_with_reconciliation(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+        *,
+        on_persisted: Callable[[dict[str, Any] | None], None] | None = None,
+    ) -> bool:
+        """Persist a snapshot, repairing it if the live record advances during store I/O."""
+        while True:
+            if not await self._persist_snapshot_to_store(run_id, payload, on_persisted=on_persisted):
+                return False
+            async with self._lock:
+                record = self._runs.get(run_id)
+                if record is None or record.ownership_lost or self._store is None:
+                    return True
+                latest_payload = self._store_put_payload(record)
+                if latest_payload == payload:
+                    return True
+                payload = latest_payload
 
     async def _persist_new_run_to_store(self, record: RunRecord) -> None:
         """Persist a newly created run record to the backing store.
@@ -589,11 +663,18 @@ class RunManager:
     def _has_final_terminal_ack(self, record: RunRecord) -> bool:
         return not record.rollback_finalization_pending and self._has_terminal_ack(record)
 
+    @staticmethod
+    def _active_paused_worker_status(record: RunRecord) -> str | None:
+        proof = record.paused_worker_terminal_proof
+        if proof is None or proof.status != RunStatus.waiting_for_input or record.status != RunStatus.success or record.task is None or record.task.done():
+            return None
+        return proof.status.value
+
     def terminal_event_status(self, record: RunRecord) -> str | None:
         """Return an attributable final outcome for this local worker only."""
         if self._runs.get(record.run_id) is not record or record.store_only or record.owner_worker_id != self._worker_id or record.status in (RunStatus.pending, RunStatus.running) or not self._has_final_terminal_ack(record):
             return None
-        return record.status.value
+        return self._active_paused_worker_status(record) or record.status.value
 
     def can_release_terminal_barrier(self, record: RunRecord) -> bool:
         """Keep durable ownership barriers through rollback's final error ACK."""
@@ -615,10 +696,12 @@ class RunManager:
     def _acknowledge_terminal(self, record: RunRecord, outcome: TerminalCommitProof, staged_revision: int) -> None:
         if self._runs.get(record.run_id) is not record or record.ownership_lost:
             return
-        # Publish the acknowledged outcome without an await. With a backing
-        # store, an older interrupted ACK cannot supersede a newer error.
-        # Storeless transitions are synchronous and retain local mutability.
+        # Publish the acknowledged outcome without an await. A stale durable
+        # ACK must not replace a newer answered/error outcome or its persistence
+        # barrier. Storeless transitions are synchronous and retain mutability.
         previous = record.terminal_commit_proof
+        if self._store is not None and previous is not None and previous.status != RunStatus.interrupted and staged_revision < record.terminal_status_revision:
+            return
         if self._store is None or previous is None or previous.status == RunStatus.interrupted or outcome.status != RunStatus.interrupted:
             record.terminal_commit_proof = outcome
         authoritative = record.terminal_commit_proof
@@ -857,13 +940,20 @@ class RunManager:
             if record is not None and record.ownership_lost:
                 logger.warning("Skipped completion persistence for run %s after lease ownership was lost", run_id)
                 return
+            paused_worker_status = self._active_paused_worker_status(record) if record is not None else None
+            stale_paused_completion = paused_worker_status is not None and kwargs.get("status") == paused_worker_status
             if self.heartbeat_enabled and self._store is not None:
-                if record is None or record.store_only or not self._has_final_terminal_ack(record) or kwargs.get("status") != record.status.value:
+                if record is None or record.store_only or not self._has_final_terminal_ack(record) or (kwargs.get("status") != record.status.value and not stale_paused_completion):
                     logger.warning("Skipped completion data without an attributable terminal ack for run %s", run_id)
                     return
                 if any(kwargs.get(key) is not None and kwargs[key] != getattr(record, key) for key in ("error", "stop_reason", "goal_verdict")):
                     logger.warning("Skipped completion data that changes the acknowledged outcome for run %s", run_id)
                     return
+            if stale_paused_completion:
+                # The answered row is already successful. The paused worker's
+                # stale status only attributes its finalization; completion
+                # metadata must target the acknowledged row, not resurrect it.
+                kwargs["status"] = record.status.value
             if record is not None:
                 if record.goal_verdict is not None:
                     # This fallback can be the first successful terminal write
@@ -1487,6 +1577,175 @@ class RunManager:
                 require_active=False,
             )
         return persisted
+
+    async def mark_approval_answered(self, thread_id: str, *, expected_request_ids: dict[str, str] | None = None) -> ApprovalAnswerHandle | None:
+        """Atomically answer the validated pause; return ``None`` for a stale response or another winner."""
+        records = await self.list_by_thread(thread_id, limit=5)
+        record = next((item for item in records if item.status == RunStatus.waiting_for_input), None)
+        if record is None:
+            return None
+        if expected_request_ids is not None and _approval_request_ids(record.metadata) != expected_request_ids:
+            return None
+
+        previous_status = record.status
+        previous_metadata = copy.deepcopy(record.metadata or {})
+        expected_request_id = _approval_request_id(previous_metadata) if expected_request_ids is not None else None
+        if expected_request_ids is not None and expected_request_id is None:
+            return None
+        previous_updated_at = record.updated_at
+        previous_terminal_proof = record.terminal_commit_proof
+        previous_terminal_revision = record.terminal_status_revision
+        previous_terminal_persisted = record.terminal_status_persisted
+        previous_terminal_commit_pending = record.terminal_commit_pending
+        previous_paused_worker_proof = record.paused_worker_terminal_proof
+        staged_revision = previous_terminal_revision + 1
+        outcome = self._terminal_outcome(record, RunStatus.success)
+        async with self._lock:
+            if not record.store_only:
+                current = self._runs.get(record.run_id)
+                if current is not record or current.status != RunStatus.waiting_for_input:
+                    return None
+            if expected_request_ids is not None and (_approval_request_ids(record.metadata) != expected_request_ids or _approval_request_id(record.metadata) != expected_request_id):
+                return None
+            metadata = dict(previous_metadata)
+            metadata.pop("hitl_approval", None)
+            record.metadata = metadata
+            record.status = RunStatus.success
+            record.updated_at = _now_iso()
+            record.terminal_status_revision = staged_revision
+            record.terminal_status_persisted = self._store is None
+            if not record.store_only:
+                record.paused_worker_terminal_proof = previous_terminal_proof if previous_terminal_proof is not None and previous_terminal_proof.status == RunStatus.waiting_for_input else None
+                # The paused worker may already be finalizing its terminal event,
+                # evidence and usage. ACK this concrete outcome before store I/O so
+                # those consumers do not mistake the answered run for an unfinished
+                # terminal transition. Durability remains gated separately below.
+                self._acknowledge_terminal(record, outcome, staged_revision)
+                record.terminal_status_persisted = self._store is None
+            payload = self._store_put_payload(record)
+
+        async def restore_local_record() -> None:
+            if record.store_only:
+                return
+            async with self._lock:
+                if self._runs.get(record.run_id) is record and record.metadata is metadata and record.status == RunStatus.success and record.terminal_status_revision == staged_revision:
+                    record.status = previous_status
+                    record.metadata = previous_metadata
+                    record.updated_at = previous_updated_at
+                    record.terminal_commit_proof = previous_terminal_proof
+                    record.paused_worker_terminal_proof = previous_paused_worker_proof
+                    record.terminal_status_revision = previous_terminal_revision
+                    record.terminal_status_persisted = previous_terminal_persisted
+                    record.terminal_commit_pending = previous_terminal_commit_pending
+
+        persisted_snapshots: list[dict[str, Any] | None] = []
+        answered_updated_at = record.updated_at
+        try:
+            if self._store is not None:
+                answered = await self._call_store_with_retry(
+                    "answer_approval",
+                    record.run_id,
+                    lambda: self._store.answer_approval(
+                        record.run_id,
+                        metadata=metadata,
+                        answered_updated_at=record.updated_at,
+                        expected_request_id=expected_request_id,
+                    ),
+                )
+                if not answered:
+                    await restore_local_record()
+                    return None
+            persisted = (
+                True
+                if record.store_only
+                else await self._persist_snapshot_with_reconciliation(
+                    record.run_id,
+                    payload,
+                    on_persisted=persisted_snapshots.append,
+                )
+            )
+        except Exception as exc:
+            await restore_local_record()
+            raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered") from exc
+        except BaseException:
+            await restore_local_record()
+            raise
+        if not persisted:
+            await restore_local_record()
+            raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered")
+        if not record.store_only:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record and record.terminal_status_revision == staged_revision and record.terminal_commit_proof == outcome:
+                    record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
+        if persisted_snapshots and persisted_snapshots[-1] is not None:
+            answered_updated_at = persisted_snapshots[-1]["updated_at"]
+        return ApprovalAnswerHandle(
+            run_id=record.run_id,
+            original_metadata=previous_metadata,
+            answered_metadata=copy.deepcopy(metadata),
+            answered_updated_at=answered_updated_at,
+            record=record,
+            previous_updated_at=previous_updated_at,
+            previous_terminal_proof=previous_terminal_proof,
+            previous_terminal_revision=previous_terminal_revision,
+            previous_terminal_persisted=previous_terminal_persisted,
+            previous_terminal_commit_pending=previous_terminal_commit_pending,
+            previous_paused_worker_proof=previous_paused_worker_proof,
+            answered_revision=staged_revision,
+        )
+
+    async def restore_approval_answer(self, answer: ApprovalAnswerHandle) -> bool:
+        """Restore only the exact success transition created by *answer*."""
+        record = answer.record
+        if not record.store_only:
+            async with self._lock:
+                current = self._runs.get(record.run_id)
+                if current is not None and current is not record:
+                    return False
+                if current is record and (record.status != RunStatus.success or record.metadata != answer.answered_metadata or record.terminal_status_revision != answer.answered_revision):
+                    return False
+                if current is None and self._store is None:
+                    return False
+
+        if self._store is not None:
+            try:
+                restored = await self._call_store_with_retry(
+                    "restore_approval",
+                    record.run_id,
+                    lambda: self._store.restore_approval(
+                        record.run_id,
+                        metadata=answer.original_metadata,
+                        expected_updated_at=answer.answered_updated_at,
+                    ),
+                )
+            except Exception as exc:
+                raise RunStartupError(f"Failed to restore approval run {record.run_id} after worker attachment failed") from exc
+            if not restored:
+                return False
+
+        if not record.store_only:
+            async with self._lock:
+                if self._runs.get(record.run_id) is record and record.status == RunStatus.success and record.metadata == answer.answered_metadata and record.terminal_status_revision == answer.answered_revision:
+                    record.status = RunStatus.waiting_for_input
+                    record.metadata = copy.deepcopy(answer.original_metadata)
+                    record.updated_at = answer.previous_updated_at
+                    record.terminal_commit_proof = answer.previous_terminal_proof
+                    record.paused_worker_terminal_proof = answer.previous_paused_worker_proof
+                    record.terminal_status_revision = answer.previous_terminal_revision
+                    record.terminal_status_persisted = answer.previous_terminal_persisted
+                    record.terminal_commit_pending = answer.previous_terminal_commit_pending
+        return True
+
+    async def persist_metadata(self, run_id: str) -> bool:
+        """Upsert the full run record so metadata (e.g. HITL payload) is durable."""
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.ownership_lost:
+                return False
+            if self._store is None:
+                return True
+            payload = self._store_put_payload(record)
+        return await self._persist_snapshot_with_reconciliation(run_id, payload)
 
     async def set_status_if_not_cancelled(
         self,

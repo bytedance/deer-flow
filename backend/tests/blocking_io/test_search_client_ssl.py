@@ -110,3 +110,46 @@ async def test_infoquest_client_tls_setup_runs_off_loop(operation, monkeypatch):
     assert contexts
     assert len(clients) == 1
     assert clients[0].is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["searxng", "jina"])
+async def test_remaining_search_clients_build_tls_off_loop(provider, monkeypatch):
+    loop_thread = threading.get_ident()
+    original_context = ssl.create_default_context
+    contexts = []
+    clients = []
+
+    def create_context(*args, **kwargs):
+        assert threading.get_ident() != loop_thread, "TLS trust loading blocks the event loop"
+        context = original_context(*args, **kwargs)
+        contexts.append(context)
+        return context
+
+    async def send(self, request, **kwargs):
+        assert threading.get_ident() == loop_thread
+        clients.append(self)
+        if provider == "searxng":
+            assert request.url.host == "searx.example"
+            payload = {"results": [{"url": "https://example.com", "title": "Synthetic", "content": "Synthetic text"}]}
+            return httpx.Response(200, request=request, json=payload)
+        assert request.url.host == "r.jina.ai"
+        return httpx.Response(200, request=request, text="Synthetic text")
+
+    monkeypatch.setattr(ssl, "create_default_context", create_context)
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+
+    if provider == "searxng":
+        from deerflow.community.searxng.searxng_client import SearxngClient
+
+        result = await SearxngClient("https://searx.example").search("synthetic query", max_results=1)
+        assert result and result[0]["url"] == "https://example.com"
+    else:
+        from deerflow.community.jina_ai.jina_client import JinaClient
+
+        result = await JinaClient().crawl("https://example.com", max_retries=0)
+        assert result == "Synthetic text"
+
+    assert contexts
+    assert len(clients) == 1
+    assert clients[0].is_closed
