@@ -96,15 +96,32 @@ def _is_advanced_query(query: str) -> bool:
     return bool(_FTS5_ADVANCED_RE.search(query))
 
 
+def _quote_fallback_token(token: str) -> str:
+    """Quote one token for the OR query, prefixing single CJK characters.
+
+    The fallback index stores CJK runs as character bigrams, so a one-character
+    query (``重``) has no equal token to match.  ``"重"*`` is an FTS5 prefix
+    phrase: it matches any indexed token that starts with that character,
+    including the bigram ``重试``, and it still matches a standalone ``重``
+    token when the content contained an isolated single character.  Multi-
+    character tokens keep the plain quoted phrase so their semantics do not
+    change.  Double quotes inside a token are the FTS5 escape sequence for a
+    literal quote.
+    """
+    escaped = token.replace(chr(34), chr(34) * 2)
+    if len(token) == 1 and _CJK_RUN_RE.fullmatch(token):
+        return f'"{escaped}"*'
+    return f'"{escaped}"'
+
+
 def _build_fallback_query(query: str) -> str:
     """Convert natural-language query to FTS5 OR query (fallback strategy)."""
     tokens = [token for token in _tokenize(query) if any(char.isalnum() for char in token)]
     if not tokens:
         return ""
     # Quote each token so punctuation in natural-language input cannot become
-    # an FTS5 operator or syntax error. Double quotes inside a token are the
-    # FTS5 escape sequence for a literal quote.
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+    # an FTS5 operator or syntax error.
+    return " OR ".join(_quote_fallback_token(token) for token in tokens)
 
 
 # ── Core retrieval engine ─────────────────────────────────────────────
