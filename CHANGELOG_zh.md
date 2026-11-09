@@ -26,6 +26,10 @@
 
 ### 修复
 
+- **网关：** SQL 存储下，使用其他用户已占用的会话 ID 创建会话时，现在会返回
+  不暴露归属信息的 `404 Thread not found`，而不是 500。同一用户的重试仍保持幂等，
+  原有会话会保留。([#8054](https://github.com/bytedance/deer-flow/pull/8054))
+
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
