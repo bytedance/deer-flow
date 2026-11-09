@@ -1449,15 +1449,11 @@ def _http_host(url: str) -> str | None:
         parts = urlsplit(url)
     except ValueError:
         return None
-    # A bracketed literal where userinfo belongs is read as the host by
-    # urlsplit on 3.12 and rejected outright on 3.13, so the answer would
-    # change with the interpreter. Refuse to name a host either way: the
-    # URL stays outbound in _is_outbound_url, like the other malformed shapes.
+    # Python versions differ on which brackets in userinfo they accept.
+    # Treat raw brackets there as malformed so the URL stays outbound.
     userinfo, at_sign, _hostport = parts.netloc.rpartition("@")
-    if at_sign and userinfo.startswith("[") and userinfo.endswith("]"):
+    if at_sign and ("[" in userinfo or "]" in userinfo):
         return None
-    # Parse the authority so IPv6 brackets and userinfo cannot be mistaken
-    # for the host. Malformed URLs remain outbound in _is_outbound_url.
     host = parts.hostname
     return host.lower() if host else None
 
