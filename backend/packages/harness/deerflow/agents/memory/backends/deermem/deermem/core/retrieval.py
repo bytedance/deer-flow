@@ -414,9 +414,12 @@ class FTS5Retrieval:
         Returns list of fact dicts (id, content, category, confidence,
         createdAt, source, score, bm25_score) sorted by relevance.
 
+        An empty list means no match, or an empty/invalid request; an index
+        failure raises instead of returning an empty result.
+
         Raises:
             sqlite3.OperationalError: the index is unavailable (locked, corrupt,
-                or schema drift). An empty list only means "no match".
+                or schema drift).
         """
         import time
 
