@@ -810,6 +810,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     if batch_repo is not None:
         await batch_repo.suppress_thread_continuations(thread_id)
@@ -831,14 +832,15 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         # being deleted under a run that has just been admitted.
         response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
-    # Remove checkpoints (best-effort)
+    # Retain ownership if a configured checkpointer cannot delete the thread.
+    # Read routes treat rowless checkpoints as untracked legacy threads.
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
         try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+            await checkpointer.adelete_thread(thread_id)
+        except Exception as exc:
+            logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
 
     # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
     # are deleted, so the durable thread-operation reservation protecting this
@@ -850,6 +852,16 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             await delete_runs(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Drop this worker's in-memory copies too. ``RunManager.get()`` and
+    # ``list_by_thread()`` answer from the process-local registry before the
+    # store, so without this the deleted thread's runs — including ``kwargs``
+    # with the user's prompt — stay readable through ``GET /threads/{id}/runs``
+    # until the Gateway restarts, while the thread itself already 404s.
+    try:
+        await run_manager.discard_thread_runs(thread_id)
+    except Exception:
+        logger.debug("Could not evict in-memory runs for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted

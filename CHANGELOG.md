@@ -22,6 +22,15 @@ This section accumulates work toward the **2.3.0** milestone
   `hitl_approval.max_actions` configures the approval-batch count limit
   (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
 
+- **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
+  access for authenticated users, without maintaining a per-user allowlist.
+  Exact-user allowlists remain the default; shared access requires matching
+  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+
+- **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
+  ranked results with a direct answer when the sources agree on one, and fetch
+  returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation
@@ -38,6 +47,19 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
+
+- **gateway:** Deleting a thread no longer reports success while its
+  conversation stays readable. When the checkpoint store failed during
+  `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
+  thread's metadata row and returned success; any signed-in user could then
+  read the leftover title and messages through `GET /threads/{id}`, `/state`,
+  `/history` and `/goal`, and the owner could not retry. The delete now
+  returns a 500 and keeps the thread, so the owner can delete it again.
+  ([#7992])
+
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
@@ -51,6 +73,16 @@ This section accumulates work toward the **2.3.0** milestone
   Gateway `/api/subagents` boundary before attempting filesystem writes,
   preventing `OSError` failures on Windows hosts while keeping existing
   read and delete operations permissive.
+
+- **scheduler:** A stored `schedule_spec` that is JSON null, a list or a string
+  no longer aborts the scheduler poll. `stored_next_run_at` caught the value
+  errors from a dropped zone or a newer cron parser, but a non-object spec
+  fails on `.get`; the launch-failure handler recomputed it again, so the
+  `AttributeError` escaped `run_once`'s claimed-task loop. Such a task is now
+  paused with the reason, like the other unusable schedules. The poll loop also
+  isolates one task's dispatch failure from the rest of its claimed batch, so a
+  future per-record raise costs one tick instead of every other claimed task.
+  ([#7998])
 
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
@@ -16174,6 +16206,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
