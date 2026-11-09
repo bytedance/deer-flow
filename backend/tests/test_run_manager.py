@@ -826,6 +826,68 @@ async def _wait_for_eviction(manager: RunManager, run_id: str) -> None:
 
 
 @pytest.mark.anyio
+async def test_hidden_record_read_stays_quiet_without_a_store(manager: RunManager, caplog: pytest.LogCaptureFixture):
+    """A store-less manager must not reach for a store it does not have.
+
+    The hidden record is authoritative for "this run is deleted", so ``get``
+    settles on it before any store call. Narrowing that to a missing record let
+    a store-less read fall through to ``None.get`` and log a hydration warning
+    with a traceback, misattributing a local invariant to a store failure.
+    """
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    async def tail() -> None:
+        await asyncio.sleep(0.05)
+
+    record.task = asyncio.create_task(tail())
+    try:
+        assert await manager.discard_thread_runs("thread-1") == 0
+        assert record.evicted
+
+        with caplog.at_level(logging.WARNING):
+            assert await manager.get(record.run_id) is None
+            assert await manager.aget(record.run_id) is None
+        assert [r.message for r in caplog.records if "Failed to hydrate" in r.message] == []
+    finally:
+        await record.task
+
+
+@pytest.mark.anyio
+async def test_get_many_by_thread_never_rebuilds_a_hidden_record(manager_with_store: RunManager):
+    """Batch reads skip evicted runs even when the store still has a row.
+
+    ``list_by_thread`` already refuses to rebuild a hidden record from a store
+    row, because the durable row is deleted before the flag is set and anything
+    left is a stale or partial read. The batch reader must keep that invariant
+    uniform, or a stale row resurrects a run the user just deleted.
+    """
+    mgr = manager_with_store
+    record = await mgr.create("thread-1", kwargs={"input": "the user's prompt"})
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    async def tail() -> None:
+        await asyncio.sleep(0.05)
+
+    record.task = asyncio.create_task(tail())
+    try:
+        assert await mgr.discard_thread_runs("thread-1") == 0
+        # A stale row surviving the delete must not satisfy the batch read.
+        await mgr._store.put(
+            record.run_id,
+            thread_id="thread-1",
+            assistant_id=record.assistant_id,
+            status="success",
+            multitask_strategy=record.multitask_strategy,
+            metadata={},
+            user_id=record.user_id,
+        )
+        assert await mgr.get_many_by_thread("thread-1", {record.run_id}) == {}
+    finally:
+        await record.task
+
+
+@pytest.mark.anyio
 async def test_discard_thread_runs_ignores_other_threads(manager: RunManager):
     mine = await manager.create("thread-1")
     theirs = await manager.create("thread-2")

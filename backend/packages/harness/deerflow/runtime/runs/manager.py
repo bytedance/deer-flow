@@ -1097,12 +1097,12 @@ class RunManager:
             record = self._runs.get(run_id)
         if record is not None and not record.evicted:
             return record
-        # A deletion hides the record without dropping it (a live finalize tail
-        # still needs it), and the durable row is gone too because
-        # ``delete_by_thread`` runs first. A hidden record is authoritative for
-        # "this run is deleted", so never resurrect it from a stale store read;
-        # but resolve it before any store call, keeping this read side-effect free.
-        if record is None and self._store is None:
+        # A hidden record is authoritative for "this run is deleted", so never
+        # resurrect it from a stale store read. Settle that before any store call
+        # so the read stays side-effect free and store-less managers stop here.
+        if record is not None and record.evicted:
+            return None
+        if self._store is None:
             return None
         try:
             row = await self._store.get(run_id, user_id=user_id)
@@ -1416,6 +1416,14 @@ class RunManager:
             return records_by_id
 
         remaining = run_ids - records_by_id.keys()
+        if not remaining:
+            return records_by_id
+        # Mirror ``list_by_thread``: a hidden record means the thread was deleted
+        # while its finalize tail was live, so a store row for it can only be a
+        # stale or partial read and must never be rebuilt into a visible record.
+        async with self._thread_registry_lock(thread_id):
+            hidden_run_ids = {record.run_id for record in self._thread_records_locked(thread_id) if record.operation_kind == ThreadOperationKind.run and record.evicted}
+        remaining -= hidden_run_ids
         if not remaining:
             return records_by_id
         try:
