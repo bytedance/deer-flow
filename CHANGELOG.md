@@ -47,6 +47,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **frontend:** The workspace change review now colors diff lines that start
+  with `--- ` or `+++ ` correctly. Deleting a SQL or Lua comment such as
+  `-- get users`, or adding a line such as `++ counter`, produced hunk lines
+  that were styled as grey file headers instead of a red deletion or green
+  addition. Only lines before a diff's first `@@` are treated as headers now,
+  as the backend line counts already do. ([#8065])
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the
@@ -16232,4 +16239,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8065]: https://github.com/bytedance/deer-flow/pull/8065
 

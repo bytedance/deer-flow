@@ -26,6 +26,11 @@
 
 ### 修复
 
+- **前端：** 工作区变更评审现在能正确着色以 `--- ` 或 `+++ ` 开头的 diff 行。此前删除
+  `-- get users` 这类 SQL 或 Lua 注释、或新增 `++ counter` 这类行时，生成的变更行会被显示成
+  灰色的文件头，而不是红色的删除或绿色的新增。现在只有 diff 中第一个 `@@` 之前的行才被视为
+  文件头，与后端的行数统计一致。([#8065])
+
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
@@ -12854,3 +12859,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8065]: https://github.com/bytedance/deer-flow/pull/8065

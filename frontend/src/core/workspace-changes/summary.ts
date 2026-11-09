@@ -21,9 +21,14 @@ export function getWorkspaceChangeBadgeLabel(summary: WorkspaceChangeSummary) {
   return `${count} ${count === 1 ? "file" : "files"} changed +${summary.additions} -${summary.deletions}`;
 }
 
+/**
+ * Classify one unified-diff line. `inHunk` must be true once the diff's first
+ * "@@" line has been seen; to render a whole diff, use
+ * `classifyWorkspaceDiffLines`, which tracks that for you.
+ */
 export function getWorkspaceChangeLineClass(
   line: string,
-  inHunk = false,
+  inHunk: boolean,
 ): WorkspaceChangeLineClass {
   if (line.startsWith("@@")) {
     return "hunk";
