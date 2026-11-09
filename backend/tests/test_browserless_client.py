@@ -442,6 +442,35 @@ class TestBrowserlessTools:
         """YAML `timeout_s: off` parses as False; 0.0 would time out every request."""
         assert self._client_with_config({"timeout_s": False}).timeout_s == 30.0
 
+    async def test_env_token_is_stripped(self):
+        """A token read from a file keeps its trailing newline.
+
+        ``resolve_api_key`` is the shared credential rule for search and fetch
+        providers; without it the raw value becomes the auth query parameter and
+        every Browserless request fails authentication.
+        """
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"base_url": "https://production-sfo.browserless.io"}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "  env-token\r\n"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == "env-token"
+
+    async def test_config_token_is_stripped(self):
+        assert self._client_with_config({"token": " cfg-token\n"}).token == "cfg-token"
+
+    async def test_blank_config_token_falls_back_to_env(self):
+        """A whitespace-only configured key counts as unset, like the other providers."""
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": "   "}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == "env-token"
+
+    async def test_whitespace_only_token_sends_no_auth_parameter(self):
+        assert self._client_with_config({"token": "\r\n"}).token == ""
+
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_success(self, mock_get_client):
         """web_fetch_tool successfully fetches and extracts content."""
