@@ -786,8 +786,47 @@ async def test_discard_thread_runs_leaves_a_live_finalize_tail_attached(manager:
 
 
 @pytest.mark.anyio
+async def test_discard_thread_runs_hides_a_live_finalize_tail_from_reads(manager_with_store: RunManager):
+    """A delete during the finalize tail must not leave the run readable.
+
+    ``discard_thread_runs`` cannot pop the record while ``worker.py``'s tail is
+    still running, so the record stays registered as its write target. Every
+    public read must treat it as deleted anyway: the durable row is gone and the
+    user only sees a 404 for the thread they just deleted.
+    """
+    mgr = manager_with_store
+    record = await mgr.create("thread-1", kwargs={"input": "the user's prompt"})
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    async def tail() -> None:
+        await asyncio.sleep(0.05)
+
+    tail_task = asyncio.create_task(tail())
+    record.task = tail_task
+    # The router deletes the durable rows before evicting this worker's copies.
+    await mgr._store.delete_by_thread("thread-1")
+    try:
+        assert await mgr.discard_thread_runs("thread-1") == 0
+
+        assert await mgr.get(record.run_id, user_id=record.user_id) is None
+        assert await mgr.list_by_thread("thread-1", user_id=record.user_id) == []
+        assert await mgr.get_many_by_thread("thread-1", {record.run_id}) == {}
+    finally:
+        await tail_task
+
+    # The tail's completion evicts it; no second delete pass and no 300s wait.
+    await asyncio.wait_for(_wait_for_eviction(mgr, record.run_id), timeout=1)
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+
+
+async def _wait_for_eviction(manager: RunManager, run_id: str) -> None:
+    while run_id in manager._runs:
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.anyio
 async def test_discard_thread_runs_ignores_other_threads(manager: RunManager):
-    """A delete of one thread must not unindex its neighbour's runs."""
     mine = await manager.create("thread-1")
     theirs = await manager.create("thread-2")
 
