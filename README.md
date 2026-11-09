@@ -1887,8 +1887,9 @@ Providers remain usable without a catalog or management page. See the
 for extension registration and configuration. The installable
 [WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
 targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
-retrieval citations. Configure explicit user-to-workspace credential bindings;
-resource authorization remains with WeKnora. The extension directory includes
+retrieval citations. Configure explicit user-to-workspace credential bindings,
+or opt into shared read-only access for authenticated users without maintaining
+a user-ID list. Resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
 The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)

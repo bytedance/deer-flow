@@ -11,6 +11,10 @@ into an unrestricted search. Use KB-bound `hybrid-search` with optional
 `knowledge_ids` and disabled context enrichment. The global search endpoint
 rejects document targets for KB-restricted keys and unions base/document target
 lists. Never broaden credentials to work around that. Verify result membership.
+Default `access_mode: users` requires exact user IDs. Explicit `authenticated`
+mode omits user_ids and requires nonempty host authenticated_user_id == user_id;
+never infer login from a default/storage ID or serialized context. Retain Agent,
+base and upstream checks. Shared retrieval grants no management permissions.
 Reject malformed document totals and detail shapes as provider errors; reserve
 permission errors for resource identity, membership and searchability failures.
 Dataset IDs derive from endpoint/tenant/native base, not credentials or labels.
