@@ -112,3 +112,30 @@ async def test_concurrent_first_feedback_puts_both_succeed_with_one_row(feedback
     assert len(rows) == 1
     # The later commit wins, as with sequential submissions.
     assert rows[0]["rating"] in (1, -1)
+
+
+@pytest.mark.anyio
+async def test_second_feedback_post_for_same_run_returns_409_not_500(feedback_repo):
+    app = make_authed_test_app(user_factory=_user)
+
+    @app.middleware("http")
+    async def _session_auth_source(request, call_next):
+        request.state.auth_source = AUTH_SOURCE_SESSION
+        return await call_next(request)
+
+    run_store = MagicMock()
+    run_store.get = AsyncMock(return_value={"run_id": RUN_ID, "thread_id": THREAD_ID})
+    app.state.run_store = run_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(feedback.router)
+
+    url = f"/api/threads/{THREAD_ID}/runs/{RUN_ID}/feedback"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
+        first = await client.post(url, json={"rating": 1, "message_id": "msg-a"})
+        second = await client.post(url, json={"rating": -1, "message_id": "msg-b"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 409, second.text
+    assert "PUT" in second.json()["detail"]
+    rows = await feedback_repo.list_by_run(THREAD_ID, RUN_ID, user_id=str(_user().id))
+    assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first.json()["feedback_id"], 1)]
