@@ -323,26 +323,26 @@ async def test_http_input_admission_and_status_are_owner_scoped(input_store, mon
         assert (await client.post(url, json=body)).status_code == 404
         assert (await client.get("/api/threads/thread/inputs")).json() == {"items": [], "active_run_id": None}
 
+
 @pytest.mark.asyncio
 async def test_list_thread_inputs_keeps_retryable_inputs_ahead_of_terminal_receipts(monkeypatch):
     """Regression for #7972: 32 recent receipts must not hide an older retryable input."""
     from app.gateway import run_inputs as gateway_run_inputs
 
     def entry(index: int, status: str):
-        return {"id": f"input-{index:03d}", "status": status,
-                "text": f"instruction {index}", "mode": "queue"}
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
 
     # The store returns runs newest-first; list_thread_inputs reverses them.
     failed_row = {
-        "run_id": "run-failed", "status": "failed", "stop_reason": "error",
+        "run_id": "run-failed",
+        "status": "failed",
+        "stop_reason": "error",
         "run_inputs": {"items": [entry(0, "pending")]},
     }
     later_rows = []
     for run_index in (1, 2):
-        items = [entry(run_index * 16 + i, "applied" if i % 16 else "cancelled")
-                 for i in range(16)]
-        later_rows.append({"run_id": f"run-{run_index}", "status": "success",
-                           "run_inputs": {"items": items}})
+        items = [entry(run_index * 16 + i, "applied" if i % 16 else "cancelled") for i in range(16)]
+        later_rows.append({"run_id": f"run-{run_index}", "status": "success", "run_inputs": {"items": items}})
     rows = list(reversed(later_rows)) + [failed_row]
 
     class _FakeStore:
@@ -374,16 +374,12 @@ async def test_list_thread_inputs_starves_receipts_when_all_inputs_are_unresolve
     from app.gateway import run_inputs as gateway_run_inputs
 
     def entry(index: int, status: str):
-        return {"id": f"input-{index:03d}", "status": status,
-                "text": f"instruction {index}", "mode": "queue"}
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
 
     rows = [
-        {"run_id": "run-a", "status": "failed", "stop_reason": "error",
-         "run_inputs": {"items": [entry(i, "pending") for i in range(16)]}},
-        {"run_id": "run-b", "status": "failed", "stop_reason": "error",
-         "run_inputs": {"items": [entry(16 + i, "pending") for i in range(16)]}},
-        {"run_id": "run-c", "status": "success",
-         "run_inputs": {"items": [entry(32, "applied")]}},
+        {"run_id": "run-a", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(i, "pending") for i in range(16)]}},
+        {"run_id": "run-b", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(16 + i, "pending") for i in range(16)]}},
+        {"run_id": "run-c", "status": "success", "run_inputs": {"items": [entry(32, "applied")]}},
     ]
 
     class _FakeStore:
