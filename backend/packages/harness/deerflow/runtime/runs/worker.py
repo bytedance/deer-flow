@@ -1355,7 +1355,10 @@ async def run_agent(
             hitl_app_config = get_app_config()
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
-        hitl_resume_tool_names = await _pending_hitl_resume_tool_names(checkpointer, checkpoint_config, graph_input)
+        hitl_resume_calls = await _pending_hitl_resume_calls(checkpointer, checkpoint_config, graph_input)
+        hitl_resume_tool_names = set(hitl_resume_calls.values())
+        if journal is not None and hitl_resume_calls:
+            journal.adopt_resumed_tool_calls(hitl_resume_calls)
         agent_app_config = ctx.app_config
         if hitl_resume_escape:
             agent_app_config = hitl_app_config.model_copy(deep=True)
@@ -3183,25 +3186,35 @@ def _is_resume_command_input(graph_input: Any) -> bool:
 
 async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
     """Recover gated names from the durable pause matched by this resume."""
+    return set((await _pending_hitl_resume_calls(checkpointer, checkpoint_config, graph_input)).values())
+
+
+async def _pending_hitl_resume_calls(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> dict[str, str]:
+    """Map each paused call this resume answers to its tool name.
+
+    The calls were dispatched by the paused Run, but the resume Run produces
+    their results: a rejection is written by HITL ``after_model`` with no tool
+    callback, so the resume journal must adopt these calls to persist it.
+    """
     if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
-        return set()
+        return {}
     responses = graph_input.resume.get("responses")
     if not isinstance(responses, list):
-        return set()
+        return {}
     response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
     if not response_ids:
-        return set()
+        return {}
     async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
         writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
         # The newest checkpoint carrying either marker decides whether the pause
         # is still live. A newer head-moving write must not hide an interrupt;
         # a newer resume must not resurrect an older one.
         if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
-            return set()
+            return {}
         interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
         if not interrupt_writes:
             continue
-        names: set[str] = set()
+        calls: dict[str, str] = {}
         for write in interrupt_writes:
             interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
             for pending_interrupt in interrupts:
@@ -3212,9 +3225,11 @@ async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: 
                 actions = payload.get("actions")
                 if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
                     continue
-                names.update(action.get("tool_name") for action in actions if isinstance(action, Mapping) and isinstance(action.get("tool_name"), str))
-        return names
-    return set()
+                for action in actions:
+                    if isinstance(action, Mapping) and isinstance(action.get("tool_call_id"), str) and isinstance(action.get("tool_name"), str):
+                        calls[action["tool_call_id"]] = action["tool_name"]
+        return calls
+    return {}
 
 
 def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
