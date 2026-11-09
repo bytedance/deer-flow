@@ -101,12 +101,14 @@ def _quote_fallback_token(token: str) -> str:
 
     The fallback index stores CJK runs as character bigrams, so a one-character
     query (``重``) has no equal token to match.  ``"重"*`` is an FTS5 prefix
-    phrase: it matches any indexed token that starts with that character,
-    including the bigram ``重试``, and it still matches a standalone ``重``
-    token when the content contained an isolated single character.  Multi-
-    character tokens keep the plain quoted phrase so their semantics do not
-    change.  Double quotes inside a token are the FTS5 escape sequence for a
-    literal quote.
+    phrase: it matches every indexed token that *starts with* that character,
+    which covers the bigram ``重试`` and still matches a standalone ``重`` token
+    when the content held an isolated single character.  It does not reach a
+    character that only occurs later inside a bigram, so ``务`` does not match
+    the ``任务`` token; that residual gap is accepted instead of widening the
+    prefix.  Multi-character tokens keep the plain quoted phrase so their
+    semantics do not change.  Double quotes inside a token are the FTS5 escape
+    sequence for a literal quote.
     """
     escaped = token.replace(chr(34), chr(34) * 2)
     if len(token) == 1 and _CJK_RUN_RE.fullmatch(token):
