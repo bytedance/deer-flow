@@ -8,11 +8,21 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import case, column, select, table, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore, _ProjectFilterUnset
+from deerflow.persistence.thread_meta.base import (
+    PROJECT_FILTER_UNSET,
+    THREAD_ARCHIVED_METADATA_KEY,
+    THREAD_PINNED_METADATA_KEY,
+    THREAD_PROJECT_METADATA_KEY,
+    InvalidMetadataFilterError,
+    ThreadMetaStore,
+    ThreadOwnershipConflictError,
+    _ProjectFilterUnset,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -90,7 +100,18 @@ class ThreadMetaRepository(ThreadMetaStore):
                 updated_at=now,
             )
             session.add(row)
-            await session.flush()
+            try:
+                await session.flush()
+            except IntegrityError:
+                # SQL rejects duplicate IDs before the owner-scoped HTTP
+                # recovery can see a foreign row. Match the memory store's
+                # conflict signal without exposing that row to the caller.
+                await session.rollback()
+                existing = (await session.execute(select(ThreadMetaRow.user_id).where(ThreadMetaRow.thread_id == thread_id))).first()
+                if existing is not None and resolved_user_id is not None and existing.user_id != resolved_user_id:
+                    raise ThreadOwnershipConflictError(thread_id) from None
+                # Preserve same-owner insert-race recovery and real failures.
+                raise
             # A refresh after commit could observe a replacement incarnation.
             created = self._row_to_dict(row)
             await session.commit()

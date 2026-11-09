@@ -30,6 +30,13 @@ claiming while paused. Preserve explicit retry/resume and terminal projection;
 
 ## Unique-key upserts
 
+Thread metadata creation translates a confirmed foreign-owner duplicate into
+`ThreadOwnershipConflictError`, matching memory mode and the router's 404.
+Rollback before checking the persisted owner; retain `IntegrityError` for
+same-owner races and unrelated failures. Never return the foreign record or
+rewrite its metadata/checkpoint. Coverage: `test_thread_create_owner_collision.py`
+and `test_thread_create_idempotency.py`.
+
 A repository method that creates or updates a row by a unique key must survive two first writers: both can miss the SELECT, and the later INSERT raises `IntegrityError`, a 500 for the caller. Use a dialect `on_conflict_do_update` when every key column is non-null, or retry the select-then-write after rolling back the session, as `ChannelConnectionRepository.upsert_connection` / `set_thread_id` and `FeedbackRepository.upsert` do. Feedback keeps the retry because `user_id` is nullable and a NULL key never conflicts, so ON CONFLICT would stop updating the NULL-user row.
 
 ## JSON integer filters

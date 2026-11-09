@@ -695,6 +695,10 @@ writes, and preserves explicit checkpoint selections and delta replay state.
 See [checkpoint operations](frontend/src/content/en/harness/checkpoints/operations.mdx)
 for the retention constraints.
 
+Creating a thread with an existing ID is idempotent for its owner. An ID owned
+by another user returns `404 Thread not found` in memory and SQL storage; the
+original conversation and metadata are preserved.
+
 > [!TIP]
 > On Linux, if Docker-based commands fail with `permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock`, add your user to the `docker` group and re-login before retrying. See [CONTRIBUTING.md](CONTRIBUTING.md#linux-docker-daemon-permission-denied) for the full fix.
 
