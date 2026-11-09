@@ -22,6 +22,11 @@ This section accumulates work toward the **2.3.0** milestone
   `hitl_approval.max_actions` configures the approval-batch count limit
   (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
 
+- **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
+  access for authenticated users, without maintaining a per-user allowlist.
+  Exact-user allowlists remain the default; shared access requires matching
+  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation

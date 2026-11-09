@@ -1887,8 +1887,9 @@ Providers remain usable without a catalog or management page. See the
 for extension registration and configuration. The installable
 [WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
 targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
-retrieval citations. Configure explicit user-to-workspace credential bindings;
-resource authorization remains with WeKnora. The extension directory includes
+retrieval citations. Configure explicit user-to-workspace credential bindings,
+or opt into shared read-only access for authenticated users without maintaining
+a user-ID list. Resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
 The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)
@@ -2165,7 +2166,8 @@ Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`,
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
-loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
+loopback (`[::1]`) hosts as local. Raw brackets in the URL's userinfo make it count as outbound for
+exfiltration checks. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
 SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
