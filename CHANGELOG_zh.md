@@ -24,6 +24,10 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+- **向导：** Standard Compute 加入安装向导的 LLM 提供方列表。该条目使用
+  `langchain_openai:ChatOpenAI`，接入 `https://api.stdcmpt.com/v1`，读取 `STANDARDCOMPUTE_API_KEY`
+  环境变量，默认使用路由模型 ID `StandardCompute`。([#8063](https://github.com/bytedance/deer-flow/pull/8063))
+
 ### 修复
 
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
