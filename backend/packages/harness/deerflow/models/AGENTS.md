@@ -131,6 +131,12 @@ or history. Offline HTTP serialization and tool-followup coverage:
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
+Async generation owns an HTTPX async stream, not an executor-backed sync request.
+Load TLS trust off-loop before client construction; drain client close across
+repeated cancellation. Sync/async share request validation and SSE collection.
+Keep retry sleeps cancellable. `test_codex_cancellation.py` observes real loopback
+EOF before fixture release; always drain server handlers during teardown.
+
 Completed responses with null, omitted, or empty `usage` retain their text,
 reasoning, and tool calls. Normalize unavailable usage to the existing empty
 mapping fallback while keeping `AIMessage.usage_metadata` as `None`; populated
