@@ -2779,6 +2779,7 @@ Manual compaction also returns HTTP 409 when execution is pending or the checkpo
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
+The token budget counts separate accepted model calls even when their response message IDs repeat, without double-counting repeated observations or later subagent-usage increments.
 
 ### Sub-Agents
 
