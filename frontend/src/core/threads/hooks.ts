@@ -46,7 +46,10 @@ import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
-import type { AttachmentUploadSession } from "../uploads/attachment-upload-session";
+import {
+  AttachmentUploadError,
+  type AttachmentUploadSession,
+} from "../uploads/attachment-upload-session";
 import { uuid } from "../utils/uuid";
 
 import {
@@ -2942,7 +2945,7 @@ export function useThreadStream({
                 ? error.message
                 : "Failed to upload files.";
             toast.error(
-              errorMessage === "Attachments are not ready"
+              error instanceof AttachmentUploadError && error.code !== "failed"
                 ? t.uploads.notReady
                 : errorMessage,
             );

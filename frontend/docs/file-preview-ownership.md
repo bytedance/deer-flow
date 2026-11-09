@@ -6,7 +6,9 @@ in `workspace/`; generated AI Elements stay unchanged.
 `core/uploads/attachment-upload-session.ts` owns per-file state and successful
 receipts for one composer, viewer and thread. Retry is upload-only; failed or
 cancelled files preserve the draft and prevent sending until resolved or removed.
-Keep actionable errors with each failed file. `ArtifactDownloadButton` owns bounded
+Keep actionable errors with each failed file. `AttachmentUploadError` carries a
+session code and every failed part's original cause; localize session states by
+type/code, never by matching diagnostic text. `ArtifactDownloadButton` owns bounded
 preparation, duplicate-click prevention, failure feedback and stale-callback fencing.
 Browser handoff does not prove a disk write.
 

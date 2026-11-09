@@ -1,7 +1,10 @@
 import { expect, it, rs } from "@rstest/core";
 
 import type { UploadResponse } from "@/core/uploads/api";
-import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
+import {
+  AttachmentUploadError,
+  AttachmentUploadSession,
+} from "@/core/uploads/attachment-upload-session";
 
 const part = (name: string) => ({
   type: "file" as const,
@@ -75,4 +78,68 @@ it("deactivation cancels uploads and rejects late submissions", async () => {
   await expect(session.uploadAll("thread", [part("one.txt")])).rejects.toThrow(
     "inactive",
   );
+});
+
+it("retains every failed attachment and its original cause independently of error text", async () => {
+  const first = part("same.txt"),
+    second = part("same.txt");
+  const causes = [
+    new Error("Attachments are not ready"),
+    new Error("disk full"),
+  ] as const;
+  const upload = rs.fn(async (_thread: string, files: File[]) => {
+    throw causes[files[0] === first.file ? 0 : 1];
+  });
+  const session = new AttachmentUploadSession(upload);
+  const error = await session
+    .uploadAll("thread", [first, second])
+    .catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(AttachmentUploadError);
+  expect(error).toMatchObject({
+    code: "failed",
+    message: "Attachments are not ready",
+    cause: causes[0],
+    failures: [
+      { part: first, cause: causes[0] },
+      { part: second, cause: causes[1] },
+    ],
+  });
+});
+
+it("distinguishes cancellation and inactive sessions from file failures", async () => {
+  const file = part("one.txt");
+  let resolve!: (result: UploadResponse) => void;
+  const session = new AttachmentUploadSession(
+    () =>
+      new Promise<UploadResponse>((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = session.uploadAll("thread", [file]);
+  await Promise.resolve();
+  session.cancel(file);
+  resolve(response("one.txt"));
+  await expect(pending).rejects.toMatchObject({
+    code: "not_ready",
+    failures: [],
+  });
+  session.deactivate();
+  await expect(session.uploadAll("thread", [file])).rejects.toMatchObject({
+    code: "inactive",
+    failures: [],
+  });
+});
+
+it("keeps non-Error rejection values available as structured causes", async () => {
+  const file = part("one.txt");
+  const cause = { code: "quota_exceeded", remaining: 0 };
+  const session = new AttachmentUploadSession(async () => {
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- Upload adapters may reject with arbitrary values.
+    throw cause;
+  });
+  await expect(session.uploadAll("thread", [file])).rejects.toMatchObject({
+    code: "failed",
+    cause,
+    failures: [{ part: file, cause }],
+  });
 });

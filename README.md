@@ -4355,6 +4355,7 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ### File attachments and downloads
 
 Attachments show individual ready, uploading, uploaded, failed and cancelled states.
+Failed uploads retain per-file error details; session-state messages remain localized.
 Retry a failed file or remove it before sending again; successful uploads and the
 message draft are retained. File cards share format icons and preserve extensions
 in long filenames. Sent attachments open in the right-hand artifact panel.

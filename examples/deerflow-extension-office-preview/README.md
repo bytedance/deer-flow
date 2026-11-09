@@ -74,7 +74,10 @@ Other formats retain their built-in preview or download fallback.
   limit; it searches displayed results rather than formula expressions. Word searches
   rendered text, including styled runs. PPT searches slide text. Images, charts and
   embedded objects are outside the search scope, which the toolbar explains.
-- Word's collapsible outline follows actual OOXML heading levels. PowerPoint's
+- Word's collapsible outline follows actual OOXML heading levels. Preview bookmarks
+  preserve existing names and numeric IDs; a shared allocator indexes reserved IDs
+  once and probes each candidate at most once, without Web Crypto or name parsing.
+  PowerPoint's
   collapsible thumbnails render only near the navigation viewport and retain the
   same sandbox/CSP restrictions as the main slide.
 - Switching files restores worksheet/page, zoom, scroll and navigation visibility
@@ -89,9 +92,11 @@ it cannot preempt synchronous third-party parsing.
 
 ```sh
 python -m unittest discover -s examples/deerflow-extension-office-preview/tests
+node --test examples/deerflow-extension-office-preview/tests/identifiers.test.mjs
 cd frontend
 pnpm exec rstest run binary-preview plugin-artifact-preview registry.test catalog.test
 PLAYWRIGHT_BASE_URL=http://127.0.0.1:3000 PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test office-preview-interactions office-preview-navigation --workers=1
+PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test word-outline --workers=1
 ```
 
 The browser regression serves the actual packaged module graph and synthetic Office

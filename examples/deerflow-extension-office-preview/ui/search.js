@@ -1,3 +1,5 @@
+import { createUniqueIdAllocator } from "./identifiers.js";
+
 /** Literal matches across styled runs, with no HTML insertion. */
 export function highlightText(root, query) {
   root
@@ -85,12 +87,18 @@ export async function prepareWordOutline(zip) {
   if (!file) return [];
   const xml = parse(await file.async("string")),
     outline = [];
-  const names = [...xml.getElementsByTagNameNS("*", "bookmarkStart")].map(
-    (bookmark) => attr(bookmark, "name") ?? "",
+  const bookmarks = [...xml.getElementsByTagNameNS("*", "bookmarkStart")];
+  const nextName = createUniqueIdAllocator(
+    bookmarks.map((bookmark) => attr(bookmark, "name") ?? ""),
+    "office-",
   );
-  let suffix = 0;
-  while (names.some((name) => name.startsWith(`office-${suffix}-`))) suffix++;
-  const prefix = `office-${suffix}-`;
+  const nextId = createUniqueIdAllocator(
+    [...bookmarks, ...xml.getElementsByTagNameNS("*", "bookmarkEnd")].map(
+      (bookmark) => attr(bookmark, "id") ?? "",
+    ),
+    "",
+    100000,
+  );
   for (const paragraph of xml.getElementsByTagNameNS("*", "p")) {
     const props = child(paragraph, "pPr");
     const level = Number(
@@ -103,27 +111,20 @@ export async function prepareWordOutline(zip) {
       .join("")
       .trim();
     if (level < 0 || level > 8 || !title) continue;
-    const id = `${prefix}${outline.length}`;
+    const id = nextName();
+    const bookmarkId = nextId();
     const bookmark = xml.createElementNS(
       paragraph.namespaceURI,
       "w:bookmarkStart",
     );
     bookmark.setAttributeNS(paragraph.namespaceURI, "w:name", id);
-    bookmark.setAttributeNS(
-      paragraph.namespaceURI,
-      "w:id",
-      String(100000 + outline.length),
-    );
+    bookmark.setAttributeNS(paragraph.namespaceURI, "w:id", bookmarkId);
     paragraph.insertBefore(
       bookmark,
       props?.nextSibling ?? paragraph.firstChild,
     );
     const end = xml.createElementNS(paragraph.namespaceURI, "w:bookmarkEnd");
-    end.setAttributeNS(
-      paragraph.namespaceURI,
-      "w:id",
-      String(100000 + outline.length),
-    );
+    end.setAttributeNS(paragraph.namespaceURI, "w:id", bookmarkId);
     paragraph.append(end);
     outline.push({ id, title, level });
   }

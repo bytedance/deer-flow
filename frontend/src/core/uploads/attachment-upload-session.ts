@@ -10,10 +10,46 @@ export type AttachmentUploadStatus =
   | "uploaded"
   | "failed"
   | "cancelled";
+
+export type AttachmentUploadFailure = {
+  part: PromptInputFilePart;
+  cause: unknown;
+};
+
+export type AttachmentUploadErrorCode =
+  | "inactive"
+  | "thread_changed"
+  | "not_ready"
+  | "failed";
+
+const sessionErrorMessages: Record<AttachmentUploadErrorCode, string> = {
+  inactive: "Upload session is inactive",
+  thread_changed: "Upload thread changed",
+  not_ready: "Attachments are not ready",
+  failed: "Failed to upload files.",
+};
+
+function failureMessage(cause: unknown): string | undefined {
+  const message = cause instanceof Error ? cause.message : cause;
+  return typeof message === "string" && message.trim() ? message : undefined;
+}
+
+/** Machine-readable session state and original per-file failures, separate from display text. */
+export class AttachmentUploadError extends Error {
+  constructor(
+    readonly code: AttachmentUploadErrorCode,
+    readonly failures: readonly AttachmentUploadFailure[] = [],
+  ) {
+    const cause = failures[0]?.cause;
+    super(failureMessage(cause) ?? sessionErrorMessages[code], { cause });
+    this.name = "AttachmentUploadError";
+  }
+}
+
 type Entry = {
   status: AttachmentUploadStatus;
   result?: UploadedFileInfo;
-  error?: string;
+  cause?: unknown;
   controller?: AbortController;
   promise?: Promise<void>;
 };
@@ -45,7 +81,7 @@ export class AttachmentUploadSession {
     return this.entries.get(this.key(part))?.status ?? "pending";
   }
   error(part: PromptInputFilePart): string | undefined {
-    return this.entries.get(this.key(part))?.error;
+    return failureMessage(this.entries.get(this.key(part))?.cause);
   }
   activate() {
     this.active = true;
@@ -105,8 +141,7 @@ export class AttachmentUploadSession {
       } catch (error) {
         if (this.entries.get(key) === entry) {
           entry.status = controller.signal.aborted ? "cancelled" : "failed";
-          if (entry.status === "failed" && error instanceof Error)
-            entry.error = error.message;
+          if (entry.status === "failed") entry.cause = error;
         }
       } finally {
         entry.controller = undefined;
@@ -120,9 +155,9 @@ export class AttachmentUploadSession {
     threadId: string,
     parts: PromptInputFilePart[],
   ): Promise<UploadedFileInfo[]> {
-    if (!this.active) throw new Error("Upload session is inactive");
+    if (!this.active) throw new AttachmentUploadError("inactive");
     if (this.threadId && this.threadId !== threadId)
-      throw new Error("Upload thread changed");
+      throw new AttachmentUploadError("thread_changed");
     this.threadId = threadId;
     const cancellations = this.cancellations;
     // Three workers bound memory and requests. A cancelled queued item stays cancelled this attempt.
@@ -146,9 +181,13 @@ export class AttachmentUploadSession {
       cancellations !== this.cancellations ||
       parts.some((part) => this.status(part) !== "uploaded")
     ) {
-      const failed = parts.find((part) => this.error(part));
-      throw new Error(
-        failed ? this.error(failed) : "Attachments are not ready",
+      const failures = parts.flatMap((part) => {
+        const entry = this.entries.get(this.key(part));
+        return entry?.status === "failed" ? [{ part, cause: entry.cause }] : [];
+      });
+      throw new AttachmentUploadError(
+        failures.length ? "failed" : "not_ready",
+        failures,
       );
     }
     return parts.map((part) => this.entries.get(this.key(part))!.result!);
