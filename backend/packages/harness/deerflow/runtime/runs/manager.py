@@ -382,6 +382,9 @@ class RunManager:
         self._lease_checks: dict[str, asyncio.Task[None]] = {}
         self._lease_operations: dict[str, asyncio.Task] = {}
         self._lease_deadlines: dict[str, asyncio.TimerHandle] = {}
+        # Evictions queued by a deleted thread's finishing finalize tail. Held so
+        # the loop cannot garbage-collect them before they drop the record.
+        self._tail_evictions: set[asyncio.Task] = set()
 
     @asynccontextmanager
     async def _admission_scope(self, thread_id: str, run_id: str) -> AsyncIterator[None]:
@@ -2615,17 +2618,24 @@ class RunManager:
     def _evict_after_task(self, thread_id: str, completed: asyncio.Task) -> None:
         """Evict a record shielded only by *completed*, once its tail is done.
 
-        ``discard_thread_runs`` marks a record ``evicted`` instead of popping it
-        so the finalize tail keeps a write target. The tail is the record's
-        ``task``, so its completion is the earliest point at which popping is
-        safe; ``cleanup()``'s 300s delay is far too late for a deleted thread.
+        ``discard_thread_runs`` flags a record instead of popping it so the
+        finalize tail keeps a write target. The tail is the record's ``task``,
+        so its completion is the earliest point at which popping is safe;
+        ``cleanup()``'s 300s delay is far too late for a deleted thread.
+
+        Eviction runs as its own task because this callback cannot await the
+        registry lock. The loop holds only weak references to tasks, so the
+        eviction is tracked here until it settles.
         """
         try:
-            asyncio.get_running_loop().create_task(self._evict_completed_tail(thread_id))
+            task = asyncio.get_running_loop().create_task(self._evict_completed_tail(thread_id))
         except RuntimeError:
             # Fail-closed: the record stays hidden from reads because it is
             # still flagged, and the next discard pass evicts it outright.
             logger.debug("No running loop to evict the thread %s finalize tail", thread_id, exc_info=True)
+            return
+        self._tail_evictions.add(task)
+        task.add_done_callback(self._tail_evictions.discard)
 
     async def _evict_completed_tail(self, thread_id: str) -> None:
         """Drop records a deletion marked ``evicted`` once their tail is done."""
