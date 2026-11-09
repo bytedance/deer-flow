@@ -204,18 +204,22 @@ chain instead of skipping the block and reading the remaining text. Tests:
 
 Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
 
-InputSanitization removes empty bare strings from genuine user content lists before
-text-related early returns; all-empty string lists become an empty string. Request
-copies preserve metadata and leave persisted history untouched.
+InputSanitization removes empty bare strings and empty typed text blocks from
+genuine user content lists before text-related early returns; all-empty lists
+become an empty string. Only truly empty text is swept — whitespace-only parts
+keep the turn alive and survive untouched. Request copies preserve metadata and
+leave persisted history untouched.
 
-Scope / known provider compatibility limits (#8038 review):
+Scope / known provider compatibility limits (#8038, #8037 review):
 - On the upload extraction-disagreement (`rfind` failure) fallback, non-empty
   bare strings are framed individually but remain untyped list parts. Strict
   Chat Completions endpoints can still reject them; typing those parts is deferred.
-- Empty typed text blocks (`{"type": "text", "text": ""}`) remain unchanged:
-  this fix targets untyped empty strings, not all provider-specific validation.
-  Anthropic can still reject those empty typed blocks.
-- All-empty bare-string lists become `content=""`; this middleware replaces
+- Empty typed text blocks (`{"type": "text", "text": ""}`) are dropped from
+  genuine user content lists along with empty bare strings, so Anthropic and
+  strict Chat Completions endpoints no longer see the empty text part. This
+  covers user content only: assistant and tool messages are out of scope, and
+  provider-specific validation beyond empty text remains unaddressed.
+- All-empty lists become `content=""`; this middleware replaces
   messages in place rather than dropping turns. This is not a guarantee of
   Anthropic compatibility: an empty user turn can still be rejected. No upstream
   Gateway / IM empty-turn handling is assumed by this normalization.
