@@ -28,12 +28,14 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **gateway:** Creating a thread with `step`, `source`, `writes` or `parents`
-  in its metadata no longer leaves the thread broken. Those keys used to
-  replace LangGraph's own values on the thread's first checkpoint, so a bad
-  `parents` made the thread's history fail with 500 for good and a bad `step`
-  made every later turn fail. The checkpoint now always keeps LangGraph's
-  values. ([#8019])
+- **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
+  `parents` or `counters_since_delta_snapshot` in its metadata no longer
+  leaves the thread broken. Those keys used to land on the thread's first
+  checkpoint, so a bad `parents` made the thread's history fail with 500 for
+  good, and a bad `step` or delta counter made every later turn fail. A
+  `deerflow_agent_name` key was also copied into the next state update as if
+  the server had set it. The first checkpoint now takes none of these keys
+  from the request. ([#8019])
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
