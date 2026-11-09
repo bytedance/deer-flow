@@ -45,7 +45,7 @@ _SKILL_ARCHIVE_READ_CHUNK_SIZE = 64 * 1024
 MAX_EDITABLE_ARTIFACT_BYTES = 2 * 1024 * 1024
 MAX_VIEWED_IMAGE_BLOB_BYTES = 20 * 1024 * 1024
 _ARTIFACT_EDIT_TEMP_PREFIX = ".artifact-edit-"
-_ARTIFACT_READ_TEMP_PREFIX = ".artifact-read-"
+_ARTIFACT_COPY_BEFORE_STREAM = os.name == "nt"
 _artifact_digest_source = threading.local()
 
 
@@ -340,7 +340,7 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
     return ("inline_file", mime_type)
 
 
-def _sha256_of_file(path: Path) -> str:
+def _sha256_of_file(path: Path, *, pinned: tuple[BinaryIO, os.stat_result] | None = None) -> str:
     """Return the hex SHA-256 digest of *path* without loading it whole.
 
     Computing the digest on the Gateway lets the browser skip its own
@@ -352,50 +352,58 @@ def _sha256_of_file(path: Path) -> str:
     requests a browser issues while scrubbing/paginating a preview do not each
     re-hash a potentially huge artifact from scratch (raised in PR review).
     """
-    stat = path.stat()
+    file_stat = path.stat() if pinned is None else pinned[1]
     # Sandbox syncs and other writers can atomically replace a same-size file
     # while preserving its mtime. Identity separates those generations; ctime
     # also invalidates in-place writes where the filesystem exposes change time.
-    return _sha256_of_file_cached(
+    key = (
         str(path),
-        stat.st_dev,
-        stat.st_ino,
-        stat.st_ctime_ns,
-        stat.st_mtime_ns,
-        stat.st_size,
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_ctime_ns,
+        file_stat.st_mtime_ns,
+        file_stat.st_size,
     )
+    if pinned is None:
+        return _sha256_of_file_cached(*key)
+
+    previous = getattr(_artifact_digest_source, "pinned", None)
+    _artifact_digest_source.pinned = (key, pinned[0])
+    try:
+        return _sha256_of_file_cached(*key)
+    finally:
+        _artifact_digest_source.pinned = previous
 
 
 @functools.lru_cache(maxsize=256)
 def _sha256_of_file_cached(path: str, device: int, inode: int, ctime_ns: int, mtime_ns: int, size: int) -> str:
     """Cached SHA-256 of *path*; metadata arguments separate file generations."""
-    digest = hashlib.sha256()
-    source = getattr(_artifact_digest_source, "handle", None)
-    if source is None:
-        source_context = open(path, "rb")
-    else:
-        source_context = None
-        previous_offset = source.tell()
-        source.seek(0)
+    pinned = getattr(_artifact_digest_source, "pinned", None)
+    # A nested lookup for a different file must hash its own bytes.
+    if pinned is None or pinned[0] != (path, device, inode, ctime_ns, mtime_ns, size):
+        with open(path, "rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
 
-    handle = source if source is not None else source_context
+    handle = pinned[1]
+    previous_offset = handle.tell()
     try:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
+        handle.seek(0)
+        return hashlib.file_digest(handle, "sha256").hexdigest()
     finally:
-        if source_context is not None:
-            source_context.close()
-        else:
-            source.seek(previous_offset)
-    return digest.hexdigest()
+        handle.seek(previous_offset)
 
 
 def _artifact_etag(path: Path) -> str:
-    """Keep content revisions for editable files and metadata-only tags for large files."""
+    """Keep content revisions for editable files and metadata tags for large files."""
     file_stat = path.stat()
     if file_stat.st_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-        return f'"{_sha256_of_file(path)}"'
+        # Populate the shared cache only with metadata from the hashed handle.
+        with path.open("rb") as handle:
+            return _artifact_etag_from_handle(path, handle, os.fstat(handle.fileno()))
+    return _artifact_stat_etag(file_stat)
 
+
+def _artifact_stat_etag(file_stat: os.stat_result) -> str:
     # Do not read oversized artifacts just to validate a small byte range.
     # The prefix keeps this opaque validator distinct from an editable SHA-256.
     identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{file_stat.st_ctime_ns}:{file_stat.st_mtime_ns}:{file_stat.st_size}"
@@ -405,73 +413,49 @@ def _artifact_etag(path: Path) -> str:
 def _artifact_etag_from_handle(path: Path, handle: BinaryIO, file_stat: os.stat_result) -> str:
     """Build the validator from the same file generation the response will read."""
     if file_stat.st_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-        previous_handle = getattr(_artifact_digest_source, "handle", None)
-        _artifact_digest_source.handle = handle
-        try:
-            digest = _sha256_of_file_cached(
-                str(path),
-                file_stat.st_dev,
-                file_stat.st_ino,
-                file_stat.st_ctime_ns,
-                file_stat.st_mtime_ns,
-                file_stat.st_size,
-            )
-        finally:
-            if previous_handle is None:
-                del _artifact_digest_source.handle
-            else:
-                _artifact_digest_source.handle = previous_handle
+        digest = _sha256_of_file(path, pinned=(handle, file_stat))
         return f'"{digest}"'
-
-    identity = f"{file_stat.st_dev}:{file_stat.st_ino}:{file_stat.st_ctime_ns}:{file_stat.st_mtime_ns}:{file_stat.st_size}"
-    return f'"stat-{hashlib.sha256(identity.encode("ascii")).hexdigest()}"'
+    return _artifact_stat_etag(file_stat)
 
 
-def _prepare_artifact_stream(path: Path) -> tuple[Path, BinaryIO | None, os.stat_result, str, Path | None]:
+def _prepare_artifact_stream(path: Path) -> tuple[BinaryIO, os.stat_result, str]:
     """Pin one file generation before response headers authorize a byte range."""
-    snapshot_path: Path | None = None
-    handle: BinaryIO | None = None
+    handle = path.open("rb")
     try:
-        if os.name == "nt":
-            # Windows does not let os.replace() replace an open file. A temporary
-            # hard link pins the same file generation while leaving the public
-            # path replaceable between the response headers and body.
-            snapshot_path = path.with_name(f"{_ARTIFACT_READ_TEMP_PREFIX}{secrets.token_hex(16)}")
-            try:
-                os.link(path, snapshot_path, follow_symlinks=False)
-            except OSError:
-                snapshot_path = None
-
-        response_path = snapshot_path or path
-        handle = response_path.open("rb")
-        # Path.stat() carries Windows creation time while os.fstat() exposes a
-        # different ctime value there. Keep the existing validator vocabulary
-        # when a hard link has already made this path generation-stable.
-        file_stat = response_path.stat() if snapshot_path is not None else os.fstat(handle.fileno())
+        file_stat = os.fstat(handle.fileno())
         if not stat.S_ISREG(file_stat.st_mode):
             raise RuntimeError(f"File at path {path} is not a file.")
-        etag = _artifact_etag_from_handle(path, handle, file_stat)
-
-        if snapshot_path is not None:
-            handle.close()
-            handle = None
-        return response_path, handle, file_stat, etag, snapshot_path
+        return handle, file_stat, _artifact_etag_from_handle(path, handle, file_stat)
     except BaseException:
-        _cleanup_artifact_stream(handle, snapshot_path)
+        _close_artifact_handle(handle)
         raise
 
 
-def _cleanup_artifact_stream(handle: BinaryIO | None, snapshot_path: Path | None) -> None:
-    if handle is not None:
-        try:
-            handle.close()
-        except OSError:
-            logger.warning("Could not close artifact response handle", exc_info=True)
-    if snapshot_path is not None:
-        try:
-            snapshot_path.unlink(missing_ok=True)
-        except OSError:
-            logger.warning("Could not remove artifact response snapshot: %s", snapshot_path, exc_info=True)
+def _copy_artifact_ranges(handle: BinaryIO, ranges: list[tuple[int, int]]) -> BinaryIO:
+    """Pack the selected ranges into a private temporary file in send order."""
+    snapshot = tempfile.TemporaryFile(mode="w+b")
+    try:
+        for start, end in ranges:
+            handle.seek(start)
+            remaining = end - start
+            while remaining:
+                chunk = handle.read(min(1 << 20, remaining))
+                if not chunk:
+                    raise OSError("Artifact was truncated while preparing the response")
+                snapshot.write(chunk)
+                remaining -= len(chunk)
+        snapshot.seek(0)
+        return snapshot
+    except BaseException:
+        _close_artifact_handle(snapshot)
+        raise
+
+
+def _close_artifact_handle(handle: BinaryIO) -> None:
+    try:
+        handle.close()
+    except OSError:
+        logger.warning("Could not close artifact response handle", exc_info=True)
 
 
 class _ArtifactFileResponse(FileResponse):
@@ -482,38 +466,55 @@ class _ArtifactFileResponse(FileResponse):
         self._artifact_handle: BinaryIO | None = None
 
     async def __call__(self, scope, receive, send) -> None:
-        original_path = Path(self.path)
-        snapshot_path = None
-        try:
-            response_path, self._artifact_handle, file_stat, etag, snapshot_path = await asyncio.to_thread(_prepare_artifact_stream, original_path)
-            self.path = response_path
-            self.stat_result = file_stat
+        async def prepare() -> None:
+            self._artifact_handle, self.stat_result, etag = await asyncio.to_thread(_prepare_artifact_stream, Path(self.path))
             self.headers["etag"] = etag
-            self.set_stat_headers(file_stat)
+            self.set_stat_headers(self.stat_result)
+
+        try:
+            await await_drained(prepare())
             await super().__call__(scope, receive, send)
         finally:
-            await asyncio.to_thread(_cleanup_artifact_stream, self._artifact_handle, snapshot_path)
-            self._artifact_handle = None
+            if self._artifact_handle is not None:
+                handle, self._artifact_handle = self._artifact_handle, None
+                await await_drained(asyncio.to_thread(_close_artifact_handle, handle))
+
+    async def _snapshot_windows_body(self, ranges: list[tuple[int, int]], send_header_only: bool) -> bool:
+        if not _ARTIFACT_COPY_BEFORE_STREAM:
+            return False
+
+        source = self._artifact_handle
+        assert source is not None
+
+        async def snapshot() -> None:
+            # Windows replacement needs the public handle closed. A private
+            # copy also leaves the artifact's link count unchanged for ZIP.
+            self._artifact_handle = None if send_header_only else await asyncio.to_thread(_copy_artifact_ranges, source, ranges)
+            await asyncio.to_thread(_close_artifact_handle, source)
+
+        await await_drained(snapshot())
+        return True
 
     async def _handle_simple(self, send, send_header_only: bool, send_pathsend: bool) -> None:
-        if self._artifact_handle is None:
-            return await super()._handle_simple(send, send_header_only, send_pathsend)
+        assert self.stat_result is not None
+        await self._snapshot_windows_body([(0, self.stat_result.st_size)], send_header_only)
 
         await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
         if send_header_only:
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
 
-        await asyncio.to_thread(self._artifact_handle.seek, 0)
+        handle = self._artifact_handle
+        assert handle is not None
+        await await_drained(asyncio.to_thread(handle.seek, 0))
         more_body = True
         while more_body:
-            chunk = await asyncio.to_thread(self._artifact_handle.read, self.chunk_size)
+            chunk = await await_drained(asyncio.to_thread(handle.read, self.chunk_size))
             more_body = len(chunk) == self.chunk_size
             await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
 
     async def _handle_single_range(self, send, start: int, end: int, file_size: int, send_header_only: bool) -> None:
-        if self._artifact_handle is None:
-            return await super()._handle_single_range(send, start, end, file_size, send_header_only)
+        snapshot = await self._snapshot_windows_body([(start, end)], send_header_only)
 
         headers = MutableHeaders(raw=list(self.raw_headers))
         headers["content-range"] = f"bytes {start}-{end - 1}/{file_size}"
@@ -523,17 +524,19 @@ class _ArtifactFileResponse(FileResponse):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
 
-        await asyncio.to_thread(self._artifact_handle.seek, start)
+        handle = self._artifact_handle
+        assert handle is not None
+        if not snapshot:
+            await await_drained(asyncio.to_thread(handle.seek, start))
         more_body = True
         while more_body:
-            chunk = await asyncio.to_thread(self._artifact_handle.read, min(self.chunk_size, end - start))
+            chunk = await await_drained(asyncio.to_thread(handle.read, min(self.chunk_size, end - start)))
             start += len(chunk)
             more_body = len(chunk) == self.chunk_size and start < end
             await send({"type": "http.response.body", "body": chunk, "more_body": more_body})
 
     async def _handle_multiple_ranges(self, send, ranges: list[tuple[int, int]], file_size: int, send_header_only: bool) -> None:
-        if self._artifact_handle is None:
-            return await super()._handle_multiple_ranges(send, ranges, file_size, send_header_only)
+        snapshot = await self._snapshot_windows_body(ranges, send_header_only)
 
         boundary = secrets.token_hex(13)
         content_length, header_generator = self.generate_multipart(ranges, boundary, file_size, self.headers["content-type"])
@@ -545,11 +548,16 @@ class _ArtifactFileResponse(FileResponse):
             await send({"type": "http.response.body", "body": b"", "more_body": False})
             return
 
+        handle = self._artifact_handle
+        assert handle is not None
         for start, end in ranges:
             await send({"type": "http.response.body", "body": header_generator(start, end), "more_body": True})
-            await asyncio.to_thread(self._artifact_handle.seek, start)
+            if not snapshot:
+                await await_drained(asyncio.to_thread(handle.seek, start))
             while start < end:
-                chunk = await asyncio.to_thread(self._artifact_handle.read, min(self.chunk_size, end - start))
+                chunk = await await_drained(asyncio.to_thread(handle.read, min(self.chunk_size, end - start)))
+                if not chunk:
+                    raise OSError("Artifact was truncated while streaming a byte range")
                 start += len(chunk)
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
             await send({"type": "http.response.body", "body": b"\r\n", "more_body": True})

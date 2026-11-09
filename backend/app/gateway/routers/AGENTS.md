@@ -1,5 +1,11 @@
 # Router contracts
 
+Artifact range validators and bytes come from one opened file. POSIX streams
+the descriptor. Windows copies only the selected response bytes into a
+private temporary file and closes the public handle before sending headers.
+Preserve the ZIP single-link checks and drain preparation before cancellation
+can release an artifact response's resources.
+
 Trash listing resolves the live retention configuration off-loop before its
 best-effort sweep. Configuration failures skip automatic cleanup and preserve
 the listing; never substitute a default policy for an unreadable one. Resolve

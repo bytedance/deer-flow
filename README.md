@@ -3291,8 +3291,9 @@ external image URLs keep their existing behavior.
 
 If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
-Text artifacts are streamed with HTTP byte-range support. The Web UI initially
-loads at most 1 MiB, shows the preview size when a file is larger, and waits for
+Text artifacts are streamed with HTTP byte-range support. A resumed download
+validates its ETag against the file version that supplies its response bytes.
+The Web UI initially loads at most 1 MiB, shows the preview size for larger files, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting
 the full code editor. Editing becomes available once the complete file has loaded;
 unsaved-change detection uses the full content, including when reverting edits
