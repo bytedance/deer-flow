@@ -1,11 +1,25 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
-import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
+import {
+  HumanInputCard,
+  ToolApprovalCard,
+} from "@/components/workspace/messages/human-input-card";
 import { MessageArtifactPathsContext } from "@/components/workspace/messages/markdown-link";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
-import type { HumanInputRequest } from "@/core/messages/human-input";
+import type {
+  HitlApprovalRequest,
+  HitlApprovalResponse,
+  HumanInputRequest,
+} from "@/core/messages/human-input";
 
 const formRequest: HumanInputRequest = {
   version: 2,
@@ -19,6 +33,56 @@ const formRequest: HumanInputRequest = {
     { name: "category", label: "Category", type: "text", required: true },
   ],
 };
+
+const approvalRequest: HitlApprovalRequest = {
+  version: 1,
+  kind: "hitl_approval",
+  request_id: "hitl_approval:ai-1:call-1",
+  actions: [
+    {
+      tool_call_id: "call-1",
+      tool_name: "write_file",
+      args_summary: JSON.stringify({ path: "/tmp/a.txt", content: "A" }),
+      request_id: "hitl_approval:ai-1:call-1",
+    },
+    {
+      tool_call_id: "call-2",
+      tool_name: "bash",
+      args_summary: JSON.stringify({ command: "pwd" }),
+      request_id: "hitl_approval:ai-1:call-2",
+    },
+  ],
+  allowed_decisions: ["approve", "reject"],
+  pending_tool_call_ids: ["call-1", "call-2"],
+};
+
+function renderApprovalCard({
+  request = approvalRequest,
+  onSubmit = async () => undefined,
+  disabled = false,
+}: {
+  request?: HitlApprovalRequest;
+  onSubmit?: (
+    request: HitlApprovalRequest,
+    responses: HitlApprovalResponse[],
+  ) => Promise<boolean | void>;
+  disabled?: boolean;
+} = {}) {
+  return {
+    onSubmit,
+    ...render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <ToolApprovalCard
+          disabled={disabled}
+          request={request}
+          onSubmit={onSubmit}
+        />
+      </I18nContext.Provider>,
+    ),
+  };
+}
 
 function renderCard() {
   return render(
@@ -128,5 +192,133 @@ describe("HumanInputCard form validation (DOM)", () => {
         String(message).includes("uncontrolled to controlled"),
       ),
     ).toBe(false);
+  });
+});
+
+describe("ToolApprovalCard", () => {
+  it("collects every action before one atomic mixed-decision submit", async () => {
+    const onSubmit = rs.fn(
+      async (
+        _request: HitlApprovalRequest,
+        _responses: HitlApprovalResponse[],
+      ) => undefined,
+    );
+    renderApprovalCard({ onSubmit });
+    const submit = screen.getByRole("button", { name: "Submit decisions" });
+
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    const approveButtons = screen.getAllByRole("button", { name: "Approve" });
+    fireEvent.click(approveButtons[0]!);
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[1]!);
+    fireEvent.change(screen.getByLabelText("Rejection reason (optional)"), {
+      target: { value: "Do not run this command" },
+    });
+    expect(submit.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const responses = onSubmit.mock.calls[0]![1];
+    expect(responses).toHaveLength(2);
+    expect(
+      responses.map((response: { option_id: string }) => response.option_id),
+    ).toEqual(["approve", "reject"]);
+    expect(responses[1]?.value).toBe("Do not run this command");
+    await screen.findByText("Answered");
+    expect(submit.hasAttribute("disabled")).toBe(true);
+  });
+
+  it("keeps mixed decisions and rejection reason editable after failure", async () => {
+    let resolveAccepted!: (accepted: boolean) => void;
+    const accepted = new Promise<boolean>((resolve) => {
+      resolveAccepted = resolve;
+    });
+    const onSubmit = rs.fn(() => accepted);
+    renderApprovalCard({ onSubmit });
+    const approveButtons = screen.getAllByRole("button", { name: "Approve" });
+    fireEvent.click(approveButtons[0]!);
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject" })[1]!);
+    const reason = screen.getByLabelText<HTMLTextAreaElement>(
+      "Rejection reason (optional)",
+    );
+    fireEvent.change(reason, {
+      target: { value: "Do not run this command" },
+    });
+    const submit = screen.getByRole("button", { name: "Submit decisions" });
+    fireEvent.click(submit);
+
+    // The submit promise deliberately remains unresolved; assert the in-flight
+    // frame synchronously instead of wrapping that pending operation in findBy*.
+    expect(screen.getByText("Sending...")).not.toBeNull();
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    act(() => resolveAccepted(false));
+
+    await waitFor(() => expect(submit.hasAttribute("disabled")).toBe(false));
+    expect(screen.getByTestId("tool-approval-card")).not.toBeNull();
+    expect(approveButtons[0]!.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      screen
+        .getAllByRole("button", { name: "Reject" })[1]!
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(reason.value).toBe("Do not run this command");
+    expect(screen.queryByText("Answered")).toBeNull();
+    expect(screen.queryByText("Sending...")).toBeNull();
+  });
+
+  it("submits approve-all once and disables an in-flight interrupt frame", async () => {
+    const onSubmit = rs.fn(
+      async (
+        _request: HitlApprovalRequest,
+        _responses: HitlApprovalResponse[],
+      ) => undefined,
+    );
+    renderApprovalCard({ onSubmit, disabled: true });
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve all" }));
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("uses allowed_decisions and keeps all-reject available by itself", () => {
+    renderApprovalCard({
+      request: { ...approvalRequest, allowed_decisions: ["reject"] },
+    });
+
+    expect(screen.queryByRole("button", { name: "Approve all" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Reject all and finish" }),
+    ).not.toBeNull();
+  });
+
+  it("shows the complete str_replace old and new strings as a diff", () => {
+    renderApprovalCard({
+      request: {
+        ...approvalRequest,
+        actions: [
+          {
+            tool_call_id: "replace-1",
+            tool_name: "str_replace",
+            args_summary: JSON.stringify({
+              path: "/tmp/a.txt",
+              old_str: "old line\nsecond old line",
+              new_str: "new line\nsecond new line",
+            }),
+            request_id: "hitl_approval:ai-1:replace-1",
+          },
+        ],
+        pending_tool_call_ids: ["replace-1"],
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /Tool details/ }));
+    const diff = screen.getByTestId("approval-diff");
+    expect(diff.textContent).toContain("- old line");
+    expect(diff.textContent).toContain("- second old line");
+    expect(diff.textContent).toContain("+ new line");
+    expect(diff.textContent).toContain("+ second new line");
   });
 });

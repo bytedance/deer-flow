@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import get_current_user, get_run_context, get_run_manager
-from deerflow.runtime.runs.inputs import InputConflict, RunInputs
+from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +75,15 @@ async def list_thread_inputs(thread_id: str, request: Request):
             if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
                 status = "not_applied"
             items.append({key: value for key, value in {**entry, "status": status, "target_run_id": row["run_id"]}.items() if key != "context"})
-    return {"items": items[-32:], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
+    # Rank unresolved inputs (pending / not_applied / ...) ahead of terminal
+    # applied/cancelled receipts, prefer the newest entry within each group,
+    # cap at 32 records, then restore chronological order. A plain items[-32:]
+    # slice lets two full batches of receipts hide an older retryable input
+    # (issue #7972). If more than 32 inputs are unresolved, this deliberately
+    # returns 32 unresolved rows and no receipts for submission reconciliation;
+    # that trade-off follows the priority the issue asks for.
+    keep = sorted(range(len(items)), key=lambda i: (items[i]["status"] in ("applied", "cancelled"), -i))[:32]
+    return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
 
 
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):
@@ -92,7 +100,13 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
         if entry["mode"] != "queue" or entry["status"] != "pending":
             continue
         try:
-            run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            try:
+                run = await agent_runs.dispatch_input(thread_id=thread_id, run_id=inputs.run_id, input_id=entry["id"])
+            except InputCancelled:
+                # Cancellation can win after the snapshot, even during
+                # admission. The atomic claim proves no Run was started.
+                logger.info("Skipping cancelled queued input %s for Run %s", entry["id"], inputs.run_id)
+                continue
             while run.status in ("pending", "running"):
                 # AgentRuns.wait retains its capped backoff and revocation
                 # checks; a long task exceeding a wait window is still live.

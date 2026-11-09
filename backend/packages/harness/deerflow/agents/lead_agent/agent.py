@@ -520,8 +520,8 @@ def build_middlewares(
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
-        mcp_routing_middleware: Optional PR2 middleware that auto-promotes
-            deferred MCP schemas before the deferred filter runs.
+        mcp_routing_middleware: Compatibility middleware for advisory MCP
+            capability metadata; schema selection requires tool_search.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
@@ -826,6 +826,34 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     if agent_config and agent_config.skills is not None:
         return set(agent_config.skills)
     return None
+
+
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool) -> None:
+    hitl_config = getattr(app_config, "hitl_approval", None)
+    if hitl_config is None or not hitl_config.enabled:
+        return
+    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+
+    known_tool_names = {tool.name for tool in final_tools}
+    unknown_names = set(hitl_config.tools) - known_tool_names
+    if unknown_names:
+        logger.warning("hitl_approval.tools contains names not present in this build's tool set: %s", sorted(unknown_names))
+    logger.info(
+        "hitl_approval enabled: tools=%s non_interactive=%s max_actions=%s",
+        hitl_config.tools,
+        hitl_config.non_interactive,
+        hitl_config.max_actions,
+    )
+    middlewares.insert(
+        0,
+        HitlApprovalMiddleware(
+            tool_names=set(hitl_config.tools),
+            non_interactive=hitl_config.non_interactive,
+            max_actions=hitl_config.max_actions,
+            supports_resume=supports_resume,
+            pii_config=getattr(app_config, "pii_redaction", None),
+        ),
+    )
 
 
 def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
@@ -1231,6 +1259,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
+        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False)
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1394,6 +1423,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
+    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False))
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,

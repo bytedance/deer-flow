@@ -8,11 +8,14 @@ from typing import Any
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from sqlalchemy.orm import defer
+from sqlalchemy.orm import aliased, defer
 
-from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
+from deerflow.persistence.extension_leases.model import ExtensionExecutionLeaseRow
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow, SubagentBatchItemRow, SubagentBatchRow
 from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
-from deerflow.subagents.batch_runtime import BatchItemInput
+from deerflow.subagents.batch_dependencies import batch_dependencies
+from deerflow.subagents.batch_runtime import BATCH_CONTINUATION_NAMESPACE, BatchItemInput, batch_continuation_key
 from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
@@ -70,6 +73,8 @@ class SubagentBatchRepository:
         for key in _BATCH_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
+        if row.continuation_status is not None:
+            data.update(continuation_status=row.continuation_status, continuation_run_id=row.continuation_run_id)
         return data
 
     @staticmethod
@@ -111,7 +116,9 @@ class SubagentBatchRepository:
         max_running_items: int,
         max_attempts: int,
         execution_spec: dict[str, Any],
+        continuation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        dependencies = batch_dependencies(items)
         now = datetime.now(UTC)
         batch = SubagentBatchRow(
             id=batch_id,
@@ -128,6 +135,8 @@ class SubagentBatchRepository:
             max_running_items=max_running_items,
             max_attempts=max_attempts,
             execution_spec=execution_spec,
+            continuation_json=continuation,
+            continuation_status="pending" if continuation is not None else None,
             created_at=now,
             updated_at=now,
         )
@@ -157,6 +166,10 @@ class SubagentBatchRepository:
                 # key can fail here before commit.
                 await session.flush()
                 session.add_all(rows)
+                if dependencies:
+                    await session.flush()
+                    identities = {row.item_key: row.id for row in rows}
+                    session.add_all(SubagentBatchDependencyRow(item_id=identities[key], prerequisite_id=identities[dependency]) for key, required in dependencies.items() for dependency in required)
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
@@ -240,6 +253,164 @@ class SubagentBatchRepository:
                     value["prompt"] = row.prompt
                 values.append(value)
             return values
+
+    @staticmethod
+    def _dependencies_ready():
+        prerequisite = aliased(SubagentBatchItemRow)
+        return (
+            ~select(SubagentBatchDependencyRow.item_id)
+            .join(prerequisite, prerequisite.id == SubagentBatchDependencyRow.prerequisite_id)
+            .where(
+                SubagentBatchDependencyRow.item_id == SubagentBatchItemRow.id,
+                or_(prerequisite.status != "succeeded", prerequisite.stop_reason.is_not(None)),
+            )
+            .exists()
+        )
+
+    async def _fail_blocked_dependencies(self, session, batch, *, now):
+        prerequisite = aliased(SubagentBatchItemRow)
+        blocked = (
+            select(SubagentBatchDependencyRow.item_id)
+            .join(prerequisite, prerequisite.id == SubagentBatchDependencyRow.prerequisite_id)
+            .where(
+                prerequisite.batch_id == batch.id,
+                or_(prerequisite.status.in_(("failed", "cancelled")), (prerequisite.status == "succeeded") & prerequisite.stop_reason.is_not(None)),
+            )
+            .cte("blocked_batch_dependencies", recursive=True)
+        )
+        blocked = blocked.union(select(SubagentBatchDependencyRow.item_id).join(blocked, SubagentBatchDependencyRow.prerequisite_id == blocked.c.item_id))
+        if (await session.execute(select(blocked.c.item_id).limit(1))).first() is None:
+            return
+        changed = await session.execute(
+            update(SubagentBatchItemRow)
+            .where(
+                SubagentBatchItemRow.batch_id == batch.id,
+                SubagentBatchItemRow.status.in_(("pending", "queued")),
+                SubagentBatchItemRow.id.in_(select(blocked.c.item_id)),
+            )
+            .values(status="failed", error="A prerequisite did not complete successfully", completed_at=now, updated_at=now)
+            .returning(SubagentBatchItemRow.id)
+            .execution_options(synchronize_session=False)
+        )
+        if changed.first() is not None:
+            await self._refresh_batch_status(session, batch, now=now)
+
+    async def claim_continuations(self, *, now: datetime, lease_owner: str, lease_seconds: int, limit: int = 8, exclude_batch_ids: tuple[str, ...] = ()) -> list[dict]:
+        """Claim one follow-up after terminal results commit; retries retain the batch ID."""
+        live_claim = (
+            select(ExtensionExecutionLeaseRow.resource_id)
+            .where(
+                ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE,
+                ExtensionExecutionLeaseRow.resource_id == SubagentBatchRow.id,
+                ExtensionExecutionLeaseRow.expires_at >= now.timestamp(),
+            )
+            .exists()
+        )
+        ready = or_(SubagentBatchRow.continuation_status == "pending", (SubagentBatchRow.continuation_status == "dispatching") & ~live_claim)
+        claimed = []
+        async with self._sf() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(SubagentBatchRow)
+                        .where(SubagentBatchRow.status.in_(("completed", "failed")), SubagentBatchRow.id.not_in(exclude_batch_ids), ready)
+                        .order_by(SubagentBatchRow.updated_at, SubagentBatchRow.completed_at, SubagentBatchRow.id)
+                        .limit(limit)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for batch in rows:
+                changed = await session.execute(
+                    update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.status.in_(("completed", "failed")), ready).values(continuation_status="dispatching").execution_options(synchronize_session=False)
+                )
+                if changed.rowcount == 1:
+                    await session.refresh(batch)
+                    fence = await session.get(ExtensionExecutionLeaseRow, (BATCH_CONTINUATION_NAMESPACE, batch.id), with_for_update=True)
+                    expires = (now + timedelta(seconds=lease_seconds)).timestamp()
+                    if fence is None:
+                        fence = ExtensionExecutionLeaseRow(namespace=BATCH_CONTINUATION_NAMESPACE, resource_id=batch.id, user_id=batch.user_id, holder_id=lease_owner, epoch=1, expires_at=expires)
+                        session.add(fence)
+                    else:
+                        fence.holder_id, fence.epoch, fence.expires_at = lease_owner, fence.epoch + 1, expires
+                    claimed.append(
+                        {
+                            **self._execution_batch_dict(batch),
+                            "status": batch.status,
+                            "continuation": batch.continuation_json,
+                            "execution_fence": {"namespace": BATCH_CONTINUATION_NAMESPACE, "resource_id": batch.id, "holder_id": lease_owner, "epoch": fence.epoch},
+                        }
+                    )
+            await session.commit()
+        return claimed
+
+    async def finish_continuation(self, batch_id: str, *, lease_owner: str, status: str, run_id: str | None = None) -> bool:
+        if status not in ("pending", "dispatched", "suppressed"):
+            raise ValueError("Invalid continuation outcome")
+        async with self._sf() as session:
+            changed = await session.execute(
+                update(SubagentBatchRow)
+                .where(
+                    SubagentBatchRow.id == batch_id,
+                    SubagentBatchRow.continuation_status == "dispatching",
+                    select(ExtensionExecutionLeaseRow.resource_id)
+                    .where(
+                        ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE,
+                        ExtensionExecutionLeaseRow.resource_id == batch_id,
+                        ExtensionExecutionLeaseRow.holder_id == lease_owner,
+                    )
+                    .exists(),
+                )
+                .values(continuation_status=status, continuation_run_id=run_id, updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            return changed.rowcount == 1
+
+    async def list_continuation_batches_for_run(self, run_id: str) -> list[dict]:
+        async with self._sf() as session:
+            rows = (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.run_id == run_id, SubagentBatchRow.continuation_status.in_(("pending", "dispatching"))))).scalars().all()
+            return [self._execution_batch_dict(row) for row in rows]
+
+    async def continuation_run_id(self, batch_id: str, *, user_id: str) -> str | None:
+        async with self._sf() as session:
+            return await session.scalar(select(RunRow.run_id).where(RunRow.user_id == user_id, RunRow.idempotency_key == batch_continuation_key(batch_id)))
+
+    async def suppress_thread_continuations(self, thread_id: str, *, goal_created_at: str | None = None) -> None:
+        """Called while the host owns the thread's Goal/deletion operation."""
+        async with self._sf() as session:
+            batches = select(SubagentBatchRow.id).where(SubagentBatchRow.thread_id == thread_id, SubagentBatchRow.continuation_status.in_(("pending", "dispatching")))
+            if goal_created_at is not None:
+                batches = batches.where(SubagentBatchRow.continuation_json["goal"]["created_at"].as_string() == goal_created_at, SubagentBatchRow.continuation_json["goal"]["status"].as_string() == "active")
+            # Match claim/cancel lock order: batch first, then execution fence.
+            ids = list((await session.scalars(batches.order_by(SubagentBatchRow.completed_at, SubagentBatchRow.id).with_for_update())).all())
+            if not ids:
+                return
+            ids = list(
+                (
+                    await session.scalars(
+                        update(SubagentBatchRow).where(SubagentBatchRow.id.in_(ids), SubagentBatchRow.continuation_status.in_(("pending", "dispatching"))).values(continuation_status="suppressed").returning(SubagentBatchRow.id)
+                    )
+                ).all()
+            )
+            await session.execute(
+                update(ExtensionExecutionLeaseRow).where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id.in_(ids)).values(expires_at=0, epoch=ExtensionExecutionLeaseRow.epoch + 1)
+            )
+            await session.commit()
+
+    async def latest_run_state(self, thread_id: str, *, user_id: str) -> dict | None:
+        async with self._sf() as session:
+            row = (
+                (
+                    await session.execute(
+                        select(RunRow.status, RunRow.stop_reason).where(RunRow.thread_id == thread_id, RunRow.user_id == user_id, RunRow.operation_kind == "run").order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(1)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            return dict(row) if row is not None else None
 
     async def claim_items(
         self,
@@ -325,6 +496,8 @@ class SubagentBatchRepository:
                 if batch.status == "paused":
                     continue
 
+                await self._fail_blocked_dependencies(session, batch, now=now)
+
                 counts = await self._counts(session, batch.id)
                 live = counts["queued"] + counts["leased"] + counts["running"]
                 promote_count = max(0, batch.max_live_items - live)
@@ -336,6 +509,7 @@ class SubagentBatchRepository:
                                 .where(
                                     SubagentBatchItemRow.batch_id == batch.id,
                                     SubagentBatchItemRow.status == "pending",
+                                    self._dependencies_ready(),
                                 )
                                 .order_by(SubagentBatchItemRow.position)
                                 .limit(promote_count)
@@ -349,6 +523,7 @@ class SubagentBatchRepository:
                             .where(
                                 SubagentBatchItemRow.id == item.id,
                                 SubagentBatchItemRow.status == "pending",
+                                self._dependencies_ready(),
                                 SubagentBatchItemRow.cancel_requested_at.is_(None),
                                 SubagentBatchItemRow.batch_id.in_(runnable_batch),
                             )
@@ -370,6 +545,7 @@ class SubagentBatchRepository:
                             .where(
                                 SubagentBatchItemRow.batch_id == batch.id,
                                 SubagentBatchItemRow.status == "queued",
+                                self._dependencies_ready(),
                                 SubagentBatchItemRow.cancel_requested_at.is_(None),
                                 SubagentBatchItemRow.id.not_in(exclude_item_ids),
                             )
@@ -389,6 +565,7 @@ class SubagentBatchRepository:
                         .where(
                             SubagentBatchItemRow.id == item.id,
                             SubagentBatchItemRow.status == "queued",
+                            self._dependencies_ready(),
                             SubagentBatchItemRow.cancel_requested_at.is_(None),
                             SubagentBatchItemRow.batch_id.in_(runnable_batch),
                         )
@@ -576,6 +753,14 @@ class SubagentBatchRepository:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
             if batch is None or batch.user_id != user_id:
                 return None
+            if action == "cancel" and batch.continuation_status is not None:
+                await session.execute(update(SubagentBatchRow).where(SubagentBatchRow.id == batch.id, SubagentBatchRow.user_id == user_id).values(continuation_status="cancelled").execution_options(synchronize_session=False))
+                await session.refresh(batch)
+                await session.execute(
+                    update(ExtensionExecutionLeaseRow)
+                    .where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id == batch.id)
+                    .values(expires_at=0, epoch=ExtensionExecutionLeaseRow.epoch + 1)
+                )
             if action == "pause" and batch.status in ("queued", "running"):
                 batch.status = "paused"
             elif action == "resume" and batch.status == "paused":
@@ -635,6 +820,14 @@ class SubagentBatchRepository:
             # stopped. Returning without commit discards the item reset.
             if batch.status == "cancelled":
                 return None
+            if batch.continuation_status in ("pending", "dispatching"):
+                batch.continuation_status = "pending"
+                await session.flush()
+                await session.execute(
+                    update(ExtensionExecutionLeaseRow)
+                    .where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id == batch.id)
+                    .values(expires_at=0, epoch=ExtensionExecutionLeaseRow.epoch + 1)
+                )
             if batch.status != "paused":
                 batch.status = "queued"
                 batch.completed_at = None

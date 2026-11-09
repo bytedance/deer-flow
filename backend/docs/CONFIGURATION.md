@@ -323,7 +323,7 @@ are:
 
 | Provider ID | Service / credential scope | Endpoint | Protocol / authentication |
 | --- | --- | --- | --- |
-| `openai` | OpenAI API | `https://api.openai.com/v1` | Chat Completions / Bearer |
+| `openai` | OpenAI API | `https://api.openai.com/v1` | Responses for the GPT-6 IDs below; otherwise Chat Completions / Bearer |
 | `anthropic` | Anthropic API | `https://api.anthropic.com` | Native Messages `/v1/messages` / `x-api-key` |
 | `deepseek` | DeepSeek API | `https://api.deepseek.com` | Chat Completions / Bearer |
 | `qwen-cn` | Alibaba Cloud Bailian / Qwen, China | `https://dashscope.aliyuncs.com/compatible-mode/v1` | Chat Completions / Bearer |
@@ -334,6 +334,7 @@ are:
 | `zai` | Z.AI, international ordinary API | `https://api.z.ai/api/paas/v4` | Chat Completions / Bearer |
 | `minimax` | MiniMax, international API | `https://api.minimax.io/v1` | Chat Completions / Bearer |
 | `minimax-cn` | MiniMax, China API | `https://api.minimaxi.com/v1` | Chat Completions / Bearer |
+| `stepfun` | StepFun, ordinary API | `https://api.stepfun.com/v1` | Chat Completions / Bearer |
 | `openai-compatible` | Custom OpenAI-compatible, including unauthenticated local endpoints | Administrator-supplied HTTP(S) base URL | Chat Completions / optional key |
 
 Keys for different regions and Coding Plans are not interchangeable. These
@@ -341,6 +342,47 @@ presets do not route China keys to international endpoints or infer a Coding
 Plan from the model name. Plans/regions without a preset can use the custom
 OpenAI-compatible option if their documented protocol is compatible; native
 protocols need a verified backend preset or operator YAML configuration.
+
+The StepFun preset uses the existing `PatchedChatStepFun` adapter to capture
+`reasoning` / `reasoning_content` in responses and replay reasoning history.
+Both connection probes and chat send the documented `max_tokens` output bound.
+Model IDs remain free-form; this provider registration does not infer thinking,
+vision or context-window capabilities from their names. The preset is for
+ordinary API credentials. Step Plan has a separate `/step_plan/v1` endpoint;
+use the custom OpenAI-compatible option for that channel. See the official
+[OpenAI migration guide](https://platform.stepfun.com/docs/zh/guides/developer/openai)
+and [Chat Completions reference](https://platform.stepfun.com/docs/zh/api-reference/chat/chat-completion-create).
+
+Settings → Models → **Fetch and add models** reads the connection's model
+catalog without changing configuration. Administrators can reuse an existing
+saved connection without exposing its key, search IDs, select visible results,
+and test/add the selection. Each selected new model must pass the existing
+streaming tool-call probe before it is enabled. Tests can incur provider charges.
+Failures are displayed individually; stop/retry preserves successful imports and
+deduplicates by provider, endpoint, credential and model ID. Existing disabled
+profiles remain disabled. Renaming and enabling/disabling stay in the model editor.
+
+Discovery uses the provider's model-list endpoint (including Anthropic pagination)
+and reports unsupported endpoints for manual entry. It follows no redirects and
+caps reads at 20 seconds, 2 MiB and 2,000 model IDs/20 pages; truncated catalogs are
+marked. IDs do not establish chat/tool capabilities. No background synchronization
+or automatic enabling occurs just because a model appears in the catalog.
+
+Chat model pickers search display names, configured names, IDs and provider labels,
+with provider filtering and favorites/recent groups. The eight recent selections
+are browser-local and user-scoped, and only currently available models appear.
+Selecting a model continues to use the existing conversation/account preferences.
+
+The `openai` preset recognizes the exact IDs `gpt-6-astra`, `gpt-6.1-sol`,
+`gpt-6.1-terra`, `gpt-6-sol` and `gpt-6-luna`. They use the Responses API
+for both the connection probe and chat, including tool calls and tool-result
+follow-ups. Astra and GPT-6.1 Sol require thinking, default to `medium`, and
+accept `low`, `medium`, `high`, `xhigh` and `max`. The other three also accept
+`none`: disabling thinking uses `none`, while enabling it without an explicit
+effort uses `medium`. Generic `minimal` maps to `low`. Image input is enabled.
+Explicit capability overrides remain supported; routing stays provider-owned.
+Unknown IDs, older OpenAI presets and custom endpoints keep their existing
+behavior. See OpenAI's [GPT-6 protocol and parameter guide](https://developers.openai.com/api/docs/guides/latest-model).
 
 The `moonshot-cn` preset recognizes the exact IDs `kimi-k3.1-pro` and
 `kimi-k3.1-pro-highspeed`. Both require thinking, preserve reasoning history,
@@ -1262,8 +1304,8 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -2035,6 +2077,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
@@ -2210,6 +2253,52 @@ Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
 Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
+
+
+## HITL Tool Approval
+
+`hitl_approval` pauses high-risk tool calls for human approval before execution.
+It is disabled by default; enabling it without a tool list changes nothing.
+
+```yaml
+hitl_approval:
+  enabled: true
+  tools: [write_file, str_replace, bash]
+  non_interactive: deny  # deny | allow
+  max_actions: 32  # 0 disables the approval-batch count limit
+```
+
+- `enabled`: master switch. `false` leaves all behavior unchanged.
+- `tools`: host-owned high-risk list edited by the operator. Unknown names log
+  a warning at assembly (a typo would otherwise silently disable approval).
+- `non_interactive`: behavior for IM channels, GitHub runs, scheduled tasks,
+  and other non-interactive entry points. `deny` rejects the call with an
+  error ToolMessage; `allow` executes it directly. Subagents and runtimes
+  assembled without resume support always reject matching calls regardless of
+  this setting.
+- `max_actions`: maximum matching tool calls in one approval batch. Batches
+  above the limit are rejected without executing any call; `0` disables this
+  count limit. The approval payload size limit still applies.
+
+Approval is **not** authorization. `read_before_write`, guardrails, and sandbox
+authorization still apply after approval — "approve to try executing", not
+"approve to guarantee execution". Approval requires a resume-capable entry:
+the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
+follow `non_interactive`; subagents and runtimes without resume support always
+fail closed.
+
+Argument summaries are display-only. Fields other than `path`, `command`, `url`,
+`old_str`, and `new_str` are truncated when they exceed the display budget; the
+summary includes a `chars omitted` marker. Approving executes the original,
+complete arguments, including content hidden by that marker. The payload-size
+limit bounds the approval summary, not the tool arguments.
+
+Pending approvals do not expire. While the thread remains paused at the current
+checkpoint, its approval stays resumable and blocks new runs on that thread,
+including scheduled runs, until every action is approved or rejected. Operators
+must resolve stale approvals explicitly. Disabling HITL while paused still
+allows the all-reject response as a safe escape hatch; other configuration
+changes fail closed.
 
 
 ## Best Practices

@@ -9,7 +9,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, create_autospec
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.lead_agent import agent as lead_agent_module
 from deerflow.agents.middlewares import summarization_middleware as summarization_middleware_module
@@ -290,6 +290,27 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
     assert middleware_calls[0]["available_skills"] == {"bootstrap"}
     assert middleware_calls[0]["owns_agent_skill_projection"] is False
     assert len(prompt_calls) == 1
+
+
+def test_bootstrap_hitl_tools_fail_closed_without_resume_support(model_control_assembly):
+    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+
+    app_config, _strict, _fallback, _model_factory = model_control_assembly
+    app_config.hitl_approval.enabled = True
+    app_config.hitl_approval.tools = ["setup_agent"]
+    app_config.hitl_approval.max_actions = 7
+
+    assembly = lead_agent_module._make_lead_agent({"configurable": {"is_bootstrap": True}}, app_config=app_config)
+    hitl = next(middleware for middleware in assembly["middleware"] if isinstance(middleware, HitlApprovalMiddleware))
+    assert hitl.supports_resume is False
+    assert hitl.max_actions == 7
+
+    message = AIMessage(content="", tool_calls=[{"id": "call-setup", "name": "setup_agent", "args": {}}])
+    result = hitl.after_model({"messages": [message]}, SimpleNamespace(context={"is_bootstrap": True}))
+
+    assert result is not None
+    assert "__interrupt__" not in result
+    assert result["messages"][0].status == "error"
 
 
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):

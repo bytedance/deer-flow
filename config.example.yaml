@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 64
+config_version: 65
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1062,6 +1062,17 @@ tools:
   #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
 
+  # Web search tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # SpecStream answers from the live web: ranked results with a snippet each, plus a
+  # direct answer when the sources agree on one. Sign up at https://specstream.ai to get a key.
+  # Note: set SPECSTREAM_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $SPECSTREAM_API_KEY  # Optional explicit env-var reference
+
   # Web search tool (uses You.com; YDC_API_KEY optional)
   # You.com runs its own web index and returns extracted page snippets rather
   # than a single meta description, so results are usable without a follow-up
@@ -1295,6 +1306,15 @@ tools:
   #   use: deerflow.community.sofya.tools:web_fetch_tool
   #   # api_key: $SOFYA_API_KEY
 
+  # Web fetch tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # Returns the page as markdown. Also reads PDF, Word and Excel files.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_fetch_tool
+  #   # api_key: $SPECSTREAM_API_KEY
+
   # Web fetch tool (uses Unbrowse, requires UNBROWSE_API_KEY)
   # Returns the page as markdown. Fetches over plain HTTP when that is enough and
   # falls back to a hosted cloud browser for pages that need JavaScript.
@@ -1395,9 +1415,8 @@ tools:
 
 tool_search:
   enabled: false
-  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
-  # matching deferred MCP tool schemas before a model call. This is the maximum
-  # number of matched schemas promoted per model call. Valid range: 1..5.
+  # Legacy compatibility setting (1..5). Routing keywords are advisory only;
+  # deferred schemas are exposed by explicit tool_search selection.
   auto_promote_top_k: 3
 
 # ============================================================================
@@ -1594,6 +1613,22 @@ read_before_write:
   # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
+
+# Optional pre-write syntax validation and targeted error remediation guard.
+# When enabled (write_verify_syntax: true), intercepts str_replace to validate
+# spliced .py (ast.parse) and .json (json.loads) syntax before disk I/O.
+# Also classifies tool error outputs (ModuleNotFoundError, SyntaxError,
+# FileNotFoundError, etc.) and injects actionable remediation hints directly into
+# tool results.
+harness_guard:
+  enabled: true
+  write_verify_syntax: false
+  block_on_syntax_error: true
+  targeted_hints_enabled: true
+  max_repeated_error_signatures: 2
+  detect_alternating_loops: true
+  max_loop_history: 20
+  max_tracked_scopes: 1000
 
 # ============================================================================
 # Projects
@@ -1838,6 +1873,7 @@ sandbox:
 #   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
 #   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
+#   #   AIO_BASH_MAX_SESSIONS: "50"  # Separate Bash pool; excess env calls wait (cancellable)
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
@@ -2110,6 +2146,24 @@ verification:
   receipts_render_mode: "delegation_only"
   judge_enabled: false
   judge_model_name: null
+
+# ============================================================================
+# HITL tool approval
+# ============================================================================
+# Pause high-risk tool calls for human approval before execution.
+# enabled=false (default) leaves all behavior unchanged.
+# The high-risk list is host-owned security policy edited by the operator.
+# non_interactive: deny | allow — behavior for IM channels, GitHub runs,
+# scheduled tasks, and other non-interactive entry points. Subagents and
+# runtimes without resume support always fail closed regardless of this setting.
+# Approval is not authorization: read_before_write, guardrails, and sandbox
+# authorization still apply after approval ("approve to try executing").
+hitl_approval:
+  enabled: false
+  tools: []  # e.g. [write_file, str_replace, bash]
+  non_interactive: deny
+  # Maximum matching tool calls in one approval batch; 0 disables the count limit.
+  max_actions: 32
 
 # ============================================================================
 # ACP Agents Configuration
