@@ -63,10 +63,7 @@ def test_chinese_fact_is_recallable_without_memory_zh_extra(tmp_path: Path) -> N
     try:
         adapter.upsert(_fact("zh-default", "调度器会重试失败的任务"), scope=scope, path="")
         results = adapter.search("重试", scopes=[scope], top_k=5, mode="fts5", filters=None)
-        assert results, (
-            "expected the stored Chinese fact to be recalled by the CJK sub-phrase '重试', got 0 hits: "
-            "the no-jieba fallback must emit CJK bigrams instead of keeping '调度器会重试失败的任务' as one token"
-        )
+        assert results, "expected the stored Chinese fact to be recalled by the CJK sub-phrase '重试', got 0 hits: the no-jieba fallback must emit CJK bigrams instead of keeping '调度器会重试失败的任务' as one token"
         assert [item["fact"]["id"] for item in results] == ["zh-default"]
     finally:
         adapter.close()
