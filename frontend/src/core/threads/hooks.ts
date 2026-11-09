@@ -2062,6 +2062,7 @@ function getStreamErrorToastMessage(
 ): string {
   const status = getHttpStatus(error);
   if (status !== undefined && status >= 500 && status < 600) {
+    console.warn("Chat stream request failed:", getStreamErrorMessage(error));
     return t.conversation.streamServerError(status);
   }
 

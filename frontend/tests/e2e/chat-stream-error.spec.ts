@@ -16,6 +16,16 @@ for (const { status, body, message } of [
   },
 ]) {
   test(`shows the expected chat error for HTTP ${status}`, async ({ page }) => {
+    const streamWarnings: string[] = [];
+    page.on("console", (entry) => {
+      if (
+        entry.type() === "warning" &&
+        entry.text().startsWith("Chat stream request failed:")
+      ) {
+        streamWarnings.push(entry.text());
+      }
+    });
+
     mockLangGraphAPI(page);
     await page.route(
       /\/api\/langgraph\/(?:threads\/[^/]+\/)?runs\/stream$/,
@@ -32,6 +42,9 @@ for (const { status, body, message } of [
 
     await expect(page.locator("[data-sonner-toast]").last()).toHaveText(
       message,
+    );
+    expect(streamWarnings).toEqual(
+      status === 502 ? [`Chat stream request failed: HTTP 502: ${body}`] : [],
     );
   });
 }
