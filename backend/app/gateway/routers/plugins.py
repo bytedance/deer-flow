@@ -103,7 +103,10 @@ async def list_plugins(request: Request, response: Response):
     for source, page in request.app.state.extensions.documentation:
         if source in registered_sources or page["id"] in known_ids:
             continue
-        copy = page["locales"].get("en-US") or next(iter(page["locales"].values()))
+        locales = page["locales"]
+        copy = next((value for tag, value in locales.items() if tag.lower() == "en-us"), None)
+        if copy is None:
+            copy = next((value for tag, value in locales.items() if tag.partition("-")[0] == "en"), next(iter(locales.values())))
         entries.append(
             {
                 "namespace": page["id"],

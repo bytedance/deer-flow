@@ -80,6 +80,41 @@ def test_loader_projects_only_public_documentation(package):
         assert "private" not in response.text
 
 
+@pytest.mark.parametrize(
+    "tags,expected",
+    [
+        (["zh-CN", "en"], "English"),
+        (["zh-CN", "en-us"], "English"),
+        (["zh-CN", "en-GB"], "English"),
+        (["zh-CN", "en", "en-us"], "US English"),
+        (["zh-CN", "fr"], "中文"),
+    ],
+)
+def test_backend_only_discovery_prefers_english_language_variants(package, tags, expected):
+    page = copy.deepcopy(PAGE)
+    page["locales"] = {}
+    titles = {"zh-CN": "中文", "fr": "Français"}
+    if len(tags) == 3:
+        titles["en-us"] = "US English"
+    for tag in tags:
+        localized = copy.deepcopy(PAGE["locales"]["en-US"])
+        localized["title"] = titles.get(tag, "English")
+        page["locales"][tag] = localized
+    package.write_text(json.dumps(page))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use=SOURCE)])
+    assert not diagnostics
+    app = FastAPI()
+    app.state.extensions = loaded
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda request: ExtensionPrincipal("viewer"))
+    app.include_router(router)
+    with TestClient(app) as client:
+        response = client.get("/api/plugins")
+    assert response.status_code == 200
+    (entry,) = response.json()
+    assert entry["title"] == expected
+    assert entry["documentation"] == page
+
+
 def test_bad_documentation_does_not_disable_working_extension(package):
     package.write_text('{"secret":"synthetic-secret"}')
     loaded, diagnostics = load_extensions([ExtensionSpec(use=SOURCE)])
