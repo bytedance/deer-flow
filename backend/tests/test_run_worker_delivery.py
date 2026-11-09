@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
-from langgraph.types import Command
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, Interrupt, interrupt
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
@@ -965,3 +967,308 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_pending_snapshot_failure_cannot_complete_run_successfully():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-snapshot-failure")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = True
+
+    class SnapshotFailureAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            raise RuntimeError("checkpoint snapshot unavailable")
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: SnapshotFailureAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "checkpoint snapshot unavailable"
+    assert (await run_store.get(record.run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_paused_metadata_is_not_written_after_ownership_loss():
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(
+        store=run_store,
+        worker_id="owner",
+        run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=0),
+    )
+    record = await run_manager.create_or_reject("thread-paused-ownership")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = True
+    original_finalize = run_store.finalize_if_not_cancelled
+
+    async def finalize_then_lose_ownership(*args, **kwargs):
+        result = await original_finalize(*args, **kwargs)
+        run_store._runs[record.run_id].update(status="error", error="peer takeover", owner_worker_id="peer", metadata={"owner": "peer"})
+        await run_manager._mark_ownership_lost(record, reason="Test peer takeover", require_active=False)
+        return result
+
+    run_store.finalize_if_not_cancelled = finalize_then_lose_ownership
+    run_store.put = AsyncMock(wraps=run_store.put)
+    run_manager.persist_metadata = AsyncMock(wraps=run_manager.persist_metadata)
+    payload = {"kind": "hitl_approval", "request_id": "approval-1"}
+
+    class PausedAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": []}
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={},
+                metadata={},
+                next=("agent",),
+                tasks=(SimpleNamespace(interrupts=(SimpleNamespace(value=payload),)),),
+            )
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: PausedAgent(),
+        graph_input={},
+        config={},
+    )
+
+    run_manager.persist_metadata.assert_not_awaited()
+    run_store.put.assert_not_awaited()
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row["error"] == "peer takeover"
+    assert row["metadata"] == {"owner": "peer"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stream_modes", [None, ["messages-tuple"]], ids=["values", "messages-only"])
+async def test_generic_interrupt_is_waiting_even_when_hitl_is_disabled(stream_modes):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-generic-pause" if stream_modes is None else "thread-generic-pause-messages")
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+
+    class GenericPausedAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [], "__interrupt__": (Interrupt(value={"question": "Continue?"}, id="generic-pause"),)}
+
+        async def aget_state(self, _config):
+            return SimpleNamespace(
+                values={"messages": []},
+                config={},
+                metadata={},
+                next=("answer",),
+                tasks=(SimpleNamespace(interrupts=(SimpleNamespace(value={"question": "Continue?"}),)),),
+            )
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=InMemorySaver(), app_config=app_config),
+        agent_factory=lambda *, config: GenericPausedAgent(),
+        graph_input={},
+        config={},
+        stream_modes=stream_modes,
+    )
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "waiting_for_input"
+    assert "hitl_approval" not in row["metadata"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_approval_pause_bypasses_terminal_goal_delivery_and_batch_completion(tmp_path, monkeypatch, mode):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.subagent_batches.continuation import BatchContinuations
+    from deerflow.agents.thread_state import ThreadState
+    from deerflow.extensions.registry import ExtensionRegistry
+    from deerflow.runtime.goal import build_goal_state, read_thread_goal, write_thread_goal
+
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    user_id = get_effective_user_id()
+    thread_id = f"thread-approval-pause-{mode}"
+    checkpointer = InMemorySaver()
+    event_store = MemoryRunEventStore()
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create(thread_id, user_id=user_id)
+    await write_thread_goal(checkpointer, thread_id, build_goal_state("Finish the report"), create_if_missing=True)
+
+    output_dir = paths.sandbox_outputs_dir(thread_id, user_id=user_id)
+    payload = {"kind": "hitl_approval", "request_id": f"approval-{mode}", "pending_tool_call_ids": ["call-write"]}
+
+    def produce_output(_state):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "report.md").write_text("Ready for review\n", encoding="utf-8")
+        return {}
+
+    def request_approval(_state):
+        interrupt(payload)
+
+    builder = StateGraph(ThreadState)
+    builder.add_node("produce_output", produce_output)
+    builder.add_node("request_approval", request_approval)
+    builder.add_edge(START, "produce_output")
+    builder.add_edge("produce_output", "request_approval")
+    builder.add_edge("request_approval", END)
+    graph = builder.compile(checkpointer=checkpointer)
+
+    requested_followups = {"batch-1": "requested"}
+
+    class BatchRepo:
+        async def list_continuation_batches_for_run(self, run_id):
+            assert run_id == record.run_id
+            return [{"id": "batch-1", "user_id": user_id}]
+
+        async def suppress_thread_continuations(self, _thread_id, *, goal_created_at):
+            requested_followups["batch-1"] = f"suppressed:{goal_created_at}"
+
+    class BatchService:
+        async def cancel_batch(self, *, batch_id, user_id):
+            assert batch_id == "batch-1"
+            assert user_id == record.user_id
+            requested_followups.pop(batch_id, None)
+
+    batch_app = SimpleNamespace(
+        state=SimpleNamespace(
+            subagent_batch_repo=BatchRepo(),
+            subagent_batch_service=BatchService(),
+            checkpointer=checkpointer,
+        )
+    )
+    batch_continuations = BatchContinuations(batch_app)
+
+    class LifecycleRecorder:
+        def __init__(self):
+            self.events = []
+
+        async def on_task_start(self, _app_store, _task_store, info):
+            self.events.append(("start", info.run_id))
+
+        async def on_task_stop(self, _app_store, _task_store, info, outcome):
+            self.events.append(("stop", info.run_id, outcome.value))
+
+    recorder = LifecycleRecorder()
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:hitl-pause"):
+        registry.task_lifecycle(recorder)
+
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = True
+    app_config.title.enabled = app_config.memory.enabled = app_config.memory.injection_enabled = False
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=checkpointer,
+            event_store=event_store,
+            app_config=app_config,
+            extensions=registry.build(),
+            checkpoint_channel_mode=mode,
+            on_run_completed=batch_continuations.source_finished,
+        ),
+        agent_factory=lambda *, config: graph,
+        graph_input={"messages": [HumanMessage(content="Write the report")]},
+        config={"configurable": {"thread_id": thread_id}},
+    )
+
+    row = await run_store.get(record.run_id)
+    assert row["status"] == "waiting_for_input"
+    assert row["error"] is None
+    assert row["metadata"]["hitl_approval"] == payload
+    paused_goal = await read_thread_goal(checkpointer, thread_id)
+    assert paused_goal["status"] == "active"
+    assert paused_goal["continuation_count"] == paused_goal["no_progress_count"] == 0
+    assert "last_evaluation" not in paused_goal
+    assert requested_followups == {"batch-1": "requested"}
+    assert recorder.events == [("start", record.run_id), ("stop", record.run_id, "failed")]
+
+    delivery = await _delivery_events(event_store, thread_id, record.run_id)
+    assert len(delivery) == 1
+    assert delivery[0]["content"]["produced_paths"] == ["/mnt/user-data/outputs/report.md"]
+    assert delivery[0]["content"]["satisfied"] is False
+    terminal = await event_store.list_events(thread_id, record.run_id, event_types=["run.terminal"])
+    assert [event["content"] for event in terminal] == [{"status": "waiting_for_input"}]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_disabled_hitl_does_not_materialize_pending_approval_snapshot(mode):
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from deerflow.agents.thread_state import ThreadState
+
+    checkpointer = InMemorySaver()
+    run_manager = RunManager()
+    record = await run_manager.create(f"thread-disabled-hitl-{mode}")
+
+    def finish(_state):
+        return {"messages": [AIMessage(content="Done")]}
+
+    builder = StateGraph(ThreadState)
+    builder.add_node("finish", finish)
+    builder.add_edge(START, "finish")
+    builder.add_edge("finish", END)
+    compiled = builder.compile(checkpointer=checkpointer)
+
+    class SnapshotTrackingGraph:
+        def __init__(self):
+            self.stream_finished = False
+            self.post_stream_running_snapshots = 0
+
+        def __getattr__(self, name):
+            return getattr(compiled, name)
+
+        async def astream(self, *args, **kwargs):
+            async for item in compiled.astream(*args, **kwargs):
+                yield item
+            self.stream_finished = True
+
+        async def aget_state(self, config):
+            if self.stream_finished and record.status == RunStatus.running:
+                self.post_stream_running_snapshots += 1
+            return await compiled.aget_state(config)
+
+    graph = SnapshotTrackingGraph()
+    app_config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    app_config.hitl_approval.enabled = False
+    app_config.title.enabled = app_config.memory.enabled = app_config.memory.injection_enabled = False
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, app_config=app_config, checkpoint_channel_mode=mode),
+        agent_factory=lambda *, config: graph,
+        graph_input={"messages": [HumanMessage(content="Finish normally")]},
+        config={"configurable": {"thread_id": record.thread_id}},
+    )
+
+    assert record.status == RunStatus.success
+    assert graph.post_stream_running_snapshots == 0
