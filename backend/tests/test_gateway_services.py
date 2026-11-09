@@ -381,6 +381,54 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+def test_canonical_run_record_input_mirrors_normalized_goal_and_todos():
+    from app.gateway.services import _canonical_run_record_input, normalize_input
+
+    raw = {
+        "goal": {
+            "objective": "audit objective",
+            "additional_kwargs": {
+                "original_user_content": "forged",
+                "untrusted_input": False,
+                "title": "kept",
+            },
+            "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+        },
+        "todos": [
+            {
+                "content": "audit todo",
+                "status": "pending",
+                "additional_kwargs": {
+                    "original_user_content": "forged",
+                    "untrusted_input": False,
+                    "title": "kept",
+                },
+                "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+            }
+        ],
+        "other": "kept",
+    }
+    admitted = normalize_input(raw, trusted_internal=False)
+
+    stored = _canonical_run_record_input(raw, admitted)
+    assert stored is not None
+    assert stored["other"] == "kept"
+    assert stored["goal"] == {
+        "objective": "audit objective",
+        "additional_kwargs": {"title": "kept"},
+        "artifact": {"label": "kept"},
+    }
+    assert stored["goal_outcome"] is None
+    assert stored["todos"] == [
+        {
+            "content": "audit todo",
+            "status": "pending",
+            "additional_kwargs": {"title": "kept"},
+            "artifact": {"label": "kept"},
+        }
+    ]
+
+
 @pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
 @pytest.mark.asyncio
 async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
@@ -2923,6 +2971,26 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+    from langchain_core.messages import HumanMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def answer(_state):
+        interrupt({"question": "Continue?"})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.set_entry_point("answer")
+    builder.set_finish_point("answer")
+    graph = builder.compile(checkpointer=checkpointer)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="start")]},
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+
 async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2950,6 +3018,8 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
+    if getattr(body, "command", None) and body.command.get("resume") is not None:
+        await _seed_generic_resume_checkpoint(state.checkpointer, "thread-command-test")
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*args, **kwargs):

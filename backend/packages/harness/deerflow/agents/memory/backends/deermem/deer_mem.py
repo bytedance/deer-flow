@@ -38,7 +38,6 @@ from .deermem.core.message_processing import (
     SIGNAL_NAMES,
     detect_signals,
     filter_messages_for_memory,
-    filter_trivial,
     load_patterns,
 )
 from .deermem.core.paths import DEFAULT_AGENT_BUCKET
@@ -104,7 +103,6 @@ class DeerMem(MemoryManager):
     _llm: Any = PrivateAttr(default=None)
     _updater: Any = PrivateAttr(default=None)
     _queue: Any = PrivateAttr(default=None)
-    _trivial_patterns: Any = PrivateAttr(default=None)
 
     # DeerMem implements search() (case-insensitive substring over stored facts),
     # so it is valid for mode="tool" (the base invariant validator requires this
@@ -122,13 +120,9 @@ class DeerMem(MemoryManager):
         """
         self._config = DeerMemConfig.from_backend_config(self.backend_config)
         self._storage = create_storage(self._config)
-        # Signal-detection patterns (externalized YAML; ``patterns_dir`` override
-        # or bundled defaults = pre-externalization behavior). Loaded once at
-        # construction and reused by ``_prepare_update``'s detect_* calls.
-        # Pre-load trivial + signal patterns at construction so a misconfigured
-        # patterns_dir (missing / invalid yaml) surfaces at startup, not on the
-        # first update. Compiled patterns are cached by load_patterns.
-        self._trivial_patterns = load_patterns("trivial", patterns_dir=self._config.patterns_dir)
+        # Load signal patterns at construction so a misconfigured patterns_dir
+        # surfaces at startup, not on the first update. Compiled patterns are
+        # cached by load_patterns.
         for _signal_name in SIGNAL_NAMES:
             load_patterns(_signal_name, patterns_dir=self._config.patterns_dir)
         # host_llm (host-injected default model) takes precedence over build_llm(model)
@@ -290,14 +284,12 @@ class DeerMem(MemoryManager):
 
         Returns ``(filtered, signals)`` where ``signals`` is the set of signal
         classes detected in the recent turns, or ``None`` when there is no
-        meaningful conversation (missing a user or an assistant turn, or every
-        turn dropped as a trivial pure-acknowledgment).
+        conversation containing both a user and an assistant turn.
         """
         filtered = filter_messages_for_memory(
             messages,
             should_keep_hidden_message=self._config.should_keep_hidden_message,
         )
-        filtered = filter_trivial(filtered, patterns=self._trivial_patterns)
         user_messages = [m for m in filtered if getattr(m, "type", None) == "human"]
         assistant_messages = [m for m in filtered if getattr(m, "type", None) == "ai"]
         if not user_messages or not assistant_messages:

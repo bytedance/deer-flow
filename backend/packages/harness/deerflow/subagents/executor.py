@@ -61,6 +61,7 @@ from deerflow.tracing import (
     build_tracing_callbacks,
     inject_langfuse_metadata,
 )
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.messages import message_content_to_text
@@ -1141,7 +1142,10 @@ class SubagentExecutor:
         except ReasoningPolicyError as exc:
             raise ValueError(f"Model {self.model_name}: {exc}") from exc
         # Preserve the original request for the factory's validation and logs.
-        model = create_chat_model(
+        # Provider construction can read local credentials (the Codex provider
+        # loads the CLI auth.json), so keep the build off the event loop.
+        model = await run_assembly(
+            create_chat_model,
             name=self.model_name,
             thinking_enabled=self.thinking_enabled,
             reasoning_effort=self.reasoning_effort,
@@ -1241,6 +1245,13 @@ class SubagentExecutor:
                 "is" if len(missing) == 1 else "are",
                 self.config.name,
             )
+        bound_tools = list(tools if tools is not None else self.tools)
+        # Native subagents have no resumable checkpoint/runtime. Reuse the lead
+        # builder's configured policy so matching calls fail closed instead of
+        # bypassing approval; disabled configuration remains a no-op.
+        from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
+
+        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1253,7 +1264,6 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
-        bound_tools = list(tools if tools is not None else self.tools)
         agent = create_agent(
             model=model,
             tools=bound_tools,

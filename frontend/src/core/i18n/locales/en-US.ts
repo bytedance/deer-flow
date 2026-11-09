@@ -450,6 +450,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -617,6 +623,7 @@ export const enUS: Translations = {
       waitingForYou: "Waiting for you",
       waiting: "Waiting",
       paused: "Paused",
+      waitingApproval: "Waiting for approval",
       autoContinuedOnce: "Auto-continued once",
       autoContinuedMany: "Auto-continued {count} times",
       details: "Details",
@@ -648,6 +655,9 @@ export const enUS: Translations = {
           "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
         needsInputCard: "Answer the question above to continue.",
         needsInputReply: "Reply with the missing details to continue.",
+        needsApproval: "Review the tool approval above to continue.",
+        needsApprovalReload:
+          "Approval details failed to load. Use the reload-error panel above to try again.",
         external:
           "Goal check: waiting on something external. Send a message when it's ready.",
         unchecked: "{reason}. It's checked again after your next message.",
@@ -953,7 +963,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -1914,6 +1926,31 @@ export const enUS: Translations = {
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
+    approval: {
+      title: "Tool approval required",
+      description:
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
+      waiting: "Waiting for approval",
+      loading: "Loading approval details...",
+      loadFailed:
+        "Approval details could not be loaded. This conversation is still waiting for approval; reload the details before continuing.",
+      reload: "Reload approval details",
+      approve: "Approve",
+      reject: "Reject",
+      approveAll: "Approve all",
+      rejectAll: "Reject all and finish",
+      submitDecisions: "Submit decisions",
+      reasonLabel: "Rejection reason (optional)",
+      reasonPlaceholder: "Tell the agent why it should not run these tools...",
+      submitFailed:
+        "The approval could not be submitted. Review your decisions and try again.",
+      submitTimeout:
+        "The approval submission timed out and was stopped. Review your decisions and try again.",
+      featureDisabled:
+        "Tool approval is now disabled. You can still reject all and finish safely.",
+      noPending:
+        "This approval is no longer pending. Reload the conversation before retrying.",
+    },
   },
 
   // Subtasks
@@ -1999,6 +2036,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",

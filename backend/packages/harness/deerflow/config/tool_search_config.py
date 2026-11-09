@@ -7,7 +7,7 @@ AUTO_PROMOTE_TOP_K_MAX = 5
 
 
 def clamp_auto_promote_top_k(value: int) -> int:
-    """Clamp the global MCP routing auto-promote breadth to PR2's range."""
+    """Clamp the legacy MCP routing setting for configuration compatibility."""
     return max(AUTO_PROMOTE_TOP_K_MIN, min(AUTO_PROMOTE_TOP_K_MAX, int(value)))
 
 
@@ -25,7 +25,7 @@ class ToolSearchConfig(BaseModel):
     )
     auto_promote_top_k: int = Field(
         default=3,
-        description="Maximum number of deferred MCP tool schemas auto-promoted from routing metadata per model call",
+        description="Legacy setting retained for compatibility; routing keywords do not auto-promote schemas",
     )
 
     @field_validator("auto_promote_top_k")

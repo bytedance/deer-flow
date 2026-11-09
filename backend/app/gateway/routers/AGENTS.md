@@ -112,3 +112,22 @@ Unauthenticated auth routes (`/register`, `/setup-status`, `/providers`,
 `/oauth/{provider}`, `/callback/{provider}`, the `/login/local` throttle) read
 `get_app_config()` through `asyncio.to_thread`: each read stats and hashes the
 config files. Coverage: `tests/blocking_io/test_auth_router_config_reads.py`.
+
+Managed-model `/discover` and `/import` require administrator access before
+reading credentials or making outbound requests. Discovery is read-only and
+bounded (20 seconds, 2 MiB, 2,000 IDs/20 pages); it never follows redirects
+and requests identity encoding, rejecting compressed bodies before decoding.
+Import probes each new profile, saves through the drained writer, and atomically
+deduplicates retries without changing existing disabled profiles. Saved-key reuse
+requires matching connection and revision, checked again under the write lock
+after probing (409 on change); provider errors remain redacted.
+
+Agent-scoped memory routes take `agent_name` and validate it with
+`AGENT_NAME_PATTERN`; the backend must also declare
+`supports_agent_scoped_management` or the route answers 501. The two routes that
+create the scope — `POST /memory/facts` and `POST /memory/import` — additionally
+reject Windows reserved device names through `windows_incompatible_segment()`.
+The scope is a host directory (`agents/{name}/facts`), so the character class
+alone let the first write fail with `FileNotFoundError` and answer 500. Keep
+reads and deletes permissive: a scope an older release stored under a reserved
+name must stay exportable and clearable. Tests: `test_memory_router.py`.

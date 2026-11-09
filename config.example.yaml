@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 64
+config_version: 65
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1396,9 +1396,8 @@ tools:
 
 tool_search:
   enabled: false
-  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
-  # matching deferred MCP tool schemas before a model call. This is the maximum
-  # number of matched schemas promoted per model call. Valid range: 1..5.
+  # Legacy compatibility setting (1..5). Routing keywords are advisory only;
+  # deferred schemas are exposed by explicit tool_search selection.
   auto_promote_top_k: 3
 
 # ============================================================================
@@ -1595,6 +1594,22 @@ read_before_write:
   # count, not tokens: CJK text costs ~3-4x more per character than ASCII).
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
+
+# Optional pre-write syntax validation and targeted error remediation guard.
+# When enabled (write_verify_syntax: true), intercepts str_replace to validate
+# spliced .py (ast.parse) and .json (json.loads) syntax before disk I/O.
+# Also classifies tool error outputs (ModuleNotFoundError, SyntaxError,
+# FileNotFoundError, etc.) and injects actionable remediation hints directly into
+# tool results.
+harness_guard:
+  enabled: true
+  write_verify_syntax: false
+  block_on_syntax_error: true
+  targeted_hints_enabled: true
+  max_repeated_error_signatures: 2
+  detect_alternating_loops: true
+  max_loop_history: 20
+  max_tracked_scopes: 1000
 
 # ============================================================================
 # Projects
@@ -2111,6 +2126,24 @@ verification:
   receipts_render_mode: "delegation_only"
   judge_enabled: false
   judge_model_name: null
+
+# ============================================================================
+# HITL tool approval
+# ============================================================================
+# Pause high-risk tool calls for human approval before execution.
+# enabled=false (default) leaves all behavior unchanged.
+# The high-risk list is host-owned security policy edited by the operator.
+# non_interactive: deny | allow — behavior for IM channels, GitHub runs,
+# scheduled tasks, and other non-interactive entry points. Subagents and
+# runtimes without resume support always fail closed regardless of this setting.
+# Approval is not authorization: read_before_write, guardrails, and sandbox
+# authorization still apply after approval ("approve to try executing").
+hitl_approval:
+  enabled: false
+  tools: []  # e.g. [write_file, str_replace, bash]
+  non_interactive: deny
+  # Maximum matching tool calls in one approval batch; 0 disables the count limit.
+  max_actions: 32
 
 # ============================================================================
 # ACP Agents Configuration
