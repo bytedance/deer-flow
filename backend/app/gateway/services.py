@@ -30,7 +30,7 @@ from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_INTERNAL, get_auth_disabled_user, is_auth_disabled
 from app.gateway.authz import require_cancel_permission_if, resolve_route_permissions
-from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -106,7 +106,7 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import get_current_user, reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
@@ -158,6 +158,7 @@ async def reserve_checkpoint_write(
 
 _TERMINAL_RUN_STATUSES = {
     RunStatus.success,
+    RunStatus.waiting_for_input,
     RunStatus.error,
     RunStatus.timeout,
     RunStatus.interrupted,
@@ -937,6 +938,45 @@ def _legacy_stored_idempotency_request(kwargs: dict[str, Any]) -> dict[str, Any]
     if not isinstance(digest, str) or len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         return None
     return identity
+
+
+async def _find_admitted_run_for_idempotency_key(
+    run_mgr: RunManager,
+    thread_id: str,
+    idempotency_key: str,
+    *,
+    user_id: str | None,
+) -> RunRecord | None:
+    """Resolve an existing key on this thread and owner before pause checks."""
+    before_created_at: str | None = None
+    before_run_id: str | None = None
+    while True:
+        records = await run_mgr.list_by_thread(
+            thread_id,
+            user_id=user_id,
+            limit=100,
+            before_created_at=before_created_at,
+            before_run_id=before_run_id,
+        )
+        for record in records:
+            if record.idempotency_key == idempotency_key and record.user_id == user_id:
+                return record
+        if len(records) < 100:
+            return None
+        cursor = records[-1]
+        before_created_at = cursor.created_at
+        before_run_id = cursor.run_id
+
+
+def _is_retryable_resume_start_failure(record: RunRecord | None) -> bool:
+    """Whether admission failed before a resume worker could attach."""
+    return record is not None and record.status == RunStatus.error and isinstance(record.error, str) and record.error.startswith("Failed to attach run worker:")
+
+
+async def _discard_failed_resume_admission(request: Request, run_mgr: RunManager, record: RunRecord) -> None:
+    """Release a failed admission's key so an identical retry can start work."""
+    await get_run_store(request).delete(record.run_id, user_id=record.user_id)
+    await run_mgr.cleanup(record.run_id, delay=0)
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -2263,6 +2303,7 @@ async def start_run(
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
+    validated_approval_request_ids: dict[str, str] | None = None
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
@@ -2335,10 +2376,40 @@ async def start_run(
         if admitted_origin not in EVIDENCE_ORIGINS:
             raise ValueError("Unsupported host evidence origin")
         command = getattr(body, "command", None)
+        from app.gateway.hitl_approval import reject_new_run_when_approval_pending, validate_resume_request
+
+        current_user = get_current_user()
+        run_user_id = str(current_user.id) if current_user is not None else None
+        admitted_run = (
+            await _find_admitted_run_for_idempotency_key(
+                run_mgr,
+                thread_id,
+                idempotency_key,
+                user_id=run_user_id,
+            )
+            if idempotency_key is not None
+            else None
+        )
         if command and command.get("resume") is not None:
             graph_input = Command(resume=command["resume"])
+            stored_idempotency_request = (admitted_run.idempotency_request or _legacy_stored_idempotency_request(admitted_run.kwargs or {})) if admitted_run is not None else None
+            retry_failed_resume = _is_retryable_resume_start_failure(admitted_run) and stored_idempotency_request == idempotency_request
+            if admitted_run is None or retry_failed_resume:
+                accessor, read_config = await build_thread_checkpoint_state_accessor(
+                    request,
+                    thread_id=thread_id,
+                )
+                validated_approval_request_ids = await validate_resume_request(
+                    request=request,
+                    thread_id=thread_id,
+                    accessor=accessor,
+                    read_config=read_config,
+                    enabled=get_app_config().hitl_approval.enabled,
+                    body=body,
+                )
         else:
-            # LangGraph continues pending work with None; {} starts new input.
+            if admitted_run is None:
+                await reject_new_run_when_approval_pending(request, thread_id)
             graph_input = normalized_input if body.input is not None else None
         # Keep the idempotency identity in the caller's pre-stamp shape. A
         # keyed retry can then reuse a run even though its stored run input has
@@ -2745,55 +2816,64 @@ async def start_run(
                 )
                 if start_producer_lease is not None:
                     producer_lease_started = await start_producer_lease(admission_run_id)
-                    if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
-                        # Best-effort: a cross-process bridge returns False only
-                        # after a transient backend error whose partial lease
-                        # registration was safely rolled back (nothing is left
-                        # tracked). An untracked producer falls back to the
-                        # historical conservative recovery path -- wait for the
-                        # real END or the retained-stream TTL rather than
-                        # synthesizing one -- so this run is no less safe than it
-                        # was before producer leases existed. Rejecting admission
-                        # here would instead turn a transient blip into a 500.
-                        logger.warning(
-                            "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
-                            sanitize_log_param(admission_run_id),
-                        )
-                try:
-                    record = await run_mgr.create_or_reject(
-                        thread_id,
-                        body.assistant_id,
-                        on_disconnect=disconnect,
-                        metadata=run_metadata,
-                        # Persist a redacted copy of the config: the run record is
-                        # written to runs.kwargs_json and echoed by the run API, so a
-                        # request-scoped secret (#3861) or client hint must not ride along.
-                        # The live config built above keeps them for the actual run.
-                        kwargs={
-                            "input": run_record_input,
-                            **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
-                            "config": redact_config_secrets(body.config),
-                            **({"conversation_references": conversation_references} if conversation_references else {}),
-                        },
-                        idempotency_request=idempotency_request,
-                        multitask_strategy=body.multitask_strategy,
-                        model_name=model_name,
-                        user_id=owner_user_id,
-                        idempotency_key=idempotency_key,
-                        evidence_origin=admitted_origin,
-                        # Canonical agent keys, not routing aliases or display names.
-                        # Bootstrap and unresolved legacy identities stay read-only.
-                        evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
-                        run_id=admission_run_id,
-                        **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
+                if not producer_lease_started and getattr(bridge, "supports_cross_process", False) is True:
+                    # Best-effort: a cross-process bridge returns False only
+                    # after a transient backend error whose partial lease
+                    # registration was safely rolled back (nothing is left
+                    # tracked). An untracked producer falls back to the
+                    # historical conservative recovery path -- wait for the
+                    # real END or the retained-stream TTL rather than
+                    # synthesizing one -- so this run is no less safe than it
+                    # was before producer leases existed. Rejecting admission
+                    # here would instead turn a transient blip into a 500.
+                    logger.warning(
+                        "Stream producer tracking unavailable for run %s; admitting it with untracked (conservative) stream recovery",
+                        sanitize_log_param(admission_run_id),
                     )
-                except RunIdempotencyUnsupported as exc:
-                    raise HTTPException(status_code=503, detail=str(exc)) from exc
-                except RunIdempotencyKeyMismatch as exc:
-                    # A trusted internal key is scoped by owner, not thread: the
-                    # same message requested on another thread (IM ``/new``) is
-                    # a different request for the run already admitted.
-                    raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
+
+                async def admit_run() -> RunRecord:
+                    try:
+                        if admitted_run is None and not (command and command.get("resume") is not None):
+                            # Validation above is intentionally early, but a pause can
+                            # appear while this request prepares its admission. Recheck
+                            # under the thread lock so a fresh input cannot replace it.
+                            await reject_new_run_when_approval_pending(request, thread_id)
+                        return await run_mgr.create_or_reject(
+                            thread_id,
+                            body.assistant_id,
+                            on_disconnect=disconnect,
+                            metadata=run_metadata,
+                            # Persist a redacted copy of the config: the run record is
+                            # written to runs.kwargs_json and echoed by the run API, so a
+                            # request-scoped secret (#3861) or client hint must not ride along.
+                            # The live config built above keeps them for the actual run.
+                            kwargs={
+                                "input": run_record_input,
+                                **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                                "config": redact_config_secrets(body.config),
+                                **({"conversation_references": conversation_references} if conversation_references else {}),
+                            },
+                            idempotency_request=idempotency_request,
+                            multitask_strategy=body.multitask_strategy,
+                            model_name=model_name,
+                            user_id=owner_user_id,
+                            idempotency_key=idempotency_key,
+                            evidence_origin=admitted_origin,
+                            # Canonical agent keys, not routing aliases or display names.
+                            # Bootstrap and unresolved legacy identities stay read-only.
+                            evidence_agent_id=(None if scope_runtime_config.get("is_bootstrap") else (_DEFAULT_ASSISTANT_ID if scope_assistant_id == _DEFAULT_ASSISTANT_ID else getattr(agent_config, "name", None))),
+                            run_id=admission_run_id,
+                            **({"execution_fence": request.state.extension_execution_fence} if getattr(request.state, "extension_execution_fence", None) is not None else {}),
+                        )
+                    except RunIdempotencyUnsupported as exc:
+                        raise HTTPException(status_code=503, detail=str(exc)) from exc
+                    except RunIdempotencyKeyMismatch as exc:
+                        # A trusted internal key is scoped by owner, not thread: the
+                        # same message requested on another thread (IM ``/new``) is
+                        # a different request for the run already admitted.
+                        raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request") from exc
+
+                record = await admit_run()
 
                 if record.idempotency_reused:
                     stored = record.kwargs or {}
@@ -2821,13 +2901,48 @@ async def start_run(
                             status_code=409,
                             detail="Idempotency-Key already used with a different request",
                         )
-                    return record
-
+                    if request_identity["kind"] == "resume" and _is_retryable_resume_start_failure(record):
+                        # The original request never attached a worker. Preserve
+                        # idempotency for real execution outcomes, but let this
+                        # identical retry replace only that failed admission.
+                        await _discard_failed_resume_admission(request, run_mgr, record)
+                        record = await admit_run()
+                        if record.idempotency_reused:
+                            # A concurrent identical retry won the replacement.
+                            return record
+                    else:
+                        return record
                 worker = run_after_metadata(record)
+                answered_approval = None
                 try:
+                    if command and command.get("resume") is not None:
+                        from app.gateway.hitl_approval import _all_reject, _responses_of, current_approval_request_ids, mark_approval_answered
+
+                        responses = _responses_of(command)
+                        answered_approval = await mark_approval_answered(
+                            request,
+                            thread_id,
+                            expected_request_ids=(validated_approval_request_ids if responses is not None else None),
+                        )
+                        if answered_approval is None and responses is not None:
+                            if not _all_reject(responses):
+                                # Competing or stale approvals fail closed.
+                                raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                            # A crashed attempt may have consumed the run row while
+                            # leaving the same checkpoint pause live. Only that exact
+                            # pause may use checkpoint-only recovery; a stale reject
+                            # must never dismiss a newer approval.
+                            current_request_ids = await current_approval_request_ids(
+                                request,
+                                thread_id,
+                                accessor=accessor,
+                                read_config=read_config,
+                            )
+                            if current_request_ids != validated_approval_request_ids:
+                                raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
                     # The stream lease was established before durable admission.
-                    # Keep the admission-to-task-attachment window await-free so
-                    # cancellation cannot strand a pending row.
+                    # Once resume persistence succeeds, keep task attachment
+                    # await-free so cancellation cannot strand a pending row.
                     record.task = asyncio.create_task(worker)
                     if producer_lease_started:
                         transfer_producer_lease = _declared_bridge_method(
@@ -2840,12 +2955,28 @@ async def start_run(
                                 record.task,
                             )
                         producer_lease_handed_off = True
-                except Exception as exc:
-                    worker.close()
-                    await run_mgr.fail_start_if_pending(
-                        record.run_id,
-                        error=f"Failed to attach run worker: {exc}",
-                    )
+                except BaseException as exc:
+                    attachment_error = f"Failed to attach run worker: {exc}"
+                    task = record.task
+                    if task is None:
+                        worker.close()
+
+                    async def cleanup_failed_attachment() -> None:
+                        if task is not None:
+                            task.cancel()
+                            await asyncio.gather(task, return_exceptions=True)
+                            if record.task is task:
+                                record.task = None
+                        await run_mgr.fail_start_if_pending(
+                            record.run_id,
+                            error=attachment_error,
+                        )
+                        if answered_approval is not None:
+                            restored = await run_mgr.restore_approval_answer(answered_approval)
+                            if not restored:
+                                raise RuntimeError(f"Failed to restore approval run {answered_approval.run_id} after worker attachment failed")
+
+                    await asyncio.shield(cleanup_failed_attachment())
                     raise
         except ConflictError as exc:
             raise BusyThreadConflict(str(exc)) from exc
@@ -2957,14 +3088,23 @@ async def launch_scheduled_thread_run(
     # scheduler service's own per-occurrence scope -- ensure_trace_context
     # keeps that trace instead of minting a competing one.
     with ensure_trace_context():
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            evidence_origin="scheduled",
-            scheduled_task_runtime=scheduled_task_runtime,
-        )
+        try:
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                evidence_origin="scheduled",
+                scheduled_task_runtime=scheduled_task_runtime,
+            )
+        except HTTPException as exc:
+            if isinstance(exc.detail, dict) and exc.detail.get("code") == "approval_pending":
+                # Skip-and-retry: an approval pause on the thread is temporary,
+                # not a permanent launch failure. The scheduler treats this as
+                # an overlap conflict and retries on its normal cadence.
+                logger.info("Scheduled launch skipped: thread %s has a pending approval", thread_id)
+                raise ConflictError(str(exc.detail)) from exc
+            raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
@@ -3049,6 +3189,9 @@ async def launch_mcp_task_notification_run(
                 require_existing_thread=True,
             )
     except HTTPException as exc:
+        if isinstance(exc.detail, dict) and exc.detail.get("code") == "approval_pending":
+            # Temporary condition, not a permanent notification failure.
+            raise ConflictError(str(exc.detail)) from exc
         if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
         if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:

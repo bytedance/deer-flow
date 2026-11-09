@@ -68,6 +68,7 @@ const TERMINAL_RUN_STATUSES = new Set([
   "error",
   "timeout",
   "interrupted",
+  "waiting_for_input",
 ]);
 
 // This is a rejoin budget: the original stream is not counted, so exhausting

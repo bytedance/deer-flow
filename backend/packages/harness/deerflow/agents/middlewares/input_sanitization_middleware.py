@@ -208,6 +208,18 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
+def _is_empty_text_item(block) -> bool:
+    """True for a content-list item that carries no text at all.
+
+    Covers both shapes the sanitizer normalizes away: an empty bare string and
+    an empty ``{"type": "text", "text": ""}`` block. Neither contributes text,
+    and both are rejected inside a content list by strict serializers.
+    """
+    if isinstance(block, str):
+        return not block
+    return isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) and not block["text"]
+
+
 class _FramedUserText(str):
     """Request-local encoding provenance; JSON/plain strings cannot carry it.
 
@@ -271,17 +283,12 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Extract concatenated text from a plain-string or content-block-list.
 
         Returns ``(text, extracted_blocks)``. *extracted_blocks* is None when
-        *content* is a string, or the list of text items when a list.
+        *content* is a string, or the list of text-content blocks when a list.
 
         A list can hold bare ``str`` items next to content-block dicts
         (``message_content_to_text`` treats both as text, and some IM/SDK
         clients send exactly that shape), so bare strings are collected too —
         skipping them would skip sanitization entirely for that message.
-
-        Empty text items are collected but contribute no text. They are still
-        text-shaped, so the rebuild has to drop them: leaving one in place
-        emits a bare ``""`` (or ``{"type": "text", "text": ""}``) content part
-        that the Chat Completions schema does not allow (#8037).
         """
         if isinstance(content, str):
             return content, None
@@ -291,22 +298,18 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         text_blocks: list[dict | str] = []
         for block in content:
             if isinstance(block, str):
-                if block:
-                    text_parts.append(block)
+                if not block:  # skip empty items — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(block)
                 text_blocks.append(block)
             elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                if block["text"]:
-                    text_parts.append(block["text"])
+                text = block["text"]
+                if not text:  # skip empty blocks — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(text)
                 text_blocks.append(block)
         # Preserve request-local provenance for a single already-framed block.
         return (text_parts[0] if len(text_parts) == 1 else "\n".join(text_parts)), text_blocks
-
-    @staticmethod
-    def _is_empty_text_item(block) -> bool:
-        """True for a collected text item that carries no text and contributes none of ``text_content``."""
-        if isinstance(block, str):
-            return not block
-        return not block["text"]
 
     @staticmethod
     def _rebuild_content(
@@ -317,9 +320,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Replace text blocks with a single merged text block, preserving interleaved non-text blocks.
 
         For ``[text, image, text]`` the image block between the two text blocks
-        is kept in place — only the text blocks are collapsed into one. Empty
-        text items are collected as text blocks precisely so they are dropped
-        here instead of surviving as untyped content parts.
+        is kept in place — only the text blocks are collapsed into one.
         """
         text_block_ids = {id(b) for b in text_blocks}
         first = last = None
@@ -346,14 +347,27 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         message is never mutated.
         """
         content = msg.content
+        normalized_message = None
+        if isinstance(content, list):
+            # Empty bare strings and empty typed text blocks both carry no text.
+            # Dropping them here keeps them out of both the extractor and the
+            # rebuilt list; an empty text part is rejected by serializers that
+            # validate content-part text, just like an untyped bare string.
+            filtered = [block for block in content if not _is_empty_text_item(block)]
+            if len(filtered) != len(content):
+                # Normalize before early returns, including image-only and
+                # already-framed messages. Use an empty string rather than
+                # introducing an empty content-parts list for all-empty input.
+                content = filtered or ""
+                normalized_message = msg.model_copy(update={"content": deepcopy(content)})
+                if not filtered:
+                    return normalized_message
         text_content, text_blocks = self._extract_text_from_content(content)
 
-        # No text items at all (e.g. image-only message) — pass through. An
-        # empty text item still counts: it contributes no text, but it has to
-        # leave the request, so the message is rebuilt without it.
-        if not text_blocks and not isinstance(content, str):
+        # No text at all (e.g. image-only message) — pass through
+        if not text_content and not isinstance(content, str):
             logger.debug("_sanitize_message: no text content in message — passing through")
-            return None
+            return normalized_message
 
         # Sanitize only the user's original input when available (set by
         # UploadsMiddleware before it prepends the <current_uploads> block),
@@ -428,11 +442,8 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
             processed = _check_user_content(text_content)  # fallback
 
         if processed == text_content:
-            # Nothing to sanitize. An already-framed message needs no override,
-            # but an empty text item still has to leave the request.
-            if not any(self._is_empty_text_item(block) for block in text_blocks or ()):
-                return None
-            return msg.model_copy(update={"content": deepcopy(self._rebuild_content(content, text_content, text_blocks))})
+            # Already clean / already wrapped — only normalization may be needed
+            return normalized_message
 
         if text_blocks:
             new_content = self._rebuild_content(content, processed, text_blocks)

@@ -11,6 +11,21 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
+  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
+  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
+  approval card with per-field argument summaries. Approve executes the call,
+  reject returns the reason to the model without executing. IM channels,
+  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
+  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
+  support always reject matching calls regardless of that setting.
+  `hitl_approval.max_actions` configures the approval-batch count limit
+  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
+
+- **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
+  access for authenticated users, without maintaining a per-user allowlist.
+  Exact-user allowlists remain the default; shared access requires matching
+  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
 
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
@@ -27,6 +42,19 @@ This section accumulates work toward the **2.3.0** milestone
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
 ### Fixed
+
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
+
+- **gateway:** Deleting a thread no longer reports success while its
+  conversation stays readable. When the checkpoint store failed during
+  `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
+  thread's metadata row and returned success; any signed-in user could then
+  read the leftover title and messages through `GET /threads/{id}`, `/state`,
+  `/history` and `/goal`, and the owner could not retry. The delete now
+  returns a 500 and keeps the thread, so the owner can delete it again.
+  ([#7992])
 
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
@@ -105,6 +133,18 @@ This section accumulates work toward the **2.3.0** milestone
   threads. A group bound with its own `/connect` keeps its thread; a legacy
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
+  
+- **memory:** An agent-scoped memory write whose `agent_name` is a Windows
+  reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
+  on the two routes that create that scope, `POST /memory/facts` and
+  `POST /memory/import`. DeerMem resolves the scope to
+  `{storage}/users/{uid}/agents/{name}/facts` and creates it on the first write;
+  the character-class check admitted such names, so the write raised
+  `FileNotFoundError` and the endpoint answered an opaque `500`. The check reuses
+  `windows_incompatible_segment()` and applies on every platform. Read and delete
+  routes stay permissive, so a scope with a reserved-name identifier that an
+  older release stored on a Linux host can still be exported and cleared.
+  ([#7941])
 
 - **skills:** A custom skill name that is a Windows reserved device name
   (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
@@ -16138,9 +16178,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7941]: https://github.com/bytedance/deer-flow/pull/7941
 [#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006

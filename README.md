@@ -1775,6 +1775,20 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
+**Human approval for high-risk tools**: Set `hitl_approval.enabled: true` and
+list tools such as `write_file`, `str_replace`, or `bash` in `config.yaml` to
+pause matching calls before execution. The Web UI shows an approval card for
+each action; approval attempts execution under the existing guardrails and
+sandbox authorization, while rejection returns the reason to the agent without
+running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
+subagents and runtimes without resume support always fail closed.
+
+Pending approvals do not expire and block new runs on the same thread until
+resolved. Long argument values may be truncated in the display, but approval
+executes the original complete arguments. The feature is disabled by default.
+See [HITL Tool Approval](backend/docs/CONFIGURATION.md#hitl-tool-approval) for
+configuration and safety semantics.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not
@@ -1873,8 +1887,9 @@ Providers remain usable without a catalog or management page. See the
 for extension registration and configuration. The installable
 [WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
 targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
-retrieval citations. Configure explicit user-to-workspace credential bindings;
-resource authorization remains with WeKnora. The extension directory includes
+retrieval citations. Configure explicit user-to-workspace credential bindings,
+or opt into shared read-only access for authenticated users without maintaining
+a user-ID list. Resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
 The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)
@@ -2151,7 +2166,8 @@ Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`,
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
-loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
+loopback (`[::1]`) hosts as local. Raw brackets in the URL's userinfo make it count as outbound for
+exfiltration checks. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
 SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
@@ -2635,6 +2651,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+The composer's paperclip button opens the local file chooser directly; the `@` button opens the reference picker for skills, project files, conversations, and plugins.
+
 If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
 
 Document conversion reads the live PDF-converter setting and parses documents in a background worker, keeping configuration-file checks off the Gateway event loop.
@@ -2719,8 +2737,9 @@ and SDK retries can add calls. See the
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
-and filters before the eight-result limit; omitting it or passing `null` preserves
-search across all roles.
+and filters before limiting results to eight distinct sources. Omitting `role` or
+passing `null` preserves search across all roles. Repeated archives of one source
+share one result slot.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range
@@ -2907,6 +2926,11 @@ independently shaped summaries from other runners still contribute evidence.
 Pytest sibling summaries retain warning counts and the optional human-readable
 duration suffix printed for runs lasting at least a minute, such as `(0:01:05)`.
 
+`tests_passed` evidence pairs each command with its own result, even when a
+provider reuses a tool-call id in a later response. Each run stays a separate
+entry in execution order, so a later failing run is decisive and an earlier
+run's output is never credited to another command.
+
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
 Complete `Tests run: N, Failures: F, Errors: E, Skipped: S` or `N tests completed`
@@ -3039,6 +3063,23 @@ Native workers support per-subagent `thinking_enabled` and `reasoning_effort` th
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ### Sandbox & File System
+
+AIO runs commands from independent subagents concurrently, including Lark CLI
+and skill commands with per-call environment variables. Commands within one
+subagent stay ordered, and each environment-bearing call uses a fresh session.
+Environment-bearing calls share a per-sandbox Bash admission limit, configured
+by `sandbox.environment.AIO_BASH_MAX_SESSIONS` (positive integer, default `50`).
+Excess calls wait without creating a session and can be cancelled while waiting;
+the slot is retained through session cleanup. This pool is separate from
+`MAX_SHELL_SESSIONS`. Docker reuse checks the persisted container environment;
+K8s reuse checks the provisioner's Pod-reported Bash capacity. Upgrade the
+provisioner with the Gateway: missing capacity metadata blocks admission.
+Cancellation remains routed to the running command while scope release or
+sandbox close waits for it to finish and clean up.
+Scope release waits for in-flight execution and cleanup without a separate drain
+deadline. Allow for the remaining command timeout (600 seconds by default), plus
+session/transport/recovery/cleanup time when setting operator-facing release
+budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
 
 With local host bash enabled, the path guard permits division in simple shell
 arithmetic and recognized single-quoted Python, Node.js and Perl programs.
@@ -3728,7 +3769,12 @@ editing the saved agent configuration to refresh the selection.
 
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API.
+
+The HTTP Gateway exposes `DELETE /api/threads/{thread_id}` to remove a thread's
+files, checkpoints, and metadata. If checkpoint deletion fails, the Gateway
+returns 500 and retains the owner record for retry.
+[Thread cleanup API](backend/docs/API.md#thread-cleanup)
 
 An embedded `DeerFlowClient(config_path="custom/config.yaml")` keeps the process
 config singleton on that file, even after a working-directory change. Later edits

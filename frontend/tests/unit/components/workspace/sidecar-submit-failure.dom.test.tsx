@@ -28,6 +28,12 @@ const mocks = rs.hoisted(() => ({
   createSidecarThread: rs.fn(),
   sendMessage: rs.fn(),
   toastError: rs.fn(),
+  streamOptions: undefined as unknown,
+  threadMetadata: {
+    data: undefined as unknown,
+    isLoading: false,
+    isFetching: false,
+  },
 }));
 
 rs.mock("next/navigation", () => ({
@@ -58,14 +64,18 @@ rs.mock("@/core/sidecar/api", () => ({
 
 rs.mock("@/core/threads/hooks", () => ({
   useDeleteThread: () => ({ mutateAsync: rs.fn(), isPending: false }),
-  useThreadStream: () => ({
-    thread: { isLoading: false, messages: [], values: {} },
-    sendMessage: mocks.sendMessage,
-    isUploading: false,
-    isHistoryLoading: false,
-    hasMoreHistory: false,
-    loadMoreHistory: rs.fn(),
-  }),
+  useThreadMetadata: () => mocks.threadMetadata,
+  useThreadStream: (options: unknown) => {
+    mocks.streamOptions = options;
+    return {
+      thread: { isLoading: false, messages: [], values: {} },
+      sendMessage: mocks.sendMessage,
+      isUploading: false,
+      isHistoryLoading: false,
+      hasMoreHistory: false,
+      loadMoreHistory: rs.fn(),
+    };
+  },
 }));
 
 const USER = {
@@ -141,6 +151,10 @@ beforeEach(() => {
   mocks.createSidecarThread.mockReset();
   mocks.sendMessage.mockReset();
   mocks.toastError.mockReset();
+  mocks.streamOptions = undefined;
+  mocks.threadMetadata.data = undefined;
+  mocks.threadMetadata.isLoading = false;
+  mocks.threadMetadata.isFetching = false;
 });
 
 afterEach(() => {
@@ -148,6 +162,36 @@ afterEach(() => {
 });
 
 describe("SidecarPanel keeps the draft when a send fails", () => {
+  it("forwards restored interrupts and initial metadata loading to the stream", async () => {
+    const interrupts = { task: [{ value: { kind: "hitl_approval" } }] };
+    mocks.threadMetadata.data = { interrupts };
+    mocks.threadMetadata.isLoading = true;
+    mocks.threadMetadata.isFetching = true;
+
+    render(renderPanel("sidecar-1"));
+
+    await waitFor(() =>
+      expect(mocks.streamOptions).toMatchObject({
+        threadId: "sidecar-1",
+        restInterrupts: interrupts,
+        restInterruptsLoading: true,
+      }),
+    );
+  });
+
+  it("does not treat a background metadata refetch as initial loading", async () => {
+    mocks.threadMetadata.isFetching = true;
+
+    render(renderPanel("sidecar-1"));
+
+    await waitFor(() =>
+      expect(mocks.streamOptions).toMatchObject({
+        threadId: "sidecar-1",
+        restInterruptsLoading: false,
+      }),
+    );
+  });
+
   it("keeps the draft when creating the side chat fails", async () => {
     mocks.createSidecarThread.mockRejectedValue(new Error("create failed"));
     render(renderPanel(null));

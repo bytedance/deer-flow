@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from deerflow.knowledge_scope import execution_scope
+from deerflow.runtime.user_context import get_authenticated_user_id
 
 from .contract import KnowledgeCapabilities, KnowledgeRequestContext, RetrievalProvider, RetrievalResult
 
@@ -171,7 +172,7 @@ async def search_provider(provider: RetrievalProvider, query: str, *, scope: obj
     canonical = validate_scope_capabilities(scope, capabilities) if scope is not None else None
     if canonical is not None and canonical["mode"] == "disabled":
         raise ValueError("Knowledge search is disabled for this turn")
-    context = KnowledgeRequestContext(user_id=user_id, agent_name=agent_name, scope=canonical)
+    context = KnowledgeRequestContext(user_id=user_id, agent_name=agent_name, scope=canonical, authenticated_user_id=get_authenticated_user_id())
     contextual_search = getattr(provider, "search_scoped" if operation == "search" else operation, None)
     if callable(contextual_search):
         result = await contextual_search(query, context=context)
