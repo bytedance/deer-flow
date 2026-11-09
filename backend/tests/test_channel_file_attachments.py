@@ -1192,6 +1192,45 @@ class TestManagerArtifactResolution:
         assert "https://" not in invalid
         assert "javascript:" not in invalid
 
+    def test_normalize_public_base_url_validates_and_is_idempotent(self):
+        from app.channels.manager import _normalize_public_base_url
+
+        assert _normalize_public_base_url(None) is None
+        assert _normalize_public_base_url("   ") is None
+        assert _normalize_public_base_url("ftp://example.com") is None
+        assert _normalize_public_base_url("https://example.com/?x=1") is None
+        assert _normalize_public_base_url("https://example.com/#frag") is None
+        assert _normalize_public_base_url("https://example.com:not-a-port") is None
+        assert _normalize_public_base_url("https://example.com/") == "https://example.com"
+
+        encoded = "https://example.com/my%20base"
+        assert _normalize_public_base_url(encoded) == encoded
+        assert _normalize_public_base_url(_normalize_public_base_url(encoded)) == encoded
+
+        non_ascii = "https://example.com/鹿"
+        once = _normalize_public_base_url(non_ascii)
+        assert once == "https://example.com/%E9%B9%BF"
+        assert _normalize_public_base_url(once) == once
+
+    def test_format_artifact_text_does_not_double_encode_base_path(self):
+        from app.channels.manager import _format_artifact_text
+
+        encoded = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.html"],
+            thread_id="thread-1",
+            public_base_url="https://example.com/my%20base",
+        )
+        assert "https://example.com/my%20base/api/threads/thread-1/artifacts/" in encoded
+        assert "%2520" not in encoded
+
+        non_ascii = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.html"],
+            thread_id="thread-1",
+            public_base_url="https://example.com/鹿",
+        )
+        assert "https://example.com/%E9%B9%BF/api/threads/thread-1/artifacts/" in non_ascii
+        assert "%25E9" not in non_ascii
+
 
 # ---------------------------------------------------------------------------
 # URL-based inbound file reader (WeCom media / WeChat full_url fallback)

@@ -7,8 +7,8 @@ transition and clear it only on a displayed-conversation switch or the existing
 failure/replay-gap paths. Draft and confirmation regressions live in
 `tests/unit/core/threads/local-turn-order.dom.test.tsx`.
 
-Answer details use `workspace/message-details` descriptors; skill run scoping
-is documented in `docs/skill-usage-ui.md`.
+Answer details use `workspace/message-details`; skill scoping:
+`docs/skill-usage-ui.md`.
 
 Encode raw paths preserving literal percent escapes. Decode Markdown once;
 match image names to raw paths.

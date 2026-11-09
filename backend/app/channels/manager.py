@@ -1216,15 +1216,19 @@ def _normalize_public_base_url(value: str | None) -> str | None:
     if parsed.query or parsed.fragment:
         return None
 
-    path = quote(parsed.path.rstrip("/"), safe="/-._~!$&'*,;=:@")
+    path = quote(parsed.path.rstrip("/"), safe="/-._~!$&'*,;=:@%")
     return f"{parsed.scheme.lower()}://{parsed.netloc}{path}"
 
 
 def _artifact_browser_url(virtual_path: str, *, thread_id: str | None, public_base_url: str | None) -> str | None:
-    """Build an externally reachable URL for an HTML artifact."""
+    """Build an externally reachable URL for an HTML artifact.
+
+    ``public_base_url`` is expected to be already normalized by the caller so a
+    percent-encoded or non-ASCII path is not encoded twice.
+    """
     import posixpath
 
-    base_url = _normalize_public_base_url(public_base_url)
+    base_url = public_base_url
     if not base_url or not thread_id or not virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
         return None
     if posixpath.splitext(virtual_path)[1].lower() not in HTML_ARTIFACT_SUFFIXES:
@@ -1248,10 +1252,15 @@ def _format_artifact_text(
     """Format artifact filenames, linking HTML when an external base URL is set."""
     import posixpath
 
+    normalized_base_url = _normalize_public_base_url(public_base_url)
     formatted_artifacts: list[str] = []
     for artifact in artifacts:
         filename = posixpath.basename(artifact)
-        browser_url = _artifact_browser_url(artifact, thread_id=thread_id, public_base_url=public_base_url)
+        browser_url = _artifact_browser_url(
+            artifact,
+            thread_id=thread_id,
+            public_base_url=normalized_base_url,
+        )
         if browser_url:
             filename = f"[{_escape_markdown_link_label(filename)}]({browser_url})"
         formatted_artifacts.append(filename)
