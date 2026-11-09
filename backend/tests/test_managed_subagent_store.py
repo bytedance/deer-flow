@@ -109,6 +109,37 @@ def test_sql_signature_detects_update_behind_existing_max_timestamp(sql_store):
     assert sql_store.signature() != before
 
 
+def test_sql_signature_changes_when_the_clock_does_not_advance(sql_store, monkeypatch):
+    """An update inside one clock tick must still invalidate peer snapshots."""
+    sql_store.create(_definition())
+    fixed = datetime.now(UTC)
+
+    # Pin the stored timestamp, then freeze the wall clock at exactly that
+    # value. The ORM onupdate callback writes the very same timestamp back,
+    # so without the fix the row's (id, updated_at) pair never moves.
+    with sql_store._Session() as session:
+        row = session.execute(select(ManagedSubagentRow).where(ManagedSubagentRow.name == "researcher")).scalar_one()
+        row.updated_at = fixed.replace(tzinfo=None)  # SQLite persists naive datetimes
+        session.commit()
+
+    before = sql_store.signature()
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.model.datetime", FrozenDatetime)
+    # The store's own clock only exists once the fix is in place; raising=False
+    # keeps this test a behavioural check against unpatched code too.
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.sql.datetime", FrozenDatetime, raising=False)
+
+    sql_store.update(_definition().model_copy(update={"description": "second"}))
+
+    assert sql_store.get("researcher").description == "second"
+    assert sql_store.signature() != before
+
+
 @pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])
 def test_duplicate_create_is_a_conflict(request, store_fixture):
     store = request.getfixturevalue(store_fixture)

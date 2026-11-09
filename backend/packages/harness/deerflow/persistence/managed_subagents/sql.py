@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Hashable
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -63,6 +64,23 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
             if row is None:
                 raise FileNotFoundError(f"Managed subagent not found: {definition.name}")
             row.definition = definition.model_dump(mode="json")
+            # ``signature()`` is the tuple of (id, updated_at), so a definition
+            # change is only visible to peer processes when this row's stamp
+            # moves. The ORM onupdate callback reads the wall clock, whose
+            # resolution is coarse (about 15.6 ms on Windows) and which can
+            # also sit behind a stamp written by a node with a skewed clock.
+            # Either case leaves updated_at at or below the stored value, so
+            # signature() reports "unchanged" and other processes keep serving
+            # the stale definition. Force the stamp strictly forward instead
+            # of relying on the clock alone.
+            now = datetime.now(UTC)
+            current = row.updated_at
+            if current is not None:
+                if current.tzinfo is None:  # SQLite returns naive datetimes
+                    current = current.replace(tzinfo=UTC)
+                if now <= current:
+                    now = current + timedelta(microseconds=1)
+            row.updated_at = now
             session.commit()
 
     def delete(self, name: str) -> bool:
