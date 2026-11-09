@@ -64,6 +64,16 @@ This section accumulates work toward the **2.3.0** milestone
   `report_1.txt`), instead of `report.tar_1.gz`, so the extension stays intact
   for file-type detection. ([#8042](https://github.com/bytedance/deer-flow/pull/8042))
 
+- **memory:** `memory_search` no longer reports a broken retrieval index as
+  "no matching memories". The FTS5 index is a derived store whose file
+  persists across upgrades, so a locked, unreadable, or outdated one raised
+  `OperationalError` that the search swallowed into an empty list; callers
+  could not tell an index outage from a genuine miss. An index failure is now
+  logged once and falls back to canonical Markdown substring search, while a
+  schema that drifted away from the code reports the missing column so the
+  index can be rebuilt. Malformed FTS5 query syntax still degrades to the
+  tokenized retry. ([#8027])
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
@@ -16235,6 +16245,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8027]: https://github.com/bytedance/deer-flow/pull/8027
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064

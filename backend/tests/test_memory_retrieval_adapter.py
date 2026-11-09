@@ -12,6 +12,7 @@ import pytest
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.retrieval import (
+    _INDEX_SCHEMA_COLUMNS,
     FTS5Retrieval,
     FTS5RetrievalAdapter,
     _is_advanced_query,
@@ -546,6 +547,20 @@ def test_search_surfaces_a_stale_index_schema(tmp_path: Path) -> None:
             engine.search("alpha", scope_user='"alice"', scope_agent='"agent-a"')
     finally:
         engine._conn = original_connection
+        engine.close()
+
+
+def test_index_columns_match_the_schema_used_to_classify_drift(tmp_path: Path) -> None:
+    """A column added to the table or SELECT must also update ``_INDEX_SCHEMA_COLUMNS``.
+
+    Otherwise drift on that column classifies as a query syntax error, the
+    tokenized retry fails the same way, and the search silently returns ``[]``.
+    """
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    try:
+        rows = engine._conn.execute("PRAGMA table_info(memory_fts)").fetchall()
+        assert {row[1] for row in rows} == _INDEX_SCHEMA_COLUMNS
+    finally:
         engine.close()
 
 
