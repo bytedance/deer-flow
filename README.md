@@ -2649,6 +2649,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+The composer's paperclip button opens the local file chooser directly; the `@` button opens the reference picker for skills, project files, conversations, and plugins.
+
 If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
 
 Document conversion reads the live PDF-converter setting and parses documents in a background worker, keeping configuration-file checks off the Gateway event loop.
