@@ -1,6 +1,15 @@
-"""Boundary coverage for ``deerflow.utils.bash_exit``."""
+"""Boundary coverage for ``deerflow.utils.bash_exit``.
+
+``backend/tests/test_tool_result_meta.py`` already drives the same markers
+through ``normalize_tool_message``. This file pins the direct return contract
+of ``bash_exit_status`` -- the exact ``(status, marker)`` tuple -- for the
+inputs where string handling, sign, or unbounded length matters. The few cases
+that overlap the existing suite are kept as the baseline for those assertions.
+"""
 
 from __future__ import annotations
+
+import sys
 
 from deerflow.utils.bash_exit import bash_exit_status
 
@@ -27,7 +36,14 @@ def test_negative_and_timeout_codes_are_errors() -> None:
 
 
 def test_unbounded_digits_are_compared_as_strings() -> None:
-    huge = "9" * 400
+    # CPython >= 3.11 refuses int() on digit strings longer than
+    # sys.get_int_max_str_digits() (4300 by default). Exceeding that cap makes
+    # an implementation regressed to int(match.group(2)) raise ValueError here
+    # instead of silently returning the same ("error", marker) tuple.
+    # A disabled cap (0) falls back to the default so the test still uses a
+    # length far beyond the standard conversion limit.
+    limit = sys.get_int_max_str_digits() or 4300
+    huge = "9" * (limit + 1)
     assert bash_exit_status(f"Exit Code: {huge}") == ("error", f"Exit Code: {huge}")
 
 
