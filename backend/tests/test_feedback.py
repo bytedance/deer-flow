@@ -85,6 +85,24 @@ class TestFeedbackRepository:
             await _cleanup()
 
     @pytest.mark.anyio
+    async def test_create_reraises_integrity_errors_other_than_the_run_user_key(self, tmp_path, monkeypatch):
+        """A violation that is not the (thread, run, user) key, e.g. a feedback_id collision, is not reported as 'already exists'."""
+        import uuid
+        from types import SimpleNamespace
+
+        from deerflow.persistence.feedback import sql as feedback_sql
+
+        fixed_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+        monkeypatch.setattr(feedback_sql, "uuid", SimpleNamespace(uuid4=lambda: fixed_id))
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            with pytest.raises(IntegrityError):
+                await repo.create(run_id="r2", thread_id="t1", rating=1, user_id="u2")
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
     async def test_create_invalid_rating_zero(self, tmp_path):
         repo = await _make_feedback_repo(tmp_path)
         with pytest.raises(ValueError):

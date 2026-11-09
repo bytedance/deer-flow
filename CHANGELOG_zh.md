@@ -26,6 +26,11 @@
 
 ### 修复
 
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
+
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
@@ -12837,3 +12842,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064

@@ -114,8 +114,37 @@ async def test_concurrent_first_feedback_puts_both_succeed_with_one_row(feedback
     assert rows[0]["rating"] in (1, -1)
 
 
-@pytest.mark.anyio
-async def test_second_feedback_post_for_same_run_returns_409_not_500(feedback_repo):
+class _CommitBarrierSession:
+    """Hold each session at commit until every writer has staged its INSERT.
+
+    Both POSTs then commit at once and the database's unique key decides the
+    winner, which is the interleaving two concurrent first submissions produce.
+    """
+
+    def __init__(self, session, barrier: asyncio.Barrier):
+        self._session = session
+        self._barrier = barrier
+        self._waited = False
+
+    def __getattr__(self, name):
+        return getattr(self._session, name)
+
+    async def commit(self):
+        if not self._waited:
+            self._waited = True
+            async with asyncio.timeout(5):
+                await self._barrier.wait()
+        return await self._session.commit()
+
+    async def __aenter__(self):
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._session.__aexit__(*args)
+
+
+def _feedback_post_app(feedback_repo):
     app = make_authed_test_app(user_factory=_user)
 
     @app.middleware("http")
@@ -128,14 +157,43 @@ async def test_second_feedback_post_for_same_run_returns_409_not_500(feedback_re
     app.state.run_store = run_store
     app.state.feedback_repo = feedback_repo
     app.include_router(feedback.router)
+    return app
 
-    url = f"/api/threads/{THREAD_ID}/runs/{RUN_ID}/feedback"
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test") as client:
-        first = await client.post(url, json={"rating": 1, "message_id": "msg-a"})
-        second = await client.post(url, json={"rating": -1, "message_id": "msg-b"})
+
+def _client(app) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test")
+
+
+FEEDBACK_URL = f"/api/threads/{THREAD_ID}/runs/{RUN_ID}/feedback"
+
+
+@pytest.mark.anyio
+async def test_second_feedback_post_for_same_run_returns_409_not_500(feedback_repo):
+    async with _client(_feedback_post_app(feedback_repo)) as client:
+        first = await client.post(FEEDBACK_URL, json={"rating": 1, "message_id": "msg-a"})
+        second = await client.post(FEEDBACK_URL, json={"rating": -1, "message_id": "msg-b"})
 
     assert first.status_code == 200, first.text
     assert second.status_code == 409, second.text
     assert "PUT" in second.json()["detail"]
     rows = await feedback_repo.list_by_run(THREAD_ID, RUN_ID, user_id=str(_user().id))
     assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first.json()["feedback_id"], 1)]
+
+
+@pytest.mark.anyio
+async def test_concurrent_first_feedback_posts_return_one_200_and_one_409(feedback_repo):
+    barrier = asyncio.Barrier(2)
+    real_factory = feedback_repo._sf
+    feedback_repo._sf = lambda: _CommitBarrierSession(real_factory(), barrier)
+
+    async with _client(_feedback_post_app(feedback_repo)) as client:
+        up, down = await asyncio.gather(
+            client.post(FEEDBACK_URL, json={"rating": 1}),
+            client.post(FEEDBACK_URL, json={"rating": -1}),
+        )
+
+    assert sorted([up.status_code, down.status_code]) == [200, 409], (up.text, down.text)
+    winner = up if up.status_code == 200 else down
+    feedback_repo._sf = real_factory
+    rows = await feedback_repo.list_by_run(THREAD_ID, RUN_ID, user_id=str(_user().id))
+    assert [(row["feedback_id"], row["rating"]) for row in rows] == [(winner.json()["feedback_id"], winner.json()["rating"])]

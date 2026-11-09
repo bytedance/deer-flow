@@ -43,6 +43,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** Posting feedback twice for the same run now returns a 409
+  instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
+  feedback row per user and run; a retry, or feedback on another message of the
+  same run, hit that unique key and the Gateway failed with an unhandled
+  database error. The 409 points callers at `PUT` on the same route, which
+  updates the existing feedback. ([#8064])
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
@@ -16182,3 +16189,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
