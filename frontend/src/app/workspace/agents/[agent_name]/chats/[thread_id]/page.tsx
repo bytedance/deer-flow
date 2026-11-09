@@ -362,6 +362,17 @@ export default function AgentChatPage() {
       }
       const executionOptions = {
         ...scopedOptions,
+        onSent: () => {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("message");
+          url.searchParams.delete("message_seq");
+          history.replaceState(
+            null,
+            "",
+            `${url.pathname}${url.search}${url.hash}`,
+          );
+          scopedOptions?.onSent?.();
+        },
         additionalKwargs: {
           ...scopedOptions?.additionalKwargs,
           ...modelInput.additionalKwargs,

@@ -1,13 +1,17 @@
 "use client";
 
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, type InfiniteData } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission } from "@/core/auth/permissions";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
-import { searchWorkspace, type SearchFilters } from "./api";
+import {
+  searchWorkspace,
+  type SearchFilters,
+  type WorkspaceSearchPage,
+} from "./api";
 
 export function useWorkspaceSearch(
   input: string,
@@ -24,9 +28,23 @@ export function useWorkspaceSearch(
   const ready = settled.trim() === query;
   const supported =
     !isStaticWebsiteOnly() && hasPermission(user, "threads:read");
-  const result = useInfiniteQuery({
-    queryKey: ["workspace-search", user?.id, query, filters],
+  const scope = JSON.stringify([
+    user?.id,
+    supported,
+    user?.permissions,
+    filters,
+  ]);
+  const result = useInfiniteQuery<
+    WorkspaceSearchPage,
+    Error,
+    InfiniteData<WorkspaceSearchPage>,
+    string[],
+    string | null
+  >({
+    queryKey: ["workspace-search", scope, query],
     enabled: enabled && ready && supported,
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === scope ? previous : undefined,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) =>
       searchWorkspace(query, filters, pageParam, signal),
@@ -42,8 +60,6 @@ export function useWorkspaceSearch(
     ...result,
     supported,
     waiting: !ready,
-    items: ready
-      ? (result.data?.pages.flatMap((page) => page.items) ?? [])
-      : [],
+    items: result.data?.pages.flatMap((page) => page.items) ?? [],
   };
 }

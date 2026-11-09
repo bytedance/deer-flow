@@ -121,3 +121,8 @@ Import probes each new profile, saves through the drained writer, and atomically
 deduplicates retries without changing existing disabled profiles. Saved-key reuse
 requires matching connection and revision, checked again under the write lock
 after probing (409 on change); provider errors remain redacted.
+
+Workspace search jumps resolve one owned thread rather than listing the corpus.
+Search snippets and historical windows resolve the latest visible message ID
+across pages; stale sequence hints return 404. Checkpoint-only legacy history
+uses `ensure_checkpoint_history_seeded` and its existing write reservation.

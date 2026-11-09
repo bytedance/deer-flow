@@ -53,3 +53,15 @@ SQLite histories, Unicode/symbol queries, ownership, filters, index refresh and
 historical windows. `frontend/tests/e2e-real-backend/workspace-search.spec.ts`
 drives the real Gateway and frontend with synthetic history. Run the replay
 Gateway with `--workspace-search` to enable this provider in that isolated stack.
+
+Review follow-up behavior: message jumps use a single owned thread lookup, and
+latest message versions win across storage pages. Legacy checkpoint-only
+threads are seeded through the host history-migration reservation before
+indexing. SQL membership checks use batches of 250 thread IDs. Clean SQLite
+FTS projections survive restart; literal-fallback writes mark the projection
+dirty and the next FTS-capable startup repairs it.
+
+Title matching keeps Python Unicode casefold semantics across SQL dialects,
+including German sharp-s. It scans metadata in batches of 200 and stops once
+the requested result page is filled; a no-match query can still scan the
+owner's title metadata.

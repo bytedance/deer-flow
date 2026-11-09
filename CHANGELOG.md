@@ -12,6 +12,8 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Added
 
+- Search owned conversation titles and visible messages from the command palette, with historical message navigation and an optional workspace search extension.
+
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation

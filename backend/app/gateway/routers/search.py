@@ -47,7 +47,7 @@ def snippet(text: str, query: str) -> list[dict]:
 
 
 def _corpus(request: Request) -> GatewaySearchCorpus:
-    return GatewaySearchCorpus(get_thread_store(request), get_run_event_store(request), get_run_manager(request), str(request.state.auth.require_user().id))
+    return GatewaySearchCorpus(get_thread_store(request), get_run_event_store(request), get_run_manager(request), str(request.state.auth.require_user().id), request=request)
 
 
 def _encode_cursor(scope: str, phase: str, position) -> str:
@@ -128,9 +128,8 @@ async def search_workspace(body: WorkspaceSearchRequest, request: Request):
             if thread is None or candidate.incarnation != thread.incarnation or not await corpus.owns(thread):
                 continue
             # Re-read authoritative visible text before returning ANY snippet.
-            rows, _ = await corpus._page(candidate.thread_id, limit=1, after_seq=candidate.seq - 1, before_seq=candidate.seq + 1)
-            current = corpus.project(thread, rows[0]) if rows else None
-            if current is None or current.message_id != candidate.message_id or query.casefold() not in current.text.casefold():
+            current = await corpus.latest_message(thread, candidate.message_id)
+            if current is None or current.seq != candidate.seq or query.casefold() not in current.text.casefold():
                 continue
             hit = thread_hit(thread)
             hit.update(type="message", message_id=current.message_id, seq=current.seq, role=current.role, updated_at=current.created_at, snippet=snippet(current.text, query))
@@ -154,7 +153,7 @@ async def message_context(thread_id: ThreadId, request: Request, message_id: str
     window = await corpus.around(thread_id, message_id, seq=seq, limit=limit)
     if window is None:
         raise HTTPException(404, "Message is unavailable")
-    thread = next((t for t in await corpus.threads() if t.thread_id == thread_id), None)
+    thread = await corpus.thread(thread_id)
     if thread is None:
         raise HTTPException(404, "Message is unavailable")
     messages = [asdict(message) for row in window.pop("data") if (message := corpus.project(thread, row)) is not None]

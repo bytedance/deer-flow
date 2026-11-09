@@ -270,17 +270,30 @@ class ThreadMetaRepository(ThreadMetaStore):
                 stmt = stmt.where(ThreadMetaRow.project_id == project_id)
 
         needle = query.strip().casefold() if query else ""
-        if not needle:
-            stmt = stmt.limit(limit).offset(offset)
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            rows = [self._row_to_dict(r) for r in result.scalars()]
-            if needle:
-                # SQL dialects differ in Unicode folding. Filter owner-scoped,
-                # title metadata consistently before applying pagination.
-                rows = [row for row in rows if needle in (row.get("display_name") or "").casefold()]
-                return rows[offset : offset + limit]
-            return rows
+            if not needle:
+                result = await session.execute(stmt.limit(limit).offset(offset))
+                return [self._row_to_dict(r) for r in result.scalars()]
+            # Casefold is dialect-independent (including ß -> ss). Scan bounded
+            # metadata batches and stop as soon as the requested page is full.
+            matches = []
+            scanned, skipped = 0, 0
+            while len(matches) < limit:
+                result = await session.execute(stmt.limit(200).offset(scanned))
+                batch = list(result.scalars())
+                for row in batch:
+                    if needle not in (row.display_name or "").casefold():
+                        continue
+                    if skipped < offset:
+                        skipped += 1
+                    else:
+                        matches.append(self._row_to_dict(row))
+                        if len(matches) == limit:
+                            break
+                if len(batch) < 200:
+                    break
+                scanned += len(batch)
+            return matches
 
     async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
         """Return True if the row exists and is owned (or filter bypassed)."""

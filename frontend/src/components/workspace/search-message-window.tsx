@@ -4,14 +4,17 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowDownIcon, ArrowUpIcon, Loader2Icon } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
+import type { ImgHTMLAttributes } from "react";
 
-import { MessageResponse } from "@/components/ai-elements/message";
 import { Button } from "@/components/ui/button";
+import { resolveMessageImageURL } from "@/core/artifacts/utils";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { fetchMessageWindow } from "@/core/search/api";
 import { cn } from "@/lib/utils";
 
+import { MarkdownContent } from "./messages/markdown-content";
+import { createMarkdownLinkComponent } from "./messages/markdown-link";
 import { MessageList } from "./messages/message-list";
 
 export function SearchableMessageList(
@@ -73,9 +76,25 @@ function SearchMessageWindow({
     const next = new URLSearchParams(params.toString());
     next.delete("message");
     next.delete("message_seq");
-    router.replace(`${pathname}${next.size ? `?${next}` : ""}`, {
+    const queryString = next.toString();
+    router.replace(`${pathname}${queryString ? `?${queryString}` : ""}`, {
       scroll: false,
     });
+  };
+  const markdownComponents = {
+    a: createMarkdownLinkComponent(threadId),
+    img: ({ src, alt, ...props }: ImgHTMLAttributes<HTMLImageElement>) => (
+      <img
+        {...props}
+        src={
+          typeof src === "string"
+            ? resolveMessageImageURL(src, threadId, [])
+            : src
+        }
+        alt={alt}
+        loading="lazy"
+      />
+    ),
   };
   const data = query.data;
   const first = data?.messages[0];
@@ -152,7 +171,11 @@ function SearchMessageWindow({
                   )}
                 </div>
                 {message.role === "assistant" ? (
-                  <MessageResponse>{message.text}</MessageResponse>
+                  <MarkdownContent
+                    content={message.text}
+                    isLoading={false}
+                    components={markdownComponents}
+                  />
                 ) : (
                   <div className="break-words whitespace-pre-wrap">
                     {message.text}

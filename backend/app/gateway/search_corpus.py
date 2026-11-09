@@ -27,11 +27,12 @@ def visible_search_text(row: dict, *, thread_id: str):
 
 
 class GatewaySearchCorpus:
-    def __init__(self, thread_store, event_store, run_manager, user_id: str):
+    def __init__(self, thread_store, event_store, run_manager, user_id: str, *, request=None):
         self.thread_store = thread_store
         self.event_store = event_store
         self.run_manager = run_manager
         self.user_id = user_id
+        self.request = request
 
     async def threads(self) -> tuple[SearchThread, ...]:
         result = []
@@ -42,27 +43,45 @@ class GatewaySearchCorpus:
                 metadata = row.get("metadata") or {}
                 if metadata.get("deerflow_sidecar") is True:
                     continue
-                assistant = row.get("assistant_id")
-                from app.gateway.services import custom_agent_name
-
-                try:
-                    agent_name = custom_agent_name(assistant)
-                except (TypeError, ValueError):
-                    agent_name = None
-                result.append(
-                    SearchThread(
-                        thread_id=row["thread_id"],
-                        incarnation=str(row.get("incarnation") or row.get("created_at") or ""),
-                        title=row.get("display_name") or "",
-                        updated_at=coerce_iso(row.get("updated_at", "")),
-                        agent_name=agent_name,
-                        project_id=metadata.get("deerflow_project_id"),
-                        archived=metadata.get("deerflow_archived") is True,
-                    )
-                )
+                result.append(self.project_thread(row))
             offset += len(rows)
             if len(rows) < 200:
                 return tuple(result)
+
+    @staticmethod
+    def project_thread(row) -> SearchThread:
+        from app.gateway.services import custom_agent_name
+
+        try:
+            agent_name = custom_agent_name(row.get("assistant_id"))
+        except (TypeError, ValueError):
+            agent_name = None
+        metadata = row.get("metadata") or {}
+        return SearchThread(
+            thread_id=row["thread_id"],
+            incarnation=str(row.get("incarnation") or row.get("created_at") or ""),
+            title=row.get("display_name") or "",
+            updated_at=coerce_iso(row.get("updated_at", "")),
+            agent_name=agent_name,
+            project_id=metadata.get("deerflow_project_id"),
+            archived=metadata.get("deerflow_archived") is True,
+        )
+
+    async def thread(self, thread_id: str) -> SearchThread | None:
+        row = await self.thread_store.get(thread_id, user_id=self.user_id)
+        if row is None or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
+            return None
+        return self.project_thread(row)
+
+    async def seed_legacy_history(self, thread: SearchThread) -> None:
+        if self.request is None or await self.event_store.list_messages(thread.thread_id, limit=1, user_id=None):
+            return
+        row = await self.thread_store.get(thread.thread_id, user_id=self.user_id)
+        if row is None or self.project_thread(row).incarnation != thread.incarnation:
+            return
+        from app.gateway.services import ensure_checkpoint_history_seeded
+
+        await ensure_checkpoint_history_seeded(self.request, thread_id=thread.thread_id, assistant_id=row.get("assistant_id"))
 
     async def owns(self, thread: SearchThread) -> bool:
         row = await self.thread_store.get(thread.thread_id, user_id=self.user_id)
@@ -71,6 +90,7 @@ class GatewaySearchCorpus:
     async def revision(self, thread: SearchThread) -> str | None:
         if not await self.owns(thread):
             return None
+        await self.seed_legacy_history(thread)
         latest = await self.event_store.list_messages(thread.thread_id, limit=1, user_id=self.user_id)
         hidden = await default_history_hidden_run_ids(self.run_manager, thread.thread_id, user_id=self.user_id)
         revision = [thread.incarnation, thread.updated_at, latest[-1]["seq"] if latest else 0, sorted(hidden)]
@@ -108,29 +128,45 @@ class GatewaySearchCorpus:
         row = await self.thread_store.get(thread_id, user_id=self.user_id)
         if row is None or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
             return None
-        target = None
-        identity = f"message:{message_id}"
-        if seq is not None:
-            candidates, _ = await self._page(thread_id, limit=1, after_seq=seq - 1, before_seq=seq + 1)
-            target = next((item for item in candidates if message_identity(item["content"]) == identity), None)
-            # A stale hint never falls through to another version of the same ID.
-            if target is None:
-                return None
-        else:
-            before = None
-            while target is None:
-                candidates, more = await self._page(thread_id, limit=200, before_seq=before)
-                target = next((item for item in reversed(candidates) if message_identity(item["content"]) == identity), None)
-                if target is not None or not more:
-                    break
-                before = candidates[0]["seq"]
-        if target is None:
+        await self.seed_legacy_history(self.project_thread(row))
+        # Walk backward from the head so later versions win even when they
+        # live on another storage page. Sequence hints never select old text.
+        rows = await self.latest_rows(thread_id)
+        index = next((i for i, item in enumerate(rows) if message_identity(item["content"]) == f"message:{message_id}"), None)
+        if index is None or (seq is not None and rows[index]["seq"] != seq):
             return None
+        target = rows[index]
         seq = target["seq"]
-        older, has_before = await self._page(thread_id, limit=limit, before_seq=seq)
-        newer, has_after = await self._page(thread_id, limit=limit, after_seq=seq)
+        left, right = max(0, index - limit), min(len(rows), index + limit + 1)
+        older, newer = rows[left:index], rows[index + 1 : right]
+        has_before, has_after = left > 0, right < len(rows)
         # Recheck ownership/incarnation after the asynchronous history reads.
         current = await self.thread_store.get(thread_id, user_id=self.user_id)
         if current is None or current.get("incarnation") != row.get("incarnation"):
             return None
         return {"data": older + [target] + newer, "target_seq": seq, "has_before": has_before, "has_after": has_after}
+
+    async def latest_rows(self, thread_id: str) -> list[dict]:
+        latest = {}
+        before = None
+        while True:
+            rows, more = await self._page(thread_id, limit=200, before_seq=before)
+            for row in reversed(rows):
+                latest.setdefault(message_identity(row["content"]), row)
+            if not more:
+                break
+            before = rows[0]["seq"]
+        return sorted(latest.values(), key=lambda row: row["seq"])
+
+    async def latest_message(self, thread: SearchThread, message_id: str) -> SearchMessage | None:
+        if not await self.owns(thread):
+            return None
+        before = None
+        while True:
+            rows, more = await self._page(thread.thread_id, limit=200, before_seq=before)
+            for row in reversed(rows):
+                if message_identity(row["content"]) == f"message:{message_id}":
+                    return self.project(thread, row)
+            if not more:
+                return None
+            before = rows[0]["seq"]

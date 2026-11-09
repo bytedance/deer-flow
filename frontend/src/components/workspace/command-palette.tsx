@@ -250,7 +250,9 @@ export function CommandPalette() {
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-2">
                                 <span className="truncate font-medium">
-                                  {hit.title || t.workspaceSearch.untitled}
+                                  {hit.title.trim()
+                                    ? hit.title
+                                    : t.workspaceSearch.untitled}
                                 </span>
                                 {hit.archived && (
                                   <span className="text-muted-foreground flex shrink-0 items-center gap-1 text-xs">
@@ -317,6 +319,25 @@ export function CommandPalette() {
                   )}
                 </>
               )}
+              {commandMode &&
+                ![
+                  t.sidebar.newChat,
+                  t.common.settings,
+                  t.shortcuts.keyboardShortcuts,
+                ].some((label) =>
+                  label
+                    .toLocaleLowerCase()
+                    .includes(
+                      input.trimStart().slice(1).trim().toLocaleLowerCase(),
+                    ),
+                ) && (
+                  <div
+                    role="status"
+                    className="text-muted-foreground py-8 text-center text-sm"
+                  >
+                    {t.workspaceSearch.empty}
+                  </div>
+                )}
               {(commandMode || !input.trim()) && (
                 <CommandGroup heading={t.shortcuts.actions}>
                   {[

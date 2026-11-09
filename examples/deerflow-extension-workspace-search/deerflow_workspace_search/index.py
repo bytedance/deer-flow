@@ -39,6 +39,12 @@ revisions = Table(
     Column("thread_id", String(64), primary_key=True),
     Column("revision", String(64), nullable=False),
 )
+fts_state = Table(
+    "extension_workspace_search_fts_state",
+    metadata,
+    Column("key", String(32), primary_key=True),
+    Column("value", String(16), nullable=False),
+)
 _FTS = "extension_workspace_search_fts"
 
 
@@ -70,11 +76,13 @@ class WorkspaceSearchIndex:
 
             try:
                 async with self._engine.begin() as connection:
+                    existed = await connection.scalar(text("SELECT name FROM sqlite_master WHERE type='table' AND name=:name"), {"name": _FTS})
+                    state = await connection.scalar(select(fts_state.c.value).where(fts_state.c.key == "projection"))
                     await connection.execute(text(f"CREATE VIRTUAL TABLE IF NOT EXISTS {_FTS} USING fts5(docid UNINDEXED, normalized, tokenize='trigram')"))
-                    # Rebuild only on startup, repairing a previously unavailable
-                    # FTS index without changing authoritative projection rows.
-                    await connection.execute(text(f"DELETE FROM {_FTS}"))
-                    await connection.execute(text(f"INSERT INTO {_FTS}(docid, normalized) SELECT id, normalized FROM {documents.name}"))
+                    if not existed or state != "clean":
+                        await connection.execute(text(f"DELETE FROM {_FTS}"))
+                        await connection.execute(text(f"INSERT INTO {_FTS}(docid, normalized) SELECT id, normalized FROM {documents.name}"))
+                    await connection.execute(text(f"INSERT INTO {fts_state.name} (key, value) VALUES ('projection', 'clean') ON CONFLICT(key) DO UPDATE SET value='clean'"))
                 self._fts = True
             except OperationalError as exc:
                 if "no such module" not in str(exc) and "no such tokenizer" not in str(exc):
@@ -97,6 +105,8 @@ class WorkspaceSearchIndex:
 
     async def _replace(self, owner, thread, revision, messages):
         async with self._sf() as session, session.begin():
+            if self._engine.dialect.name == "sqlite" and not self._fts:
+                await session.execute(text(f"INSERT INTO {fts_state.name} (key, value) VALUES ('projection', 'dirty') ON CONFLICT(key) DO UPDATE SET value='dirty'"))
             where = and_(documents.c.owner == owner, documents.c.thread_id == thread.thread_id)
             if self._fts:
                 await session.execute(text(f"DELETE FROM {_FTS} WHERE docid IN (SELECT id FROM {documents.name} WHERE owner=:owner AND thread_id=:thread_id)"), {"owner": owner, "thread_id": thread.thread_id})
@@ -141,6 +151,8 @@ class WorkspaceSearchIndex:
         live = {thread.thread_id for thread in threads}
         for removed in set(known) - live:
             async with self._sf() as session, session.begin():
+                if self._engine.dialect.name == "sqlite" and not self._fts:
+                    await session.execute(text(f"INSERT INTO {fts_state.name} (key, value) VALUES ('projection', 'dirty') ON CONFLICT(key) DO UPDATE SET value='dirty'"))
                 if self._fts:
                     await session.execute(text(f"DELETE FROM {_FTS} WHERE docid IN (SELECT id FROM {documents.name} WHERE owner=:owner AND thread_id=:thread_id)"), {"owner": corpus.user_id, "thread_id": removed})
                 await session.execute(delete(documents).where(documents.c.owner == corpus.user_id, documents.c.thread_id == removed))
@@ -177,7 +189,7 @@ class WorkspaceSearchIndex:
         # The host binds cursors to the filter set. Live thread membership may
         # change between pages without invalidating an otherwise valid cursor.
         scope = hashlib.sha256(json.dumps([corpus.user_id, normalized]).encode()).hexdigest()
-        statement = select(documents).where(documents.c.owner == corpus.user_id, documents.c.thread_id.in_([t.thread_id for t in threads]), documents.c.normalized.contains(normalized, autoescape=True))
+        statement = select(documents).where(documents.c.owner == corpus.user_id, documents.c.normalized.contains(normalized, autoescape=True))
         if self._fts and len(normalized) >= 3:
             statement = statement.where(documents.c.id.in_(text(f"SELECT docid FROM {_FTS} WHERE {_FTS} MATCH :match"))).params(match='"' + normalized.replace('"', '""') + '"')
         if cursor:
@@ -197,7 +209,15 @@ class WorkspaceSearchIndex:
             )
         statement = statement.order_by(documents.c.updated_at.desc(), documents.c.thread_id.desc(), documents.c.seq.desc(), documents.c.message_id.desc()).limit(limit + 1)
         async with self._sf() as session:
-            rows = (await session.execute(statement)).mappings().all()
+            rows = []
+            ids = [thread.thread_id for thread in threads]
+            # Keep SQL parameter counts below SQLite's portable limit. Each
+            # batch contributes only its top page; merge by the same total order.
+            for offset in range(0, len(ids), 250):
+                batch = statement.where(documents.c.thread_id.in_(ids[offset : offset + 250]))
+                rows.extend((await session.execute(batch)).mappings().all())
+                rows.sort(key=lambda row: (row["updated_at"], row["thread_id"], row["seq"], row["message_id"]), reverse=True)
+                rows = rows[: limit + 1]
         more = len(rows) > limit
         rows = rows[:limit]
         next_cursor = None
