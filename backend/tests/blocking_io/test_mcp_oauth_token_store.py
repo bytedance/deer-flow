@@ -109,8 +109,14 @@ async def test_token_request_builds_its_client_off_the_event_loop(tmp_path, monk
     Linux, but seconds on Windows -- while the refresh lease is already held.
     A loop blocked that long starves the lease-renewal task, so the lease can
     expire mid-request and a peer re-posts the already-consumed refresh token
-    (``invalid_grant``). Construction belongs in a worker thread, like every
-    other TLS-trust load in this repository.
+    (``invalid_grant``). Construction belongs in a worker thread, like the other
+    client fixes in this series (#7889, #7909).
+
+    The construction thread is recorded below instead of leaving the check to
+    this package's Blockbuster gate: ``ssl.SSLContext`` loads its trust store
+    inside OpenSSL/CryptoAPI C code, which Blockbuster's Python-level file
+    instrumentation cannot see, so a regression back onto the loop would pass
+    the gate silently.
     """
     construction_threads: list[int] = []
 
@@ -123,6 +129,7 @@ async def test_token_request_builds_its_client_off_the_event_loop(tmp_path, monk
         def __init__(self, *args, **kwargs):
             kwargs["transport"] = httpx.MockTransport(handle)
             kwargs["trust_env"] = False
+            # Recorded explicitly: the Blockbuster gate cannot see the C-level trust-store load.
             construction_threads.append(threading.get_ident())
             super().__init__(*args, **kwargs)
 

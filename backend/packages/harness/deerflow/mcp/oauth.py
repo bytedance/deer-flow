@@ -473,8 +473,8 @@ class OAuthTokenManager:
         # refresh lease is already held. Building the client on the caller's
         # loop starves the lease-renewal task, so the lease can expire
         # mid-request and a peer re-posts the already-consumed refresh token
-        # (invalid_grant). Construct it in a worker thread like every other
-        # TLS-trust load in this repository.
+        # (invalid_grant). Construct it in a worker thread like the other client
+        # fixes in this series (#7889, #7909).
         async with await asyncio.to_thread(httpx.AsyncClient, timeout=15.0) as client:
             response = await client.post(oauth.token_url, data=data)
             if oauth.grant_type == "refresh_token" and _is_invalid_grant(response):
