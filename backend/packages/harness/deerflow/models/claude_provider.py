@@ -218,17 +218,30 @@ class ClaudeChatModel(ChatAnthropic):
         anthropic-beta header that replaces the client default holding the
         OAuth betas - Anthropic then rejects the OAuth token (issue #8060).
         Merging keeps the OAuth betas first and appends the request's own.
+
+        An `anthropic-beta` in the request's `extra_headers` (from
+        `model_kwargs` or per-call `extra_headers`) replaces both the default
+        and the `betas` header, so it gets the same merge (case-insensitive
+        key match). The headers dict is rebuilt rather than changed in place:
+        the payload's `extra_headers` can be the dict in `self.model_kwargs`.
         """
         from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
 
         betas = payload.get("betas")
-        if not isinstance(betas, (list, tuple)):
-            # No per-request betas: leave the payload untouched so langchain-anthropic
-            # keeps using the client default header via _client.messages.create.
-            return
-        request_betas = [str(beta) for beta in betas]
-        merged = [beta for beta in OAUTH_ANTHROPIC_BETAS.split(",") if beta not in request_betas]
-        payload["betas"] = [*merged, *request_betas]
+        if isinstance(betas, (list, tuple)):
+            request_betas = [str(beta) for beta in betas]
+            merged = [beta for beta in OAUTH_ANTHROPIC_BETAS.split(",") if beta not in request_betas]
+            payload["betas"] = [*merged, *request_betas]
+
+        extra_headers = payload.get("extra_headers")
+        if isinstance(extra_headers, dict):
+            headers = dict(extra_headers)
+            for key, value in extra_headers.items():
+                if key.lower() == "anthropic-beta" and isinstance(value, str):
+                    request_betas = [beta.strip() for beta in value.split(",") if beta.strip()]
+                    merged = [beta for beta in OAUTH_ANTHROPIC_BETAS.split(",") if beta not in request_betas]
+                    headers[key] = ",".join([*merged, *request_betas])
+            payload["extra_headers"] = headers
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system, recent messages, and last tool definition.

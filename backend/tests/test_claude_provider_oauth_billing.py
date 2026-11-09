@@ -214,18 +214,10 @@ def test_request_payload_merges_betas_on_oauth_path():
     """_get_request_payload itself must merge OAuth betas when the request
     carries per-request betas, so the tests catch a regression in the
     request path (not just errors inside the helper)."""
-    from unittest.mock import patch
-
     from langchain_core.messages import HumanMessage
 
     m = _make_model()
-
-    with patch.object(ClaudeChatModel, "model_post_init"):
-        pass  # _make_model already patched model_post_init
-
-    payload = m._get_request_payload(
-        [HumanMessage(content="hi")], betas=["context-1m-2025-08-07"]
-    )
+    payload = m._get_request_payload([HumanMessage(content="hi")], betas=["context-1m-2025-08-07"])
     assert payload["betas"] == [*_oauth_betas(), "context-1m-2025-08-07"]
 
 
@@ -238,3 +230,21 @@ def test_request_payload_without_betas_stays_on_default_path():
     m = _make_model()
     payload = m._get_request_payload([HumanMessage(content="hi")])
     assert "betas" not in payload
+
+
+def test_request_payload_merges_extra_headers_beta():
+    """An anthropic-beta in extra_headers replaces both the client default and
+    the betas header, so it needs the same OAuth merge (case-insensitive key)."""
+    from langchain_core.messages import HumanMessage
+
+    m = _make_model()
+    payload = m._get_request_payload([HumanMessage(content="hi")], extra_headers={"Anthropic-Beta": "context-1m-2025-08-07"})
+    assert payload["extra_headers"]["Anthropic-Beta"] == ",".join([*_oauth_betas(), "context-1m-2025-08-07"])
+
+
+def test_extra_headers_without_beta_header_are_untouched():
+    from langchain_core.messages import HumanMessage
+
+    m = _make_model()
+    payload = m._get_request_payload([HumanMessage(content="hi")], extra_headers={"x-custom": "1"})
+    assert payload["extra_headers"] == {"x-custom": "1"}
