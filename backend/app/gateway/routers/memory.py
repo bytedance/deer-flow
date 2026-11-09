@@ -16,6 +16,7 @@ from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 router = APIRouter(prefix="/api", tags=["memory"])
 
@@ -161,6 +162,8 @@ def _unsupported_501(manager: object, label: str) -> HTTPException:
 def _management_agent_name_or_501(
     manager: MemoryManager,
     agent_name: str | None,
+    *,
+    for_creation: bool = False,
 ) -> str | None:
     """Validate an optional agent-scoped management target.
 
@@ -170,6 +173,16 @@ def _management_agent_name_or_501(
     into a mutation of the wrong bucket. Preserve the caller's spelling here:
     remote backends such as Mem0 use the agent name as a case-sensitive storage
     identity, while DeerMem performs its own lowercase canonicalization.
+
+    ``for_creation`` also refuses names that cannot become a host path
+    component. DeerMem resolves an agent scope to
+    ``{storage}/users/{uid}/agents/{name}/facts`` and creates it on the first
+    write; the character class above admits Windows reserved device names
+    (``NUL``, ``CON``, ``COM1``, ...), so that write raised
+    ``FileNotFoundError`` and the endpoint's ``OSError`` branch answered
+    ``500``. Only the two endpoints that create the scope set this: reads and
+    deletes stay permissive so a scope an older release stored can still be
+    exported and cleared.
     """
     if agent_name is None:
         return None
@@ -178,6 +191,20 @@ def _management_agent_name_or_501(
             status_code=422,
             detail=(f"Invalid agent name '{agent_name}'. Must match {AGENT_NAME_PATTERN.pattern} (letters, digits, and hyphens only)."),
         )
+    if for_creation:
+        # Reuse the canonical Windows-name check that agent directories,
+        # thread IDs, uploads, sandbox writes and skill support files use.
+        # Sibling PR #7939 applies the same rule inside the shared
+        # ``validate_agent_name()`` (``deerflow.config.agents_config``); this
+        # router inlines ``AGENT_NAME_PATTERN`` and preserves caller spelling for
+        # case-sensitive backends rather than delegating to it, so keep the two
+        # copies in sync if the reserved set ever changes.
+        reason = windows_incompatible_segment(agent_name)
+        if reason is not None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid agent name '{agent_name}'. Contains a {reason}.",
+            )
     if getattr(manager, "supports_agent_scoped_management", False) is not True:
         raise HTTPException(
             status_code=501,
@@ -412,7 +439,7 @@ async def clear_memory(request: Request, agent_name: str | None = None) -> Memor
 async def create_memory_fact_endpoint(body: FactCreateRequest, request: Request, agent_name: str | None = None) -> MemoryResponse:
     """Create a single fact manually."""
     manager = await asyncio.to_thread(get_memory_manager)
-    selected_agent = _management_agent_name_or_501(manager, agent_name)
+    selected_agent = _management_agent_name_or_501(manager, agent_name, for_creation=True)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
         memory_data, fact_id = await run_drained_write(
@@ -545,7 +572,7 @@ async def export_memory(request: Request, agent_name: str | None = None) -> Memo
 async def import_memory(body: MemoryResponse, request: Request, agent_name: str | None = None) -> MemoryResponse:
     """Import memory data, preserving shared summaries for a selected agent."""
     manager = await asyncio.to_thread(get_memory_manager)
-    selected_agent = _management_agent_name_or_501(manager, agent_name)
+    selected_agent = _management_agent_name_or_501(manager, agent_name, for_creation=True)
     scope_kwargs = _agent_scope_kwargs(selected_agent)
     try:
         memory_data = await run_drained_write(

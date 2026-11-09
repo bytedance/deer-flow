@@ -81,14 +81,6 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def _next_confirmation_count(fact: dict[str, Any]) -> int:
-    """Increment a valid prior confirmation count, resetting malformed values."""
-    prior_count = fact.get("confirmationCount", 0)
-    if isinstance(prior_count, bool) or not isinstance(prior_count, int) or prior_count < 0:
-        return 1
-    return prior_count + 1
-
-
 def _extract_text(content: Any) -> str:
     """Extract plain text from LLM response content (str or list of content blocks).
 
@@ -470,40 +462,8 @@ def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
     raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
 
 
-# Matches sentences that describe a file-upload *event* rather than general
-# file-related work.  Deliberately narrow to avoid removing legitimate facts
-# such as "User works with CSV files" or "prefers PDF export".
-_UPLOAD_SENTENCE_RE = re.compile(
-    r"[^.!?]*\b(?:"
-    r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
-    r"|file\s+upload"
-    r"|/mnt/user-data/uploads/"
-    r"|<current_uploads>"
-    r")[^.!?]*[.!?]?\s*",
-    re.IGNORECASE,
-)
-
-
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
-    """Remove sentences about file uploads from all memory summaries and facts.
-
-    Uploaded files are session-scoped; persisting upload events in long-term
-    memory causes the agent to search for non-existent files in future sessions.
-    """
-    # Scrub summaries in user/history sections
-    for section in ("user", "history"):
-        section_data = memory_data.get(section, {})
-        for _key, val in section_data.items():
-            if isinstance(val, dict) and "summary" in val:
-                cleaned = _UPLOAD_SENTENCE_RE.sub("", val["summary"]).strip()
-                cleaned = re.sub(r"  +", " ", cleaned)
-                val["summary"] = cleaned
-
-    # Also remove any facts that describe upload events
-    facts = memory_data.get("facts", [])
-    if facts:
-        memory_data["facts"] = [f for f in facts if not _UPLOAD_SENTENCE_RE.search(f.get("content", ""))]
-
+    """Keep legacy API; prose cannot establish whether a fact is session-scoped."""
     return memory_data
 
 
@@ -1035,6 +995,10 @@ class MemoryUpdater:
         raw_facts = memory_data.get("facts")
         if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
             raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        for fact in raw_facts:
+            revision = fact.get("revision", 1)
+            if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+                raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
@@ -1050,10 +1014,17 @@ class MemoryUpdater:
                 user_id=user_id,
             )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
-            incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            upsert_revisions = {fact["id"]: (int(current_by_id[fact["id"]].get("revision") or 1) if fact["id"] in current_by_id else None) for fact in incoming_facts}
+            # Backup revisions describe the exported snapshot; writes use the
+            # current snapshot's preconditions, including the fact payload.
+            for fact in incoming_facts:
+                current_revision = upsert_revisions[fact["id"]]
+                if current_revision is not None:
+                    fact["revision"] = current_revision
+            incoming_ids = set(upsert_revisions)
             change_set = {
                 "upserts": incoming_facts,
-                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "upsertRevisions": upsert_revisions,
                 "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
                 "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
             }
@@ -1370,37 +1341,14 @@ class MemoryUpdater:
         return updated_memory
 
     def _build_signal_hints(self, signals: frozenset[str]) -> str:
-        """Build optional prompt hints for the detected signal classes.
-
-        Each present signal contributes one instruction nudging the extraction
-        LLM toward the right category and confidence. The variable is still
-        rendered into the template's ``{correction_hint}`` slot (the name is
-        historical -- it now carries the full signal-hint set, plus the manual
-        fact note appended by :meth:`_prepare_update_prompt`).
-        """
-        hints: list[str] = []
-        if "correction" in signals:
-            hints.append(
-                "IMPORTANT: Explicit correction signals were detected in this conversation. "
-                "Record a correction with confidence >= 0.95 only when it describes a durable, user-level "
-                "working preference that is safe to reuse across unrelated tasks. A correction to facts, files, "
-                "directions, or constraints in the current task is thread- or project-scoped and must not be stored."
-            )
-        if "reinforcement" in signals:
-            hints.append(
-                "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
-                "Record the confirmed approach, style, or preference with high confidence only if it is a durable, "
-                "user-level pattern. Approval of the current result or current task is thread-scoped and must not be stored."
-            )
-        if "preference" in signals:
-            hints.append("IMPORTANT: A preference signal was detected. Record it with high confidence only when it is a durable, user-level preference; a one-off choice for the current task is thread-scoped and must not be stored.")
-        if "identity" in signals:
-            hints.append("IMPORTANT: An identity signal was detected. Record the user's stated role, profession, or background only when it is user-level and durable across tasks.")
-        if "goal" in signals:
-            hints.append("IMPORTANT: A goal signal was detected. Record only a durable, user-level goal that remains useful across unrelated tasks; the objective of the current task, sprint, PR, or thread must not be stored.")
-        if "decision" in signals:
-            hints.append("IMPORTANT: A decision signal was detected. Record only a durable, user-level decision or working pattern; a choice made for the current task, file, PR, or thread must not be stored.")
-        return "\n".join(hints)
+        """Remind extraction that lexical matches cannot establish intent."""
+        if not signals:
+            return ""
+        return (
+            "Some lexical patterns may be present in this conversation. They are not evidence of user intent. "
+            "Examine the full context, including quotations, negation and whether the user is discussing someone else. "
+            "Store only durable, descriptive user-level facts supported by the conversation, not transient current task or thread state."
+        )
 
     def _prepare_update_prompt(
         self,
@@ -1956,9 +1904,8 @@ class MemoryUpdater:
             prepared = self._prepare_update_prompt(
                 messages=feed_messages,
                 agent_name=agent_name,
-                # Hint text takes the union (deterministic + model hints); the
-                # reinforcement evidence gate below still reads the deterministic
-                # set only, so a model verdict can never confirm a fact (S4).
+                # Hints can invite contextual review; neither lexical nor model
+                # signals authorize an automatic confirmation of a stored fact.
                 signals=frozenset(feed_signals) | (model_hints if isinstance(model_hints, frozenset) else frozenset()),
                 user_id=user_id,
                 conversation_text=batch_text,
@@ -2211,35 +2158,9 @@ class MemoryUpdater:
         def reject_by_scope_gate(kind: str, reason: str) -> None:
             scope_gate_rejections[kind][reason] += 1
 
-        # Explicit confirmation is distinct from extraction duplication. The
-        # deterministic gate is batch-level: it proves only that a human
-        # message among the last six filtered messages matched a reinforcement
-        # pattern. The LLM remains responsible for binding that signal to an
-        # existing id, which must be user-scoped and carry a non-empty reason.
-        tracks_hybrid_signals = config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or config.fact_eviction_shadow_enabled
-        if tracks_hybrid_signals and "reinforcement" in signals:
-            reinforced_ids = {
-                entry["id"]
-                for entry in update_data.get("factsToReinforce", [])
-                if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
-            }
-            # Only an id that actually exists can be confirmed. A nonexistent
-            # target changes nothing, so counting it would report an accepted
-            # mutation that never landed (the pre-screen evaluation reads the
-            # counter as "worth remembering").
-            reinforced_ids &= {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
-            if reinforced_ids:
-                current_memory["facts"] = [
-                    {
-                        **fact,
-                        "lastConfirmedAt": now,
-                        "confirmationCount": _next_confirmation_count(fact),
-                    }
-                    if isinstance(fact, dict) and fact.get("id") in reinforced_ids
-                    else fact
-                    for fact in current_memory.get("facts", [])
-                ]
-                mutations_accepted += len(reinforced_ids)
+        # A lexical match and a model-proposed fact ID cannot establish that
+        # the user explicitly confirmed that fact. Do not update confirmation
+        # counters without a trusted fact-bound confirmation event.
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -2723,10 +2644,9 @@ class MemoryUpdater:
                     current_memory["facts"].extend(new_consolidated)
                     mutations_accepted += merge_count
 
-        # Finalization scrubs upload-event facts (session-scoped) from the memory it
-        # persists; apply that here, before scoring survival, so a fact accepted by
-        # the apply but dropped by the scrub is not counted as a landed mutation
-        # (the shadow evaluation reads a positive count on a skip as a lost memory).
+        # Keep this compatibility hook aligned with finalization. It preserves
+        # facts: upload vocabulary cannot distinguish a transient event from a
+        # durable preference or profession.
         current_memory = _strip_upload_mentions_from_memory(current_memory)
 
         # Count new facts and changed near-duplicate targets only once they survive

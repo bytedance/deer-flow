@@ -49,6 +49,7 @@ class FileManagedSubagentStore(ManagedSubagentStore):
         return sorted(definitions, key=lambda item: item.name)
 
     def create(self, definition: ManagedSubagentDefinition) -> None:
+        normalize_managed_subagent_name(definition.name, for_creation=True)
         path = get_paths().managed_subagent_file(definition.name)
         with _write_lock:
             if path.exists():

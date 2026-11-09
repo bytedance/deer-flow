@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from langchain.tools import ToolRuntime
@@ -222,16 +222,18 @@ async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
     run_sync_tool = AsyncMock(return_value="forwarded")
     monkeypatch.setattr("deerflow.sandbox.tools._run_sync_tool_after_async_sandbox_init", run_sync_tool)
     runtime = object()
+    # read_file supplies a private callback to format sandbox initialization errors.
+    forwarded_kwargs = {"_error_result": ANY} if tool_obj is read_file_tool else {}
 
     assert await tool_obj.coroutine(runtime=runtime, **call_args) == "forwarded"
-    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args)
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args, **forwarded_kwargs)
 
     run_sync_tool.reset_mock()
     call_args_without_description = {key: value for key, value in call_args.items() if key != "description"}
     forwarded_without_description = tuple("" if value == "description" else value for value in forwarded_args)
 
     assert await tool_obj.coroutine(runtime=runtime, **call_args_without_description) == "forwarded"
-    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_without_description)
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_without_description, **forwarded_kwargs)
 
 
 def test_task_tool_description_is_optional_but_discoverable() -> None:

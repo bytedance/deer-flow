@@ -41,9 +41,10 @@ from langchain_core.messages import (
 from langchain_core.messages.ai import UsageMetadata, subtract_usage
 from langchain_core.messages.tool import tool_call_chunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import _create_usage_metadata
 from pydantic import Field, PrivateAttr
+
+from deerflow.models.openai_response import GuardedChatOpenAI
 
 _CUMULATIVE_USAGE_TRACKER_CAPACITY = 1024
 _CUMULATIVE_USAGE_TRACKER_IDLE_SECONDS = 60 * 60
@@ -187,7 +188,7 @@ def _get_completion_id(chunk: Mapping[str, Any]) -> str | None:
     return None
 
 
-class VllmChatModel(ChatOpenAI):
+class VllmChatModel(GuardedChatOpenAI):
     """ChatOpenAI variant that preserves vLLM reasoning fields across turns."""
 
     model_config = {"arbitrary_types_allowed": True}

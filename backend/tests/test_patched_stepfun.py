@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 
@@ -33,6 +34,21 @@ def test_lc_secrets_contains_stepfun_api_key_mapping():
     model = _make_model()
     assert model.lc_secrets["api_key"] == "STEPFUN_API_KEY"
     assert model.lc_secrets["openai_api_key"] == "STEPFUN_API_KEY"
+
+
+@pytest.mark.parametrize("limit_field", ["max_tokens", "max_completion_tokens"])
+def test_request_uses_documented_max_tokens_for_instance_and_call_limits(limit_field):
+    model = _make_model(max_tokens=128)
+    messages = [HumanMessage(content="Hello")]
+    initial = model._get_request_payload(messages)
+    assert initial["max_tokens"] == 128
+    assert "max_completion_tokens" not in initial
+    overrides = {limit_field: 64}
+    payload = model._get_request_payload(messages, **overrides)
+    assert payload["max_tokens"] == 64
+    assert "max_completion_tokens" not in payload
+    assert overrides == {limit_field: 64}
+    assert model.max_tokens == 128
 
 
 # ---------------------------------------------------------------------------
