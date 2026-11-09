@@ -99,7 +99,7 @@ export const zhCN: Translations = {
       gettingStarted: "开始使用",
       requirements: "使用前准备",
       loaded: "已加载",
-      loadedHint: "此扩展已加载，使用方式见左侧说明。",
+      loadedHint: "此扩展已加载，使用方式见本页说明。",
       tools: "已注册工具",
       pages: "工作区入口",
       management: "使用与管理",

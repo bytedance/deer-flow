@@ -121,7 +121,7 @@ export function ExtensionDetail({
           {entry.gettingStarted?.length ? (
             <ol className="mt-6 space-y-6">
               {entry.gettingStarted.map((step, index) => (
-                <li key={step.title} className="flex gap-4">
+                <li key={index} className="flex gap-4">
                   <span className="bg-muted text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-medium tabular-nums">
                     {String(index + 1).padStart(2, "0")}
                   </span>
@@ -165,8 +165,8 @@ export function ExtensionDetail({
                 {copy.detail.requirements}
               </h3>
               <ul className="text-muted-foreground mt-3 list-disc space-y-2 pl-4 text-sm leading-6">
-                {entry.requirements.map((item) => (
-                  <li key={item}>{item}</li>
+                {entry.requirements.map((item, index) => (
+                  <li key={index}>{item}</li>
                 ))}
               </ul>
             </section>

@@ -110,7 +110,7 @@ export function extensionDirectory(
       existing.loaded = entry;
       if (page)
         Object.assign(existing, localizeDocumentation(page, locale), {
-          guide: page.docs_url,
+          guide: page.docs_url ?? existing.guide,
         });
       continue;
     }

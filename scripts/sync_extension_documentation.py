@@ -6,9 +6,11 @@ import runpy
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-VALIDATE = runpy.run_path(
+CONTRACT = runpy.run_path(
     str(ROOT / "backend/packages/harness/deerflow/extensions/documentation.py")
-)["validate_documentation"]
+)
+VALIDATE = CONTRACT["validate_documentation"]
+MAX_BYTES = CONTRACT["MAX_BYTES"]
 DESTINATION = ROOT / "frontend/src/core/extensions/bundled-documentation.json"
 
 
@@ -17,9 +19,13 @@ def render():
     for path in sorted(
         (ROOT / "examples").glob("deerflow-extension-*/*/deerflow-extension.json")
     ):
-        page = VALIDATE(json.loads(path.read_text(encoding="utf-8")))
-        if len(path.read_bytes()) > 65536:
+        raw = path.read_bytes()
+        if len(raw) > MAX_BYTES:
             raise ValueError(f"Documentation is too large: {path}")
+        page = VALIDATE(json.loads(raw))
+        languages = {tag.lower().split("-")[0] for tag in page["locales"]}
+        if not {"en", "zh"}.issubset(languages):
+            raise ValueError(f"Bundled documentation requires English and Chinese: {path}")
         if any(existing["id"] == page["id"] for existing in pages.values()):
             raise ValueError(f"Duplicate extension documentation id: {page['id']}")
         pages[path.parent.parent.name] = page

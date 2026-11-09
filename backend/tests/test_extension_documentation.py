@@ -4,9 +4,11 @@ import copy
 import json
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
+from deerflow_extension_api.plugins import PluginContribution
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -105,3 +107,40 @@ def test_bundled_documentation_snapshot_is_current():
     script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
     assert script["DESTINATION"].read_text(encoding="utf-8") == script["render"]()
     assert len(json.loads(script["render"]())) == 15
+
+
+@pytest.mark.parametrize("collision", [False, True])
+def test_plugin_discovery_fences_documentation_identity(collision):
+    plugin = PluginContribution(namespace="example.background", title="Plugin", description="Plugin copy")
+    page = copy.deepcopy(PAGE)
+    page["id"] = plugin.namespace if collision else "another.plugin"
+    source = "backend.only:install" if collision else SOURCE
+    app = FastAPI()
+    app.state.extensions = SimpleNamespace(plugins=((SOURCE, plugin),), documentation=((source, page),))
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda request: ExtensionPrincipal("viewer"))
+    app.include_router(router)
+    with TestClient(app) as client:
+        response = client.get("/api/plugins")
+    assert response.status_code == 200
+    (entry,) = response.json()
+    assert entry["namespace"] == plugin.namespace
+    assert entry["documentation"] is None
+
+
+def test_bundled_generator_rejects_missing_language_and_shared_size_limit(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
+    namespace = script["render"].__globals__
+    monkeypatch.setitem(namespace, "ROOT", tmp_path)
+    path = tmp_path / "examples/deerflow-extension-test/package/deerflow-extension.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(PAGE))
+    with pytest.raises(ValueError, match="English and Chinese"):
+        script["render"]()
+    value = copy.deepcopy(PAGE)
+    value["locales"]["zh"] = copy.deepcopy(value["locales"]["en-US"])
+    path.write_text(json.dumps(value))
+    assert "deerflow-extension-test" in script["render"]()
+    monkeypatch.setitem(namespace, "MAX_BYTES", 1)
+    with pytest.raises(ValueError, match="too large"):
+        script["render"]()

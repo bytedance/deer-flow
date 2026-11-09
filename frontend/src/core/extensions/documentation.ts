@@ -32,11 +32,19 @@ export function localizeDocumentation(
   doc: Pick<ExtensionDocumentation, "locales">,
   locale: string,
 ) {
-  const copy =
-    doc.locales[locale] ??
-    doc.locales["en-US"] ??
-    Object.values(doc.locales)[0]!;
-  return { ...copy, gettingStarted: copy.usage };
+  const entries = Object.entries(doc.locales);
+  const target = locale.toLowerCase();
+  const match = (tag: string) =>
+    entries.find(([key]) => key.toLowerCase() === tag)?.[1] ??
+    entries.find(
+      ([key]) => key.toLowerCase().split("-")[0] === tag.split("-")[0],
+    )?.[1];
+  const copy = match(target) ?? match("en-us") ?? entries[0]![1];
+  return {
+    ...copy,
+    gettingStarted: copy.usage,
+    requirements: copy.requirements,
+  };
 }
 
 export function bundledCopy(name: keyof typeof bundled, locale: string) {
