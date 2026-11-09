@@ -1941,6 +1941,8 @@ class TestScopedShellSessions:
             },
         )
         sandbox._client.shell.create_session.assert_not_called()
+        assert sandbox._scoped_shell_sessions["subagent-a"].session_id is None
+        sandbox.release_command_scope("subagent-a")
         assert sandbox._scoped_shell_sessions == {}
 
     def test_env_session_cleanup_failure_does_not_mask_command_output(self, sandbox):
