@@ -177,10 +177,13 @@ def test_empty_request_betas_still_carries_oauth_betas(model):
     assert payload["betas"] == _oauth_betas()
 
 
-def test_missing_request_betas_gets_oauth_betas(model):
+def test_missing_request_betas_leaves_payload_untouched(model):
+    """Without per-request betas the payload stays untouched, so langchain-anthropic
+    keeps the client default header path (_client.messages.create) instead of
+    switching to _client.beta.messages.create with an equivalent header."""
     payload: dict = {}
     model._merge_oauth_betas(payload)
-    assert payload["betas"] == _oauth_betas()
+    assert "betas" not in payload
 
 
 def test_request_already_carrying_an_oauth_beta_is_not_duplicated(model):

@@ -222,7 +222,11 @@ class ClaudeChatModel(ChatAnthropic):
         from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
 
         betas = payload.get("betas")
-        request_betas = [str(beta) for beta in betas] if isinstance(betas, (list, tuple)) else []
+        if not isinstance(betas, (list, tuple)):
+            # No per-request betas: leave the payload untouched so langchain-anthropic
+            # keeps using the client default header via _client.messages.create.
+            return
+        request_betas = [str(beta) for beta in betas]
         merged = [beta for beta in OAUTH_ANTHROPIC_BETAS.split(",") if beta not in request_betas]
         payload["betas"] = [*merged, *request_betas]
 
