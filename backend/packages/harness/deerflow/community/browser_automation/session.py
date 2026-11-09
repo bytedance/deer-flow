@@ -142,6 +142,43 @@ _LIVE_FRAME_SETTLE_DELAYS_S = (0.8, 2.0)
 _DEFAULT_MAX_SESSIONS = 32
 _DEFAULT_IDLE_TIMEOUT_S = 30 * 60.0
 
+# Launch engines for a managed (non-CDP) session. ``chromium`` is Playwright's
+# bundled Chromium and the default. ``camoufox`` is an optional, anti-detection
+# Firefox build for bot-protected sites, installed with the ``camoufox`` extra.
+BROWSER_ENGINES = ("chromium", "camoufox")
+_DEFAULT_BROWSER_ENGINE = "chromium"
+_CAMOUFOX_INSTALL_HINT = "cd backend && uv sync --extra browser --extra camoufox && uv run python -m camoufox fetch"
+# Firefox resolves SOCKS hostnames locally and never proxies loopback unless told
+# to; both would bypass the pinned egress proxy (DNS rebinding, localhost SSRF).
+_CAMOUFOX_EGRESS_PREFS = {
+    "network.proxy.socks_remote_dns": True,
+    "network.proxy.allow_hijacking_localhost": True,
+}
+
+
+def _validate_browser_engine(engine: str, cdp_url: str | None) -> None:
+    if engine not in BROWSER_ENGINES:
+        raise ValueError(f"Unknown browser engine {engine!r}; expected one of: {', '.join(BROWSER_ENGINES)}")
+    if engine != _DEFAULT_BROWSER_ENGINE and cdp_url:
+        raise ValueError(f"engine: {engine} cannot be combined with cdp_url; CDP attachment is Chromium-only")
+
+
+async def _launch_camoufox(playwright: Playwright, *, headless: bool, proxy: dict[str, str] | None) -> Browser:
+    """Launch Camoufox (Playwright Firefox) on *playwright*; import lazily."""
+    try:
+        from camoufox.async_api import AsyncNewBrowser
+    except ImportError as exc:
+        raise RuntimeError(f"browser engine 'camoufox' requires the optional camoufox package. Install it with: {_CAMOUFOX_INSTALL_HINT}") from exc
+    options: dict[str, Any] = {
+        "headless": headless,
+        # WebRTC UDP cannot traverse the SOCKS egress proxy; Camoufox can disable it.
+        "block_webrtc": True,
+        "firefox_user_prefs": dict(_CAMOUFOX_EGRESS_PREFS),
+    }
+    if proxy is not None:
+        options["proxy"] = proxy
+    return await AsyncNewBrowser(playwright, **options)
+
 
 # ``GATEWAY_WORKERS`` is the documented knob and the one docker-compose forwards as
 # ``--workers``; ``backend/Dockerfile`` and ``scripts/serve.sh`` start uvicorn with no
@@ -313,7 +350,10 @@ class BrowserSession:
         url_guard: Callable[[str], str | None] | None = None,
         egress_resolver: EgressResolver | None = None,
         on_activity: Callable[[], None] | None = None,
+        engine: str = _DEFAULT_BROWSER_ENGINE,
     ) -> None:
+        _validate_browser_engine(engine, cdp_url)
+        self._engine = engine
         self._loop = loop
         self._headless = headless
         self._timeout_ms = timeout_ms
@@ -456,7 +496,10 @@ class BrowserSession:
                 return self._page
 
             if self._browser is None or not self._browser.is_connected():
-                self._browser = await self._playwright.chromium.launch(headless=self._headless, proxy=await self._egress_proxy_settings())
+                if self._engine == "camoufox":
+                    self._browser = await _launch_camoufox(self._playwright, headless=self._headless, proxy=await self._egress_proxy_settings())
+                else:
+                    self._browser = await self._playwright.chromium.launch(headless=self._headless, proxy=await self._egress_proxy_settings())
             # device_scale_factor=2 renders screenshots at retina density so the
             # panel stays crisp when the image is scaled up to fill the view.
             self._context = await self._browser.new_context(viewport=self._viewport, device_scale_factor=2)
@@ -473,6 +516,7 @@ class BrowserSession:
             self._egress_proxy = BrowserEgressProxy(self._egress_resolver)
         # Playwright already proxies loopback for Chromium unless an environment
         # override disables it; spell it out so localhost is never exempt.
+        # Firefox ignores this token and uses _CAMOUFOX_EGRESS_PREFS instead.
         return {"server": await self._egress_proxy.start(), "bypass": "<-loopback>"}
 
     def _set_active_page(self, page: Page) -> None:
@@ -990,8 +1034,10 @@ class BrowserSessionManager:
         url_guard: Callable[[str], str | None] | None = None,
         egress_resolver: EgressResolver | None = None,
         pin: bool = False,
+        engine: str = _DEFAULT_BROWSER_ENGINE,
     ) -> BrowserSession:
         ensure_browser_worker_compatibility()
+        _validate_browser_engine(engine, cdp_url)
         if cdp_url and not allow_unguarded_cdp:
             raise RuntimeError("cdp_url uses a browser context where DeerFlow cannot enforce its SSRF request guard; set allow_unguarded_cdp: true only for an explicitly trusted local Chrome session")
         key = thread_id or "default"
@@ -1015,6 +1061,7 @@ class BrowserSessionManager:
                     url_guard=url_guard,
                     egress_resolver=egress_resolver,
                     on_activity=lambda: self._touch_session(key),
+                    engine=engine,
                 )
                 self._sessions[key] = session
             if pin:

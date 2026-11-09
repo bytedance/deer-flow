@@ -1,0 +1,37 @@
+use_default_settings:
+  engines:
+    keep_only:
+      - brave
+      - yahoo
+      - yandex
+      - mwmbl
+      - wikipedia
+      - duckduckgo
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  # SearXNG reads secret_key from SEARXNG_SECRET in the container environment.
+  limiter: false
+  public_instance: false
+
+# Verified live on searxng/searxng 2026.11.1 from a residential IP: brave, yahoo
+# and yandex returned relevant results; mwmbl is sparse; duckduckgo answered with
+# a CAPTCHA (kept so it recovers automatically). Bing, Google, Qwant, Yep and
+# Seznam failed or were denied; Mojeek and Startpage are inactive upstream.
+engines:
+  - name: brave
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: yandex
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: duckduckgo
+    disabled: false

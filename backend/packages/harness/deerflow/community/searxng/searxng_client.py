@@ -20,6 +20,16 @@ class SearxngResponseError(ValueError):
     """
 
 
+class SearxngEnginesUnavailableError(RuntimeError):
+    """Raised when SearXNG answers HTTP 200 with no results because its engines failed.
+
+    SearXNG reports engines that timed out, were rate limited or challenged in
+    ``unresponsive_engines``. An empty first page alongside such failures is an
+    upstream outage, not a genuine empty search, so callers can fail over
+    instead of telling the agent the query matched nothing.
+    """
+
+
 class SearxngClient:
     """Client for SearXNG meta search engine API."""
 
@@ -116,6 +126,21 @@ class SearxngClient:
             raise SearxngResponseError("SearXNG returned an unexpected response format")
         return usable
 
+    @staticmethod
+    def _unresponsive_engines(data: dict[str, Any]) -> str:
+        """Summarize ``unresponsive_engines`` (``[[engine, reason], ...]``) as ``"engine (reason), ..."``."""
+        entries = data.get("unresponsive_engines")
+        if not isinstance(entries, list):
+            return ""
+        parts: list[str] = []
+        for entry in entries:
+            if isinstance(entry, (list, tuple)) and entry:
+                name = str(entry[0])
+                parts.append(f"{name} ({entry[1]})" if len(entry) > 1 and entry[1] else name)
+            elif isinstance(entry, str) and entry:
+                parts.append(entry)
+        return ", ".join(parts)
+
     async def _search_page(
         self,
         query: str,
@@ -157,7 +182,13 @@ class SearxngClient:
                 except ValueError as e:
                     logger.error("SearXNG returned a response body that is not JSON")
                     raise SearxngResponseError("SearXNG returned an unexpected response format") from e
-                return self._response_rows(data)
+                rows = self._response_rows(data)
+                if not rows and pageno == 1:
+                    failed = self._unresponsive_engines(data)
+                    if failed:
+                        logger.warning("SearXNG returned no results while engines failed: %s", failed)
+                        raise SearxngEnginesUnavailableError(f"SearXNG returned no results because its upstream engines failed: {failed}")
+                return rows
         except httpx.HTTPStatusError as e:
             logger.error(f"SearXNG search returned error status: {e}")
             raise
