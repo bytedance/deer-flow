@@ -106,6 +106,9 @@ class ThreadMetaRepository(ThreadMetaStore):
                 # SQL rejects duplicate IDs before the owner-scoped HTTP
                 # recovery can see a foreign row. Match the memory store's
                 # conflict signal without exposing that row to the caller.
+                # The current schema has no FK/CHECK constraints. If those
+                # are added, narrow by constraint identity before classifying
+                # an unrelated integrity failure as an ownership collision.
                 await session.rollback()
                 existing = (await session.execute(select(ThreadMetaRow.user_id).where(ThreadMetaRow.thread_id == thread_id))).first()
                 if existing is not None and resolved_user_id is not None and existing.user_id != resolved_user_id:

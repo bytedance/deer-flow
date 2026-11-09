@@ -38,6 +38,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** SQL-backed thread creation now returns the existing
+  non-disclosing `404 Thread not found` response instead of 500 when a
+  caller-supplied ID belongs to another user. Same-owner retries remain
+  idempotent, and the original conversation is preserved.
+  ([#8054](https://github.com/bytedance/deer-flow/pull/8054))
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the

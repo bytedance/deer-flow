@@ -100,6 +100,27 @@ async def test_sql_insert_race_preserves_committed_owner_and_metadata(store, mon
 
 
 @pytest.mark.anyio
+async def test_normal_user_cannot_claim_legacy_unowned_thread(store):
+    await store.create("legacy-unowned", user_id=None, metadata={"marker": "legacy"})
+    original = await store.get("legacy-unowned", user_id=None)
+    assert original["user_id"] is None
+    user = User(id=UUID(int=1), email="caller@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
+    app.state.thread_store = store
+    saver = InMemorySaver()
+    app.state.checkpointer = saver
+    app.include_router(threads.router)
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": "legacy-unowned", "metadata": {"marker": "replacement"}})
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Thread not found"}
+    assert await store.get("legacy-unowned", user_id=None) == original
+    assert await store.get("legacy-unowned", user_id=str(user.id)) is None
+    assert await saver.aget_tuple({"configurable": {"thread_id": "legacy-unowned", "checkpoint_ns": ""}}) is None
+
+
+@pytest.mark.anyio
 async def test_unrelated_sql_integrity_failure_remains_a_server_error(store):
     if not isinstance(store, ThreadMetaRepository):
         pytest.skip("Actual SQL integrity failure")
