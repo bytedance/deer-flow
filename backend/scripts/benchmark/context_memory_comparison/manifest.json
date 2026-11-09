@@ -1,0 +1,352 @@
+{
+  "schema_version": 1,
+  "protocol_id": "deerflow-context-memory-comparison-v1",
+  "scope_isolation_cases": [
+    {
+      "id": "thread-isolation-project-alpha-beta",
+      "description": "Cross-thread isolation between Project Alpha and Project Beta with project constraint memory pollution check",
+      "thread_a": {
+        "thread_id": "thread-alpha-7884",
+        "user_id": "user-corp-7884",
+        "agent_name": "lead-agent",
+        "project_context": {
+          "project_id": "proj-alpha-7884",
+          "name": "Project Alpha",
+          "instructions": "Alpha guidelines: strictly follow Alpha codestyle (CANARY-TH-A-INST-7884).",
+          "shelf": {
+            "total": 1,
+            "entries": [
+              {
+                "id": "doc-alpha-1",
+                "name": "alpha-architecture.md",
+                "size_bytes": 1024,
+                "updated_at": "2026-11-01",
+                "summary": "Alpha core architectural specification (CANARY-TH-A-DOC-7884)."
+              }
+            ]
+          }
+        }
+      },
+      "thread_b": {
+        "thread_id": "thread-beta-7884",
+        "user_id": "user-corp-7884",
+        "agent_name": "lead-agent",
+        "project_context": {
+          "project_id": "proj-beta-7884",
+          "name": "Project Beta",
+          "instructions": "Beta guidelines: use Beta API protocol (CANARY-TH-B-INST-7884).",
+          "shelf": {
+            "total": 1,
+            "entries": [
+              {
+                "id": "doc-beta-1",
+                "name": "beta-manual.md",
+                "size_bytes": 2048,
+                "updated_at": "2026-11-02",
+                "summary": "Beta developer operating manual (CANARY-TH-B-DOC-7884)."
+              }
+            ]
+          }
+        }
+      },
+      "seed_facts": [
+        {
+          "id": "user-global-pref-1",
+          "content": "The user prefers concise diffs across all workflows (CANARY-USER-GLOBAL-7884).",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user"
+        }
+      ],
+      "contamination_turn": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Only in Project Alpha, pin third-party library to legacy 1.0 (CANARY-PROJ-REJECT-7884)."
+          }
+        ],
+        "offline_output": {
+          "user": {},
+          "history": {},
+          "newFacts": [
+            {
+              "content": "Project Alpha pins third-party library to 1.0 (CANARY-PROJ-REJECT-7884).",
+              "category": "constraint",
+              "confidence": 0.99,
+              "scope": "project",
+              "durability": "temporary",
+              "authority": "descriptive"
+            }
+          ],
+          "factsToRemove": []
+        }
+      },
+      "expected_thread_a_canaries": [
+        "CANARY-TH-A-INST-7884",
+        "CANARY-TH-A-DOC-7884",
+        "CANARY-USER-GLOBAL-7884"
+      ],
+      "expected_thread_b_canaries": [
+        "CANARY-TH-B-INST-7884",
+        "CANARY-TH-B-DOC-7884",
+        "CANARY-USER-GLOBAL-7884"
+      ],
+      "expected_rejected_canaries": [
+        "CANARY-PROJ-REJECT-7884"
+      ]
+    },
+    {
+      "id": "thread-isolation-assigned-vs-unassigned",
+      "description": "Boundary verification between a project-assigned thread and an unassigned independent thread",
+      "thread_a": {
+        "thread_id": "thread-gamma-7884",
+        "user_id": "user-gamma-7884",
+        "agent_name": "lead-agent",
+        "project_context": {
+          "project_id": "proj-gamma-7884",
+          "name": "Project Gamma",
+          "instructions": "Gamma rules: enforce zero-warning compilation (CANARY-TH-GAMMA-INST-7884).",
+          "shelf": {
+            "total": 1,
+            "entries": [
+              {
+                "id": "doc-gamma-1",
+                "name": "gamma-spec.md",
+                "size_bytes": 4096,
+                "updated_at": "2026-11-03",
+                "summary": "Gamma project roadmap and deadlines (CANARY-TH-GAMMA-DOC-7884)."
+              }
+            ]
+          }
+        }
+      },
+      "thread_b": {
+        "thread_id": "thread-unassigned-7884",
+        "user_id": "user-gamma-7884",
+        "agent_name": "lead-agent",
+        "project_context": null
+      },
+      "seed_facts": [
+        {
+          "id": "user-gamma-pref-1",
+          "content": "The user prefers dark theme outputs (CANARY-USER-FACT-G-7884).",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user"
+        }
+      ],
+      "contamination_turn": null,
+      "expected_thread_a_canaries": [
+        "CANARY-TH-GAMMA-INST-7884",
+        "CANARY-TH-GAMMA-DOC-7884",
+        "CANARY-USER-FACT-G-7884"
+      ],
+      "expected_thread_b_canaries": [
+        "CANARY-USER-FACT-G-7884"
+      ],
+      "expected_rejected_canaries": []
+    }
+  ],
+  "turn_invalidation_cases": [
+    {
+      "id": "invalidation-atomic-fact-replacement",
+      "description": "Verify instant invalidation and zero stale prompt injection on next turn during atomic fact replacement",
+      "user_id": "user-inv-replace-7884",
+      "agent_name": "lead-agent",
+      "seed_facts": [
+        {
+          "id": "fact-seed-db-1",
+          "content": "The user standardizes on PostgreSQL for all relational storage (CANARY-STALE-PG-7884).",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user",
+          "durability": "durable"
+        }
+      ],
+      "expected_turn_1_canaries": [
+        "CANARY-STALE-PG-7884"
+      ],
+      "update_messages": [
+        {
+          "role": "user",
+          "content": "Correction for future architecture: we migrated completely from PostgreSQL to CockroachDB (CANARY-FRESH-CRDB-7884)."
+        }
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [
+          {
+            "content": "The user standardizes on CockroachDB for distributed relational storage (CANARY-FRESH-CRDB-7884).",
+            "category": "preference",
+            "confidence": 0.99,
+            "scope": "user",
+            "durability": "durable",
+            "authority": "descriptive"
+          }
+        ],
+        "factsToRemove": [
+          {
+            "id": "fact-seed-db-1",
+            "scope": "user",
+            "reason": "The user explicitly replaced PostgreSQL with CockroachDB",
+            "replacementFactIndex": 0
+          }
+        ]
+      },
+      "expected_turn_2_present_canaries": [
+        "CANARY-FRESH-CRDB-7884"
+      ],
+      "expected_turn_2_absent_canaries": [
+        "CANARY-STALE-PG-7884"
+      ]
+    },
+    {
+      "id": "invalidation-pure-fact-deletion",
+      "description": "Verify instant removal of revoked transient authorization fact on next turn prompt assembly",
+      "user_id": "user-inv-delete-7884",
+      "agent_name": "lead-agent",
+      "seed_facts": [
+        {
+          "id": "fact-seed-debug-auth",
+          "content": "Temporary authorization granted for verbose trace output (CANARY-STALE-AUTH-7884).",
+          "category": "context",
+          "confidence": 0.99,
+          "scope": "user",
+          "durability": "durable"
+        }
+      ],
+      "expected_turn_1_canaries": [
+        "CANARY-STALE-AUTH-7884"
+      ],
+      "update_messages": [
+        {
+          "role": "user",
+          "content": "Revoke the verbose trace authorization immediately (CANARY-REVOKE-TRIGGER-7884)."
+        }
+      ],
+      "offline_output": {
+        "user": {},
+        "history": {},
+        "newFacts": [],
+        "factsToRemove": [
+          {
+            "id": "fact-seed-debug-auth",
+            "scope": "user",
+            "reason": "The user revoked verbose trace authorization"
+          }
+        ]
+      },
+      "expected_turn_2_present_canaries": [],
+      "expected_turn_2_absent_canaries": [
+        "CANARY-STALE-AUTH-7884"
+      ]
+    }
+  ],
+  "token_overhead_cases": [
+    {
+      "id": "token-breakdown-user-facts-only",
+      "description": "Measure baseline token overhead from user facts only without agent facts or project context",
+      "user_id": "user-tok-base-7884",
+      "agent_name": "lead-agent",
+      "user_facts": [
+        {
+          "content": "The user prefers Python 3.12 syntax with explicit type annotations.",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user"
+        },
+        {
+          "content": "The user runs unit tests using pytest with verbose diff output.",
+          "category": "preference",
+          "confidence": 0.95,
+          "scope": "user"
+        }
+      ],
+      "agent_facts": [],
+      "project_context": null
+    },
+    {
+      "id": "token-breakdown-hierarchical-agent-scope",
+      "description": "Measure token overhead delta between global user facts and agent-scoped facts",
+      "user_id": "user-tok-agent-7884",
+      "agent_name": "researcher-agent",
+      "user_facts": [
+        {
+          "content": "The user prefers summary tables with Markdown alignment.",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user"
+        }
+      ],
+      "agent_facts": [
+        {
+          "content": "Researcher agent must prioritize peer-reviewed arXiv papers over blogs.",
+          "category": "constraint",
+          "confidence": 0.98,
+          "scope": "agent"
+        },
+        {
+          "content": "Researcher agent outputs bibtex citations for all academic references.",
+          "category": "preference",
+          "confidence": 0.94,
+          "scope": "agent"
+        }
+      ],
+      "project_context": null
+    },
+    {
+      "id": "token-breakdown-full-project-stack",
+      "description": "Measure fine-grained prompt token overhead across all layers: user facts, agent facts, instructions, and document shelf",
+      "user_id": "user-tok-full-7884",
+      "agent_name": "lead-agent",
+      "user_facts": [
+        {
+          "content": "The user prefers concise bulleted summaries.",
+          "category": "preference",
+          "confidence": 0.99,
+          "scope": "user"
+        }
+      ],
+      "agent_facts": [
+        {
+          "content": "Lead agent coordinates subagents sequentially without unbounded spawning.",
+          "category": "constraint",
+          "confidence": 0.95,
+          "scope": "agent"
+        }
+      ],
+      "project_context": {
+        "project_id": "proj-full-stack-7884",
+        "name": "DeerFlow Enterprise Suite",
+        "instructions": "All code must comply with enterprise security baseline v4. No external network egress without proxy authorization. Ensure all database writes are idempotent and audit-logged.",
+        "shelf": {
+          "total": 3,
+          "entries": [
+            {
+              "id": "doc-sec-1",
+              "name": "security-policy.md",
+              "size_bytes": 8192,
+              "updated_at": "2026-11-01",
+              "summary": "Enterprise data protection, encryption at rest, and zero-trust policies."
+            },
+            {
+              "id": "doc-api-1",
+              "name": "gateway-api-spec.yaml",
+              "size_bytes": 16384,
+              "updated_at": "2026-11-02",
+              "summary": "Gateway OpenAPI 3.1 specification for SSE streaming and thread management."
+            },
+            {
+              "id": "doc-arch-1",
+              "name": "memory-subsystem-rfc.md",
+              "size_bytes": 12288,
+              "updated_at": "2026-11-03",
+              "summary": "Hierarchical memory architecture and offline evaluation guidelines."
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
