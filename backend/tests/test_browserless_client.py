@@ -459,17 +459,51 @@ class TestBrowserlessTools:
     async def test_config_token_is_stripped(self):
         assert self._client_with_config({"token": " cfg-token\n"}).token == "cfg-token"
 
-    async def test_blank_config_token_falls_back_to_env(self):
-        """A whitespace-only configured key counts as unset, like the other providers."""
+    async def test_blank_config_token_does_not_fall_back_to_env(self):
+        """An explicit blank token opts the tool out of the environment token.
+
+        A self-hosted capture endpoint sets ``token: ""`` so it receives no
+        authentication; falling back to BROWSERLESS_TOKEN would send the cloud
+        credential to it.
+        """
         with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
-            mock_cfg.return_value = {"token": "   "}
+            mock_cfg.return_value = {"token": ""}
             with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
                 client = tools._get_browserless_client("web_capture")
 
-        assert client.token == "env-token"
+        assert client.token == ""
+
+    async def test_null_config_token_does_not_fall_back_to_env(self):
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": None}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "env-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        assert client.token == ""
 
     async def test_whitespace_only_token_sends_no_auth_parameter(self):
         assert self._client_with_config({"token": "\r\n"}).token == ""
+
+    async def test_capture_query_omits_token_when_config_opts_out(self):
+        """The outgoing capture request must not carry the environment token."""
+        with patch("deerflow.community.browserless.tools._get_tool_config") as mock_cfg:
+            mock_cfg.return_value = {"token": ""}
+            with patch.dict("os.environ", {"BROWSERLESS_TOKEN": "cloud-token"}, clear=True):
+                client = tools._get_browserless_client("web_capture")
+
+        with patch("deerflow.community.browserless.browserless_client.httpx.AsyncClient") as mock_cls:
+            mock_ctx = MagicMock()
+            mock_cls.return_value.__aenter__.return_value = mock_ctx
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.content = b"\x89PNG\r\n\x1a\nimage"
+            mock_resp.text = "<binary>"
+            mock_resp.headers = {"Content-Type": "image/png"}
+            mock_ctx.post = AsyncMock(return_value=mock_resp)
+
+            await client.capture_screenshot("https://example.com")
+
+        assert mock_ctx.post.call_args.kwargs["params"] is None
 
     @patch("deerflow.community.browserless.tools._get_browserless_client")
     async def test_web_fetch_tool_success(self, mock_get_client):

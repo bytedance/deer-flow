@@ -90,10 +90,12 @@ def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UN
     timeout_s = 30.0
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        # Same credential rule as the search/fetch providers: a key read from a
-        # file keeps its trailing newline, and the raw value becomes the auth
-        # query parameter. A blank config value counts as unset.
-        token = resolve_api_key(cfg.get("token")) or token
+        if "token" in cfg:
+            # An explicitly configured value is authoritative, including "" and
+            # null: a self-hosted capture endpoint opts out of the cloud token,
+            # and falling back to BROWSERLESS_TOKEN would send that credential to
+            # it. Only an omitted key falls back to the environment.
+            token = resolve_api_key(cfg.get("token"))
         timeout_s = _resolve_timeout(cfg, timeout_s)
     return BrowserlessClient(base_url=base_url, token=token or "", timeout_s=timeout_s)
 
