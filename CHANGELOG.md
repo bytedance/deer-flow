@@ -28,17 +28,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **agents:** Token budgets count separate accepted model calls even when a
-  provider reuses message IDs, so repeated IDs no longer bypass the configured
-  cap. Hard stops preserve already-completed structured-output tool results.
-  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
-
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
   every user message on every model call, so one 100 KB paste blocked every
   thread for about 6 s per model call. The scan is now linear, and it redacts
   exactly the same addresses as before. ([#8006])
+
+- **agents:** Token budgets count separate accepted model calls even when a
+  provider reuses message IDs, so repeated IDs no longer bypass the configured
+  cap. Hard stops preserve already-completed structured-output tool results.
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
   
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
