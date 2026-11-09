@@ -98,9 +98,18 @@ def _append_visible_note(content: Any, note: str) -> Any:
 
 
 def _strip_calls(last: AIMessage, calls: list[dict[str, Any]], reason: str) -> dict[str, Any]:
-    """Deny calls that cannot carry a result by removing them from the response."""
+    """Deny calls that cannot carry a result by removing them from the response.
+
+    A non-target call can share an id with a removed one. ``clone_ai_message_with_tool_calls``
+    filters the raw provider payload and content tool-call blocks by id, so such
+    a survivor would keep the removed call's raw entry, and the next request
+    would advertise a call that has no result. Drop the whole colliding id group
+    instead: an id shared with a denied approval call cannot be answered
+    unambiguously either.
+    """
+    dropped_ids = {call["id"] for call in calls if isinstance(call.get("id"), str) and call["id"]}
     dropped = {id(call) for call in calls}
-    kept = [tool_call for tool_call in last.tool_calls if id(tool_call) not in dropped]
+    kept = [tool_call for tool_call in last.tool_calls if id(tool_call) not in dropped and not (isinstance(tool_call.get("id"), str) and tool_call["id"] in dropped_ids)]
     return {"messages": [clone_ai_message_with_tool_calls(last, kept, content=_append_visible_note(last.content, reason))]}
 
 

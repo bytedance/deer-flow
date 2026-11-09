@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -484,3 +485,59 @@ def test_empty_tool_call_id_is_denied_instead_of_pausing():
     _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
 
     _assert_stripped_without_pausing(out)
+
+
+class _RawPayloadApprovalModel(FakeMessagesListChatModel):
+    """Emit structured tool calls plus the raw OpenAI-style provider payload."""
+
+    calls: list[dict[str, Any]]
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+        if any(isinstance(message, ToolMessage) for message in messages):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="final answer"))])
+        raw = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call.get("args", {}))}} for call in self.calls]
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=self.calls, additional_kwargs={"tool_calls": raw}))])
+
+
+def test_stripping_a_shared_id_clears_the_raw_provider_payload_too():
+    """A non-target call sharing the removed id must not keep the removed call serialized.
+
+    ``clone_ai_message_with_tool_calls`` filters ``additional_kwargs["tool_calls"]``
+    and content blocks by id, so a surviving ordinary call with the same id would
+    keep the denied approval calls in the raw provider payload; the next request
+    would advertise calls that have no result.
+    """
+    executed: list[str] = []
+
+    @tool
+    def echo(text: str = "") -> str:
+        """Echo text."""
+        executed.append("echo")
+        return "echoed"
+
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_shared"},
+        {"name": "write_file", "args": {"path": "/tmp/b.txt", "content": "b"}, "id": "call_shared"},
+        {"name": "echo", "args": {"text": "hi"}, "id": "call_shared"},
+    ]
+    model = _RawPayloadApprovalModel(responses=[], calls=calls)
+    agent = create_agent(
+        model,
+        tools=[write_file, echo],
+        middleware=[HitlApprovalMiddleware(tool_names={"write_file"})],
+        checkpointer=InMemorySaver(),
+    )
+
+    out = agent.invoke({"messages": [{"role": "user", "content": "go"}]}, {"configurable": {"thread_id": "shared-raw"}})
+
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert executed == []
+    answer = messages[-1]
+    assert answer.tool_calls == []
+    assert "tool_calls" not in answer.additional_kwargs
+    assert "no usable id" in _visible_text(answer.content)
