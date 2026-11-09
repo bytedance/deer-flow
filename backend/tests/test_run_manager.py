@@ -725,6 +725,80 @@ async def test_cleanup_without_store_preserves_history(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_discard_thread_runs_keeps_internal_operation_rows(manager_with_store: RunManager):
+    """Only the thread's historical runs go; the release path owns the rest.
+
+    The deletion that calls this holds a ``delete`` reservation, and a
+    checkpoint write or a branch operation may be indexed for the same thread.
+    Inverting the ``operation_kind`` guard must fail here rather than being
+    absorbed by a later release: the reservation's own ``finally`` would prune
+    its bucket anyway, which is why the router-level tests cannot pin it.
+    """
+    mgr = manager_with_store
+    thread_id = "thread-1"
+    finished = await mgr.create(thread_id, kwargs={"input": "keep me out of memory"})
+    await mgr.set_status(finished.run_id, RunStatus.success)
+
+    async with mgr.reserve_thread_operation(thread_id, kind=ThreadOperationKind.delete):
+        dropped = await mgr.discard_thread_runs(thread_id)
+
+        assert dropped == 1
+        assert finished.run_id not in mgr._runs
+        assert finished.run_id not in mgr._runs_by_thread.get(thread_id, {})
+        internal = [record for record in mgr._runs.values() if record.thread_id == thread_id]
+        assert [record.operation_kind for record in internal] == [ThreadOperationKind.delete]
+        # The reservation still protects the request that is running.
+        assert [record.run_id for record in internal] == [next(iter(mgr._runs_by_thread[thread_id]))]
+
+    # Its own release path removes it once the reservation exits.
+    assert thread_id not in mgr._runs_by_thread
+    # The run's history survives through the store fallback.
+    hydrated = await mgr.get(finished.run_id, user_id=finished.user_id)
+    assert hydrated is not None
+    assert hydrated.status is RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_discard_thread_runs_leaves_a_live_finalize_tail_attached(manager: RunManager):
+    """A finished record whose task is mid-tail is not severed.
+
+    ``worker.py`` clears ``finalizing`` before publishing the terminal frame and
+    releasing the sandbox lease, so popping here would turn the tail's
+    manager-mediated writes into ``set_status called for unknown run`` warnings.
+    """
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    async def tail() -> None:
+        await asyncio.sleep(0)
+
+    tail_task = asyncio.create_task(tail())
+    record.task = tail_task
+    try:
+        assert await manager.discard_thread_runs("thread-1") == 0
+        assert manager._runs.get(record.run_id) is record
+    finally:
+        await tail_task
+
+    # Once the tail finishes, the next pass drops it.
+    assert await manager.discard_thread_runs("thread-1") == 1
+    assert record.run_id not in manager._runs
+
+
+@pytest.mark.anyio
+async def test_discard_thread_runs_ignores_other_threads(manager: RunManager):
+    """A delete of one thread must not unindex its neighbour's runs."""
+    mine = await manager.create("thread-1")
+    theirs = await manager.create("thread-2")
+
+    assert await manager.discard_thread_runs("thread-1") == 1
+
+    assert mine.run_id not in manager._runs
+    assert manager._runs.get(theirs.run_id) is theirs
+    assert [r.run_id for r in await manager.list_by_thread("thread-2")] == [theirs.run_id]
+
+
+@pytest.mark.anyio
 async def test_set_status_with_error(manager: RunManager):
     """Error message should be stored on the record."""
     record = await manager.create("thread-1")

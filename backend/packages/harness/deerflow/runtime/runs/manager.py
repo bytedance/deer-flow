@@ -2548,7 +2548,18 @@ class RunManager:
         thread itself already answers 404.
 
         The caller must already hold the thread's exclusive admission, so no
-        run for it can be admitted concurrently here.
+        run for it can be admitted concurrently here. A finished record can
+        still own a live finalize tail (``worker.py`` clears ``finalizing``,
+        then publishes the terminal frame, closes the journal and releases the
+        sandbox lease before scheduling ``cleanup()``), so records whose
+        ``task`` is still running stay indexed here: the bound is one final
+        tail, and later manager-mediated writes land on a record whose durable
+        rows are already gone.
+
+        This covers this worker only. A Gateway peer that admitted the same
+        thread keeps its own ``_runs`` copies until its deferred
+        ``cleanup(run_id)`` fires (the default 300s delay), so a DELETE served
+        elsewhere bounds multi-worker residues rather than removing them.
         """
         async with self._thread_registry_lock(thread_id):
             run_ids = list(self._runs_by_thread.get(thread_id, {}))
@@ -2561,6 +2572,9 @@ class RunManager:
                 # Historical runs only. Internal thread-operation rows are held
                 # by their own release path (this deletion holds one of them).
                 if record.operation_kind != ThreadOperationKind.run:
+                    continue
+                task = record.task
+                if task is not None and not task.done():
                     continue
                 self._runs.pop(run_id, None)
                 self._unindex_run_locked(run_id, thread_id)
