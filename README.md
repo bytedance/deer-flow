@@ -2719,8 +2719,9 @@ and SDK retries can add calls. See the
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
-and filters before the eight-result limit; omitting it or passing `null` preserves
-search across all roles.
+and filters before limiting results to eight distinct sources. Omitting `role` or
+passing `null` preserves search across all roles. Repeated archives of one source
+share one result slot.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range
