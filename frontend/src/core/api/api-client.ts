@@ -59,7 +59,7 @@ function injectCsrfHeader(_url: URL, init: RequestInit): RequestInit {
 //
 // ``error``/``timeout`` are terminal too, so a reload within the ~60s
 // bridge-reap window no longer replays the buffered error event through
-// ``onError`` — the transient error toast (``getStreamErrorMessage``) is
+// ``onError`` — the transient error toast (``getStreamErrorToastMessage``) is
 // dropped. The persisted error state still loads from the checkpoint via
 // ``useThreadHistory``, so only the toast is lost; that is intentional, since
 // surfacing a stale error toast on every reload is noise rather than signal.
