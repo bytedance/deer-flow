@@ -3064,6 +3064,23 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ### Sandbox & File System
 
+AIO runs commands from independent subagents concurrently, including Lark CLI
+and skill commands with per-call environment variables. Commands within one
+subagent stay ordered, and each environment-bearing call uses a fresh session.
+Environment-bearing calls share a per-sandbox Bash admission limit, configured
+by `sandbox.environment.AIO_BASH_MAX_SESSIONS` (positive integer, default `50`).
+Excess calls wait without creating a session and can be cancelled while waiting;
+the slot is retained through session cleanup. This pool is separate from
+`MAX_SHELL_SESSIONS`. Docker reuse checks the persisted container environment;
+K8s reuse checks the provisioner's Pod-reported Bash capacity. Upgrade the
+provisioner with the Gateway: missing capacity metadata blocks admission.
+Cancellation remains routed to the running command while scope release or
+sandbox close waits for it to finish and clean up.
+Scope release waits for in-flight execution and cleanup without a separate drain
+deadline. Allow for the remaining command timeout (600 seconds by default), plus
+session/transport/recovery/cleanup time when setting operator-facing release
+budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
+
 With local host bash enabled, the path guard permits division in simple shell
 arithmetic and recognized single-quoted Python, Node.js and Perl programs.
 Variable-built paths remain checked even when the filename is numeric or a

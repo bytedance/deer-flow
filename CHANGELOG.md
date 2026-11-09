@@ -43,6 +43,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
