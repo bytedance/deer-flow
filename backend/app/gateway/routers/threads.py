@@ -826,12 +826,10 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         # being deleted under a run that has just been admitted.
         response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
-    # Remove checkpoints. Unlike the cleanup below this is not best-effort: the
-    # read routes treat a thread with no thread_meta row as an untracked legacy
-    # thread open to every user, so the row must not outlive a failed checkpoint
-    # delete. Failing here keeps the row, and the owner can retry the delete.
+    # Retain ownership if a configured checkpointer cannot delete the thread.
+    # Read routes treat rowless checkpoints as untracked legacy threads.
     checkpointer = getattr(request.app.state, "checkpointer", None)
-    if checkpointer is not None and hasattr(checkpointer, "adelete_thread"):
+    if checkpointer is not None:
         try:
             await checkpointer.adelete_thread(thread_id)
         except Exception as exc:
