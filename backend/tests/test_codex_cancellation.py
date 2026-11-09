@@ -16,6 +16,8 @@ from deerflow.models.credential_loader import CodexCliCredential
 @pytest.mark.parametrize("phase", ["headers", "body"])
 @pytest.mark.parametrize("api", ["ainvoke", "astream"])
 async def test_cancelled_ainvoke_closes_upstream_connection(monkeypatch, phase, api):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     started = asyncio.Event()
     disconnected = asyncio.Event()
     release = asyncio.Event()
