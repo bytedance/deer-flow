@@ -44,7 +44,8 @@ This section accumulates work toward the **2.3.0** milestone
   header, and the SDK sends a request's `betas` as that header instead, so a
   configured `betas` list (even `[]`), per-call `betas`, or a server tool for
   which langchain-anthropic adds a beta left them out and Anthropic rejected
-  the token. The OAuth betas now lead any request `betas`. ([#8061])
+  the token. The OAuth betas now lead any request `betas` and any
+  `anthropic-beta` in `extra_headers`. ([#8061])
 
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during

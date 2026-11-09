@@ -167,11 +167,13 @@ OAuth requests need `OAUTH_ANTHROPIC_BETAS` (including `oauth-2025-04-20`) in
 sets them as the client's default header, but request `betas` replace that header
 (the precedence the thinking budget resolves below). `_get_request_payload`
 therefore puts the OAuth betas first in any request `betas` list, including an
-empty one, before the thinking budget reads the header. Requests without `betas`
-keep the default header. Rebuild the list: the payload's `betas` can be
-`self.betas`. `tests/test_claude_provider_oauth_betas.py` checks the sent header
-for configured, per-call and server-tool betas through the model's SDK clients
-with offline transports.
+empty one, before the thinking budget reads the header. An `anthropic-beta` in
+`extra_headers` (from `model_kwargs` or per call) outranks both, so it gets the
+same merge. Requests without either keep the default header. Rebuild the list and
+the headers: the payload's `betas` can be `self.betas` and its `extra_headers` the
+dict in `self.model_kwargs`. `tests/test_claude_provider_oauth_betas.py` checks the
+sent header for configured, per-call, server-tool and `extra_headers` betas through
+the model's SDK clients with offline transports.
 
 ### Claude Retry Delays (`claude_provider.py`)
 

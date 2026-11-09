@@ -222,16 +222,31 @@ class ClaudeChatModel(ChatAnthropic):
         them for server tools, MCP servers and task budgets. Without
         ``oauth-2025-04-20`` Anthropic rejects the Bearer token, so the OAuth
         betas go first in any such list, including an empty one. Requests
-        without ``betas`` keep the default header.
+        without ``betas`` or a beta header keep the default header.
 
-        The list is rebuilt rather than extended: the payload's ``betas`` can be
-        ``self.betas`` itself.
+        An ``anthropic-beta`` in the request's ``extra_headers`` replaces both
+        the default and the ``betas`` header, so it gets the same merge.
+
+        The list and the headers are rebuilt rather than changed in place: the
+        payload's ``betas`` can be ``self.betas`` itself, and its
+        ``extra_headers`` can be the dict in ``self.model_kwargs``.
         """
-        betas = payload.get("betas")
-        if betas is None:
-            return
         oauth_betas = OAUTH_ANTHROPIC_BETAS.split(",")
-        payload["betas"] = [*oauth_betas, *(beta for beta in betas if beta not in oauth_betas)]
+
+        def with_oauth_betas(betas: Any) -> list:
+            return [*oauth_betas, *(beta for beta in betas if beta not in oauth_betas)]
+
+        betas = payload.get("betas")
+        if betas is not None:
+            payload["betas"] = with_oauth_betas(betas)
+
+        extra_headers = payload.get("extra_headers")
+        if isinstance(extra_headers, dict):
+            headers = dict(extra_headers)
+            for key, value in extra_headers.items():
+                if key.lower() == "anthropic-beta" and isinstance(value, str):
+                    headers[key] = ",".join(with_oauth_betas(beta.strip() for beta in value.split(",") if beta.strip()))
+            payload["extra_headers"] = headers
 
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system, recent messages, and last tool definition.

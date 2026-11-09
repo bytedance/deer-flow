@@ -112,3 +112,36 @@ async def test_api_key_betas_are_sent_unchanged():
     assert not model._is_oauth
 
     assert await _sent_beta_header(model, "ainvoke") == CONTEXT_1M_BETA
+
+
+@pytest.mark.asyncio
+async def test_configured_extra_beta_header_keeps_oauth_betas():
+    """An ``anthropic-beta`` in ``extra_headers`` replaces both the default header and the ``betas`` header."""
+    model_kwargs = {"extra_headers": {"anthropic-beta": CONTEXT_1M_BETA, "x-trace": "1"}}
+    model = _oauth_model(model_kwargs=model_kwargs)
+
+    assert await _sent_beta_header(model, "ainvoke") == ",".join([*OAUTH_BETAS, CONTEXT_1M_BETA])
+    assert model_kwargs == {"extra_headers": {"anthropic-beta": CONTEXT_1M_BETA, "x-trace": "1"}}
+
+
+@pytest.mark.asyncio
+async def test_call_time_extra_beta_header_keeps_oauth_betas():
+    call_kwargs = {"betas": ["files-api-2025-04-14"], "extra_headers": {"anthropic-beta": f"{CONTEXT_1M_BETA}, oauth-2025-04-20"}}
+
+    assert await _sent_beta_header(_oauth_model(), "ainvoke", **call_kwargs) == ",".join([*OAUTH_BETAS, CONTEXT_1M_BETA])
+
+
+def test_extra_beta_header_name_is_case_insensitive():
+    payload = {"extra_headers": {"Anthropic-Beta": CONTEXT_1M_BETA}}
+
+    ClaudeChatModel._apply_oauth_betas(payload)
+
+    assert payload == {"extra_headers": {"Anthropic-Beta": ",".join([*OAUTH_BETAS, CONTEXT_1M_BETA])}}
+
+
+@pytest.mark.asyncio
+async def test_api_key_extra_beta_header_is_sent_unchanged():
+    model = ClaudeChatModel(model="claude-sonnet-4-6", anthropic_api_key="sk-ant-api03-fake-key", max_tokens=2048, model_kwargs={"extra_headers": {"anthropic-beta": CONTEXT_1M_BETA}})
+    assert not model._is_oauth
+
+    assert await _sent_beta_header(model, "ainvoke") == CONTEXT_1M_BETA
