@@ -31,7 +31,7 @@
   `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
   `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
   的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
-  请求 `betas` 的最前面。
+  请求 `betas` 的最前面。([#8061])
 
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
@@ -12844,3 +12844,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8061]: https://github.com/bytedance/deer-flow/pull/8061

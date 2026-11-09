@@ -44,7 +44,7 @@ This section accumulates work toward the **2.3.0** milestone
   header, and the SDK sends a request's `betas` as that header instead, so a
   configured `betas` list (even `[]`), per-call `betas`, or a server tool for
   which langchain-anthropic adds a beta left them out and Anthropic rejected
-  the token. The OAuth betas now lead any request `betas`.
+  the token. The OAuth betas now lead any request `betas`. ([#8061])
 
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
@@ -16185,3 +16185,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8061]: https://github.com/bytedance/deer-flow/pull/8061
