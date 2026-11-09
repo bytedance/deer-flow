@@ -810,6 +810,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     if batch_repo is not None:
         await batch_repo.suppress_thread_continuations(thread_id)
@@ -851,6 +852,16 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             await delete_runs(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Drop this worker's in-memory copies too. ``RunManager.get()`` and
+    # ``list_by_thread()`` answer from the process-local registry before the
+    # store, so without this the deleted thread's runs — including ``kwargs``
+    # with the user's prompt — stay readable through ``GET /threads/{id}/runs``
+    # until the Gateway restarts, while the thread itself already 404s.
+    try:
+        await run_manager.discard_thread_runs(thread_id)
+    except Exception:
+        logger.debug("Could not evict in-memory runs for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted

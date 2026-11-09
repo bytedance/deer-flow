@@ -22,6 +22,15 @@ This section accumulates work toward the **2.3.0** milestone
   `hitl_approval.max_actions` configures the approval-batch count limit
   (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
 
+- **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
+  access for authenticated users, without maintaining a per-user allowlist.
+  Exact-user allowlists remain the default; shared access requires matching
+  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+
+- **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
+  ranked results with a direct answer when the sources agree on one, and fetch
+  returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+
 - **subagents:** Durable batch items can wait for explicitly named prerequisites.
   An optional, once-only lead-Agent follow-up completes a previously requested
   summary or delivery after the batch ends, with persisted admission, cancellation
@@ -37,6 +46,10 @@ This section accumulates work toward the **2.3.0** milestone
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
 ### Fixed
+
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
 
 - **gateway:** SQL-backed thread creation now returns the existing
   non-disclosing `404 Thread not found` response instead of 500 when a
@@ -66,6 +79,16 @@ This section accumulates work toward the **2.3.0** milestone
   Gateway `/api/subagents` boundary before attempting filesystem writes,
   preventing `OSError` failures on Windows hosts while keeping existing
   read and delete operations permissive.
+
+- **scheduler:** A stored `schedule_spec` that is JSON null, a list or a string
+  no longer aborts the scheduler poll. `stored_next_run_at` caught the value
+  errors from a dropped zone or a newer cron parser, but a non-object spec
+  fails on `.get`; the launch-failure handler recomputed it again, so the
+  `AttributeError` escaped `run_once`'s claimed-task loop. Such a task is now
+  paused with the reason, like the other unusable schedules. The poll loop also
+  isolates one task's dispatch failure from the rest of its claimed batch, so a
+  future per-record raise costs one tick instead of every other claimed task.
+  ([#7998])
 
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron
@@ -16183,3 +16206,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
