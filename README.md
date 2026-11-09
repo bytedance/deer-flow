@@ -1775,6 +1775,20 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
+**Human approval for high-risk tools**: Set `hitl_approval.enabled: true` and
+list tools such as `write_file`, `str_replace`, or `bash` in `config.yaml` to
+pause matching calls before execution. The Web UI shows an approval card for
+each action; approval attempts execution under the existing guardrails and
+sandbox authorization, while rejection returns the reason to the agent without
+running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
+subagents and runtimes without resume support always fail closed.
+
+Pending approvals do not expire and block new runs on the same thread until
+resolved. Long argument values may be truncated in the display, but approval
+executes the original complete arguments. The feature is disabled by default.
+See [HITL Tool Approval](backend/docs/CONFIGURATION.md#hitl-tool-approval) for
+configuration and safety semantics.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not

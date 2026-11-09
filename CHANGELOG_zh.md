@@ -342,6 +342,13 @@
   选择器缺失、是目录或不可读时会在调用 Docker 之前直接失败，而文件删除后
   `make down` 仍能停止整个栈；不设置或为空的选择器保持可选的仓库根 `.env`
   默认值。([#6522])
+- **HITL：** 可选的高风险工具调用人工审批。`hitl_approval.tools`（由宿主管理）通过
+  LangGraph `interrupt()` 暂停匹配的调用，运行进入 `waiting_for_input`，Web UI 展示
+  带逐字段参数摘要的审批卡片。批准后执行调用；拒绝则不执行，并将原因返回给模型。
+  IM 渠道、GitHub 运行和定时任务遵循 `hitl_approval.non_interactive`（默认 `deny`，
+  可选 `allow`）。子代理及不支持 resume 的运行环境无论该设置如何，始终拒绝匹配的
+  调用。`hitl_approval.max_actions` 配置审批批次的调用数量上限（默认 32，0 表示关闭）。
+  默认关闭；`config_version` 65。
 
 - **MCP：** 按未变更的服务器缓存完成包装的工具，仅在绑定对账后重新发现缺失或配置
   发生变化的服务器。将成功但未发现工具的结果与发现失败分开保存，并保留代际、共享

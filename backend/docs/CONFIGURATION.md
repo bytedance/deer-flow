@@ -2254,6 +2254,52 @@ only when the agent is expected to edit files or run commands for a trusted
 task.
 
 
+## HITL Tool Approval
+
+`hitl_approval` pauses high-risk tool calls for human approval before execution.
+It is disabled by default; enabling it without a tool list changes nothing.
+
+```yaml
+hitl_approval:
+  enabled: true
+  tools: [write_file, str_replace, bash]
+  non_interactive: deny  # deny | allow
+  max_actions: 32  # 0 disables the approval-batch count limit
+```
+
+- `enabled`: master switch. `false` leaves all behavior unchanged.
+- `tools`: host-owned high-risk list edited by the operator. Unknown names log
+  a warning at assembly (a typo would otherwise silently disable approval).
+- `non_interactive`: behavior for IM channels, GitHub runs, scheduled tasks,
+  and other non-interactive entry points. `deny` rejects the call with an
+  error ToolMessage; `allow` executes it directly. Subagents and runtimes
+  assembled without resume support always reject matching calls regardless of
+  this setting.
+- `max_actions`: maximum matching tool calls in one approval batch. Batches
+  above the limit are rejected without executing any call; `0` disables this
+  count limit. The approval payload size limit still applies.
+
+Approval is **not** authorization. `read_before_write`, guardrails, and sandbox
+authorization still apply after approval — "approve to try executing", not
+"approve to guarantee execution". Approval requires a resume-capable entry:
+the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
+follow `non_interactive`; subagents and runtimes without resume support always
+fail closed.
+
+Argument summaries are display-only. Fields other than `path`, `command`, `url`,
+`old_str`, and `new_str` are truncated when they exceed the display budget; the
+summary includes a `chars omitted` marker. Approving executes the original,
+complete arguments, including content hidden by that marker. The payload-size
+limit bounds the approval summary, not the tool arguments.
+
+Pending approvals do not expire. While the thread remains paused at the current
+checkpoint, its approval stays resumable and blocks new runs on that thread,
+including scheduled runs, until every action is approved or rejected. Operators
+must resolve stale approvals explicitly. Disabling HITL while paused still
+allows the all-reject response as a safe escape hatch; other configuration
+changes fail closed.
+
+
 ## Best Practices
 
 1. **Place `config.yaml` in project root** - Set `DEER_FLOW_PROJECT_ROOT` if the runtime starts elsewhere
