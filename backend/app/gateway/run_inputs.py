@@ -13,6 +13,8 @@ from app.gateway.deps import get_current_user, get_run_context, get_run_manager
 from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
+_INPUT_ITEMS_LIMIT = 32
+_TERMINAL_INPUT_STATUSES = frozenset({"applied", "cancelled"})
 
 
 class RunInputRequest(BaseModel):
@@ -75,7 +77,17 @@ async def list_thread_inputs(thread_id: str, request: Request):
             if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
                 status = "not_applied"
             items.append({key: value for key, value in {**entry, "status": status, "target_run_id": row["run_id"]}.items() if key != "context"})
-    return {"items": items[-32:], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
+    return {
+        "items": _prioritize_unresolved_inputs(items),
+        "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id),
+    }
+
+
+def _prioritize_unresolved_inputs(items: list[dict]) -> list[dict]:
+    """Keep retryable inputs visible before filling the window with receipts."""
+    unresolved = [item for item in items if item.get("status") not in _TERMINAL_INPUT_STATUSES]
+    terminal = [item for item in items if item.get("status") in _TERMINAL_INPUT_STATUSES]
+    return (unresolved + terminal)[:_INPUT_ITEMS_LIMIT]
 
 
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):

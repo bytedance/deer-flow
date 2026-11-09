@@ -18,6 +18,19 @@ from deerflow.runtime.runs.store.memory import MemoryRunStore
 USER_ID = "00000000-0000-0000-0000-000000000001"
 
 
+def test_prioritize_unresolved_inputs_keeps_manual_retries_visible():
+    from app.gateway.run_inputs import _prioritize_unresolved_inputs
+
+    items = [{"id": "old-retry", "status": "not_applied"}] + [
+        {"id": f"receipt-{index}", "status": "applied"} for index in range(40)
+    ]
+
+    result = _prioritize_unresolved_inputs(items)
+
+    assert len(result) == 32
+    assert result[0]["id"] == "old-retry"
+
+
 @pytest.mark.asyncio
 async def test_active_input_run_orders_legacy_rows_without_the_active_run_index(tmp_path):
     from deerflow.persistence.run.model import RunRow
