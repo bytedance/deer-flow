@@ -756,9 +756,9 @@ export default function AgentChatPage() {
                       isUploading ||
                       modelControl.busy ||
                       (selectorVisible && agent === null) ||
-                      (!isNewThread && isHistoryLoading) ||
-                      hasPendingApproval
+                      (!isNewThread && isHistoryLoading)
                     }
+                    inputLocked={hasPendingApproval}
                     onContextChange={(context, options) => {
                       if (options?.automatic)
                         resolveThreadContext(threadId, context);

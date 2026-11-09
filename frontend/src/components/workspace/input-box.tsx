@@ -351,6 +351,7 @@ export function InputBox({
   onStop,
   canStopStreaming = true,
   canCreateRuns = true,
+  inputLocked = false,
   agentSkillNames,
   agentSkillsLoading = false,
   ...props
@@ -358,6 +359,8 @@ export function InputBox({
   assistantId?: string | null;
   status?: ChatStatus;
   disabled?: boolean;
+  /** Prevent new input while retaining cancellation of a live run. */
+  inputLocked?: boolean;
   context: Omit<
     AgentThreadContext,
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
@@ -1883,7 +1886,11 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked =
-    isComposerDisabled || polishingInput || mentionBusy || runInputSending;
+    isComposerDisabled ||
+    inputLocked ||
+    polishingInput ||
+    mentionBusy ||
+    runInputSending;
   const showMentions =
     !disabled &&
     !polishingInput &&
@@ -3667,7 +3674,12 @@ export function InputBox({
             <PromptInputSubmit
               className="rounded-full"
               disabled={
-                composerLocked ||
+                (status === "streaming"
+                  ? isComposerDisabled ||
+                    polishingInput ||
+                    mentionBusy ||
+                    runInputSending
+                  : composerLocked) ||
                 stopDenied ||
                 sendDenied ||
                 (status !== "streaming" && conversationReferencesUnavailable)

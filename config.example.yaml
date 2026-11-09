@@ -2141,7 +2141,7 @@ hitl_approval:
   enabled: false
   tools: []  # Extra tools to review, including otherwise trusted read tools.
   default_mode: ask  # ask | auto | full; independent of reasoning mode
-  allowed_modes: [ask, auto, full]  # Operator ceiling for client selections.
+  allowed_modes: [ask, auto]  # Operator ceiling for client selections.
   review_unknown_tools: true  # Includes extension, personal and platform MCP tools.
   allow_tools: []
   deny_tools: []  # Mandatory in every mode.

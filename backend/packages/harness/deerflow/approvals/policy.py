@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import inspect
 import json
 import marshal
 import sys
@@ -42,15 +44,50 @@ def tool_descriptor(tool: Any) -> dict:
     schema = tool.tool_call_schema
     schema = schema if isinstance(schema, dict) else schema.model_json_schema()
     function = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
-    code = getattr(function, "__code__", None)
+    implementations = {name: _callable_implementation(getattr(tool, name, None), set()) for name in ("func", "coroutine") if getattr(tool, name, None) is not None}
     return {
         "name": tool.name,
         "source": tool_provenance_context(tool),
         "implementation": f"{getattr(function, '__module__', '')}:{getattr(function, '__qualname__', type(tool).__qualname__)}",
-        "implementation_digest": hashlib.sha256(marshal.dumps(code)).hexdigest() if isinstance(code, CodeType) else None,
+        "implementation_digest": digest(implementations) if implementations and all(value is not None for value in implementations.values()) else None,
         "schema": schema,
         "binding": (getattr(tool, "metadata", None) or {}).get("deerflow_approval_binding"),
     }
+
+
+def _callable_implementation(function: Any, seen: set[int]) -> dict | None:
+    """Bind both execution paths and callable adapters without hashing mutable runtime state."""
+    if id(function) in seen:
+        return {"recursive": True}
+    if len(seen) >= 32:
+        return None
+    seen = {*seen, id(function)}
+    if isinstance(function, functools.partial):
+        implementation = _callable_implementation(function.func, seen)
+        try:
+            arguments = digest({"args": function.args, "kwargs": function.keywords})
+        except (TypeError, ValueError):
+            return None
+        return {"partial": implementation, "arguments": arguments} if implementation else None
+    if inspect.ismethod(function):
+        function = function.__func__
+    code = getattr(function, "__code__", None)
+    if not isinstance(code, CodeType):
+        return None
+    adapters = {}
+    wrapped = getattr(function, "__wrapped__", None)
+    if wrapped is not None:
+        adapters["wrapped"] = _callable_implementation(wrapped, seen)
+    for name, cell in zip(code.co_freevars, function.__closure__ or ()):
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        if callable(value):
+            adapters[name] = _callable_implementation(value, seen)
+    if any(value is None for value in adapters.values()):
+        return None
+    return {"module": function.__module__, "name": function.__qualname__, "code": hashlib.sha256(marshal.dumps(code)).hexdigest(), "adapters": adapters}
 
 
 def action_fingerprint(descriptor: dict, arguments: dict, policy_digest: str) -> str:
@@ -89,4 +126,4 @@ def is_routine_tool(descriptor: dict, tool: Any) -> bool:
 
 def permits_thread_grant(descriptor: dict) -> bool:
     # A logical MCP server name alone cannot bind a grant to a connection.
-    return not descriptor["source"].get("mcp_server") or isinstance(descriptor.get("binding"), str)
+    return bool(descriptor.get("implementation_digest")) and (not descriptor["source"].get("mcp_server") or isinstance(descriptor.get("binding"), str))

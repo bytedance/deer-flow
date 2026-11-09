@@ -1784,6 +1784,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         updates[GOAL_OUTCOME_CHANNEL] = None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            await reject_new_run_when_approval_pending(request, thread_id)
             source_metadata = await accessor.aget_metadata(read_config)
             update_config = {
                 **read_config,
@@ -1800,6 +1801,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Update state after the run finishes.") from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")

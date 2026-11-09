@@ -50,7 +50,6 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
-from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -628,7 +627,6 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             "__run_input_control",
             "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
-            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -1359,7 +1357,6 @@ async def run_agent(
             hitl_app_config = get_app_config()
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
-        hitl_resume_tool_names = await _pending_hitl_resume_tool_names(checkpointer, checkpoint_config, graph_input)
         agent_app_config = ctx.app_config
         if hitl_resume_escape:
             agent_app_config = hitl_app_config.model_copy(deep=True)
@@ -1380,9 +1377,6 @@ async def run_agent(
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
-        runtime_ctx.pop("_hitl_resume_tool_names", None)
-        if hitl_resume_tool_names:
-            runtime_ctx["_hitl_resume_tool_names"] = hitl_resume_tool_names
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
@@ -3213,44 +3207,6 @@ def _complete_state_replacement_values(
 def _is_resume_command_input(graph_input: Any) -> bool:
     """Identify requests that need to preserve interrupted execution position."""
     return isinstance(graph_input, Command) and graph_input.resume is not None
-
-
-async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
-    """Recover gated names from the durable pause matched by this resume."""
-    if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
-        return set()
-    from deerflow.approvals.protocol import approval_responses
-
-    responses = approval_responses(graph_input.resume)
-    if not isinstance(responses, list):
-        return set()
-    response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
-    if not response_ids:
-        return set()
-    async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
-        writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
-        # The newest checkpoint carrying either marker decides whether the pause
-        # is still live. A newer head-moving write must not hide an interrupt;
-        # a newer resume must not resurrect an older one.
-        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
-            return set()
-        interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
-        if not interrupt_writes:
-            continue
-        names: set[str] = set()
-        for write in interrupt_writes:
-            interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
-            for pending_interrupt in interrupts:
-                payload = getattr(pending_interrupt, "value", None)
-                if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
-                    continue
-                pending_ids = payload.get("pending_tool_call_ids")
-                actions = payload.get("actions")
-                if not isinstance(pending_ids, list) or not set(pending_ids).issubset(response_ids) or not isinstance(actions, list):
-                    continue
-                names.update(action.get("tool_name") for action in actions if isinstance(action, Mapping) and isinstance(action.get("tool_name"), str))
-        return names
-    return set()
 
 
 def _is_all_reject_hitl_resume(graph_input: Any) -> bool:

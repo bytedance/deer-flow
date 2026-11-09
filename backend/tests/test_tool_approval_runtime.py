@@ -24,7 +24,7 @@ def graph_fixture(*, mode="ask", reviewer=None, policy_overrides=None, inner=Non
         calls.append(value)
         return "written"
 
-    policy = HitlApprovalConfig(enabled=True, tools=["external_write"], default_mode=mode, **(policy_overrides or {}))
+    policy = HitlApprovalConfig(enabled=True, tools=["external_write"], default_mode=mode, **{"allowed_modes": ["ask", "auto", "full"], **(policy_overrides or {})})
     middleware = ToolApprovalMiddleware(policy, app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy), reviewer=reviewer)
     model = build_single_tool_call_model(tool_name="external_write", tool_args={"value": "original"}, tool_call_id="call")
     graph = create_agent(model, tools=[external_write], middleware=[middleware, *([inner] if inner else [])], checkpointer=InMemorySaver())
@@ -189,7 +189,7 @@ async def test_noninteractive_auto_uncertainty_fails_closed_without_parking():
 
 @pytest.mark.asyncio
 async def test_parallel_approval_uses_each_interrupt_identity_without_replaying_sibling():
-    from test_hitl_approval_middleware import _StateAwareToolModel
+    from _approval_test_helpers import StateAwareToolModel
 
     calls = []
 
@@ -202,7 +202,7 @@ async def test_parallel_approval_uses_each_interrupt_identity_without_replaying_
     policy = HitlApprovalConfig(enabled=True)
     app = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy)
     graph = create_agent(
-        _StateAwareToolModel(responses=[], calls=[{"name": "external_write", "args": {"value": value}, "id": value} for value in ("a", "b")]),
+        StateAwareToolModel(responses=[], calls=[{"name": "external_write", "args": {"value": value}, "id": value} for value in ("a", "b")]),
         tools=[external_write],
         middleware=[ToolApprovalMiddleware(policy, app_config=app)],
         checkpointer=InMemorySaver(),
@@ -221,7 +221,7 @@ async def test_parallel_approval_uses_each_interrupt_identity_without_replaying_
 
 @pytest.mark.asyncio
 async def test_auto_approved_parallel_sibling_is_not_reexecuted_on_human_resume():
-    from test_hitl_approval_middleware import _StateAwareToolModel
+    from _approval_test_helpers import StateAwareToolModel
 
     calls = []
 
@@ -237,7 +237,7 @@ async def test_auto_approved_parallel_sibling_is_not_reexecuted_on_human_resume(
     reviewer = AsyncMock(side_effect=review)
     policy = HitlApprovalConfig(enabled=True, default_mode="auto")
     app = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy)
-    model = _StateAwareToolModel(responses=[], calls=[{"name": "external_write", "args": {"value": value}, "id": value} for value in ("a", "b")])
+    model = StateAwareToolModel(responses=[], calls=[{"name": "external_write", "args": {"value": value}, "id": value} for value in ("a", "b")])
     graph = create_agent(model, tools=[external_write], middleware=[ToolApprovalMiddleware(policy, app_config=app, reviewer=reviewer)], checkpointer=InMemorySaver())
     config = {"configurable": {"thread_id": "mixed"}}
     paused = await graph.ainvoke({"messages": [("user", "write both")]}, config)

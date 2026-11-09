@@ -849,9 +849,9 @@ export default function ChatPage() {
                           env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                           isUploading ||
                           modelControl.busy ||
-                          (!isNewThread && isHistoryLoading) ||
-                          hasPendingApproval
+                          (!isNewThread && isHistoryLoading)
                         }
+                        inputLocked={hasPendingApproval}
                         onContextChange={(context, options) => {
                           if (options?.automatic)
                             resolveThreadContext(threadId, context);

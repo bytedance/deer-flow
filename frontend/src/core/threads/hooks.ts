@@ -176,6 +176,7 @@ export function deriveHitlApprovalState({
   restInterrupts,
   historyLoading,
   restInterruptsError = false,
+  pendingApprovalRun = false,
   next,
   answeredRequestIds,
 }: {
@@ -183,6 +184,7 @@ export function deriveHitlApprovalState({
   restInterrupts?: unknown;
   historyLoading: boolean;
   restInterruptsError?: boolean;
+  pendingApprovalRun?: boolean;
   next: readonly string[];
   answeredRequestIds: ReadonlySet<string>;
 }) {
@@ -198,7 +200,8 @@ export function deriveHitlApprovalState({
     hasPendingApproval:
       pendingRequests.length > 0 ||
       ((historyLoading || restInterruptsError) &&
-        next.includes("HitlApprovalMiddleware.after_model")),
+        (pendingApprovalRun ||
+          next.includes("HitlApprovalMiddleware.after_model"))),
   };
 }
 
@@ -1962,6 +1965,10 @@ export function invalidateStoppedThreadCaches(
   }
 
   void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["tool-approvals"],
+    predicate: (query) => query.queryKey[2] === threadId,
+  });
   void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
   void queryClient.invalidateQueries({
     queryKey: threadHistoryQueryKey(threadId),
@@ -2594,7 +2601,10 @@ export function useThreadStream({
       !!onStreamThreadId &&
       !!runInputAccount &&
       !isMock,
-    refetchInterval: isThreadLoading || activeRunId ? 1000 : false,
+    refetchInterval: (query) =>
+      isThreadLoading || activeRunId || query.state.data?.requests.length
+        ? 1000
+        : false,
     retry: false,
   });
   const inputCapability = useRunInputsEnabled(!!runInputAccount && !isMock);
@@ -3257,6 +3267,9 @@ export function useThreadStream({
           });
           return true;
         } catch (error) {
+          await queryClient.invalidateQueries({
+            queryKey: approvalsKey(threadId, runInputAccount),
+          });
           toast.error(getStreamErrorMessage(error));
           return false;
         }
@@ -3838,6 +3851,13 @@ export function useThreadStream({
         liveInterrupt: thread.interrupt,
         restInterrupts,
         restInterruptsError,
+        pendingApprovalRun: (runsQuery.data ?? []).some(
+          (run) =>
+            run.status === "waiting_for_input" &&
+            extractHitlApprovalRequests(run.metadata?.hitl_approval).some(
+              (request) => !answeredApprovalRequestIds.has(request.request_id),
+            ),
+        ),
         historyLoading:
           isHistoryLoading || restInterruptsLoading || thread.isThreadLoading,
         next: thread.history?.[0]?.next ?? [],
@@ -3849,6 +3869,7 @@ export function useThreadStream({
       restInterrupts,
       restInterruptsError,
       restInterruptsLoading,
+      runsQuery.data,
       thread.history,
       thread.interrupt,
       thread.isThreadLoading,

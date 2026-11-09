@@ -34,7 +34,6 @@ def executor_module():
         "deerflow.agents.lead_agent.agent",
         "deerflow.agents.thread_state",
         "deerflow.agents.middlewares.audit_context",
-        "deerflow.agents.middlewares.hitl_approval_middleware",
         "deerflow.agents.middlewares.tool_declarations",
         "deerflow.agents.middlewares.tool_error_handling_middleware",
         "deerflow.models.factory",

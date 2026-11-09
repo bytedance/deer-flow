@@ -26,7 +26,7 @@ class HitlApprovalConfig(BaseModel):
         description="Maximum matching tool calls included in one approval batch; 0 disables the count limit",
     )
     default_mode: Literal["ask", "auto", "full"] = "ask"
-    allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=lambda: ["ask", "auto", "full"])
+    allowed_modes: list[Literal["ask", "auto", "full"]] = Field(default_factory=lambda: ["ask", "auto"])
     review_unknown_tools: bool = Field(default=True, description="Review unknown, extension and MCP tools, ignoring remote read-only hints")
     allow_tools: list[str] = Field(default_factory=list, description="Operator-approved tool names; mandatory authorization still applies")
     deny_tools: list[str] = Field(default_factory=list, description="Always block these tools, including in Full mode")

@@ -2266,7 +2266,7 @@ read-only annotation never grants permission.
 hitl_approval:
   enabled: true
   default_mode: ask
-  allowed_modes: [ask, auto, full]
+  allowed_modes: [ask, auto]
   review_unknown_tools: true
   tools: []
   allow_tools: []
@@ -2287,10 +2287,15 @@ hitl_approval:
 | `auto` | Independently assess the concrete operation against user intent. Allow low/medium-risk authorized operations; ask for uncertainty or high risk; deny critical violations. |
 | `full` | Skip individual approvals within mandatory deployment and account restrictions. |
 
-Clients select `context.tool_approval_mode` from the operator's `allowed_modes`.
+Clients select `context.tool_approval_mode` per run from the operator's `allowed_modes`.
+The default ceiling permits Ask and Auto. Full requires explicitly adding `full`
+to that operator-owned list; the client selection is not persisted server-side
+and cannot extend the ceiling.
 This setting is separate from Flash/Thinking/Pro/Ultra. `deny_tools` blocks in
 every mode. `always_ask_tools` requires a human in every mode and cannot receive
-a chat grant. `allow_tools` is an explicit operator exception. `tools` adds
+a chat grant. Uninspectable tool implementations cannot receive chat grants.
+Implementation fingerprints include both execution callables and their callable
+adapters, so changing an asynchronous implementation requires fresh approval. `allow_tools` is an explicit operator exception. `tools` adds
 otherwise routine tools to review; disabling `review_unknown_tools` restores a
 selected-tool policy. These are trusted deployment settings, never model output.
 

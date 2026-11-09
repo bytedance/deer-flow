@@ -161,6 +161,26 @@ async def find_pending_interrupts(
         if grouped:
             return grouped
 
+    try:
+        run_store = get_run_store(request)
+    except (HTTPException, AttributeError) as exc:
+        if not isinstance(exc, AttributeError) and exc.status_code != 503:
+            raise
+        runs = []
+    else:
+        runs = await run_store.list_by_thread(thread_id, limit=10)
+    # A current loop snapshot is authoritative for ordinary polling. Update
+    # checkpoints can have moved the head past an unconsumed interrupt, and
+    # checkpoint-only compositions have no snapshot: retain recovery for both.
+    if (
+        snapshot is not None
+        and (getattr(snapshot, "metadata", None) or {}).get("source") == "loop"
+        and (getattr(snapshot, "config", None) or {}).get("configurable", {}).get("checkpoint_id")
+        and not (read_config or {}).get("configurable", {}).get("checkpoint_id")
+        and not any(run.get("status") == "waiting_for_input" for run in runs)
+    ):
+        return {}
+
     checkpointer = getattr(accessor, "checkpointer", None)
     if checkpointer is None:
         try:
@@ -176,13 +196,6 @@ async def find_pending_interrupts(
         if grouped:
             return grouped
 
-    try:
-        run_store = get_run_store(request)
-    except (HTTPException, AttributeError) as exc:
-        if isinstance(exc, AttributeError) or exc.status_code == 503:
-            return {}
-        raise
-    runs = await run_store.list_by_thread(thread_id, limit=10)
     for run in runs:
         if run.get("status") != "waiting_for_input":
             continue
@@ -278,7 +291,7 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
         action = action_by_request[response["request_id"]]
         supported = ("approve", "reject", "edit", "approve_thread") if all(payload.get("version") == 2 for payload in payloads) else ("approve", "reject")
         if response.get("option_id") not in supported:
-            raise _error(422, "invalid_approval_response", "unsupported option_id; expected 'approve' or 'reject'")
+            raise _error(422, "invalid_approval_response", f"unsupported option_id; expected one of {', '.join(repr(option) for option in supported)}")
         if response.get("option_id") == "approve_thread" and not action.get("grant_allowed"):
             raise _error(422, "invalid_approval_response", "This operation does not permit a thread grant")
         if response.get("option_id") == "edit":
