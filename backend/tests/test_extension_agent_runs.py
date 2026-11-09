@@ -540,7 +540,7 @@ async def test_peer_takeover_during_assembly_is_not_undone_by_evidence(runtime, 
         # The peer sees an expired lease (clock skew or a stalled owner) that
         # the owning worker still believes is live.
         async with repository._sf() as session:
-            await session.execute(update(RunRow).values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1)))
+            await session.execute(update(RunRow).where(RunRow.thread_id == thread).values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1)))
             await session.commit()
         taken_over.extend(await peer.reconcile_orphaned_inflight_runs(error="reclaimed by worker-b", stop_reason="orphan_recovered"))
 
