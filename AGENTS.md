@@ -36,6 +36,8 @@ the generic threads regex in Docker, local and Helm nginx configs. Upgrade heade
 and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
 Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
 
+Keep local nginx temp paths checkout-relative and in sync with `serve.sh` and `nginx.sh`.
+
 Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 (README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
 controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
