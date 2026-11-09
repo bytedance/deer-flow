@@ -203,3 +203,19 @@ chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_llm_error_handling_middleware.py`.
 
 Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
+
+InputSanitization removes empty bare strings from genuine user content lists before
+text-related early returns; all-empty string lists become an empty string. Request
+copies preserve metadata and leave persisted history untouched.
+
+Scope / known provider compatibility limits (#8038 review):
+- On the upload extraction-disagreement (`rfind` failure) fallback, non-empty
+  bare strings are framed individually but remain untyped list parts. Strict
+  Chat Completions endpoints can still reject them; typing those parts is deferred.
+- Empty typed text blocks (`{"type": "text", "text": ""}`) remain unchanged:
+  this fix targets untyped empty strings, not all provider-specific validation.
+  Anthropic can still reject those empty typed blocks.
+- All-empty bare-string lists become `content=""`; this middleware replaces
+  messages in place rather than dropping turns. This is not a guarantee of
+  Anthropic compatibility: an empty user turn can still be rejected. No upstream
+  Gateway / IM empty-turn handling is assumed by this normalization.
