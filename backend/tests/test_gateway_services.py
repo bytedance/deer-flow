@@ -733,12 +733,24 @@ def test_normalize_input_strips_delegation_verdict_without_messages():
         "oops",
         ["oops"],
         [{"description": "write report"}],
+        [{"id": "call-1", "subagent_type": "general", "status": "completed"}],
+        [{"id": "call-1", "description": "write report", "status": "completed"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": 3}],
         [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": ["completed"]}],
     ],
-    ids=["string-channel", "non-object-entry", "missing-id", "non-string-status", "empty-id", "unknown-status", "unhashable-status"],
+    ids=[
+        "string-channel",
+        "non-object-entry",
+        "missing-id",
+        "missing-description",
+        "missing-subagent-type",
+        "non-string-status",
+        "empty-id",
+        "unknown-status",
+        "unhashable-status",
+    ],
 )
 def test_normalize_input_rejects_unusable_delegations_with_400(delegations):
     """A ledger entry the reducer cannot key or the renderer cannot read must be
@@ -776,11 +788,14 @@ def test_normalize_input_keeps_usable_delegation_entries():
 
 
 @pytest.mark.parametrize(
-    "delegations",
-    ["oops", [{"id": "call-1", "description": "write report", "subagent_type": "general"}]],
+    ("delegations", "detail"),
+    [
+        ("oops", "values.delegations must be a list of delegation objects"),
+        ([{"id": "call-1", "description": "write report", "subagent_type": "general"}], "values.delegations[0].status must be one of"),
+    ],
     ids=["non-list", "missing-status"],
 )
-def test_state_values_reject_unusable_delegations_with_400(delegations):
+def test_state_values_reject_unusable_delegations_with_400(delegations, detail):
     """The thread-state update path shares the ledger shape boundary."""
     from fastapi import HTTPException
 
@@ -790,7 +805,7 @@ def test_state_values_reject_unusable_delegations_with_400(delegations):
         strip_server_owned_state_metadata({"delegations": delegations})
 
     assert excinfo.value.status_code == 400
-    assert "values.delegations" in excinfo.value.detail
+    assert detail in excinfo.value.detail
 
 
 def _forged_acceptance_verdict() -> dict:
