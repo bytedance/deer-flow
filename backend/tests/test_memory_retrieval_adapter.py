@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -423,6 +424,47 @@ def test_engine_selects_composite_top_k_before_truncating(top_k: int, reversal: 
         engine.close()
 
 
+class _FailingConnection:
+    """Stand-in for the engine's sqlite3 connection that fails every statement."""
+
+    def __init__(self, error: sqlite3.Error) -> None:
+        self._error = error
+
+    def execute(self, *_args: object, **_kwargs: object) -> None:
+        raise self._error
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("message", ["database is locked", "disk I/O error"])
+def test_search_propagates_index_errors_instead_of_returning_empty(
+    tmp_path: Path,
+    message: str,
+) -> None:
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    original_connection = engine._conn
+    engine._conn = _FailingConnection(sqlite3.OperationalError(message))  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.OperationalError, match=message):
+            engine.search("alpha", scope_user='"alice"', scope_agent='"agent-a"')
+    finally:
+        engine._conn = original_connection
+        engine.close()
+
+
+def test_malformed_advanced_query_falls_back_to_tokenized_search(tmp_path: Path) -> None:
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    try:
+        engine.index_fact("alpha", "alpha beta", scope_user='"alice"', scope_agent='"agent-a"')
+
+        results = engine.search("alpha AND", scope_user='"alice"', scope_agent='"agent-a"')
+
+        assert [item["id"] for item in results] == ["alpha"]
+    finally:
+        engine.close()
+
+
 @pytest.mark.parametrize("category", [None, "preference"])
 @pytest.mark.parametrize("top_k", [1, 5])
 def test_adapter_composite_ranking_preserves_category_and_limit(category: str | None, top_k: int) -> None:
@@ -490,5 +532,44 @@ def test_deermem_default_tool_limit_keeps_best_composite_fact(tmp_path: Path) ->
         # count must not decide whether the highest-scoring fact is reachable.
         for top_k in (10, 12):
             assert [fact["id"] for fact in manager.search("Python", top_k=top_k, user_id="alice")] == [fact["id"] for fact in complete[:top_k]]
+    finally:
+        manager.close()
+
+
+def test_search_surfaces_a_stale_index_schema(tmp_path: Path) -> None:
+    """``no such column`` on an index column is schema drift, not a bad query."""
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    original_connection = engine._conn
+    engine._conn = _FailingConnection(sqlite3.OperationalError("no such column: scope_user"))  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="schema is stale"):
+            engine.search("alpha", scope_user='"alice"', scope_agent='"agent-a"')
+    finally:
+        engine._conn = original_connection
+        engine.close()
+
+
+def test_search_propagates_a_corrupt_index(tmp_path: Path) -> None:
+    engine = FTS5Retrieval(tmp_path / "facts.sqlite3")
+    original_connection = engine._conn
+    engine._conn = _FailingConnection(sqlite3.DatabaseError("database disk image is malformed"))  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+            engine.search("alpha", scope_user='"alice"', scope_agent='"agent-a"')
+    finally:
+        engine._conn = original_connection
+        engine.close()
+
+
+def test_fts5_search_falls_back_to_substring_when_the_index_raises(tmp_path: Path) -> None:
+    """An index error must degrade to canonical Markdown facts, not to ``[]``."""
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    try:
+        _, fact_id = manager.create_fact("recoverable substring memory", user_id="alice")
+        manager._storage.search_facts = MagicMock(side_effect=sqlite3.OperationalError("database is locked"))  # type: ignore[method-assign]
+
+        results = manager.search("recoverable", user_id="alice")
+
+        assert [fact["id"] for fact in results] == [fact_id]
     finally:
         manager.close()
