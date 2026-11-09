@@ -26,6 +26,13 @@
 
 ### 修复
 
+- **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
+  接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
+  行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
+  现在仅当该 Worker 仍持有活跃运行的有效租约时，才将证据合并到行元数据
+  （`RunStore.merge_owned_metadata()`），否则在执行前停止该运行。启用心跳的自定义
+  `RunStore` 实现必须实现该方法。([#8046])
+
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
@@ -12837,3 +12844,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046

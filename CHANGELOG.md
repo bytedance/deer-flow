@@ -38,6 +38,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
+  worker that had lost its run to a peer could put the row back. Its assembly
+  evidence write was an unconditional full-row upsert, so after a peer
+  reclaimed the run it reset the row to `running` and erased the takeover
+  error. The run could then finish as `success` after the peer had already
+  reported it failed, or be reclaimed a second time. The evidence is now merged
+  into the row's metadata only while the worker still holds a live lease on an
+  active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
+  the run before executing it. Custom `RunStore` implementations used with
+  heartbeats must implement that method. ([#8046])
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
@@ -16177,3 +16188,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
