@@ -5,6 +5,7 @@ import math
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import httpx
@@ -43,10 +44,11 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
 
 @dataclass
 class _ScopedShellSession:
-    """One server-side shell session serialized within an agent execution."""
+    """An execution's command lock and optional persistent shell session."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     session_id: str | None = None
+    releasing: bool = False
 
 
 @dataclass
@@ -83,6 +85,7 @@ class AioSandbox(Sandbox):
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
         lark_cli_broker: bool | None = None,
+        max_bash_sessions: int = 50,
     ):
         """Initialize the AIO sandbox.
 
@@ -99,8 +102,13 @@ class AioSandbox(Sandbox):
                 sandbox fail-closed, so a construction site that forgets to
                 thread the attested value cannot silently authorize the
                 plaintext credential-mount overlay.
+            max_bash_sessions: Bash admission limit, no greater than the
+                admitted runtime's AIO_BASH_MAX_SESSIONS (default 50).
         """
         super().__init__(id)
+        if type(max_bash_sessions) is not int or max_bash_sessions <= 0:
+            raise ValueError("max_bash_sessions must be a positive integer")
+        self._bash_slots = threading.BoundedSemaphore(max_bash_sessions)
         self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
@@ -165,15 +173,14 @@ class AioSandbox(Sandbox):
         cleanup is never blocked.
         """
         # Close admission for scoped commands before draining their sessions.
-        # A scoped call that already registered itself remains in this snapshot
-        # and is joined through its per-scope lock below; later calls fail
-        # without creating an orphaned registry entry.
+        # Keep entries registered while draining so concurrent release still
+        # joins their locks and cancellation reaches the admitted command owner.
+        # Later calls fail without creating an orphaned registry entry.
         with self._scope_registry_lock:
             if self._closed:
                 return
             self._closed = True
             scoped_sessions = list(self._scoped_shell_sessions.items())
-            self._scoped_shell_sessions.clear()
         for scope_id, scoped in scoped_sessions:
             with scoped.lock:
                 if scoped.session_id is not None and self._client is not None:
@@ -184,6 +191,10 @@ class AioSandbox(Sandbox):
                         request_options=self._bounded_cleanup_request_options(),
                     )
                     scoped.session_id = None
+                with self._scope_registry_lock:
+                    if self._scoped_shell_sessions.get(scope_id) is scoped:
+                        self._command_scopes.release(scope_id)
+                        self._scoped_shell_sessions.pop(scope_id)
 
         with self._lock:
             if self._recovery_session_id is not None and self._client is not None:
@@ -589,13 +600,13 @@ class AioSandbox(Sandbox):
         *,
         scope_id: str | None = None,
     ) -> str:
-        """Run no-env commands in one persistent session per subagent run.
+        """Serialize commands within a subagent scope, independently of others.
 
         Commands within a scope remain serialized, while independent subagents
         use distinct server-side sessions and can execute concurrently. Secret-
-        bearing commands keep the existing fresh ``bash.exec`` behavior.
+        bearing commands keep the per-call fresh ``bash.exec`` session semantics.
         """
-        if env or scope_id is None:
+        if scope_id is None:
             return self.execute_command(command, env=env, timeout=timeout)
         _validate_extra_env(env)
 
@@ -607,18 +618,25 @@ class AioSandbox(Sandbox):
                     scope_id,
                     _ScopedShellSession(),
                 )
-            with command_lock(scoped.lock, current_command_scope(self)):
+                if scoped.releasing:
+                    raise RuntimeError("sandbox command scope is no longer active")
+            with command_lock(scoped.lock, current_command_scope(self)), command_lock(self._bash_slots, current_command_scope(self)) if env else nullcontext():
                 # Registration and command execution are separated by the
                 # per-scope wait.  Revalidate identity after that wait so a
                 # release/close which removed this exact scope is a hard
                 # lifecycle fence: queued callers cannot resurrect a session
                 # on an orphaned registry entry.
                 with self._scope_registry_lock:
-                    if self._closed or self._scoped_shell_sessions.get(scope_id) is not scoped:
+                    if self._closed or scoped.releasing or self._scoped_shell_sessions.get(scope_id) is not scoped:
                         raise RuntimeError("sandbox command scope is no longer active")
                 client = self._client
                 if client is None:
                     raise RuntimeError("sandbox client is closed")
+                if env:
+                    # This registry entry also makes close()/scope release drain
+                    # fresh bash work. Keep per-call env sessions independent of
+                    # the shared implicit shell and of other execution scopes.
+                    return self._execute_with_env(command, env, self._effective_command_timeout(timeout), scope_lock_held=True)
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
@@ -696,22 +714,40 @@ class AioSandbox(Sandbox):
             return f"Error: {e}"
 
     def release_command_scope(self, scope_id: str) -> None:
-        """Release execution metadata and its explicit shell session."""
-        self._command_scopes.release(scope_id)
+        """Fence new commands, drain in-flight work, then release the session.
+
+        Waiting for the scope lock has no separate deadline. An active command
+        can hold it for its remaining command timeout (600s by default), plus
+        session creation, transport/recovery and cleanup time. Callers holding
+        a thread-key serializer must account for this in their release budget.
+        Returning early would require retaining ownership until work is drained.
+        """
         with self._scope_registry_lock:
-            scoped = self._scoped_shell_sessions.pop(scope_id, None)
-        if scoped is None:
-            return
-        with scoped.lock:
-            if scoped.session_id is None or self._client is None:
+            scoped = self._scoped_shell_sessions.get(scope_id)
+            if scoped is None:
+                self._command_scopes.release(scope_id)
                 return
-            self._cleanup_session_best_effort(
-                self._client,
-                scoped.session_id,
-                context=f"execution scope {scope_id}",
-                request_options=self._bounded_cleanup_request_options(),
-            )
-            scoped.session_id = None
+            # Keep draining entries visible to close(), while fencing new
+            # and already-queued commands before waiting on their lock.
+            scoped.releasing = True
+        try:
+            with scoped.lock:
+                if scoped.session_id is None or self._client is None:
+                    return
+                self._cleanup_session_best_effort(
+                    self._client,
+                    scoped.session_id,
+                    context=f"execution scope {scope_id}",
+                    request_options=self._bounded_cleanup_request_options(),
+                )
+                scoped.session_id = None
+        finally:
+            with self._scope_registry_lock:
+                if self._scoped_shell_sessions.get(scope_id) is scoped:
+                    # Keep cancellation routed to the original owner until
+                    # execution and cleanup drain. Only this entry may retire it.
+                    self._command_scopes.release(scope_id)
+                    self._scoped_shell_sessions.pop(scope_id)
 
     @staticmethod
     def _format_timeout_duration(timeout: float) -> str:
@@ -979,11 +1015,16 @@ class AioSandbox(Sandbox):
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> str:
         """Execute a command with per-call environment variables injected.
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
         injected commands use the ``bash.exec`` API which accepts per-command env.
+        If ``scope_lock_held`` is True, the caller must hold the registered
+        per-scope execution lock through this call, including recovery retries;
+        see ``_run_bash_exec`` for the drain contract.
         Each call creates an explicit transient session and closes it after the
         command, so injected request-scoped secrets are scoped to this command,
         never persist across calls, and do not consume the server's session
@@ -1010,10 +1051,10 @@ class AioSandbox(Sandbox):
         """
         if self._bash_exec_unsupported:
             return _BASH_EXEC_UNSUPPORTED_ERROR
-        output, status = self._run_bash_exec(command, env, timeout)
+        output, status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
         if status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
-            retried, retry_status = self._run_bash_exec(command, env, timeout)
+            retried, retry_status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
             if retry_status not in (None, "completed"):
                 return retried
             if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
@@ -1099,10 +1140,21 @@ class AioSandbox(Sandbox):
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> tuple[str, str | None]:
-        """Single bash.exec invocation in an explicitly released fresh session."""
+        """Single bash.exec invocation in an explicitly released fresh session.
+
+        ``scope_lock_held=True`` requires the caller to hold its registered
+        ``_ScopedShellSession.lock`` and a Bash permit for this entire invocation. Release/close
+        join that lock to drain work before detaching the client; the shared
+        lock is skipped only under this precondition.
+        """
         scope = current_command_scope(self)
-        with command_lock(self._lock, scope):
+        # Scoped callers already hold their registered execution lock, which
+        # close() and release_command_scope() drain before detaching the client.
+        # Unscoped calls retain the shared lock for that lifecycle guarantee.
+        with nullcontext() if scope_lock_held else command_lock(self._lock, scope), nullcontext() if scope_lock_held else command_lock(self._bash_slots, scope):
             for attempt in range(2):
                 session_id: str | None = None
                 try:

@@ -53,6 +53,12 @@
   把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
   `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
   
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
+  
 - **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
   `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
@@ -91,6 +97,10 @@
   `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
+
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -12837,3 +12847,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
