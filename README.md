@@ -448,6 +448,13 @@ fences, including unclosed fences, in complete and streamed replies.
        api_key: $API_ROUTE_API_KEY
        base_url: https://global.api-route.com/v1
 
+     - name: standardcompute
+       display_name: Standard Compute
+       use: langchain_openai:ChatOpenAI
+       model: StandardCompute
+       api_key: $STANDARDCOMPUTE_API_KEY
+       base_url: https://api.stdcmpt.com/v1
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -472,6 +479,8 @@ fences, including unclosed fences, in complete and streamed replies.
    OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
 
    [API Route](https://www.api-route.com) is also available in the setup wizard. It saves your key as `API_ROUTE_API_KEY` and uses the Chat Completions endpoint above. Model availability depends on your key's group and permissions; check the authenticated `GET https://global.api-route.com/v1/models` catalog before replacing the model in `config.yaml`, and use its returned ID unchanged without an upstream provider prefix.
+
+   [Standard Compute](https://standardcompute.com) is also available in the setup wizard. It saves your key (from https://standardcompute.com/dashboard) as `STANDARDCOMPUTE_API_KEY` and uses the Chat Completions endpoint above. The default model `StandardCompute` routes each request to the cheapest enabled model that can handle it, with automatic fallback. To pin a specific model instead, use an ID from the public `GET https://api.stdcmpt.com/v1/models` catalog unchanged. See https://docs.standardcompute.com for details.
 
    The `write_file` tool's output-budget hint uses the active model's effective `max_tokens`. Missing or unusable limits, including YAML `.inf`, `-.inf`, `.nan`, and values too large for the character estimate, omit this hint without failing tool assembly; provider-specific model validation still applies.
 

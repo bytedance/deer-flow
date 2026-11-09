@@ -190,6 +190,13 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
        api_key: $API_ROUTE_API_KEY
        base_url: https://global.api-route.com/v1
 
+     - name: standardcompute
+       display_name: Standard Compute
+       use: langchain_openai:ChatOpenAI
+       model: StandardCompute
+       api_key: $STANDARDCOMPUTE_API_KEY
+       base_url: https://api.stdcmpt.com/v1
+
      - name: gpt-5-responses
        display_name: GPT-5 (Responses API)
        use: langchain_openai:ChatOpenAI
@@ -214,6 +221,8 @@ YAML 同名模型优先，已有任务保留原配置快照。托管模型使用
    OpenRouter 以及类似的 OpenAI 兼容网关，建议通过 `langchain_openai:ChatOpenAI` 配合 `base_url` 来配置。如果你更想用 provider 自己的环境变量名，也可以直接把 `api_key` 指向对应变量，例如 `api_key: $OPENROUTER_API_KEY`。
 
    Setup Wizard 也支持 [API Route](https://www.api-route.com)，会将密钥保存为 `API_ROUTE_API_KEY`，并使用上面的 Chat Completions 端点。可用模型取决于密钥所属组别和权限；修改 `config.yaml` 中的模型前，请先查询需要认证的 `GET https://global.api-route.com/v1/models` 模型目录，并原样使用返回的模型 ID，不要添加上游 provider 前缀。
+
+   Setup Wizard 也支持 [Standard Compute](https://standardcompute.com)，会将密钥（在 https://standardcompute.com/dashboard 获取）保存为 `STANDARDCOMPUTE_API_KEY`，并使用上面的 Chat Completions 端点。默认模型 `StandardCompute` 会把每个请求路由到能处理它的最便宜的已启用模型，并自动回退。如需固定某个模型，请原样使用公开的 `GET https://api.stdcmpt.com/v1/models` 模型目录中返回的 ID。详见 https://docs.standardcompute.com。
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
