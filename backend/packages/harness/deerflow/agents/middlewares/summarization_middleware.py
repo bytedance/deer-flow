@@ -10,6 +10,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic
 from typing import Any, Protocol, override, runtime_checkable
 
@@ -17,6 +18,7 @@ from deerflow_extension_api import CompactionEvent, ExtensionData, canonical_has
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
+from langchain_core.runnables import RunnableBinding
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -32,6 +34,7 @@ from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
+from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
 from deerflow.utils.assembly_io import run_assembly
 
@@ -177,6 +180,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        run_model = self.model
+        seen_bindings: set[int] = set()
+        while isinstance(run_model, RunnableBinding) and id(run_model) not in seen_bindings:
+            seen_bindings.add(id(run_model))
+            run_model = run_model.bound
+        if "token_counter" not in kwargs and isinstance(run_model, VllmChatModel) and run_model.replays_reasoning():
+            self.token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self.token_counter)
+            self._partial_token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self._partial_token_counter)
+            # Preserve LangChain's unscaled suffix estimate.
         self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
@@ -1350,8 +1362,6 @@ def create_summarization_middleware(
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled and not skip_memory_flush:
-        from functools import partial
-
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
         hooks.append(partial(memory_flush_hook, pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
