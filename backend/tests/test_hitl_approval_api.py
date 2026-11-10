@@ -189,6 +189,17 @@ def _resume(client, csrf, tid, option_id, value=None, *, tool_call_id="call_hitl
     return _run(client, csrf, tid, {"command": {"resume": {"responses": [response]}}})
 
 
+def _feed_tool_result_ids(client, tid):
+    rows = client.get(f"/api/threads/{tid}/messages").json()
+    return [row["content"]["id"] for row in rows if row.get("event_type") == "llm.tool.result"]
+
+
+def _run_tool_result_call_ids(client, tid, run_id):
+    rows = client.get(f"/api/threads/{tid}/runs/{run_id}/messages").json()
+    rows = rows["data"] if isinstance(rows, dict) else rows
+    return [row["content"]["tool_call_id"] for row in rows if row.get("event_type") == "llm.tool.result"]
+
+
 def test_approval_pause_then_approve_executes(isolated_app):
     _enable_approval()
     with patch(_MODEL_PATCH, new=_fake_model), TestClient(isolated_app) as client:
@@ -428,9 +439,13 @@ def test_disabled_resume_409_and_all_reject_escape(isolated_app):
         terminal = _wait_run_terminal(client, tid, escape.json()["run_id"])
         assert terminal["status"] == "success"
         assert _wait_for_status(client, tid, "idle")["status"] == "idle"
-        contents = [m.get("content") for m in client.get(f"/api/threads/{tid}").json()["values"]["messages"] if m.get("type") == "tool"]
+        state_tools = [m for m in client.get(f"/api/threads/{tid}").json()["values"]["messages"] if m.get("type") == "tool"]
+        contents = [m.get("content") for m in state_tools]
         assert "OK" not in contents
         assert len(contents) == 2
+        # The escape run adopts the paused call, so its denial reaches the history feed.
+        assert _feed_tool_result_ids(client, tid) == [m["id"] for m in state_tools]
+        assert "call_hitl_1" in _run_tool_result_call_ids(client, tid, escape.json()["run_id"])
 
 
 @pytest.mark.parametrize("current_tools", [["bash"], []], ids=["changed", "cleared"])
@@ -456,6 +471,7 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert tool_messages[0]["tool_call_id"] == "call_hitl_1"
         assert tool_messages[0]["status"] == "error"
         assert "OK" not in [message.get("content") for message in tool_messages]
+        assert _run_tool_result_call_ids(client, tid, second_run_id) == ["call_hitl_1"]
 
         second_escape = _resume(client, csrf, tid, "reject", tool_call_id="call_hitl_2")
         assert second_escape.status_code == 200, second_escape.text
@@ -466,6 +482,8 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert len(tool_messages) == 2
         assert all(message.get("status") == "error" for message in tool_messages)
         assert "OK" not in [message.get("content") for message in tool_messages]
+        assert _feed_tool_result_ids(client, tid) == [message["id"] for message in tool_messages]
+        assert _run_tool_result_call_ids(client, tid, second_escape.json()["run_id"]) == ["call_hitl_2"]
 
 
 def test_stale_all_reject_cannot_dismiss_newer_pause(isolated_app):

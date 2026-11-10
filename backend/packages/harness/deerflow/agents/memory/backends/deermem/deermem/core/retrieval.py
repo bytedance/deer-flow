@@ -1,7 +1,7 @@
 """FTS5-based retrieval engine for DeerMem.
 
 Provides BM25 full-text search over stored facts with:
-- jieba Chinese tokenization (optional, falls back to whitespace)
+- jieba Chinese tokenization (optional, falls back to CJK character bigrams)
 - FTS5 MATCH syntax support (AND/OR/NOT/phrase/prefix) with fallback
 - Time-decay + confidence-weighted ranking
 - Category filtering
@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import retrieval_index_directory
+from .relevance import cjk_token
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +55,33 @@ except ImportError:
     _jieba_available = False
 
 
+# Capturing group so ``re.split`` keeps the CJK runs it separates on.
+_CJK_RUN_RE = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff]+)")
+
+
 def _tokenize(text: str) -> list[str]:
-    """Tokenize text: jieba for Chinese, whitespace split for English."""
+    """Tokenize text: jieba for Chinese, CJK bigrams otherwise.
+
+    Without jieba, whitespace-delimited words are kept verbatim except for
+    their CJK runs, which are split into character bigrams with the same
+    ``relevance.cjk_token`` strategy the relevance ranker uses.  Indexing and
+    querying share this function, so unsegmented Chinese text stays matchable
+    in the default (dependency-free) install.
+    """
     if not text or not text.strip():
         return []
     if _jieba_available:
         return [t for t in jieba.cut(text) if t.strip()]
-    return [t for t in text.split() if t.strip()]
+    tokens: list[str] = []
+    for word in text.split():
+        for part in _CJK_RUN_RE.split(word):
+            if not part:
+                continue
+            if _CJK_RUN_RE.fullmatch(part):
+                tokens.extend(cjk_token(part))
+            else:
+                tokens.append(part)
+    return tokens
 
 
 # ── FTS5 query preprocessing ──────────────────────────────────────────
@@ -78,15 +99,34 @@ def _is_advanced_query(query: str) -> bool:
     return bool(_FTS5_ADVANCED_RE.search(query))
 
 
+def _quote_fallback_token(token: str) -> str:
+    """Quote one token for the OR query, prefixing single CJK characters.
+
+    The fallback index stores CJK runs as character bigrams, so a one-character
+    query (``重``) has no equal token to match.  ``"重"*`` is an FTS5 prefix
+    phrase: it matches every indexed token that *starts with* that character,
+    which covers the bigram ``重试`` and still matches a standalone ``重`` token
+    when the content held an isolated single character.  It does not reach a
+    character that only occurs later inside a bigram, so ``务`` does not match
+    the ``任务`` token; that residual gap is accepted instead of widening the
+    prefix.  Multi-character tokens keep the plain quoted phrase so their
+    semantics do not change.  Double quotes inside a token are the FTS5 escape
+    sequence for a literal quote.
+    """
+    escaped = token.replace(chr(34), chr(34) * 2)
+    if len(token) == 1 and _CJK_RUN_RE.fullmatch(token):
+        return f'"{escaped}"*'
+    return f'"{escaped}"'
+
+
 def _build_fallback_query(query: str) -> str:
     """Convert natural-language query to FTS5 OR query (fallback strategy)."""
     tokens = [token for token in _tokenize(query) if any(char.isalnum() for char in token)]
     if not tokens:
         return ""
     # Quote each token so punctuation in natural-language input cannot become
-    # an FTS5 operator or syntax error. Double quotes inside a token are the
-    # FTS5 escape sequence for a literal quote.
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+    # an FTS5 operator or syntax error.
+    return " OR ".join(_quote_fallback_token(token) for token in tokens)
 
 
 # ── Core retrieval engine ─────────────────────────────────────────────
@@ -151,13 +191,15 @@ class FTS5Retrieval:
     # ── Index operations ───────────────────────────────────────────────
 
     def _preprocess_content(self, content: str) -> str:
-        """Preprocess content for indexing: jieba tokenize for Chinese."""
+        """Preprocess content for indexing: segment CJK so queries can match.
+
+        Must stay aligned with the query side (``_build_fallback_query``); both
+        go through ``_tokenize`` so index and query agree on Chinese without
+        jieba.
+        """
         if not content:
             return ""
-        if _jieba_available:
-            tokens = _tokenize(content)
-            return " ".join(tokens)
-        return content
+        return " ".join(_tokenize(content))
 
     def _row_from_document(self, document: dict[str, Any]) -> tuple[Any, ...]:
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -699,7 +741,10 @@ def create_fts5_retrieval(config: Any) -> FTS5RetrievalAdapter | None:
     try:
         return FTS5RetrievalAdapter(db_path)
     except sqlite3.DatabaseError as exc:
-        if db_path == ":memory:":
+        # Busy/locked, permissions, I/O and unavailable FTS5 are not evidence
+        # of corruption. Extended SQLite codes retain the primary low byte.
+        error_code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+        if db_path == ":memory:" or error_code not in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
             logger.warning("SQLite FTS5 is unavailable; DeerMem will use substring retrieval: %s", exc)
             return None
 
