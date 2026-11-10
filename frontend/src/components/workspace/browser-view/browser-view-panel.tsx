@@ -394,7 +394,9 @@ export function BrowserViewPanel({
               // bar; stop the panel + global shortcut handlers from swallowing.
               event.stopPropagation();
             }}
-            placeholder="Enter a URL and press Enter"
+            placeholder={
+              t.common.browserUrlHint ?? "Enter a URL and press Enter"
+            }
             spellCheck={false}
             autoComplete="off"
             className="h-8 pl-7 text-xs"

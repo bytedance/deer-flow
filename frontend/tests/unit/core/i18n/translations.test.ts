@@ -33,8 +33,19 @@ describe("core copy loading", () => {
     expect(russian.inputBox.placeholder).toBe("Чем я могу помочь?");
     expect(russian.settings.appearance.languageTitle).toBe("Язык");
     expect(russian.common.showingOf(3, 10)).toBe("Показано 3 из 10");
-    expect(russian.inputBox.mentionMultipleSkills).toBe(
-      english.inputBox.mentionMultipleSkills,
-    );
+    expect(russian.inputBox.mentionMultipleSkills).toContain("навыков");
+    expect(russian.settings.sections.models).toBe("Модели");
+    expect(russian.settings.sections.users).toBe("Пользователи");
+    expect(russian.settings.sections.account).toBe("Учётная запись");
+    expect(russian.settings.models.title).toBe("Модели");
+    expect(russian.settings.users.title).toBe("Управление пользователями");
+    expect(russian.tokenUsage.title).toBe("Использование токенов");
+    expect(russian.tokenUsage.view).toBe("Отображение");
+    expect(russian.tokenUsage.presets.perTurn).toBe("По сообщениям");
+    expect(russian.inputBox.suggestions[0]?.suggestion).toBe("Написать");
+    expect(russian.inputBox.suggestions[1]?.suggestion).toBe("Исследовать");
+    expect(russian.common.loadingSettings).toBe("Загрузка настроек…");
+    expect(russian.common.selectFile).toBe("Выберите файл");
+    expect(english.common.selectFile).toBeUndefined();
   });
 });

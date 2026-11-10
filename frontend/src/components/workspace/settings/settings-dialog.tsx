@@ -26,9 +26,10 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 function SettingsPageLoading() {
+  const { t } = useI18n();
   return (
     <p role="status" className="text-muted-foreground py-8 text-center text-sm">
-      Loading…
+      {t.common.loadingPage ?? "Loading…"}
     </p>
   );
 }

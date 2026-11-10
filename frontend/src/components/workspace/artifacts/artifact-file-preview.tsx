@@ -88,6 +88,7 @@ export function ArtifactDownloadFallback({
   threadId: string;
   isMock?: boolean;
 }) {
+  const { t } = useI18n();
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
 
@@ -99,10 +100,13 @@ export function ArtifactDownloadFallback({
         </div>
         <div className="space-y-1">
           <div className="font-medium break-all">{filename}</div>
-          <div className="text-muted-foreground text-sm">{fileType} file</div>
+          <div className="text-muted-foreground text-sm">
+            {t.common.fileTypeLabel?.(fileType) ?? `${fileType} file`}
+          </div>
         </div>
         <p className="text-muted-foreground text-sm">
-          This file type cannot be previewed in the browser.
+          {t.common.fileNotPreviewable ??
+            "This file type cannot be previewed in the browser."}
         </p>
         <Button asChild>
           <a
@@ -116,7 +120,7 @@ export function ArtifactDownloadFallback({
             rel="noopener noreferrer"
           >
             <DownloadIcon className="size-4" />
-            Download
+            {t.common.download}
           </a>
         </Button>
       </div>

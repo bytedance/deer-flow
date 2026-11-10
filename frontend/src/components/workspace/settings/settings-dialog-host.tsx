@@ -1,23 +1,29 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useI18n } from "@/core/i18n/hooks";
 
 import {
   setSettingsDialogOpen,
   useSettingsDialog,
 } from "./settings-dialog-store";
 
+function SettingsDialogLoading() {
+  const { t } = useI18n();
+  return (
+    <div className="bg-background/80 fixed inset-0 z-50 grid place-items-center backdrop-blur-sm">
+      <p role="status" className="text-muted-foreground text-sm">
+        {t.common.loadingSettings ?? "Loading settings…"}
+      </p>
+    </div>
+  );
+}
+
 const SettingsDialog = dynamic(
   () => import("./settings-dialog").then((module) => module.SettingsDialog),
   {
     ssr: false,
-    loading: () => (
-      <div className="bg-background/80 fixed inset-0 z-50 grid place-items-center backdrop-blur-sm">
-        <p role="status" className="text-muted-foreground text-sm">
-          Loading settings…
-        </p>
-      </div>
-    ),
+    loading: SettingsDialogLoading,
   },
 );
 

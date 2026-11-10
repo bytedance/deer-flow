@@ -4,15 +4,16 @@ Tracking: https://github.com/bytedance/deer-flow/issues/8121
 
 ## Scope and current quality
 
-This branch is **not a complete Russian translation**. It adds the `ru-RU` language
-selection, initial human-reviewed Russian strings in high-visibility screens
-(usage, common controls, welcome, chat/sidebar, composer, settings/appearance),
-and a typed `en-US` fallback for every untranslated dictionary entry.
+This branch provides an **expanded, but not yet complete, Russian translation**:
+1,845 of 1,916 English UI keys are explicitly translated (96% by static AST
+audit). All other keys inherit the original English fallback. The main UI,
+chat, settings, memory, models, users, token displays, automation scheduler,
+agents, integrations, projects, tools and extension screens are translated.
 
-Do not label this release as "fully localized". Before an upstream PR or
-production rollout, complete a key-by-key coverage review against
-`frontend/src/core/i18n/locales/types.ts`, audit placeholders and formatting
-functions, review Russian grammar and pluralization, and run browser E2E.
+A few intentionally untranslated items remain, including provider and brand
+names, technical parameters, identity fields, and some advanced server forms.
+The translation needs human linguistic QA, full browser E2E and an upstream
+maintainer review before it can be described as complete.
 
 ## Cross-layer implementation
 
@@ -52,9 +53,29 @@ for those server-generated messages; they have NOT been translated to Russian.
   exactly that unrelated test completed successfully (`tsc --noEmit`).
   The normal complete project-wide check therefore remains unresolved.
 
+## Independent UI audit
+
+- `frontend/scripts/audit-ru-localization.cjs`: compares leaf dictionary
+  keys with explicit Russian overrides. 1,845/1,916 keys localized.
+- `frontend/scripts/audit-ru-hardcoded-ui.cjs`: scans 180 workspace TSX
+  components for likely English JSX copy; initial 8 findings were addressed.
+  The follow-up heuristic scan found **0** candidates. This is a heuristic,
+  not a comprehensive UI-browser E2E assessment.
+- Regression tests cover Russian navigation, user/model settings, token usage,
+  prompt suggestions, file selection and relative date localization.
+- The 11 frontend i18n tests passed and TypeScript completed successfully
+  when excluding exactly the unrelated Bookmarks extension test, whose built
+  artifact is absent from the isolated build image.
+
 ## Deployment safety
 
-This is an isolated Git worktree and branch. No containers or production
-services were restarted, rebuilt, or updated. Do not deploy automatically:
-complete Russian translation review, maintainers' scope decision, CI,
-and staged browser smoke tests first.
+This is an isolated Git worktree and branch, with the live Compose frontend
+using its source bind mount. The first Russian build was already deployed
+to the user's own Home PC at port 2026. Its Next.js volume
+`deerflow_next_ru_20261111` is retained for rollback; the original
+`deerflow_next_prod_v2` build is also preserved. User data, sessions,
+databases and Redis volumes are outside these build volumes.
+
+Use a **new** Next.js output volume for the revised translation and replace
+only the frontend container after a successful isolated build and preview.
+For upstream publication, request maintainer review and complete browser E2E.

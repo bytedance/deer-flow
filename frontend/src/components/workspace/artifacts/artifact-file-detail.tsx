@@ -454,7 +454,9 @@ export function ArtifactFileDetail({
                 }}
               >
                 <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
-                  <SelectValue placeholder="Select a file" />
+                  <SelectValue
+                    placeholder={t.common.selectFile ?? "Select a file"}
+                  />
                 </SelectTrigger>
                 <SelectContent className="select-none">
                   <SelectGroup>

@@ -230,6 +230,16 @@ export interface Translations {
     showArtifacts: string;
     browser: string;
     showBrowser: string;
+    selectFile?: string;
+    fileTypeLabel?: (fileType: string) => string;
+    fileNotPreviewable?: string;
+    browserUrlHint?: string;
+    loadingPanel?: string;
+    emptyArtifactTitle?: string;
+    emptyArtifactDescription?: string;
+    sidePanelHelp?: string;
+    loadingSettings?: string;
+    loadingPage?: string;
   };
 
   browserStream: {

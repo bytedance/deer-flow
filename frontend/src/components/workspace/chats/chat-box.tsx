@@ -42,10 +42,11 @@ import { useThread } from "../messages/context";
 import { useMaybeSidecar } from "../sidecar/context";
 
 function RightPanelLoading() {
+  const { t } = useI18n();
   return (
     <div className="grid size-full place-items-center">
       <p role="status" className="text-muted-foreground text-sm">
-        Loading panel…
+        {t.common.loadingPanel ?? "Loading panel…"}
       </p>
     </div>
   );
@@ -399,13 +400,16 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
           {artifacts.length === 0 ? (
             <ConversationEmptyState
               icon={<FilesIcon />}
-              title="No artifact selected"
-              description="Select an artifact to view its details"
+              title={t.common.emptyArtifactTitle ?? "No artifact selected"}
+              description={
+                t.common.emptyArtifactDescription ??
+                "Select an artifact to view its details"
+              }
             />
           ) : (
             <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
               <header className="shrink-0">
-                <h2 className="text-lg font-medium">Artifacts</h2>
+                <h2 className="text-lg font-medium">{t.common.artifacts}</h2>
               </header>
               <ScrollArea className="min-h-0 grow">
                 <ArtifactFileList
@@ -459,15 +463,16 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
             <SheetHeader className="sr-only">
               <SheetTitle>
                 {renderedRightPanel === "sidecar"
-                  ? "Sidecar"
+                  ? t.sidecar.title
                   : renderedRightPanel === "browser"
-                    ? "Browser"
+                    ? t.common.browser
                     : renderedRightPanel === "details"
                       ? (messageDetails?.selectedDetail?.title ?? t.common.more)
-                      : "Artifacts"}
+                      : t.common.artifacts}
               </SheetTitle>
               <SheetDescription>
-                Browse the side panel for this conversation.
+                {t.common.sidePanelHelp ??
+                  "Browse the side panel for this conversation."}
               </SheetDescription>
             </SheetHeader>
             <div className="min-h-0 flex-1 p-3 pt-10">{rightPanelContent}</div>
