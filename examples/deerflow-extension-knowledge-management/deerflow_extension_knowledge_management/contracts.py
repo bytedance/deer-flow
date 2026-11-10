@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 from deerflow_extension_api.auth import ExtensionPrincipal
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, model_validator
 
-Operation = Literal["capabilities", "status", "upload", "url", "manual", "reprocess", "cancel"]
+Operation = Literal["capabilities", "status", "upload", "url", "manual", "reprocess", "cancel", "documents", "entries", "entry", "revisions", "revision", "entry_edit", "entry_restore", "graph"]
 
 
 class ManagementCredentialUnavailable(RuntimeError):

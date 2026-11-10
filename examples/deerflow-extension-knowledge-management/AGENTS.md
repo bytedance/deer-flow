@@ -46,6 +46,22 @@ graph support and chunk overrides for missing/parent-child chunking config.
 Local credential validation raises ManagementCredentialUnavailable before HTTP;
 map it to 503 without uncertain-write reconciliation guidance.
 
+Optional library contracts live in library.py and LIBRARY.md (since 0.1.1).
+New operations need explicit grants; ingestion-only Providers need no new method.
+WeKnora v0.8.3 Wiki writes are disabled: the service re-read loses the caller's
+expected version. Do not enable without a verified upstream atomic-version fix.
+Directory EntrySummary contains no body/summary. Treat omitted historical content
+as empty but require current-page completeness. Reject submitted credentials
+before upstream I/O. Reject oversized
+or secret-bearing editable snapshots/IDs rather than truncating or redacting data
+that can be written back. Metadata history must not expose the current body.
+LightRAGLibrary binds exactly one configured server workspace; no dataset filter
+or workspace-header delegation. Preserve exact graph IDs, join only returned
+chunk evidence, and never infer edges. Offload SSL setup and bound all responses.
+Use one 200-node budget including relation endpoints; project bounded arrays and
+recognize only the exact empty-dataset failure as an empty graph. Library
+regressions: backend/tests/test_knowledge_library.py and its blocking-I/O suite.
+
 `routes_enabled: false` preserves the enabled plugin namespace for downstream
 authorization while mounting no direct routes or Provider. Keep the default true
 for compatibility; disabling the entire install also removes the namespace.

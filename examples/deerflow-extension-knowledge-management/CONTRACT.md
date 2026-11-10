@@ -31,4 +31,11 @@ content. These diagnostics do not provide durable admission or processing Trace.
 
 ## Compatibility
 
+Optional directory, Wiki editing/version and graph contracts added in 0.1.1 are
+documented in [LIBRARY.md](LIBRARY.md). The original ManagementProvider protocol
+remains valid; existing ingestion-only Providers need no library implementation.
+The supplied WeKnora v0.8.3 library adapter is read-only for Wiki pages: its
+upstream PUT cannot atomically preserve the caller's expected version. Library
+directories expose metadata only, never full entry content or summary.
+
 No changes are made to `knowledge_scope`, retrieval tools, source artifacts, frontend citation models or stored messages. Offline fixtures in `backend/tests/test_knowledge_management_extension.py` demonstrate shared dataset identity and citation replay with the existing WeKnora read-only provider. Synthetic fixture transitions are not live processing evidence.

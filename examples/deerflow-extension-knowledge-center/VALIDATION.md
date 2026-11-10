@@ -1,5 +1,119 @@
 # Phase-4 knowledge center validation
 
+## Review corrections on 2026-11-03
+
+This record supersedes the WeKnora mutation claims below. The v0.8.3 PUT handler
+checks the caller version, but its service re-reads the page and uses that newer
+version in the atomic repository write. The adapter therefore removes edit and
+restore capabilities and rejects direct mutations before upstream I/O; no operator
+override is offered. Generic editor/restore routes and UI remain available to
+Providers with verified atomic caller-version protection. This is a Provider
+limitation, not evidence that concurrent WeKnora writes are safe.
+
+The review update also makes entry directories metadata-only, rejects submitted
+credentials before I/O, accepts omitted empty historical bodies, recognizes the
+exact LightRAG empty-dataset response, and projects graphs to a shared 200-node
+budget. Provider input errors retain 422, malformed responses produce 502, and
+entry edit bodies allow 8 MiB while policy bodies retain 1 MiB. Obsolete read
+failures cannot replace newer mutation feedback; pending-save pagination cannot
+discard a draft. Screenshot generation uses the `library-en-dark.png` output
+filename. The two library screenshots are generated locally and are not tracked,
+as requested during review; the browser generation cases remain available.
+
+| Check rerun for the review update | Result |
+| --- | --- |
+| Library/center/management/platform/guidance backend regression | 182 passed; library suite now 48 cases |
+| Entire strict blocking-I/O suite | 363 passed, 8 skipped |
+| Frontend extension/API units | 192 passed |
+| Knowledge-center Chromium browser suite | 19 passed |
+| Screenshot-generation browser cases | 2 passed; correct English/dark and Chinese/mobile output names |
+| `pnpm check` | Passed: ESLint and TypeScript |
+| Backend/example Ruff format and lint | Passed |
+| Three wheels and sdists, fresh isolated wheel installation | Passed: entry points, library routes and all 7 browser assets match source |
+
+The added regressions first failed on the prior implementation (including
+credential submission, directory disclosure, empty revisions/results, graph
+budgets and both browser ordering/draft cases). HTTP responses remain synthetic;
+no live Provider acceptance is claimed. The existing production-built host was
+used for browser checks with current shipped assets; no host runtime source or
+dependency manifest changed. The previous temporary install environment had
+missing dependency metadata, so the wheels were installed with fresh dependencies
+in a new isolated environment. Local application control blocked the `pytest`
+launcher; the passing backend commands used `uv run --no-sync python -m pytest`.
+Remote CI for this new commit must be checked separately from the already-green
+previous head.
+
+## Library completion on 2026-11-02
+
+This follow-up to merged #7518 completes the remaining capability-aware phase-4
+page surfaces: document directories and processing filters, Wiki browsing/editing/
+historical preview/guarded restoration, and real entity-relation graph queries.
+The independent branch is based on upstream main
+`3f86f071f3d26cb3fcf91841523f6f7be2796914`. Validation used Windows,
+Python 3.12.15, Node 24.16.0 and the pinned pnpm environment.
+
+| Check | Actual result |
+| --- | --- |
+| Library, center, management, platform and guidance backend tests | 171 passed, including 37 new library cases |
+| Complete strict blocking-I/O suite | 363 passed, 8 skipped |
+| Frontend extension/API unit tests | 192 passed |
+| `pnpm check` | Passed: ESLint and TypeScript |
+| Backend and extension Ruff formatting/lint | Passed |
+| Production `next build --webpack` and search index | Passed; index scanned 137 pages |
+| Knowledge-center and existing bookmark/business-plugin/icon browser tests | 36 passed (17 knowledge-center plus 19 existing regressions) |
+| Final knowledge-center browser run after screenshot viewport adjustment | 17 passed |
+| Guidance checker | 0 errors, 13 soft-limit warnings |
+| Three 0.1.1 wheels and sdists; isolated installed-wheel smoke | Passed: entry points, LightRAG factory, library routes, all 7 browser assets byte-compared with source, no Python cache files in archives |
+| `git diff --check` | Passed |
+
+The backend cases cover opt-in grants, unchanged ingestion-only Providers,
+post-capability and post-response policy revocation, response/resource identity,
+version conflicts, real historical snapshot restoration, strict response limits,
+credential-bearing or oversized editable content, graph identity and exact evidence
+joins. Browser cases cover English/dark desktop and Chinese/light 375px mobile,
+directory query parameters, draft and pending-input locks, historical preview,
+confirmed restoration, uncertain-write reconciliation, bounded graphs and a late
+directory response after cancellation. Local screenshot generation covered English
+desktop/dark and Chinese mobile/light with synthetic data in the actual host,
+including the sidebar entry point. These library images are not tracked.
+
+WeKnora routes and version semantics were checked against v0.8.3 source commit
+`3e22822c1d2397be730c458c7539d0eb8c113a24`. The optional LightRAG graph adapter
+uses the existing v1.5.7 `/query/data` shape. HTTP tests use synthetic responses;
+**no live WeKnora/LightRAG acceptance or production deployment is claimed**.
+WeKnora has no stored entity-query API in that version; its Wiki page-link graph
+is deliberately not substituted. Unsupported capabilities remain explicit.
+Processing controls project document states, not a global queue/attempt ledger.
+Phase 5 Trace remains separate.
+
+The baseline itself exceeded four hard guidance budgets. Minimal wording
+compression in backend/Gateway guides preserves the documented invariants and
+restores the hard checks; the 13 remaining warnings are soft limits. The entire
+monorepo suite was not rerun, and historical broad-suite results below describe
+only the earlier slice. Native Windows SWC remains blocked by local application
+control, so the production build used Webpack. `make` is unavailable; equivalent
+formatter/linter/test commands were executed directly.
+
+Reproduction from `backend/`:
+
+```sh
+uv run --no-sync pytest tests/test_knowledge_library.py tests/test_knowledge_center_extension.py tests/test_knowledge_management_extension.py tests/test_knowledge_platform_extension.py tests/test_agent_guidance_check.py -q
+uv run --no-sync pytest tests/blocking_io -q
+uv run --no-sync ruff format .
+uv run --no-sync ruff check .
+```
+
+From `frontend/`, use `pnpm check`,
+`pnpm exec rstest run tests/unit/core/extensions tests/unit/core/api`, and the
+production build/browser commands recorded below. The final browser host used
+port 3107. Build each example package with `uv build`; install all three wheels
+with the extension API into a separate environment before checking entry points,
+routes and manifest asset contents.
+
+## Historical first-slice validation
+
+The following records apply to #7518, not to the current completion branch.
+
 ## CI follow-up on 2026-10-26
 
 The initial GitHub run passed frontend unit tests, all four browser shards,

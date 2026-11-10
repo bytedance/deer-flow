@@ -72,6 +72,7 @@ export const copy = {
     providerState: "Provider state",
     accepted:
       "Submission returned. Check the document state below; acceptance does not mean processing completed.",
+    entrySaved: "Entry saved. Index updates may complete separately.",
     unknown: "Unknown",
     queued: "Queued",
     running: "Running",
@@ -145,6 +146,7 @@ export const copy = {
     details: "资源详情",
     providerState: "上游状态",
     accepted: "提交已返回，请以下方文档状态为准；请求被接受不代表处理完成。",
+    entrySaved: "条目已保存，索引更新可能稍后完成。",
     unknown: "未知",
     queued: "排队中",
     running: "处理中",
