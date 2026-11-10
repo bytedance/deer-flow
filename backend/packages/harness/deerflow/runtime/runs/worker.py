@@ -1357,6 +1357,10 @@ async def run_agent(
             hitl_app_config = get_app_config()
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
+        hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
+        hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
+        if journal is not None and hitl_resume_calls:
+            journal.adopt_resumed_tool_calls(hitl_resume_calls)
         agent_app_config = ctx.app_config
         if hitl_resume_escape:
             agent_app_config = hitl_app_config.model_copy(deep=True)
@@ -3207,6 +3211,63 @@ def _complete_state_replacement_values(
 def _is_resume_command_input(graph_input: Any) -> bool:
     """Identify requests that need to preserve interrupted execution position."""
     return isinstance(graph_input, Command) and graph_input.resume is not None
+
+
+def _hitl_action_calls(actions: list[Mapping[str, Any]]) -> dict[str, str]:
+    """Calls for journal adoption: only actions that also carry a usable ``tool_call_id``.
+
+    The calls were dispatched by the paused Run, but the resume Run produces
+    their results: a rejection is returned by the approval gate without a tool
+    callback, so the resume journal must adopt these calls to persist it.
+    """
+    return {action["tool_call_id"]: action["tool_name"] for action in actions if isinstance(action.get("tool_call_id"), str) and action["tool_call_id"] and isinstance(action.get("tool_name"), str)}
+
+
+async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> list[Mapping[str, Any]]:
+    """Return the actions of the live durable pause this resume answers."""
+    if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
+        return []
+    from deerflow.approvals.protocol import approval_responses
+    from deerflow.runtime.checkpoint_history import recent_checkpoint_history
+
+    responses = approval_responses(graph_input.resume)
+    if not isinstance(responses, list):
+        return []
+    response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
+    if not response_ids:
+        return []
+    async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
+        writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
+        # The newest checkpoint carrying either marker decides whether the pause
+        # is still live. A newer head-moving write must not hide an interrupt;
+        # a newer resume must not resurrect an older one.
+        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
+            return []
+        interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
+        if not interrupt_writes:
+            continue
+        matched: list[Mapping[str, Any]] = []
+        for write in interrupt_writes:
+            interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
+            for pending_interrupt in interrupts:
+                payload = getattr(pending_interrupt, "value", None)
+                if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
+                    continue
+                # Version 2 routes parallel decisions by LangGraph interrupt
+                # ID. Match each pause against its own response group, rather
+                # than comparing every action with the flattened batch.
+                interrupt_id = getattr(pending_interrupt, "id", None)
+                grouped_responses = responses if "responses" in graph_input.resume else approval_responses(graph_input.resume.get(interrupt_id))
+                if not isinstance(grouped_responses, list):
+                    continue
+                group_ids = {response.get("tool_call_id") for response in grouped_responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
+                pending_ids = payload.get("pending_tool_call_ids")
+                actions = payload.get("actions")
+                if not isinstance(pending_ids, list) or set(pending_ids) != group_ids or not isinstance(actions, list):
+                    continue
+                matched.extend(action for action in actions if isinstance(action, Mapping))
+        return matched
+    return []
 
 
 def _is_all_reject_hitl_resume(graph_input: Any) -> bool:

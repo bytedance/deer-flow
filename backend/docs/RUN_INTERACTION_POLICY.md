@@ -59,6 +59,12 @@ these live requests. Unattended parent origins cannot open child approval waits.
 A child without this bridge fails closed. The legacy `non_interactive: allow`
 only bypasses Ask on explicitly configured unattended root runs.
 
+The resume run's journal adopts the paused calls it answers, recovered from the
+durable interrupt payload. Approved calls reach the history feed through their
+tool callback; rejections have none, so the journal reconciles them under the
+resume run like other middleware-written results (#4666). Results from other
+earlier runs are not re-attributed.
+
 `waiting_for_input` is not terminal success or failure. Goals, delivery checks,
 and batch continuation must preserve a native pause. New runs cannot discard it.
 See [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for grant scoping,

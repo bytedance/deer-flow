@@ -37,9 +37,35 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **runtime:** A HITL rejection, including the all-reject escape after approval is
+  disabled or the gated tools change during a pause, now reaches the thread's
+  message history under the resume run instead of existing only in checkpoint
+  state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+  
+- **summarization:** vLLM compaction counts reasoning tokens replayed to the
+  model when checking the trigger and estimating how much history to keep.
+  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+
+- **gateway:** Posting feedback twice for the same run now returns a 409
+  instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
+  feedback row per user and run; a retry, or feedback on another message of the
+  same run, hit that unique key and the Gateway failed with an unhandled
+  database error. The 409 points callers at `PUT` on the same route, which
+  updates the existing feedback. ([#8064])
+  
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
+
+- **sandbox:** BoxLite VMs recovered at startup now run health checks, commands,
+  and cleanup on the provider's event loop, avoiding sync/async SDK mismatches
+  that made healthy recovered VMs fail their first command. ([#8072])
+
+- **uploads:** Re-uploading a file whose name collides with a compound archive
+  suffix no longer inserts the dedupe counter inside the suffix. A second
+  `report.tar.gz` is now named `report_1.tar.gz` (matching `report_1.tar` and
+  `report_1.txt`), instead of `report.tar_1.gz`, so the extension stays intact
+  for file-type detection. ([#8042](https://github.com/bytedance/deer-flow/pull/8042))
 
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
@@ -63,6 +89,11 @@ This section accumulates work toward the **2.3.0** milestone
   every user message on every model call, so one 100 KB paste blocked every
   thread for about 6 s per model call. The scan is now linear, and it redacts
   exactly the same addresses as before. ([#8006])
+
+- **agents:** Token budgets count separate accepted model calls even when a
+  provider reuses message IDs, so repeated IDs no longer bypass the configured
+  cap. Hard stops preserve already-completed structured-output tool results.
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
   
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
@@ -131,6 +162,12 @@ This section accumulates work toward the **2.3.0** milestone
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a
   later run. ([#7953])
+
+- **runtime:** A thread can accept new runs and mutations after a transient
+  database failure leaves a completed operation's reservation in place. The
+  next request for the thread on the same Gateway worker retries the release,
+  including in single-worker deployments with lease heartbeats disabled.
+  ([#8068](https://github.com/bytedance/deer-flow/pull/8068))
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
@@ -16209,3 +16246,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8072]: https://github.com/bytedance/deer-flow/pull/8072
+
