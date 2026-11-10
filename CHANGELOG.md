@@ -27,6 +27,11 @@ This section accumulates work toward the **2.3.0** milestone
   Exact-user allowlists remain the default; shared access requires matching
   host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
 
+- **community:** New Piloterr `web_fetch` provider (`PILOTERR_API_KEY`). Piloterr
+  fetches the page on its side, with a plain crawler, a headless browser
+  (`engine: rendering`) or its web unlocker, and the HTML goes through the same
+  readability extraction as the Jina reader.
+
 - **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
   ranked results with a direct answer when the sources agree on one, and fetch
   returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))

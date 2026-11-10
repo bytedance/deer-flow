@@ -648,6 +648,22 @@ class TestCheckWebSearch:
         assert result.status == "ok"
         assert "specstream" in result.detail
 
+    def test_piloterr_fetch_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PILOTERR_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.piloterr.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert "piloterr" in result.detail
+
+    def test_piloterr_fetch_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PILOTERR_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.piloterr.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "PILOTERR_API_KEY" in (result.fix or "")
+
     def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
         cfg = tmp_path / "config.yaml"

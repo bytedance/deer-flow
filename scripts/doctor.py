@@ -703,6 +703,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "sofya": "SOFYA_API_KEY",
                 "specstream": "SPECSTREAM_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
+                "piloterr": "PILOTERR_API_KEY",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",

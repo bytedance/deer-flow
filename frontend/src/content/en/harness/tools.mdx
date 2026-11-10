@@ -270,7 +270,7 @@ No extra dependency required.
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Piloterr", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -338,6 +338,17 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 Returns the page as markdown. Requires a [Sofya](https://sofya.co) API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.piloterr.tools:web_fetch_tool
+    api_key: $PILOTERR_API_KEY
+    # engine: rendering   # crawler (default), rendering or webunlocker
+```
+Piloterr fetches the page on its side and returns the HTML, which is converted to markdown like the Jina reader. `engine: rendering` loads the page in a headless browser for JavaScript sites (`wait_in_seconds` adds up to 30 seconds after load), and `engine: webunlocker` gets past anti-bot pages. Requires a [Piloterr](https://www.piloterr.com) API key.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

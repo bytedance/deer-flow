@@ -261,7 +261,7 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Piloterr", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -328,6 +328,17 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.piloterr.tools:web_fetch_tool
+    api_key: $PILOTERR_API_KEY
+    # engine: rendering   # crawler (default), rendering or webunlocker
+```
+由 Piloterr 在其服务端抓取页面并返回 HTML，再像 Jina 阅读器一样转换为 Markdown。`engine: rendering` 使用无头浏览器加载 JavaScript 页面（`wait_in_seconds` 可在加载后再等待最多 30 秒），`engine: webunlocker` 用于有反爬保护的页面。需要 [Piloterr](https://www.piloterr.com) API Key。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

@@ -804,6 +804,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         tool_name="web_fetch",
     ),
     WebProvider(
+        name="piloterr",
+        display_name="Piloterr",
+        description="Page fetched by Piloterr, with JavaScript rendering or unblocking, API key required",
+        use="deerflow.community.piloterr.tools:web_fetch_tool",
+        env_var="PILOTERR_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
         name="unbrowse",
         display_name="Unbrowse",
         description="Page as markdown, cloud browser for JavaScript pages, API key required",

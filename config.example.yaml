@@ -1297,6 +1297,19 @@ tools:
   #   #                                     # cannot be enforced end-to-end. Set true ONLY when its outbound network
   #   #                                     # is isolated from private and cloud-metadata networks.
 
+  # Web fetch tool (uses Piloterr, requires PILOTERR_API_KEY)
+  # Piloterr fetches the page on its side and returns the HTML, which goes through
+  # readability like the Jina reader. Sign up at https://www.piloterr.com
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.piloterr.tools:web_fetch_tool
+  #   # engine: crawler            # crawler (default), rendering (JavaScript) or webunlocker (anti-bot)
+  #   # wait_in_seconds: 3         # rendering only, 0-30
+  #   # timeout: 60                # seconds, 1-300
+  #   # api_key: $PILOTERR_API_KEY
+
   # Web fetch tool (uses Sofya, requires SOFYA_API_KEY)
   # Returns the page as markdown. Also handles PDF, DOCX and other documents.
   # NOTE: Only one web_fetch provider can be active at a time.
