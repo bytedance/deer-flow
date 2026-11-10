@@ -2563,7 +2563,9 @@ export function useThreadStream({
       // The run's metadata frame means the Gateway accepted this send even
       // when the response header is unreadable (e.g. a proxy that hides
       // Content-Location). Only the thread it names can be accepted: an
-      // id-less acceptance could retire a newer send from an older stream.
+      // id-less acceptance could retire a newer send from an older stream, so a
+      // frame without `thread_id` is not an acceptance at all — the stream's
+      // start/finish callbacks still settle the send.
       const eventThreadId =
         typeof data === "object" &&
         data !== null &&
@@ -2571,7 +2573,9 @@ export function useThreadStream({
         typeof (data as { thread_id?: unknown }).thread_id === "string"
           ? (data as { thread_id: string }).thread_id
           : undefined;
-      acceptPendingSend(eventThreadId);
+      if (eventThreadId) {
+        acceptPendingSend(eventThreadId);
+      }
     },
     onUpdateEvent(data, { mutate }) {
       if (hasRenderedThreadStateUpdate(data)) {
