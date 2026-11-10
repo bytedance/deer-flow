@@ -341,6 +341,8 @@ They must not change canonical Markdown timestamps or revisions.
 Write audits only after canonical persistence succeeds.
 User delete and clear operations must remove matching sidecar data.
 Updates feed after the furthest of the LRU and persisted watermark (best-effort IO).
+Emergency snapshots read neither; they skip messages already extracted
+in-process (`tests/test_updater_emergency_snapshot_dedup.py`).
 
 Staleness review reuses the regular updater call.
 It can keep, remove, or extend eligible aged facts.

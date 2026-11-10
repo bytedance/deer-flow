@@ -47,6 +47,16 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **memory:** Context compaction no longer pays to extract turns DeerMem has
+  already extracted. The pre-compaction snapshot bypasses the extraction
+  watermark, so every compaction sent the removed front of the conversation to
+  the memory model in full, even when the after-agent path had extracted those
+  turns, and could store their facts a second time in different words. The
+  updater now remembers which messages a persisted extraction consumed and
+  feeds a snapshot only the rest. The record is in-process: a failed
+  extraction, a pre-screen skip, a message without an id, and a restart or
+  another Gateway replica still get the whole snapshot.
+
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's
   message history under the resume run instead of existing only in checkpoint

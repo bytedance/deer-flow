@@ -846,6 +846,33 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     return ("content", msg_type, hashlib.sha256(text.encode("utf-8")).hexdigest())
 
 
+# How many extracted messages ``MemoryUpdater._extracted_messages`` remembers per
+# conversation. A conversation is compacted long before it holds this many
+# user/assistant messages; one that does only has its oldest forgotten, which
+# costs a repeated extraction at compaction and never a skipped message.
+_EXTRACTED_MESSAGES_PER_CONVERSATION = 256
+
+
+def _extracted_message_key(msg: Any) -> bytes | None:
+    """Return a key naming ``msg`` and its text, for the extracted-message record.
+
+    Stricter than :func:`_message_identity`, because a match here keeps a message
+    out of an emergency snapshot, which is its last chance to be extracted. The
+    message must carry an id: text alone cannot tell a later "yes" from the one
+    already extracted. The text is part of the key, so a reused id whose content
+    changed is fed again. ``None`` means the message can never be skipped. Only a
+    digest is kept, so the record holds no conversation text.
+    """
+    mid = getattr(msg, "id", None)
+    if not isinstance(mid, str) or not mid:
+        return None
+    text = extract_message_text(msg)
+    if not text:
+        return None
+    msg_type = getattr(msg, "type", "") or ""
+    return hashlib.sha256(repr((mid, msg_type, text)).encode("utf-8")).digest()
+
+
 # DeerMem is portable; the host test pins this map to its UI allowlist.
 _MEMORY_UI_LANGUAGES = {"en-US": "English", "zh-CN": "Simplified Chinese"}
 
@@ -888,6 +915,15 @@ class MemoryUpdater:
         # storage root continues from it. A key missing from both re-extracts
         # one batch on that thread's next turn.
         self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
+        # Messages a persisted extraction has consumed, per (thread_id, user_id,
+        # agent_name). An emergency (pre-compaction) snapshot is the removed
+        # front of the conversation and does not contain the watermark message,
+        # so the watermark cannot tell which of its messages were extracted;
+        # this record can. It is process-local and bounded: the same LRU cap as
+        # the watermark cache, and the most recent
+        # _EXTRACTED_MESSAGES_PER_CONVERSATION messages per key. A missing entry
+        # only means a snapshot is fed in full.
+        self._extracted_messages: OrderedDict[tuple[str | None, str | None, str | None], dict[bytes, None]] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -1807,6 +1843,54 @@ class MemoryUpdater:
                 start = max(start, identities.index(last_id) + 1)
         return messages[start:]
 
+    def _remember_extracted(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+    ) -> None:
+        """Record ``messages`` as consumed by an extraction that persisted.
+
+        Called only after the update was written, so a failed extraction and a
+        pre-screen skip leave no trace here: an emergency snapshot of those
+        turns is still fed. Bounded per key and across keys (see
+        ``_extracted_messages``).
+        """
+        message_keys = [message_key for message_key in map(_extracted_message_key, messages) if message_key is not None]
+        if not message_keys:
+            return
+        # Pop and re-insert: the key becomes the most recently used one.
+        record = self._extracted_messages.pop(key, None) or {}
+        for message_key in message_keys:
+            # Same for each message, so the per-key bound drops the oldest.
+            record.pop(message_key, None)
+            record[message_key] = None
+        for stale in list(record)[: max(0, len(record) - _EXTRACTED_MESSAGES_PER_CONVERSATION)]:
+            del record[stale]
+        self._extracted_messages[key] = record
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(self._extracted_messages) > cap:
+            self._extracted_messages.popitem(last=False)
+
+    def _not_yet_extracted(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+    ) -> list[Any]:
+        """Return the emergency snapshot ``messages`` no extraction has consumed.
+
+        A message is left out only when this process persisted an extraction
+        that was fed that exact message (same id, type and text). Everything
+        else is fed: a message without an id, one whose record was evicted, and
+        every message after a restart or on a replica that did not run the
+        earlier extraction. Feeding a message twice costs a call; skipping one
+        that was never extracted would lose it, since summarization removes the
+        snapshot's messages from state.
+        """
+        record = self._extracted_messages.get(key)
+        if not record:
+            return messages
+        return [message for message in messages if _extracted_message_key(message) not in record]
+
     def _do_update_memory_sync_impl(
         self,
         messages: list[Any],
@@ -1835,10 +1919,13 @@ class MemoryUpdater:
         conversation front and survives a restart or a move to a peer replica
         (see :meth:`_feed_after_watermark`). ``bypass_watermark`` is set by the
         emergency (summarization) flush path: the subset it carries is a one-shot
-        "extract before removal" snapshot, so it is fed in full and does not
-        read or advance the conversation watermark (advancing it from the
-        subset's own length would regress the watermark and skip un-extracted
-        tail turns on the next normal feed).
+        "extract before removal" snapshot, so it does not read or advance the
+        conversation watermark (advancing it from the subset's own length would
+        regress the watermark and skip un-extracted tail turns on the next
+        normal feed). It is fed in full except for messages an extraction
+        persisted by this process already consumed (see
+        :meth:`_not_yet_extracted`): the normal path has usually extracted most
+        of a snapshot's turns by the time summarization removes them.
         """
         metrics: dict[str, Any] = {}
         response: Any = None
@@ -1848,12 +1935,17 @@ class MemoryUpdater:
         try:
             watermark_key = (thread_id, user_id, agent_name)
             if bypass_watermark:
-                # Emergency flush: extract the carried subset in full.
-                feed_messages = messages
+                # Emergency flush: extract the carried subset, minus the messages
+                # an earlier extraction already consumed.
+                feed_messages = self._not_yet_extracted(watermark_key, messages)
             else:
                 feed_messages = self._feed_after_watermark(watermark_key, messages)
             if not feed_messages:
-                logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
+                logger.debug(
+                    "Memory update skipped: %s (thread=%s)",
+                    "snapshot already extracted" if bypass_watermark else "no new messages since watermark",
+                    thread_id,
+                )
                 return True
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
@@ -1970,6 +2062,10 @@ class MemoryUpdater:
                 metrics=metrics,
                 signals=frozenset(feed_signals),
             )
+            if success:
+                # On both paths: a later emergency snapshot may carry these
+                # messages again and must not pay to extract them twice.
+                self._remember_extracted(watermark_key, feed_messages)
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
                 # suffix, so this is messages[-1]). Skipped on the emergency
