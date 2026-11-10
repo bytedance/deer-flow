@@ -37,7 +37,7 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
-from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
+from app.gateway.deps import get_checkpointer, get_config, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -51,6 +51,7 @@ from app.gateway.services import (
     strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
+from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
@@ -76,6 +77,12 @@ from deerflow.runtime.goal import (
     is_active_goal,
     read_thread_goal,
     write_thread_goal,
+)
+from deerflow.runtime.goal_synthesis import (
+    GoalSynthesisError,
+    GoalSynthesisUnclear,
+    build_synthesis_context,
+    synthesize_goal_objective,
 )
 from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, admit_origin
@@ -603,6 +610,12 @@ class ThreadGoalResponse(BaseModel):
     """Response model for a thread goal."""
 
     goal: dict[str, Any] | None = Field(default=None, description="Current goal state, or null when no goal is active")
+
+
+class ThreadGoalFromChatRequest(BaseModel):
+    """Request body for synthesizing a goal from the recent conversation."""
+
+    guidance: str | None = Field(default=None, max_length=500, description="Optional user hint steering the synthesized objective")
 
 
 class ThreadCompactRequest(BaseModel):
@@ -1571,6 +1584,98 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
         raise
     except Exception:
         logger.exception("Failed to set goal for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
+    return ThreadGoalResponse(goal=goal)
+
+
+@router.post("/{thread_id}/goal/from-chat", response_model=ThreadGoalResponse)
+@require_permission("threads", "write", owner_check=True)
+async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoalFromChatRequest, request: Request) -> ThreadGoalResponse:
+    """Synthesize a goal objective from the thread's recent conversation and save it.
+
+    The flow the #7050 first slice agreed on: a busy pre-check runs **before**
+    the synthesis LLM call (a busy thread must not spend a model call it could
+    not save under anyway), the LLM composes an objective preserving the agreed
+    constraints and stopping condition, and the save reuses ``PUT /goal``'s
+    reservation path — its ``ConflictError`` stays the authoritative busy
+    guard, because another run can start between the pre-check and the save.
+
+    Unlike ``PUT /goal`` (which mints a missing checkpoint for ``/chats/new``
+    pages), from-chat synthesizes *from* an existing conversation: no
+    checkpoint or no visible context is a 422 ``no_context``, never a new
+    thread. A conversation whose last turn is an unanswered human-input
+    request (a clarification, a sandbox-network approval, an extension prompt)
+    is a 422 ``pending_clarification``: the goal is not agreed yet, and
+    synthesizing anyway lets the model invent the missing decision. The
+    synthesis is read-only until the save; the caller starts the run through
+    its own existing run path.
+    """
+    # Best-effort pre-check: has_inflight reads this worker's registry, so a
+    # multi-worker deployment can miss a peer's run. Missing it costs one
+    # wasted synthesis; the save-time reservation below still rejects. A
+    # failing pre-check degrades the same way rather than blocking the user.
+    try:
+        if await get_run_manager(request).has_inflight(thread_id):
+            raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning("Goal from-chat busy pre-check failed; falling through to synthesis", exc_info=True)
+
+    try:
+        accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        snapshot = await accessor.aget(config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to read thread %s state for goal synthesis", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to read thread state") from None
+    if not (snapshot.config or {}).get("configurable", {}).get("checkpoint_id"):
+        raise HTTPException(status_code=422, detail={"code": "no_context"})
+
+    values = snapshot.values or {}
+    messages = values.get("messages")
+    messages_list = messages if isinstance(messages, list) else []
+    if extract_unanswered_human_input_request(messages_list) is not None:
+        # The agreement is incomplete: the user still owes the assistant an
+        # answer. Running now would force the model to guess that decision.
+        raise HTTPException(status_code=422, detail={"code": "pending_clarification"})
+    summary_text = values.get("summary_text")
+    context = build_synthesis_context(messages_list, summary_text if isinstance(summary_text, str) else None)
+    if not context.strip():
+        raise HTTPException(status_code=422, detail={"code": "no_context"})
+
+    # The synthesis call runs outside every lock/reservation: a model call can
+    # take tens of seconds and must not hold the thread's write admission.
+    try:
+        objective = await synthesize_goal_objective(
+            context=context,
+            guidance=body.guidance or "",
+            app_config=get_config(),
+            thread_id=thread_id,
+        )
+    except GoalSynthesisUnclear:
+        # The model's reason is derived from conversation content: it is never
+        # echoed to the user, and it is not logged verbatim either.
+        logger.info("Goal from-chat found no clear goal in thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=422, detail={"code": "unclear"}) from None
+    except GoalSynthesisError:
+        logger.warning("Goal from-chat synthesis failed for thread %s", sanitize_log_param(thread_id), exc_info=True)
+        raise HTTPException(status_code=502, detail={"code": "synthesis_failed"}) from None
+
+    checkpointer = get_checkpointer(request)
+    goal = build_goal_state(objective)
+    try:
+        async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal")
+    except ConflictError:
+        raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to save from-chat goal for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to set thread goal") from None
     return ThreadGoalResponse(goal=goal)
 

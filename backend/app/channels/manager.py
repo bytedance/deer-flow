@@ -161,6 +161,13 @@ _RUN_ADMISSION: ContextVar[_RunAdmission | None] = ContextVar("deerflow_channel_
 # status errors mean the Gateway never admitted it.
 _RUN_REQUEST_REACHED_GATEWAY_ERRORS = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
 
+# ``/goal from-chat`` makes the Gateway run a synthesis LLM call before it
+# answers, which routinely exceeds the 10s budget the other ``/goal`` calls
+# need for a checkpoint read/write — the live Feishu run timed out client-side
+# while the Gateway went on to save the goal. Keep connect/write/pool short so
+# a dead Gateway still fails fast, and extend only the read for the synthesis.
+_GOAL_FROM_CHAT_TIMEOUT = httpx.Timeout(10.0, read=120.0)
+
 
 class _RunFailedFrame(RuntimeError):
     """The stream's ``error`` frame: the run ended, so a retry is not a duplicate."""
@@ -3842,7 +3849,7 @@ class ChannelManager:
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
-                "/goal [condition|clear] — Set, show, or clear an active goal\n"
+                "/goal [condition|clear|from-chat [hint]] — Set, show, clear, or compose the goal from the conversation\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
@@ -4088,8 +4095,12 @@ class ChannelManager:
         """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
         if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
             return False
+        # POST (from-chat synthesis) saves the goal like PUT, so it carries the
+        # same "Set the goal ..." detail; recognizing it lets the IM reply reuse
+        # the busy wording for both the pre-check and the save-time race.
         detail = {
             "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
+            "POST": "Thread has a run in flight. Set the goal after the run finishes.",
             "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
         }.get(error.request.method)
         if detail is None:
@@ -4107,13 +4118,15 @@ class ChannelManager:
         *,
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
+        suffix: str = "",
+        timeout: float | httpx.Timeout = 10,
     ) -> dict[str, Any]:
         async with _make_gateway_client(self._gateway_url) as http:
             request = getattr(http, method.lower())
-            kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
+            kwargs: dict[str, Any] = {"timeout": timeout, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
                 kwargs["json"] = json
-            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal{suffix}", **kwargs)
             response.raise_for_status()
             return response.json() or {}
 
@@ -4180,6 +4193,9 @@ class ChannelManager:
                 return await self._goal_reply(msg, "clear_failed")
             return await self._goal_reply(msg, "cleared")
 
+        if command.kind == "from_chat":
+            return await self._handle_goal_from_chat(msg, thread_id, guidance=command.objective, headers=headers)
+
         if not thread_id:
             thread_id, _ = await self._create_first_thread(self._get_client(), msg)
 
@@ -4196,6 +4212,85 @@ class ChannelManager:
         chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
         await self._handle_chat(chat_msg, bound_identity_checked=True)
         return None
+
+    async def _handle_goal_from_chat(self, msg: InboundMessage, thread_id: str | None, *, guidance: str, headers: dict[str, str]) -> str | None:
+        """``/goal from-chat``: synthesize an objective from the conversation, then start one run.
+
+        Unlike the literal ``set`` branch — which starts the run silently because
+        the user typed the objective — the objective here is model-synthesized,
+        so the user is shown what was saved before the run streams its output.
+        Saving and the busy/409 guard stay on the Gateway route; this only
+        reports the outcome and hands the saved objective to ``_handle_chat``.
+        """
+        if not thread_id:
+            return await self._goal_reply(msg, "from_chat_no_thread")
+
+        try:
+            result = await self._goal_request("post", thread_id, headers=headers, json={"guidance": guidance or None}, suffix="/from-chat", timeout=_GOAL_FROM_CHAT_TIMEOUT)
+        except Exception as exc:
+            return await self._goal_from_chat_error_reply(msg, exc)
+
+        goal = result.get("goal") if isinstance(result, Mapping) else None
+        objective = goal.get("objective") if isinstance(goal, Mapping) else None
+        if not isinstance(objective, str) or not objective.strip():
+            logger.warning("Goal from-chat returned no usable objective")
+            return await self._goal_reply(msg, "from_chat_failed")
+
+        # Show the synthesized objective, then start exactly one run with it as
+        # the task text (same run path as the literal set branch).
+        locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+        try:
+            await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective))
+        except Exception:
+            # The goal is already saved; a failed confirmation card must not
+            # keep the run from starting.
+            logger.warning("Goal from-chat saved but the confirmation card failed", exc_info=True)
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=objective, msg_type=InboundMessageType.CHAT)
+        try:
+            await self._handle_chat(chat_msg, bound_identity_checked=True)
+        except Exception:
+            # The goal is already saved; report that honestly instead of hiding
+            # it behind a generic failure or claiming the task is running.
+            logger.exception("Goal from-chat saved but the run did not start")
+            return await self._goal_reply(msg, "from_chat_saved_but_not_started")
+        return None
+
+    async def _goal_from_chat_error_reply(self, msg: InboundMessage, exc: Exception) -> str:
+        """Map a from-chat Gateway error to the owner-language reply.
+
+        Only the known in-flight conflict, a client-side timeout, and the
+        structured synthesis outcomes (``unclear``, ``no_context``,
+        ``pending_clarification``) get their own wording; anything else
+        degrades to the generic retry reply. The model's ``reason`` is never
+        read here, and the Gateway does not log it verbatim either.
+        """
+        if self._is_goal_in_flight_error(exc):
+            return await self._goal_reply(msg, "busy")
+        if isinstance(exc, httpx.TimeoutException):
+            # The Gateway may finish synthesizing and save the goal after this
+            # client stops waiting, so the reply must not claim it failed.
+            logger.warning("Goal from-chat request timed out; the goal may still be saved", exc_info=True)
+            return await self._goal_reply(msg, "from_chat_timeout")
+        code = None
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = None
+            detail = body.get("detail") if isinstance(body, Mapping) else None
+            if isinstance(detail, Mapping):
+                code = detail.get("code")
+        if code == "unclear":
+            return await self._goal_reply(msg, "from_chat_unclear")
+        if code == "no_context":
+            return await self._goal_reply(msg, "from_chat_no_context")
+        if code == "pending_clarification":
+            return await self._goal_reply(msg, "from_chat_pending_clarification")
+        logger.warning("Goal from-chat failed through gateway", exc_info=True)
+        return await self._goal_reply(msg, "from_chat_failed")
 
     async def _fetch_gateway_json(self, path: str, *, msg: InboundMessage | None = None) -> dict[str, Any]:
         """GET a Gateway API path and return the parsed JSON body.
