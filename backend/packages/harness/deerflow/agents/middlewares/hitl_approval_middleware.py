@@ -69,14 +69,11 @@ def _bounded_text(value: Any) -> str:
 def _addressable(calls: list[dict[str, Any]]) -> bool:
     """Whether every call can carry a stable approval decision.
 
-    ``ToolMessage`` requires a non-empty string ``tool_call_id``. A pause whose
-    payload carries a null or duplicated call id can never be validated: the
-    Gateway resume validator answers 422 (all-reject included) while a pending
-    pause blocks new runs with 409, so pausing would wedge the thread forever.
-    An empty id is technically resumable end to end, but strict providers reject
-    it when the conversation is replayed, so it is denied by the same rule.
-    These calls are denied by removing them from the model response instead of
-    by result.
+    Approval needs stable, unique call IDs. Fresh null/duplicate IDs are denied
+    before pausing; existing damaged pauses use a separate reject-only recovery
+    path. Empty IDs are also denied because strict providers reject them when
+    the conversation is replayed. Such calls are removed from the model
+    response rather than answered by result.
     """
     ids = [call.get("id") for call in calls]
     return all(isinstance(call_id, str) and call_id for call_id in ids) and len(set(ids)) == len(ids)
@@ -231,11 +228,9 @@ class HitlApprovalMiddleware(AgentMiddleware):
             return self._deny_all(last, targets, _no_resume_reason())
 
         ai_message_id = last.id or ""
-        # A pause is only resolvable when every targeted call has a unique,
-        # non-empty string id: the Gateway resume validator rejects a payload
-        # with a null or duplicate id with 422, and a pending pause blocks new
-        # runs with 409, so pausing here would wedge the thread permanently.
-        # Fail closed instead of interrupting.
+        # A fresh pause needs non-empty IDs unique across the whole response.
+        # Malformed legacy pauses use bound reject-only recovery; new ambiguous
+        # calls are denied before interrupting.
         if not _unambiguous_ids(last, targets):
             return _strip_calls(last, targets, _unaddressable_reason())
         actions = [
