@@ -185,6 +185,7 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -239,6 +240,7 @@ def test_version_41_config_moves_legacy_ragflow_settings_to_tool(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -288,6 +290,7 @@ def test_version_41_tools_only_ragflow_config_enables_knowledge_capability(tmp_p
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -338,6 +341,7 @@ def test_version_45_tools_only_ragflow_config_runs_knowledge_migration(tmp_path)
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -388,6 +392,7 @@ def test_version_45_tools_only_lightrag_config_keeps_knowledge_tool_available(tm
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -442,6 +447,7 @@ def test_version_45_lightrag_config_preserves_explicit_disabled_gate(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -575,6 +581,7 @@ def test_version_46_pii_enabled_config_upgrade_generates_token_secret(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -620,6 +627,7 @@ def test_version_46_pii_disabled_config_upgrade_skips_token_secret(tmp_path):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
     assert result.returncode == 0, result.stderr
@@ -664,6 +672,7 @@ def _run_config_upgrade_in_checkout(checkout: Path, **env_overrides: str):
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=120,
     )
 
@@ -777,7 +786,7 @@ def test_config_upgrade_creates_checkout_config_when_none_exists(tmp_path):
     result = _run_config_upgrade_in_checkout(checkout)
     assert result.returncode == 0, result.stdout + result.stderr
 
-    assert "creating from example" in result.stdout
+    assert "No config.yaml found — creating from example..." in result.stdout
     assert (checkout / "config.yaml").read_bytes() == (checkout / "config.example.yaml").read_bytes()
 
 
