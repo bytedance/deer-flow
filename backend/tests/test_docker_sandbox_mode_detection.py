@@ -152,15 +152,27 @@ def test_start_accepts_comment_on_sandbox_heading(script_name, value, expected, 
 
 @pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
 @pytest.mark.parametrize(
-    "config",
+    ("config", "expected"),
     [
-        "custom:\n  sandbox:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\nsandbox: # actual sandbox\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
-        "sandbox: # sandbox config\n  custom:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+        pytest.param(
+            "custom:\n  sandbox:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\nsandbox: # actual sandbox\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+            "local",
+            id="nested-sandbox",
+        ),
+        pytest.param(
+            "sandbox: # sandbox config\n  custom:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
+            "local",
+            id="nested-use",
+        ),
+        pytest.param(
+            _sandbox_config(None) + "  options:\n    provisioner_url: http://decoy:8002\n",
+            "aio",
+            id="nested-provisioner-url",
+        ),
     ],
-    ids=["nested-sandbox", "nested-use"],
 )
-def test_start_ignores_nested_sandbox_keys(script_name, config, tmp_path):
-    _assert_launcher_selects_sandbox_services(script_name, config, "local", tmp_path)
+def test_start_ignores_nested_sandbox_keys(script_name, config, expected, tmp_path):
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
 
 
 @pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
