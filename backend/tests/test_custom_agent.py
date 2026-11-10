@@ -892,6 +892,27 @@ class TestAgentsAPI:
         response = agent_client.delete(f"/api/agents/{name}")
         assert response.status_code == 404
 
+    @pytest.mark.parametrize("name", ["NUL", "CON", "COM1"])
+    def test_windows_reserved_device_name_is_rejected_by_check(self, agent_client, name):
+        """The frontend's availability probe must also see reserved names as unusable.
+
+        ``GET /api/agents/check?name=...`` is what the UI calls as the user types;
+        it flips to ``for_creation=True`` so a reserved name is reported as taken
+        (422) rather than appearing available and only failing on submit.
+        """
+        response = agent_client.get("/api/agents/check", params={"name": name})
+        assert response.status_code == 422
+
+    def test_windows_reserved_device_name_is_rejected_on_import(self, agent_client):
+        """Importing a package under a reserved target name must be a 422."""
+        package = {
+            "format": "deerflow.custom-agent",
+            "version": 1,
+            "agent": {"name": "NUL", "description": "d", "soul": "s"},
+        }
+        response = agent_client.post("/api/agents/import", json=package)
+        assert response.status_code == 422
+
     def test_display_name_round_trip_keeps_stable_identity(self, agent_client):
         response = agent_client.post("/api/agents", json={"name": "code-reviewer", "display_name": "  代码审查助手  "})
         assert response.status_code == 201
