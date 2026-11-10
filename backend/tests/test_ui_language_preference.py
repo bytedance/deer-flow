@@ -43,7 +43,7 @@ def test_ui_languages_match_shared_contract():
     assert UI_LANGUAGES == contract["languages"]
 
 
-@pytest.mark.parametrize("locale", ["zh-CN", "en-US", None, "fr-FR", [], {}])
+@pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ru-RU", None, "fr-FR", [], {}])
 def test_gateway_forwards_only_supported_locale_to_worker_runtime(locale):
     from app.gateway.services import merge_run_context_overrides
     from deerflow.runtime.runs.worker import _build_runtime_context
@@ -52,7 +52,7 @@ def test_gateway_forwards_only_supported_locale_to_worker_runtime(locale):
     merge_run_context_overrides(config, {"locale": locale})
     assert "locale" not in config["configurable"]
     context = _build_runtime_context("thread-1", "run-1", config["context"])
-    if isinstance(locale, str) and locale in ("zh-CN", "en-US"):
+    if isinstance(locale, str) and locale in ("zh-CN", "en-US", "ru-RU"):
         assert context["locale"] == locale
         captured = []
         DynamicContextMiddleware().wrap_model_call(_Request([HumanMessage("Hello")], context), lambda request: captured.extend(request.messages))
@@ -127,7 +127,7 @@ def test_memory_capture_carries_language_through_filtering_and_incremental_tail(
     updater = MemoryUpdater(DeerMemConfig(), storage)
     system_prompts = []
 
-    for locale, language in (("zh-CN", "Simplified Chinese"), ("en-US", "English")):
+    for locale, language in (("zh-CN", "Simplified Chinese"), ("en-US", "English"), ("ru-RU", "Russian")):
         queued = _capture_memory(monkeypatch, entry, messages, locale)
         filtered = filter_messages_for_memory(queued)
         assert len(filtered) == 2

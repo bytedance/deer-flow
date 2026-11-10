@@ -72,6 +72,7 @@ const SPEECH_RECOGNITION_LANGUAGE_ALLOWLIST = new Set([
   "ja",
   "ko",
   "pt",
+  "ru",
   "zh",
 ]);
 

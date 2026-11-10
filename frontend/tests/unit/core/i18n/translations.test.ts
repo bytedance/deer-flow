@@ -22,4 +22,19 @@ describe("core copy loading", () => {
     );
     expect(chinese.knowledge.scope.title).toBe("知识库范围");
   });
+
+  it("loads a Russian dictionary while preserving untranslated functional entries", async () => {
+    const [english, russian] = await Promise.all([
+      loadTranslations("en-US"),
+      loadTranslations("ru-RU"),
+    ]);
+    expect(russian.locale.localName).toBe("Русский");
+    expect(russian.common.save).toBe("Сохранить");
+    expect(russian.inputBox.placeholder).toBe("Чем я могу помочь?");
+    expect(russian.settings.appearance.languageTitle).toBe("Язык");
+    expect(russian.common.showingOf(3, 10)).toBe("Показано 3 из 10");
+    expect(russian.inputBox.mentionMultipleSkills).toBe(
+      english.inputBox.mentionMultipleSkills,
+    );
+  });
 });

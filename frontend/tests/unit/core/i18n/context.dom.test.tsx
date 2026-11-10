@@ -13,6 +13,9 @@ function Consumer() {
       <button type="button" onClick={() => setLocale("zh-CN")}>
         switch
       </button>
+      <button type="button" onClick={() => setLocale("ru-RU")}>
+        switch to Russian
+      </button>
     </>
   );
 }
@@ -40,5 +43,16 @@ describe("I18nProvider", () => {
     );
 
     expect(screen.getByText("zh-CN:中文")).toBeTruthy();
+  });
+
+  it("switches dictionaries to Russian without reload", async () => {
+    render(
+      <I18nProvider initialLocale="en-US">
+        <Consumer />
+      </I18nProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "switch to Russian" }));
+    expect(await screen.findByText("ru-RU:Русский")).toBeTruthy();
+    expect(document.documentElement.lang).toBe("ru-RU");
   });
 });

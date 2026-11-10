@@ -2,6 +2,7 @@
   "version": 1,
   "languages": {
     "en-US": "English",
-    "zh-CN": "Simplified Chinese"
+    "zh-CN": "Simplified Chinese",
+    "ru-RU": "Russian"
   }
 }

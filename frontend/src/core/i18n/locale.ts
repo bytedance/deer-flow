@@ -1,4 +1,4 @@
-export const SUPPORTED_LOCALES = ["en-US", "zh-CN"] as const;
+export const SUPPORTED_LOCALES = ["en-US", "zh-CN", "ru-RU"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en-US";
 
@@ -7,13 +7,17 @@ export function isLocale(value: string): value is Locale {
 }
 
 export function getLocaleByLang(lang: string): Locale {
-  const normalizedLang = lang.toLowerCase();
-  for (const locale of SUPPORTED_LOCALES) {
-    if (locale.startsWith(normalizedLang)) {
-      return locale;
-    }
-  }
-  return DEFAULT_LOCALE;
+  const normalized = lang.trim().toLowerCase();
+  const exact = SUPPORTED_LOCALES.find(
+    (locale) => locale.toLowerCase() === normalized,
+  );
+  if (exact) return exact;
+
+  const language = normalized.split("-")[0];
+  const matching = SUPPORTED_LOCALES.find(
+    (locale) => locale.toLowerCase().split("-")[0] === language,
+  );
+  return matching ?? DEFAULT_LOCALE;
 }
 
 export function getLangByLocale(locale: Locale): string {
@@ -25,19 +29,8 @@ export function getLangByLocale(locale: Locale): string {
 }
 
 export function normalizeLocale(locale: string | null | undefined): Locale {
-  if (!locale) {
-    return DEFAULT_LOCALE;
-  }
-
-  if (isLocale(locale)) {
-    return locale;
-  }
-
-  if (locale.toLowerCase().startsWith("zh")) {
-    return "zh-CN";
-  }
-
-  return DEFAULT_LOCALE;
+  if (!locale) return DEFAULT_LOCALE;
+  return getLocaleByLang(locale);
 }
 
 // Helper function to detect browser locale
