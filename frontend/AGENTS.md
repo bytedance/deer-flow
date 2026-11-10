@@ -7,14 +7,14 @@ its settings, and the documentation site. The directory map is in
 
 Feature rules live next to the code. Read the guide for the area you change:
 
-| Area | Guide |
-| --- | --- |
-| Data flow, threads, streaming | [src](src/AGENTS.md) |
+| Area                                                                    | Guide                                                                                                            |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Data flow, threads, streaming                                           | [src](src/AGENTS.md)                                                                                             |
 | Model picker, artifact previews, Capability Center, plugin UI, composer | [workspace](src/components/workspace/AGENTS.md), [browser view](src/components/workspace/browser-view/AGENTS.md) |
-| Model catalog and settings | [core/models](src/core/models/AGENTS.md) |
-| Authentication, admin user management | [core/auth](src/core/auth/AGENTS.md) |
-| Memory, background tasks | [core/memory](src/core/memory/AGENTS.md), [core/background-tasks](src/core/background-tasks/AGENTS.md) |
-| End-to-end tests | [tests/e2e](tests/e2e/AGENTS.md) |
+| Model catalog and settings                                              | [core/models](src/core/models/AGENTS.md)                                                                         |
+| Authentication, admin user management                                   | [core/auth](src/core/auth/AGENTS.md)                                                                             |
+| Memory, background tasks                                                | [core/memory](src/core/memory/AGENTS.md), [core/background-tasks](src/core/background-tasks/AGENTS.md)           |
+| End-to-end tests                                                        | [tests/e2e](tests/e2e/AGENTS.md)                                                                                 |
 
 ## Verify
 
