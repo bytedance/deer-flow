@@ -180,3 +180,37 @@ def test_replayed_rejection_removes_colliding_provider_surfaces(ids):
     assert [call["id"] for call in result.additional_kwargs["tool_calls"]] == ["healthy"]
     assert [block["id"] for block in result.content if block.get("type") == "tool_use"] == ["healthy"]
     assert any(block.get("type") == "text" and "rejected" in block["text"] for block in result.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids", [[None], ["same", "same"]])
+async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import Command, interrupt
+
+    from deerflow.runtime.runs.worker import _is_all_reject_hitl_resume, _pending_hitl_resume_tool_names
+
+    payload = _payload(ids)
+
+    def pause(state):
+        interrupt(payload)
+        return {}
+
+    saver = InMemorySaver()
+    builder = StateGraph(MessagesState)
+    builder.add_node("pause", pause)
+    builder.set_entry_point("pause")
+    builder.set_finish_point("pause")
+    graph = builder.compile(checkpointer=saver)
+    config = {"configurable": {"thread_id": "legacy-names"}}
+    await graph.ainvoke({"messages": []}, config)
+    responses = _responses(payload)
+    command = Command(resume={"responses": responses})
+    assert _is_all_reject_hitl_resume(command)
+    assert await _pending_hitl_resume_tool_names(saver, config, command) == {"write_file"}
+    responses[0]["request_id"] = "stale"
+    assert await _pending_hitl_resume_tool_names(saver, config, command) == set()
+    responses[0]["request_id"] = payload["actions"][0]["request_id"]
+    responses[0]["option_id"] = "approve"
+    assert await _pending_hitl_resume_tool_names(saver, config, command) == set()

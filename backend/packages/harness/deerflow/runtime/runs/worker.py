@@ -3183,13 +3183,15 @@ def _is_resume_command_input(graph_input: Any) -> bool:
 
 async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
     """Recover gated names from the durable pause matched by this resume."""
+    from deerflow.runtime.approval_identity import invalid_approval_identity
+
     if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
         return set()
     responses = graph_input.resume.get("responses")
     if not isinstance(responses, list):
         return set()
     response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
-    if not response_ids:
+    if not response_ids and not _is_all_reject_hitl_resume(graph_input):
         return set()
     async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
         writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
@@ -3210,6 +3212,15 @@ async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: 
                     continue
                 pending_ids = payload.get("pending_tool_call_ids")
                 actions = payload.get("actions")
+                if invalid_approval_identity(payload) is not None:
+                    if not _is_all_reject_hitl_resume(graph_input) or len(responses) != len(actions):
+                        continue
+                    if any(response.get("tool_call_id") != action["tool_call_id"] or response.get("request_id") != action["request_id"] for response, action in zip(responses, actions)):
+                        continue
+                    names.update(action["tool_name"] for action in actions)
+                    continue
+                if not isinstance(pending_ids, list) or any(not isinstance(call_id, str) for call_id in pending_ids):
+                    continue
                 if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
                     continue
                 names.update(action.get("tool_name") for action in actions if isinstance(action, Mapping) and isinstance(action.get("tool_name"), str))
@@ -3225,7 +3236,10 @@ def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
     return (
         isinstance(responses, list)
         and bool(responses)
-        and all(isinstance(response, dict) and response.get("option_id") == "reject" and isinstance(response.get("tool_call_id"), str) and bool(response["tool_call_id"]) for response in responses)
+        and all(
+            isinstance(response, dict) and response.get("option_id") == "reject" and "tool_call_id" in response and (response["tool_call_id"] is None or (isinstance(response["tool_call_id"], str) and bool(response["tool_call_id"])))
+            for response in responses
+        )
     )
 
 

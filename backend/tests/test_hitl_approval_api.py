@@ -119,7 +119,7 @@ class _LegacyApprovalModel(_StateAwareModel):
 
 
 @pytest.mark.parametrize("legacy_ids", [[None], ["duplicate", "duplicate"]], ids=["null", "duplicate"])
-@pytest.mark.parametrize("recovery_mode", ["normal", "disabled", "checkpoint-only"])
+@pytest.mark.parametrize("recovery_mode", ["normal", "disabled", "checkpoint-only", "lowered-limit"])
 def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_deer_flow_home, legacy_ids, recovery_mode):  # noqa: F811
     _enable_approval()
 
@@ -135,10 +135,23 @@ def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_d
         state = _wait_for_approval(client, tid)
         payload = next(item for group in state["interrupts"].values() for item in group)["value"]
         assert payload["pending_tool_call_ids"] == legacy_ids
+        blocked = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "must remain blocked"}]}))
+        assert blocked.status_code == 409, blocked.text
+        assert blocked.json()["detail"]["code"] == "approval_pending"
+        responses = [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "reject"} for action in payload["actions"]]
+        mixed = [dict(response) for response in responses]
+        mixed[0]["option_id"] = "approve"
+        refused = _run(client, csrf, tid, {"command": {"resume": {"responses": mixed}}})
+        assert refused.status_code == 422, refused.text
+        stale = [dict(response, request_id="earlier-pause") for response in responses]
+        refused = _run(client, csrf, tid, {"command": {"resume": {"responses": stale}}})
+        assert refused.status_code == 422, refused.text
+        assert {run["run_id"] for run in client.get(f"/api/threads/{tid}/runs").json()} == {initial.json()["run_id"]}
         if recovery_mode == "disabled":
             get_app_config().hitl_approval.enabled = False
             get_app_config().hitl_approval.tools = []
-        responses = [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "reject"} for action in payload["actions"]]
+        elif recovery_mode == "lowered-limit":
+            get_app_config().hitl_approval.max_actions = 1
         from app.gateway import hitl_approval as gateway_approval
 
         original_mark = gateway_approval.mark_approval_answered

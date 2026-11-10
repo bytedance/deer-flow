@@ -162,6 +162,11 @@ class HitlApprovalMiddleware(AgentMiddleware):
         targets = self._target_calls(last)
         if not targets:
             return None
+        if resume_tool_names and _unaddressable(targets):
+            # Worker-owned names come from the persisted interrupt on resume.
+            # Reject this legacy group before changed limits/config can send
+            # it through a denial path that requires addressable ToolMessages.
+            return self._reject_unaddressable(last, targets)
         if self.max_actions and len(targets) > self.max_actions:
             return self._deny_all(targets, _too_many_reason(len(targets), self.max_actions))
 
