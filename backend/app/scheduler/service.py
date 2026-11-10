@@ -1028,29 +1028,42 @@ class ScheduledTaskService:
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
         )
         for queued in queued_rows:
-            await self._task_repo.release_queued_admission_lease(queued["task_id"])
-            task = await self._task_repo.get_internal(queued["task_id"])
-            if task is None:
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_DELETED_WHILE_QUEUED,
-                    finished_at=now,
+            try:
+                await self._drain_queued_run(queued, now=now)
+            except Exception:
+                # A storage failure on one occurrence must not leave every
+                # later queued row and this poll's due tasks undispatched. The
+                # failed row keeps its queue/lease state for the next recovery
+                # pass, and queue_timeout still bounds how long it can wait.
+                logger.exception(
+                    "Failed to drain scheduled occurrence %s; continuing with the remaining queue",
+                    queued.get("id"),
                 )
-                continue
-            # Pausing suppresses automatic occurrences, but a manual trigger is
-            # an explicit request and has always been allowed to run without
-            # resuming the schedule. A later pause still cancels an already
-            # queued manual row atomically in pause_with_queue_cancellation().
-            if task.get("status") == "paused" and queued["trigger"] != "manual":
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_PAUSED_WHILE_QUEUED,
-                    finished_at=now,
-                )
-                continue
-            await self._attempt_queued_run(task, queued, now=now)
+
+    async def _drain_queued_run(self, queued: dict[str, Any], *, now: datetime) -> None:
+        await self._task_repo.release_queued_admission_lease(queued["task_id"])
+        task = await self._task_repo.get_internal(queued["task_id"])
+        if task is None:
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_DELETED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # Pausing suppresses automatic occurrences, but a manual trigger is
+        # an explicit request and has always been allowed to run without
+        # resuming the schedule. A later pause still cancels an already
+        # queued manual row atomically in pause_with_queue_cancellation().
+        if task.get("status") == "paused" and queued["trigger"] != "manual":
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_PAUSED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        await self._attempt_queued_run(task, queued, now=now)
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
         await self._task_run_repo.expire_queued_runs(

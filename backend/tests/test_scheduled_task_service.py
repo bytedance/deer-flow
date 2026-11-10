@@ -541,6 +541,82 @@ async def test_run_once_continues_batch_after_invalid_thread_id():
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_run_once_continues_after_queued_run_drain_error(monkeypatch, caplog):
+    """A poison queued row must not block the rest of the drain or due claims."""
+    now = datetime.now(UTC)
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": f"run-{len(launched)}", "thread_id": kwargs["thread_id"]}
+
+    poison_task = {
+        "id": "task-poison-drain",
+        "user_id": "user-1",
+        "thread_id": "thread-poison-drain",
+        "context_mode": "reuse_thread",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    healthy_task = {
+        "id": "task-healthy-drain",
+        "user_id": "user-1",
+        "thread_id": "thread-healthy-drain",
+        "context_mode": "reuse_thread",
+        "assistant_id": "lead_agent",
+        "prompt": "Summarize thread",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "0 9 * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+    }
+    due_task = {
+        **healthy_task,
+        "id": "task-due-after-drain",
+        "thread_id": "thread-due-after-drain",
+    }
+
+    class DrainRunRepo(DummyRunRepo):
+        async def list_queued_runs(self, *, limit, **_kwargs):
+            return [
+                {"id": "run-poison-drain", "task_id": poison_task["id"], "thread_id": poison_task["thread_id"], "trigger": "manual", "scheduled_for": now},
+                {"id": "run-healthy-drain", "task_id": healthy_task["id"], "thread_id": healthy_task["thread_id"], "trigger": "manual", "scheduled_for": now},
+            ][:limit]
+
+    class DrainTaskRepo(DummyTaskRepo):
+        async def release_queued_admission_lease(self, task_id):
+            if task_id == poison_task["id"]:
+                raise RuntimeError("queue admission lease release failed")
+            return False
+
+    task_repo = DrainTaskRepo([poison_task, healthy_task])
+    run_repo = DrainRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    async def claim_due_tasks(**_kwargs):
+        return [due_task]
+
+    monkeypatch.setattr(task_repo, "claim_due_tasks", claim_due_tasks)
+
+    await service.run_once(now=now)
+
+    assert [item["thread_id"] for item in launched] == ["thread-healthy-drain", "thread-due-after-drain"]
+    assert "Failed to drain scheduled occurrence run-poison-drain" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_handle_run_completion_uses_atomic_repository_boundary():
     task_repo = DummyTaskRepo(
         [
