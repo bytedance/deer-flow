@@ -9,6 +9,8 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
@@ -92,75 +94,55 @@ export const zhCN: Translations = {
     catalogHint:
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
+    detail: {
+      guide: "阅读使用说明",
+      gettingStarted: "开始使用",
+      requirements: "使用前准备",
+      loaded: "已加载",
+      loadedHint: "此扩展已加载，使用方式见本页说明。",
+      tools: "已注册工具",
+      pages: "工作区入口",
+      management: "使用与管理",
+      readyHint: "此扩展已由管理员启用，可以直接使用。",
+      disabledHint: "此扩展已停用。请联系管理员启用后再使用。",
+      failedHint: "扩展页面未能加载，请刷新扩展后重试。",
+      noPageHint:
+        "此扩展没有独立工作页面。请查看使用说明，了解它在对话或任务中的使用方式。",
+      guideHint: "通过使用说明，了解此扩展提供的功能和使用方式。",
+      technicalDetails: "技术信息",
+      package: "安装包",
+      namespace: "扩展标识",
+      refresh: "刷新扩展",
+      refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
+    },
     catalog: {
-      workflows: {
-        title: "脚本工作流",
-        description:
-          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
-      },
-      reportSections: {
-        title: "分段长文写作",
-        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
-      },
-      agentTeams: {
-        title: "Agent 团队",
-        description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
-      },
-      bookmarks: {
-        title: "会话书签",
-        description: "收藏有用的回答，在独立页面查找与整理自己的书签。",
-      },
-      context: {
-        title: "上下文裁剪",
-        description: "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
-      },
-      classify: {
-        title: "文本分类",
-        description: "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
-      },
-      screening: {
-        title: "内容风险提示",
-        description:
-          "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
-      },
-      example: {
-        title: "扩展开发示例",
-        description:
-          "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
-      },
-      retrieval: {
-        title: "本地检索示例",
-        description:
-          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
-      },
-      lightrag: {
-        title: "LightRAG",
-        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
-      },
-      knowledgePlatform: {
-        title: "知识空间与连接",
-        description:
-          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
-      },
-      knowledgeCenter: {
-        title: "知识中心",
-        description:
-          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
-      },
-      knowledgeManagement: {
-        title: "知识入库与处理",
-        description:
-          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
-      },
-      weknora: {
-        title: "WeKnora 知识检索",
-        description:
-          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
-      },
-      knowledge: {
-        title: "知识范围选择示例",
-        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
+      context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "zh-CN"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "zh-CN"),
+      workflows: bundledCopy("deerflow-extension-workflows", "zh-CN"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "zh-CN",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "zh-CN"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "zh-CN"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "zh-CN",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "zh-CN",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "zh-CN",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
+      weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
+      example: bundledCopy("deerflow-extension-example", "zh-CN"),
     },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
