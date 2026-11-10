@@ -210,8 +210,9 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
 - Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
-- Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
+- Project overview → **[README.md](README.md)** (translations: `README_zh.md`,
   `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_pt.md`, `README_ko.md`)
+- User guides by topic → **[docs/guide/](docs/guide/)**
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**
@@ -220,8 +221,11 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 
 Repo-wide conventions:
 
-- Update `README.md` for user-facing changes and the relevant `AGENTS.md` for
-  development/architecture changes in the same change set.
+- **Docs live next to their topic** — document user-facing behavior in the matching
+  guide under `docs/guide/` (or `backend/docs/`), in the same change set. `README.md`
+  is an index: change it only to add or re-point a link, never to describe behavior
+  (`make check-agent-guidance` enforces its size). Add to an `AGENTS.md` only what an
+  agent cannot find by reading the code or running a command.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.

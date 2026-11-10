@@ -29,8 +29,9 @@ for implementation boundaries.
 ## Important Development Guidelines
 
 ### Documentation Update Policy
-Every code change must keep docs accurate and current: update `README.md` for
-user-facing behavior and the relevant `AGENTS.md` for development changes.
+Keep docs accurate in the same change: user-facing behavior goes in the matching
+guide under `docs/guide/` or `backend/docs/`, not in the root `README.md` (an index).
+Add to `AGENTS.md` only what the code and commands do not already show.
 `CLAUDE.md` imports `AGENTS.md`; do not edit the shim.
 
 Image result URL policy: [image search guide](packages/harness/deerflow/community/image_search/AGENTS.md).

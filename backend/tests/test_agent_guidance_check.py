@@ -148,6 +148,34 @@ def test_legacy_hard_violation_may_shrink_but_may_not_grow(tmp_path: Path) -> No
     assert "AG001" in _codes(grown_findings, "error")
 
 
+def test_root_readme_over_hard_limit_is_an_error(tmp_path: Path) -> None:
+    findings = checker.analyze(tmp_path, _files(**{"README.md": "x" * (16 * 1024 + 1)}))
+
+    assert _codes(findings, "error") == ["AG003"]
+
+
+def test_only_the_root_readme_is_budgeted(tmp_path: Path) -> None:
+    files = _files(**{"README.md": "x" * (12 * 1024), "backend/README.md": "x" * (64 * 1024)})
+
+    assert checker.analyze(tmp_path, files) == []
+    assert checker.budgeted_paths(files) == {PurePosixPath("AGENTS.md"), PurePosixPath("README.md")}
+
+
+def test_oversized_readme_may_shrink_but_may_not_grow(tmp_path: Path) -> None:
+    base = _files(**{"README.md": "x" * (64 * 1024)})
+    smaller = _files(**{"README.md": "x" * (64 * 1024 - 1)})
+    grown = _files(**{"README.md": "x" * (64 * 1024 + 1)})
+
+    assert "AG003" not in _codes(checker.analyze(tmp_path, smaller, base_files=base), "error")
+    assert "AG003" in _codes(checker.analyze(tmp_path, grown, base_files=base), "error")
+
+
+def test_repository_readme_fits_hard_budget() -> None:
+    files = {checker.README_PATH: (REPO_ROOT / "README.md").read_text(encoding="utf-8")}
+
+    assert not [finding for finding in checker.analyze(REPO_ROOT, files) if finding.severity == "error"]
+
+
 def test_discovery_uses_exact_agents_basename() -> None:
     paths = [
         PurePosixPath("AGENTS.md"),
