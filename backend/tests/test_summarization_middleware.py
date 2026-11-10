@@ -867,6 +867,18 @@ def _tracking_create_chat_model(built: list, *, fail: bool = False):
     def _factory(*, name=None, thinking_enabled=False, app_config=None, attach_tracing=True, **kwargs):
         model = MagicMock()
         model.with_config.return_value = model
+        # Mimic an adapter that replays reasoning: the counter only charges
+        # reasoning when the model's own serializer puts it back in the request.
+        model._get_request_payload = lambda messages, **_: {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": getattr(message, "content", ""),
+                    "reasoning_content": getattr(message, "additional_kwargs", {}).get("reasoning_content"),
+                }
+                for message in messages
+            ]
+        }
         if fail:
             model.invoke.side_effect = RuntimeError("provider down")
             model.ainvoke = AsyncMock(side_effect=RuntimeError("provider down"))
@@ -1786,25 +1798,41 @@ def test_suffix_trim_counter_does_not_scale_usage_metadata(monkeypatch: pytest.M
     assert unscaled == count_tokens_approximately(messages, chars_per_token=4.0, use_usage_metadata_scaling=False)
 
 
-def test_display_only_reasoning_is_never_undercounted(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Counting reasoning for display-only adapters may only raise the estimate.
+def test_display_only_adapter_keeps_history_uncompacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real non-replaying adapter must not compact or trim on reasoning (#8074).
 
-    Only some adapters replay reasoning; for the rest the fix accepts compaction
-    firing slightly earlier. What it must never do is undercount the request, so
-    a message whose reasoning is not replayed still costs at least its content.
+    MiniMax returns ``reasoning_content`` and drops it from the outgoing payload,
+    so that text costs no input tokens. Charging it would make this trigger fire
+    and the retention cutoff trim history the provider never receives; the review
+    on #8090 reproduced exactly this shape.
     """
-    built: list = []
-    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
-    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model",)), run_model_name="run-model", keep=("messages", 2))
+    from deerflow.agents.middlewares.summarization_middleware import _ReplayedReasoningTokenCounter
+    from deerflow.models.patched_minimax import PatchedChatMiniMax
+
+    minimax = PatchedChatMiniMax(model="MiniMax-M2", api_key="test", base_url="http://127.0.0.1:1")
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **_: minimax)
+    config = _factory_app_config(
+        ("run-model",),
+        summarization_kwargs={
+            "trigger": ContextSize(type="tokens", value=8_000),
+            "keep": ContextSize(type="tokens", value=4_000),
+        },
+    )
+    middleware = create_summarization_middleware(app_config=config, run_model_name="run-model", keep=("messages", 2))
 
     assert middleware is not None
-    reasoning = "w" * 20_000
-    display_only = AIMessage(content="answer", additional_kwargs={"reasoning_content": reasoning})
-    plain = AIMessage(content="answer")
+    # The parent's counter stays in place: nothing is charged for display-only reasoning.
+    assert not isinstance(middleware.token_counter, _ReplayedReasoningTokenCounter)
 
-    counted = middleware.token_counter([display_only])
-    content_only = count_tokens_approximately([plain], chars_per_token=4.0, use_usage_metadata_scaling=False)
-    assert counted > content_only
+    reasoning = "w" * 12_000  # 3k tokens if charged, zero to the provider
+    messages: list = []
+    for index in range(4):
+        messages.append(HumanMessage(content=f"question {index}", id=f"u{index}"))
+        messages.append(AIMessage(content=f"answer {index}", id=f"a{index}", additional_kwargs={"reasoning_content": reasoning}))
+    messages.append(HumanMessage(content="next question", id="u-next"))
+
+    # The serialized request is far under the 8k trigger, so no compaction and no trim.
+    assert middleware.before_model({"messages": messages}, _runtime()) is None
 
 
 class _RaisingTextResponse:

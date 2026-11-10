@@ -115,8 +115,39 @@ class _ReplayedReasoningTokenCounter:
         )
 
 
-def _reasoning_aware_token_counter(model: Any) -> _ReplayedReasoningTokenCounter:
-    """Mirror LangChain's model-specific approximate counter, plus reasoning."""
+_REASONING_PROBE = "dsh-reasoning-probe-8074"
+
+
+def _replays_reasoning(model: Any) -> bool:
+    """True when ``model`` serializes assistant reasoning back into the request.
+
+    vLLM, DeepSeek, MiMo and StepFun adapters echo the assistant's reasoning to the
+    provider, where it costs input tokens. Others keep it for display only
+    (MiniMax, Codex) and drop it from the outgoing payload, so charging it would
+    make the trigger fire and the retention cutoff trim a history the provider
+    never receives. Probe the adapter's own serializer rather than guessing from a
+    class list, so a new adapter is covered by its actual behavior.
+    """
+    build = getattr(model, "_get_request_payload", None)
+    if not callable(build):
+        return False
+    probe = AIMessage(content="probe", additional_kwargs={"reasoning": _REASONING_PROBE, "reasoning_content": _REASONING_PROBE})
+    try:
+        payload = build([probe])
+        return _REASONING_PROBE in repr(payload)
+    except Exception:
+        return False
+
+
+def _reasoning_aware_token_counter(model: Any) -> _ReplayedReasoningTokenCounter | None:
+    """Mirror LangChain's model-specific counter plus replayed reasoning, or None.
+
+    Returns ``None`` when the model does not replay reasoning, which leaves the
+    parent's counter in place and preserves the existing trigger and retention
+    behavior for display-only adapters (#8074 review).
+    """
+    if not _replays_reasoning(model):
+        return None
     # LangChain charges Anthropic content at 3.3 chars/token and everything else
     # at the generic 4.0; keep that split so only the reasoning changes.
     chars_per_token = 3.3 if str(getattr(model, "_llm_type", "")).startswith("anthropic-chat") else 4.0
@@ -1424,13 +1455,14 @@ def create_summarization_middleware(
         "trigger": trigger,
         "keep": keep_tuple,
         "trim_tokens_to_summarize": config.trim_tokens_to_summarize,
-        # The parent's approximate counter ignores the assistant reasoning that
-        # reasoning adapters replay on the next request (vLLM's
-        # additional_kwargs["reasoning"], DeepSeek/MiMo/StepFun's
-        # "reasoning_content"). Without it a long thinking run undercounts its
-        # real input and compaction never fires (#8074).
-        "token_counter": _reasoning_aware_token_counter(anchor_model),
     }
+    # Only adapters that replay reasoning pay for it on the next request
+    # (vLLM's additional_kwargs["reasoning"], DeepSeek/MiMo/StepFun's
+    # "reasoning_content"); for display-only adapters the parent's counter stays,
+    # so their trigger and retention behavior is unchanged (#8074).
+    counter = _reasoning_aware_token_counter(anchor_model)
+    if counter is not None:
+        kwargs["token_counter"] = counter
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 

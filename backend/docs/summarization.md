@@ -284,9 +284,11 @@ The default LangChain prompt instructs the model to:
   vLLM's `additional_kwargs["reasoning"]` and the
   DeepSeek/MiMo/StepFun `reasoning_content`. It is real provider input even
   though it is not message content, and it is charged once per message when a
-  provider stores the same text under both keys (#8074). Adapters that keep
-  reasoning only for display (Codex, MiniMax) are therefore counted
-  conservatively: compaction can fire slightly earlier, never later.
+  provider stores the same text under both keys (#8074).
+- Whether that text is charged is decided per active model: the middleware
+  probes the adapter's own request serializer, so an adapter that keeps
+  reasoning for display only (MiniMax, Codex) drops it from the payload and is
+  charged nothing, leaving its trigger and retention cutoff unchanged.
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
 - Can be customized with a custom `token_counter` function
