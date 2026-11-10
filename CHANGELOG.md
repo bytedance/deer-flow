@@ -130,10 +130,13 @@ This section accumulates work toward the **2.3.0** milestone
   The `^[A-Za-z0-9-]+$` grammar admitted such names, and `FileAgentStore.create`
   then failed writing `config.yaml` under that directory on Windows hosts, which
   the create route reported as an opaque `500`. The check reuses
-  `windows_incompatible_segment()` and applies on every platform. Reading and
+  `windows_incompatible_segment()` and applies on every platform. Both storage
+  backends enforce it symmetrically — `SqlAgentStore.create`/`update` now call
+  `validate_agent_name(..., for_creation=True)` too, so callers that bypass the
+  Gateway cannot mint a reserved-name agent under the `db` backend. Reading and
   deleting an existing agent stay permissive, so an agent with a reserved-name
   identifier that an older release created on a Linux host can still be
-  inspected and removed. ([#7938])
+  inspected and removed. ([#7939])
 
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
