@@ -53,6 +53,7 @@ class Remote:
 def transport(monkeypatch, tmp_path):
     remotes = []
     requests = []
+    termination_retries = []
     lock = threading.Lock()
 
     def create(image, **kwargs):
@@ -63,6 +64,22 @@ def transport(monkeypatch, tmp_path):
         return remote
 
     monkeypatch.setattr(provider_module, "_import_sdk", lambda: (SimpleNamespace(create=create), SimpleNamespace, SimpleNamespace))
+
+    class Manager:
+        @classmethod
+        def create(cls, connection_config):
+            return cls()
+
+        def kill_sandbox(self, remote_id):
+            termination_retries.append(remote_id)
+            if next(remote for remote in remotes if remote.id == remote_id).destroy_error:
+                raise RuntimeError("sentinel-private-sdk-error")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(provider_module, "_import_manager", lambda: Manager)
+    monkeypatch.setattr(provider_module.atexit, "register", lambda callback: None)
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path / "home"))
     config = AppConfig(
         sandbox=SandboxConfig(
@@ -79,7 +96,7 @@ def transport(monkeypatch, tmp_path):
     )
     push_current_app_config(config)
     try:
-        yield SimpleNamespace(remotes=remotes, requests=requests, config=config)
+        yield SimpleNamespace(remotes=remotes, requests=requests, config=config, termination_retries=termination_retries)
     finally:
         pop_current_app_config()
 
@@ -188,9 +205,14 @@ def test_failed_destroy_invalidates_measurement_and_fails_shutdown(transport):
     finally:
         with pytest.raises(RuntimeError, match="cleanup"):
             provider.shutdown()
-    # atexit must not repeat the error or pretend that a closed SDK client retried it.
+    # Retry through a fresh management client, never the closed execution client.
+    with pytest.raises(RuntimeError, match="cleanup"):
+        provider.shutdown()
+    transport.remotes[0].destroy_error = False
     provider.shutdown()
     assert transport.remotes[0].destroy_calls == 1
+    assert transport.termination_retries == ["offline-remote-1"] * 3
+    assert not provider._pending_destroy
 
 
 def test_shutdown_attempts_every_remote_before_reporting_failure(transport):
@@ -201,6 +223,9 @@ def test_shutdown_attempts_every_remote_before_reporting_failure(transport):
     with pytest.raises(RuntimeError, match="cleanup"):
         provider.shutdown()
     assert [remote.destroy_calls for remote in transport.remotes] == [1, 1]
+    transport.remotes[0].destroy_error = False
+    provider.shutdown()
+    assert not provider._pending_destroy
 
 
 def test_shutdown_failure_is_also_visible_in_jsonl(transport, monkeypatch, tmp_path):
