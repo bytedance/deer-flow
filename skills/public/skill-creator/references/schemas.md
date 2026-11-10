@@ -302,7 +302,7 @@ Output from Benchmark mode. Located at `benchmarks/<timestamp>/benchmark.json`.
     - An unreadable or non-UTF-8 `timing.json`, malformed JSON, a non-object document, or an invalid timing field emits a warning identifying the file (and field, where applicable). Strings, booleans, arrays, objects, negative values, and non-finite numbers are invalid measurements. Missing or null fields use their fallbacks without a warning. Other runs continue to be aggregated.
 - `run_summary`: Statistical aggregates per configuration
   - `with_skill` / `without_skill`: Each contains `pass_rate`, `time_seconds`, `tokens` objects with `mean` and `stddev` fields
-  - `delta`: Difference strings like `"+0.50"`, `"+13.0"`, `"+1700"`
+  - `delta`: Difference strings like `"+0.50"`, `"+13.0"`, `"+1700"`, computed as improved (`with_skill`) minus baseline (`without_skill` or `old_skill`). A positive pass-rate delta means improvement; negative time or token deltas mean reduced cost.
 - `notes`: Freeform observations from the analyzer
 
 **Important:** The viewer reads these field names exactly. Using `config` instead of `configuration`, or putting `pass_rate` at the top level of a run instead of nested under `result`, will cause the viewer to show empty/zero values. Always reference this schema when generating benchmark.json manually.
