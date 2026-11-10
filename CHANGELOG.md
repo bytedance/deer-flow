@@ -43,12 +43,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **runtime:** A thread can accept new runs and mutations after a transient
-  database failure leaves a completed operation's reservation in place. The
-  next request for the thread on the same Gateway worker retries the release,
-  including in single-worker deployments with lease heartbeats disabled.
-  ([#8068](https://github.com/bytedance/deer-flow/pull/8068))
-
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
@@ -117,6 +111,12 @@ This section accumulates work toward the **2.3.0** milestone
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a
   later run. ([#7953])
+
+- **runtime:** A thread can accept new runs and mutations after a transient
+  database failure leaves a completed operation's reservation in place. The
+  next request for the thread on the same Gateway worker retries the release,
+  including in single-worker deployments with lease heartbeats disabled.
+  ([#8068](https://github.com/bytedance/deer-flow/pull/8068))
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
