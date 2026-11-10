@@ -2532,6 +2532,9 @@ knowledge service; artifacts do not automatically enable citations. It also appe
 in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+In **Capabilities → Extensions**, an enabled extension’s detail page links directly to its registered workspace pages. The page also includes usage guidance and keeps package details under **Technical details**.
+Extension packages can provide localized purpose and usage steps in `deerflow-extension.json`, including optional prerequisites. The same detail page supports background extensions without a browser module. All bundled examples include this description; see the [authoring contract](examples/README.md#describe-the-extension).
+
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
 lets full Custom Agents collaborate through native `@` mentions, shared messages and
 asynchronous peer requests, with a separate team page and persistent member conversations.

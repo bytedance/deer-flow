@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import ast
 import configparser
+import json
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,11 @@ from packaging.utils import canonicalize_name
 
 from deerflow.extensions.browser_assets import load_browser_assets
 from deerflow.extensions.manager import _validate_entry_point
+from deerflow.extensions.documentation import (
+    FILENAME,
+    MAX_BYTES,
+    validate_documentation,
+)
 
 
 def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> None:
@@ -89,6 +95,22 @@ def check_wheel(source: Path, wheel: Path, *, manifests: Sequence[str] = ()) -> 
         for name in names:
             if name.endswith(".py"):
                 ast.parse(archive.read(name), filename=name)
+
+        module_file = (
+            f"{module_path}/__init__.py"
+            if f"{module_path}/__init__.py" in names
+            else f"{module_path}.py"
+        )
+        documentation_path = str(PurePosixPath(module_file).parent / FILENAME)
+        for import_root in (source, source / "src"):
+            if (
+                import_root / documentation_path
+            ).is_file() and documentation_path not in names:
+                raise ValueError("Extension documentation is not packaged")
+        if documentation_path in names:
+            if archive.getinfo(documentation_path).file_size > MAX_BYTES:
+                raise ValueError("Extension documentation exceeds 64 KiB")
+            validate_documentation(json.loads(archive.read(documentation_path)))
 
         # Existing examples use flat or src-layout packages and ui_manifest.json.
         # Custom manifest names are explicit rather than guessing from plugin code.
