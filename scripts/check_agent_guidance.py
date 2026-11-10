@@ -10,14 +10,13 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
-ROOT_SOFT = 16 * 1024
-ROOT_HARD = 20 * 1024
-MODULE_SOFT = 28 * 1024
-MODULE_HARD = 32 * 1024
-LOCAL_SOFT = 40 * 1024
-LOCAL_HARD = 48 * 1024
-CHAIN_SOFT = 80 * 1024
-CHAIN_HARD = 100 * 1024
+# Agents read every AGENTS.md from the edited directory up to the root on each
+# task, so one file and the whole chain each have a budget. Codex stops loading
+# the chain at 32 KiB.
+AGENT_SOFT = 6 * 1024
+AGENT_HARD = 8 * 1024
+CHAIN_SOFT = 24 * 1024
+CHAIN_HARD = 32 * 1024
 # The root README is an index into docs/guide/; reference detail belongs in a guide.
 README_PATH = PurePosixPath("README.md")
 README_SOFT = 12 * 1024
@@ -34,14 +33,6 @@ class Finding(NamedTuple):
 def normalized_utf8_size(text: str) -> int:
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     return len(normalized.encode("utf-8"))
-
-
-def agent_budget(path: PurePosixPath) -> tuple[int, int]:
-    if path == PurePosixPath("AGENTS.md"):
-        return ROOT_SOFT, ROOT_HARD
-    if len(path.parts) == 2:
-        return MODULE_SOFT, MODULE_HARD
-    return LOCAL_SOFT, LOCAL_HARD
 
 
 def guidance_paths(paths: Iterable[PurePosixPath]) -> set[PurePosixPath]:
@@ -90,7 +81,7 @@ def _budget_finding(
     base_actual: int | None,
     relevant_change: bool,
     label: str,
-    remedy: str = "Remove inherited or local instructions.",
+    remedy: str = "Delete what the code, the tests or git already state.",
 ) -> Finding | None:
     if actual > hard:
         if base_actual is None or actual > base_actual:
@@ -135,14 +126,13 @@ def analyze(
 
     for path in sorted(agents):
         actual = normalized_utf8_size(head_files[path])
-        soft, hard = agent_budget(path)
         base_actual = normalized_utf8_size(base_files[path]) if path in base_files else None
         file_finding = _budget_finding(
             code="AG001",
             path=path,
             actual=actual,
-            soft=soft,
-            hard=hard,
+            soft=AGENT_SOFT,
+            hard=AGENT_HARD,
             base_actual=base_actual,
             relevant_change=_relevant_change([path], changed_paths),
             label="AGENTS.md",

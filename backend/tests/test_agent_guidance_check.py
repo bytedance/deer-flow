@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path, PurePosixPath
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
@@ -25,11 +24,8 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md",
     "backend/packages/harness/deerflow/agents/memory/AGENTS.md",
     "backend/packages/harness/deerflow/agents/task_continuity/AGENTS.md",
-    "backend/packages/harness/deerflow/community/brave/AGENTS.md",
-    "backend/packages/harness/deerflow/community/browser_automation/AGENTS.md",
+    "backend/packages/harness/deerflow/community/AGENTS.md",
     "backend/packages/harness/deerflow/community/groundroute/AGENTS.md",
-    "backend/packages/harness/deerflow/community/image_search/AGENTS.md",
-    "backend/packages/harness/deerflow/community/infoquest/AGENTS.md",
     "backend/packages/harness/deerflow/community/jina_ai/AGENTS.md",
     "backend/packages/harness/deerflow/community/ragflow/AGENTS.md",
     "backend/packages/harness/deerflow/community/serper/AGENTS.md",
@@ -49,7 +45,6 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/packages/harness/deerflow/persistence/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/migrations/AGENTS.md",
     "backend/packages/harness/deerflow/persistence/user/AGENTS.md",
-    "backend/packages/harness/deerflow/reflection/AGENTS.md",
     "backend/packages/harness/deerflow/skills/AGENTS.md",
     "backend/packages/harness/deerflow/storage/AGENTS.md",
     "backend/packages/harness/deerflow/subagents/AGENTS.md",
@@ -105,44 +100,49 @@ def test_normalized_utf8_size_uses_lf_and_counts_non_ascii_bytes() -> None:
     assert checker.normalized_utf8_size("a\r\n中\r") == len("a\n中\n".encode())
 
 
-@pytest.mark.parametrize(
-    ("path", "soft", "hard"),
-    [
-        ("AGENTS.md", 16 * 1024, 20 * 1024),
-        ("backend/AGENTS.md", 28 * 1024, 32 * 1024),
-        ("backend/app/gateway/AGENTS.md", 40 * 1024, 48 * 1024),
-    ],
-)
-def test_budget_depends_on_directory_level(path: str, soft: int, hard: int) -> None:
-    assert checker.agent_budget(PurePosixPath(path)) == (soft, hard)
-
-
 def test_single_file_over_hard_limit_is_an_error(tmp_path: Path) -> None:
-    findings = checker.analyze(tmp_path, _files(**{"AGENTS.md": "x" * (20 * 1024 + 1)}))
+    files = _files(**{"backend/AGENTS.md": "x" * (checker.AGENT_HARD + 1)})
 
-    assert "AG001" in _codes(findings, "error")
+    assert _codes(checker.analyze(tmp_path, files), "error") == ["AG001"]
+
+
+def test_single_file_between_soft_and_hard_limit_is_a_warning(tmp_path: Path) -> None:
+    files = _files(**{"backend/AGENTS.md": "x" * (checker.AGENT_SOFT + 1)})
+
+    findings = checker.analyze(tmp_path, files)
+
+    assert _codes(findings, "warning") == ["AG001"]
+    assert _codes(findings, "error") == []
+
+
+def test_file_at_soft_limit_has_no_finding(tmp_path: Path) -> None:
+    files = _files(**{"backend/AGENTS.md": "x" * checker.AGENT_SOFT})
+
+    assert checker.analyze(tmp_path, files) == []
 
 
 def test_effective_ancestor_chain_can_fail_when_each_file_is_valid(tmp_path: Path) -> None:
+    size = checker.AGENT_HARD - 1
     files = _files(
         **{
-            "AGENTS.md": "r" * (15 * 1024),
-            "backend/AGENTS.md": "m" * (31 * 1024),
-            "backend/app/AGENTS.md": "l" * (47 * 1024),
-            "backend/app/gateway/AGENTS.md": "g" * (47 * 1024),
+            "AGENTS.md": "r" * size,
+            "backend/AGENTS.md": "m" * size,
+            "backend/app/AGENTS.md": "l" * size,
+            "backend/app/gateway/AGENTS.md": "g" * size,
+            "backend/app/gateway/routers/AGENTS.md": "o" * size,
         }
     )
 
     findings = checker.analyze(tmp_path, files)
 
     assert "AG001" not in _codes(findings, "error")
-    assert "AG002" in _codes(findings, "error")
+    assert [finding.path.as_posix() for finding in findings if finding.code == "AG002" and finding.severity == "error"] == ["backend/app/gateway/routers/AGENTS.md"]
 
 
 def test_legacy_hard_violation_may_shrink_but_may_not_grow(tmp_path: Path) -> None:
-    base = _files(**{"AGENTS.md": "x" * (20 * 1024)})
-    smaller = _files(**{"AGENTS.md": "x" * (20 * 1024 - 1)})
-    grown = _files(**{"AGENTS.md": "x" * (20 * 1024 + 1)})
+    base = _files(**{"AGENTS.md": "x" * (checker.AGENT_HARD + 2)})
+    smaller = _files(**{"AGENTS.md": "x" * (checker.AGENT_HARD + 1)})
+    grown = _files(**{"AGENTS.md": "x" * (checker.AGENT_HARD + 3)})
 
     smaller_findings = checker.analyze(tmp_path, smaller, base_files=base)
     grown_findings = checker.analyze(tmp_path, grown, base_files=base)
@@ -199,58 +199,6 @@ def test_repository_has_the_approved_scoped_guidance_shape() -> None:
     assert actual == EXPECTED_GUIDANCE_PATHS
 
 
-def test_repository_guidance_stays_below_hard_budgets_and_avoids_doc_indexes() -> None:
-    for relative_text in EXPECTED_GUIDANCE_PATHS:
-        relative = PurePosixPath(relative_text)
-        path = REPO_ROOT / relative_text
-        assert path.is_file(), relative
-        _, hard = checker.agent_budget(relative)
-        text = path.read_text(encoding="utf-8")
-        assert checker.normalized_utf8_size(text) <= hard, relative
-        assert "Subsystem Index" not in text
-
-
-def test_local_guidance_files_contain_the_split_original_sections() -> None:
-    expected_headings = {
-        "backend/app/gateway/AGENTS.md": "### Gateway API (`app/gateway/`)",
-        "backend/app/channels/AGENTS.md": "### IM Channels System (`app/channels/`)",
-        "backend/packages/harness/deerflow/agents/AGENTS.md": "### Agent System",
-        "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md": "### Middleware Chain",
-        "backend/packages/harness/deerflow/agents/memory/AGENTS.md": "### Memory System",
-        "backend/packages/harness/deerflow/config/AGENTS.md": "### Configuration System",
-        "backend/packages/harness/deerflow/extensions/AGENTS.md": "### Python Extension System",
-        "backend/packages/harness/deerflow/runtime/AGENTS.md": "### Checkpoint Channel Modes",
-        "backend/packages/harness/deerflow/sandbox/AGENTS.md": "### Sandbox System",
-        "backend/packages/harness/deerflow/mcp/AGENTS.md": "### MCP System",
-        "backend/packages/harness/deerflow/models/AGENTS.md": "### Model Factory",
-        "backend/packages/harness/deerflow/persistence/migrations/AGENTS.md": "### Schema Migrations",
-        "backend/packages/harness/deerflow/reflection/AGENTS.md": "### Reflection System",
-        "backend/packages/harness/deerflow/skills/AGENTS.md": "### Skills System",
-        "backend/packages/harness/deerflow/subagents/AGENTS.md": "### Subagent System",
-        "backend/packages/harness/deerflow/tools/AGENTS.md": "### Tool System",
-        "backend/packages/harness/deerflow/tracing/AGENTS.md": "### Tracing System",
-        "backend/packages/harness/deerflow/tui/AGENTS.md": "### Terminal Workbench / TUI",
-        "frontend/src/AGENTS.md": "### Data Flow",
-    }
-
-    for relative_text, heading in expected_headings.items():
-        text = (REPO_ROOT / relative_text).read_text(encoding="utf-8")
-        assert heading in text, relative_text
-        assert "Before changing files in this directory" not in text, relative_text
-
-
-def test_mcp_task_lease_token_migration_is_documented() -> None:
-    guidance = (REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "AGENTS.md").read_text(encoding="utf-8")
-
-    for required in (
-        "0026_mcp_task_lease_tokens.py",
-        "0016_subagent_batches",
-        "lease_token",
-        "notification_lease_token",
-    ):
-        assert required in guidance
-
-
 def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     workflow = (REPO_ROOT / ".github" / "workflows" / "lint-check.yml").read_text(encoding="utf-8")
@@ -263,6 +211,7 @@ def test_repository_exposes_one_local_and_one_ci_entrypoint() -> None:
     assert "--before" in workflow
 
 
-def test_repository_guidance_chains_fit_hard_budget() -> None:
+def test_repository_guidance_has_no_budget_finding() -> None:
     files = {PurePosixPath(relative): (REPO_ROOT / relative).read_text(encoding="utf-8") for relative in EXPECTED_GUIDANCE_PATHS}
-    assert not [finding for finding in checker.analyze(REPO_ROOT, files) if finding.severity == "error"]
+
+    assert checker.analyze(REPO_ROOT, files) == []
