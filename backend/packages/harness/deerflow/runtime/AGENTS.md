@@ -15,6 +15,8 @@ namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Run Admission
 
+Goal operation observation preserves producer artifacts when normalizing checkpoint results; page titles never establish failure.
+
 Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
 owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
 uses ordinary AgentRuns admission after the old worker finalizes. Steer releases

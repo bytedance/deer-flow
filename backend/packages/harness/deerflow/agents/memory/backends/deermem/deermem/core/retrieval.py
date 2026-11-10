@@ -1,7 +1,7 @@
 """FTS5-based retrieval engine for DeerMem.
 
 Provides BM25 full-text search over stored facts with:
-- jieba Chinese tokenization (optional, falls back to whitespace)
+- jieba Chinese tokenization (optional, falls back to CJK character bigrams)
 - FTS5 MATCH syntax support (AND/OR/NOT/phrase/prefix) with fallback
 - Time-decay + confidence-weighted ranking
 - Category filtering
@@ -14,17 +14,21 @@ without importing storage and creating a circular dependency.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
 import re
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .paths import retrieval_index_directory
+from .relevance import cjk_token
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +55,33 @@ except ImportError:
     _jieba_available = False
 
 
+# Capturing group so ``re.split`` keeps the CJK runs it separates on.
+_CJK_RUN_RE = re.compile(r"([\u3400-\u4dbf\u4e00-\u9fff]+)")
+
+
 def _tokenize(text: str) -> list[str]:
-    """Tokenize text: jieba for Chinese, whitespace split for English."""
+    """Tokenize text: jieba for Chinese, CJK bigrams otherwise.
+
+    Without jieba, whitespace-delimited words are kept verbatim except for
+    their CJK runs, which are split into character bigrams with the same
+    ``relevance.cjk_token`` strategy the relevance ranker uses.  Indexing and
+    querying share this function, so unsegmented Chinese text stays matchable
+    in the default (dependency-free) install.
+    """
     if not text or not text.strip():
         return []
     if _jieba_available:
         return [t for t in jieba.cut(text) if t.strip()]
-    return [t for t in text.split() if t.strip()]
+    tokens: list[str] = []
+    for word in text.split():
+        for part in _CJK_RUN_RE.split(word):
+            if not part:
+                continue
+            if _CJK_RUN_RE.fullmatch(part):
+                tokens.extend(cjk_token(part))
+            else:
+                tokens.append(part)
+    return tokens
 
 
 # ── FTS5 query preprocessing ──────────────────────────────────────────
@@ -75,15 +99,34 @@ def _is_advanced_query(query: str) -> bool:
     return bool(_FTS5_ADVANCED_RE.search(query))
 
 
+def _quote_fallback_token(token: str) -> str:
+    """Quote one token for the OR query, prefixing single CJK characters.
+
+    The fallback index stores CJK runs as character bigrams, so a one-character
+    query (``重``) has no equal token to match.  ``"重"*`` is an FTS5 prefix
+    phrase: it matches every indexed token that *starts with* that character,
+    which covers the bigram ``重试`` and still matches a standalone ``重`` token
+    when the content held an isolated single character.  It does not reach a
+    character that only occurs later inside a bigram, so ``务`` does not match
+    the ``任务`` token; that residual gap is accepted instead of widening the
+    prefix.  Multi-character tokens keep the plain quoted phrase so their
+    semantics do not change.  Double quotes inside a token are the FTS5 escape
+    sequence for a literal quote.
+    """
+    escaped = token.replace(chr(34), chr(34) * 2)
+    if len(token) == 1 and _CJK_RUN_RE.fullmatch(token):
+        return f'"{escaped}"*'
+    return f'"{escaped}"'
+
+
 def _build_fallback_query(query: str) -> str:
     """Convert natural-language query to FTS5 OR query (fallback strategy)."""
     tokens = [token for token in _tokenize(query) if any(char.isalnum() for char in token)]
     if not tokens:
         return ""
     # Quote each token so punctuation in natural-language input cannot become
-    # an FTS5 operator or syntax error. Double quotes inside a token are the
-    # FTS5 escape sequence for a literal quote.
-    return " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
+    # an FTS5 operator or syntax error.
+    return " OR ".join(_quote_fallback_token(token) for token in tokens)
 
 
 # ── Core retrieval engine ─────────────────────────────────────────────
@@ -148,13 +191,15 @@ class FTS5Retrieval:
     # ── Index operations ───────────────────────────────────────────────
 
     def _preprocess_content(self, content: str) -> str:
-        """Preprocess content for indexing: jieba tokenize for Chinese."""
+        """Preprocess content for indexing: segment CJK so queries can match.
+
+        Must stay aligned with the query side (``_build_fallback_query``); both
+        go through ``_tokenize`` so index and query agree on Chinese without
+        jieba.
+        """
         if not content:
             return ""
-        if _jieba_available:
-            tokens = _tokenize(content)
-            return " ".join(tokens)
-        return content
+        return " ".join(_tokenize(content))
 
     def _row_from_document(self, document: dict[str, Any]) -> tuple[Any, ...]:
         now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -406,6 +451,7 @@ class FTS5Retrieval:
 
         where_clause = " AND ".join(conditions)
 
+        # Stable heap selection uses this BM25 order to break composite score ties.
         sql = f"""
             SELECT doc_id, content, raw_content, category, scope_user, scope_agent,
                    created_at, confidence, source, fact_json,
@@ -413,20 +459,31 @@ class FTS5Retrieval:
             FROM memory_fts
             WHERE {where_clause}
             ORDER BY bm25_score
-            LIMIT ?
         """
-        params.append(top_k * 2)
+
+        matched_count = 0
+
+        def score_matches(cursor: sqlite3.Cursor) -> Iterator[tuple[float, sqlite3.Row]]:
+            nonlocal matched_count
+            for row in cursor:
+                matched_count += 1
+                score = self._compute_final_score(bm25_score=-row["bm25_score"], confidence=row["confidence"], created_at=row["created_at"])
+                yield score, row
 
         with self._lock:
             try:
-                conn = self._conn
-                rows = conn.execute(sql, params).fetchall()
+                # Hold the shared connection lock through cursor iteration and
+                # composite scoring of every match. The heap bounds retained
+                # rows, while lock time grows with the match count.
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    cursor.row_factory = sqlite3.Row
+                    rows = heapq.nlargest(top_k, score_matches(cursor), key=lambda item: item[0])
             except sqlite3.OperationalError as e:
                 logger.debug("FTS5 query syntax error: %s (query: %s)", e, fts5_query)
                 return None
 
         results: list[dict[str, Any]] = []
-        for row in rows:
+        for score, row in rows:
             (
                 doc_id,
                 indexed_content,
@@ -440,12 +497,6 @@ class FTS5Retrieval:
                 fact_json,
                 bm25_score,
             ) = row
-
-            score = self._compute_final_score(
-                bm25_score=-bm25_score,  # FTS5 returns negative
-                confidence=confidence,
-                created_at=created_at,
-            )
 
             fact: dict[str, Any] = {}
             if fact_json:
@@ -466,17 +517,17 @@ class FTS5Retrieval:
             results.append(fact)
 
         logger.debug(
-            "FTS5 raw SQL: fts5_query=%r scope_user=%r scope_agent=%r category=%r -> %d rows. bm25 raw: %s",
+            "FTS5 composite top-k: fts5_query=%r scope_user=%r scope_agent=%r category=%r matched=%d retained=%d bm25=%s",
             fts5_query,
             scope_user,
             scope_agent,
             category,
+            matched_count,
             len(rows),
             [(r["id"], r["bm25_score"]) for r in results[:10]],
         )
 
-        results.sort(key=lambda r: r["score"], reverse=True)
-        return results[:top_k]
+        return results
 
     def _compute_final_score(
         self,
