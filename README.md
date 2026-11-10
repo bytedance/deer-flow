@@ -845,6 +845,13 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
+If a completed thread operation (such as a checkpoint, goal, or artifact write,
+branch, or deletion) fails to release its database reservation, the same Gateway
+worker retries cleanup when it receives a new run or mutation for that thread.
+This also works in single-worker deployments with lease heartbeats disabled.
+If cleanup fails again, admission returns a busy response. Completed requests
+can still replay their saved results by idempotency key.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Upgrading an existing checkout
@@ -940,6 +947,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    ```bash
    make dev
    ```
+
+   Local nginx writes temporary files under the checkout's `temp/` directory.
 
 5. **Access**: http://localhost:2026
 
@@ -1168,6 +1177,9 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+Startup-recovered BoxLite VMs use the same private async loop as newly created
+VMs for health checks, commands, and shutdown. Recovery skips boxes removed
+after discovery without creating replacement VMs.
 
 Successful `read_file` calls treat a JSON document's `error` field as file data,
 not a failure of the read tool. This keeps receipts accurate when inspecting
@@ -2529,6 +2541,9 @@ knowledge service; artifacts do not automatically enable citations. It also appe
 in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+In **Capabilities → Extensions**, an enabled extension’s detail page links directly to its registered workspace pages. The page also includes usage guidance and keeps package details under **Technical details**.
+Extension packages can provide localized purpose and usage steps in `deerflow-extension.json`, including optional prerequisites. The same detail page supports background extensions without a browser module. All bundled examples include this description; see the [authoring contract](examples/README.md#describe-the-extension).
+
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
 lets full Custom Agents collaborate through native `@` mentions, shared messages and
 asynchronous peer requests, with a separate team page and persistent member conversations.
@@ -2741,7 +2756,8 @@ A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
 input budget or smaller source window permits an immediate retry. Model fallback
-and SDK retries can add calls. See the
+and SDK retries can add calls. For vLLM run models, history and retention
+estimates include assistant reasoning replayed to the provider. See the
 [summarization guide](backend/docs/summarization.md).
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
@@ -2806,6 +2822,7 @@ Manual compaction also returns HTTP 409 when execution is pending or the checkpo
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
+The token budget counts separate accepted model calls even when their response message IDs repeat, without double-counting repeated observations or later subagent-usage increments.
 
 ### Sub-Agents
 

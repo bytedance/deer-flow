@@ -423,11 +423,10 @@ and require a known model to save a model switch.
 
 ## Full-stack plugin UI
 
-Follow [plugin invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants):
-viewer-bound auth/CSRF, native actions, i18n, mount/dispose/abort fences.
-Shadow DOM is not a sandbox. Bundled catalogs need typed en/zh entries, namespaces;
-entries do not prove activation. Optional `requestBackend` binds viewers,
-rejects redirects, never retries; routes retain authorization.
+Follow [plugin invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
+Use `pluginPages` only for enabled runtime entries; catalogs never imply activation.
+Package documentation and bundled-copy sync: `examples/README.md`. Hide empty requirements.
+Optional `requestBackend` binds viewers, rejects redirects, never retries; routes retain authorization.
 
 ### Composer references
 

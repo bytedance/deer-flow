@@ -58,6 +58,7 @@ class LoadedExtensions:
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
     knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
     workspace_search_providers: tuple[tuple[str, Any], ...] = ()
+    documentation: tuple[tuple[str, dict], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.

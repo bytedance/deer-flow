@@ -810,6 +810,97 @@ class TestWrapModelCallSpecialCases:
         assert result == "ok"
 
 
+class TestEmptyTextBlockItemsAreDropped:
+    """Empty typed text blocks cannot reach the model as content parts (#8037).
+
+    Upstream's bare-string normalization leaves ``{"type": "text", "text": ""}``
+    untouched; strict Chat Completions serializers reject the empty text part.
+    """
+
+    @staticmethod
+    def _sent_content(mw, content):
+        msg = HumanMessage(content=deepcopy(content), id="msg-1")
+        captured = []
+        mw.wrap_model_call(_make_request([msg]), lambda req: captured.append(req) or "ok")
+        return captured[0].messages[0].content
+
+    def test_empty_text_block_before_text_block_is_dropped(self):
+        processed = self._sent_content(
+            _make_middleware(),
+            [{"type": "text", "text": ""}, {"type": "text", "text": "Please summarize."}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert "Please summarize." in processed[0]["text"]
+
+    def test_empty_text_block_between_text_blocks_is_dropped(self):
+        processed = self._sent_content(
+            _make_middleware(),
+            [{"type": "text", "text": "first"}, {"type": "text", "text": ""}, {"type": "text", "text": "second"}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert "first" in processed[0]["text"] and "second" in processed[0]["text"]
+
+    def test_empty_text_block_after_text_block_is_dropped(self):
+        processed = self._sent_content(
+            _make_middleware(),
+            [{"type": "text", "text": "hello"}, {"type": "text", "text": ""}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 1
+        assert "hello" in processed[0]["text"]
+
+    def test_empty_text_blocks_only_become_empty_string(self):
+        processed = self._sent_content(_make_middleware(), [{"type": "text", "text": ""}])
+
+        assert processed == ""
+
+    def test_empty_text_block_next_to_image_drops_only_the_block(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        msg = HumanMessage(content=[image_block, {"type": "text", "text": ""}], id="msg-1")
+        captured = []
+        _make_middleware().wrap_model_call(_make_request([msg]), lambda req: captured.append(req) or "ok")
+
+        assert captured[0].messages[0].content == [image_block]
+
+    def test_whitespace_only_text_is_kept_as_a_typed_block(self):
+        """Only empty text is swept: a whitespace part still keeps the turn alive."""
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        processed = self._sent_content(
+            _make_middleware(),
+            [image_block, {"type": "text", "text": " "}],
+        )
+
+        assert isinstance(processed, list)
+        assert len(processed) == 2
+        assert processed[0] == image_block
+        assert processed[1]["type"] == "text"
+        assert processed[1]["text"].strip() == ""
+
+    def test_whitespace_only_bare_string_is_kept(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        processed = self._sent_content(_make_middleware(), [image_block, " "])
+
+        assert isinstance(processed, list)
+        assert len(processed) == 2
+        assert processed[0] == image_block
+        assert processed[1].strip() == ""
+
+    def test_image_only_message_still_passes_through_untouched(self):
+        image_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        msg = HumanMessage(content=[image_block], id="msg-1")
+        request = _make_request([msg])
+        captured = []
+
+        _make_middleware().wrap_model_call(request, lambda req: captured.append(req) or "ok")
+
+        assert captured[0] is request
+
+
 # ---------------------------------------------------------------------------
 # _rebuild_content — preserves interleaved non-text blocks
 # ---------------------------------------------------------------------------
