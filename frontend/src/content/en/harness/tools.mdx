@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -243,6 +243,16 @@ Results include the content of each page, not only a snippet. Requires a [Sofya]
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.specstream.tools:web_search_tool
+    api_key: $SPECSTREAM_API_KEY
+```
+Results carry a snippet and a source URL, and a direct answer when the sources agree on one. Requires a [SpecStream](https://specstream.ai) API key. Also supports `web_fetch`.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # optional; omit to use the keyless free tier
 ```
@@ -260,7 +270,7 @@ No extra dependency required.
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -328,6 +338,16 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 Returns the page as markdown. Requires a [Sofya](https://sofya.co) API key.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.specstream.tools:web_fetch_tool
+    api_key: $SPECSTREAM_API_KEY
+```
+Returns the page as markdown, including PDF, Word and Excel files. Requires a [SpecStream](https://specstream.ai) API key.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
