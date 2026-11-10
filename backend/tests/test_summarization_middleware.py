@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 from pydantic import ValidationError
@@ -1725,6 +1726,85 @@ def test_factory_trigger_fires_on_replayed_reasoning_tokens(monkeypatch: pytest.
     assert result is not None
     assert result["summary_text"] == "from-run-model"
     assert [message.id for message in result["messages"][1:]] == ["old-ai", "current-user"]
+
+
+def test_vllm_adapter_reasoning_fields_are_counted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The counter must charge exactly what ``VllmChatModel`` replays (#8074).
+
+    The adapter writes the raw ``reasoning`` payload and its normalized
+    ``reasoning_content`` text onto the assistant message, then sends that text
+    back as request input. Building the message through the adapter's own
+    conversion keeps the counter tied to the real field names instead of a
+    hand-written fixture that could drift away from them.
+    """
+    from deerflow.models.vllm_provider import _convert_delta_to_message_chunk_with_reasoning
+
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model",)), run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    reasoning = "y" * 40_000
+    chunk = _convert_delta_to_message_chunk_with_reasoning(
+        {"id": "chunk-1", "role": "assistant", "content": "answer", "reasoning": reasoning},
+        AIMessageChunk,
+    )
+
+    assert chunk.additional_kwargs["reasoning"] == reasoning
+    assert chunk.additional_kwargs["reasoning_content"] == reasoning
+    counted = middleware.token_counter([chunk])
+    assert 10_000 <= counted < 20_000  # 40k chars at 4 chars/token, charged once
+
+
+def test_suffix_trim_counter_does_not_scale_usage_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent reuses the counter for suffix trimming, which must not scale (#8074).
+
+    LangChain scales the approximate count by ``usage_metadata`` for the trigger
+    total but not for the cutoff search. Handing the parent one scaled counter
+    would shrink the suffix trim against an inflated estimate, so the middleware
+    restores the parent's no-scaling mode.
+    """
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model",)), run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    # LangChain scales only when the history has more than one message, and caps the
+    # factor at 1.25, so this needs a preceding human turn to exercise the difference.
+    messages = [
+        HumanMessage(content="q" * 4_000),
+        AIMessage(
+            content="z" * 4_000,
+            usage_metadata={"input_tokens": 100_000, "output_tokens": 1_000, "total_tokens": 101_000},
+            response_metadata={"model_provider": "openai"},
+        ),
+    ]
+
+    scaled = middleware.token_counter(messages)
+    unscaled = middleware._partial_token_counter(messages)
+    assert unscaled < scaled
+    assert unscaled == count_tokens_approximately(messages, chars_per_token=4.0, use_usage_metadata_scaling=False)
+
+
+def test_display_only_reasoning_is_never_undercounted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Counting reasoning for display-only adapters may only raise the estimate.
+
+    Only some adapters replay reasoning; for the rest the fix accepts compaction
+    firing slightly earlier. What it must never do is undercount the request, so
+    a message whose reasoning is not replayed still costs at least its content.
+    """
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model",)), run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    reasoning = "w" * 20_000
+    display_only = AIMessage(content="answer", additional_kwargs={"reasoning_content": reasoning})
+    plain = AIMessage(content="answer")
+
+    counted = middleware.token_counter([display_only])
+    content_only = count_tokens_approximately([plain], chars_per_token=4.0, use_usage_metadata_scaling=False)
+    assert counted > content_only
 
 
 class _RaisingTextResponse:
