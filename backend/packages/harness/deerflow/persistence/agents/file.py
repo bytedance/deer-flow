@@ -126,7 +126,7 @@ class FileAgentStore(AgentStore):
         return result
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
+        name = validate_agent_name(name, for_creation=True)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
@@ -155,6 +155,12 @@ class FileAgentStore(AgentStore):
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
         pre_existing = agent_dir.exists()
+        if not agent_dir.is_dir():
+            # ``exists()`` is true for a Windows device name such as NUL even
+            # though no directory can be created there. Only a real directory
+            # proves a legacy agent already owns the name; anything else is a
+            # creation and takes the creation guard.
+            validate_agent_name(name, for_creation=True)
         agent_dir.mkdir(parents=True, exist_ok=True)
         try:
             self._write(agent_dir, config, soul)

@@ -83,3 +83,10 @@ When you add or rename a field, update `config.example.yaml` and raise its
   only, and no run context can override them.
 - **A knowledge scope narrows; it does not authorize.** Retrieval still checks
   the operator allowlist.
+- **An agent name is a host directory component.** Creation calls
+  `validate_agent_name(..., for_creation=True)`, which rejects Windows reserved
+  device names on every platform — on Windows a device name creates no
+  directory, so the create route answered 500 instead of refusing the name. The
+  `/api/agents/check` pre-check uses the same rule; reads, updates and deletes of
+  an existing name stay permissive so a pre-fix Linux installation stays
+  manageable.
