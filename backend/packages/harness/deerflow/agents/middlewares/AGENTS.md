@@ -25,6 +25,8 @@ PII before splitting, budgets before escaping; hooks/history/removal on success.
 Chunk/carry/cooldown invariants and tests:
 [contract](../../../../../docs/summarization.md).
 
+vLLM compaction counts replayed reasoning. Keep it out of summary input.
+
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
 Delegation verdicts are untrusted: revalidate persisted values, ignore malformed

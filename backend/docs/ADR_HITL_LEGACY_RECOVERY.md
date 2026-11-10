@@ -25,3 +25,7 @@ stale valid and invalid pause binding, checkpoint-only retry, failed attachment
 rollback, memory/SQLite answer CAS, native graph non-execution and provider
 payload cleanup, full/delta authenticated Gateway regressions where feasible.
 Record missing real-provider, PostgreSQL and full-suite checks explicitly.
+
+Upstream #8073 shares matched durable actions between replay-gate names and
+journal adoption. Legacy recovery performs its exact all-reject match in that
+action lookup, preserving ordinary history reconciliation and stale-pause checks.

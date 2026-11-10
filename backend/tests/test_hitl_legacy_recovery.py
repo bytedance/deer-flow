@@ -200,7 +200,7 @@ async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
     from langgraph.graph import MessagesState, StateGraph
     from langgraph.types import Command, interrupt
 
-    from deerflow.runtime.runs.worker import _is_all_reject_hitl_resume, _pending_hitl_resume_tool_names
+    from deerflow.runtime.runs.worker import _is_all_reject_hitl_resume, _pending_hitl_resume_actions, _pending_hitl_resume_tool_names
 
     payload = _payload(ids)
 
@@ -219,9 +219,12 @@ async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
     responses = _responses(payload)
     command = Command(resume={"responses": responses})
     assert _is_all_reject_hitl_resume(command)
+    assert await _pending_hitl_resume_actions(saver, config, command) == payload["actions"]
     assert await _pending_hitl_resume_tool_names(saver, config, command) == {"write_file"}
     responses[0]["request_id"] = "stale"
+    assert await _pending_hitl_resume_actions(saver, config, command) == []
     assert await _pending_hitl_resume_tool_names(saver, config, command) == set()
     responses[0]["request_id"] = payload["actions"][0]["request_id"]
     responses[0]["option_id"] = "approve"
+    assert await _pending_hitl_resume_actions(saver, config, command) == []
     assert await _pending_hitl_resume_tool_names(saver, config, command) == set()

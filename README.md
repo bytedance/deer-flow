@@ -845,6 +845,13 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
+If a completed thread operation (such as a checkpoint, goal, or artifact write,
+branch, or deletion) fails to release its database reservation, the same Gateway
+worker retries cleanup when it receives a new run or mutation for that thread.
+This also works in single-worker deployments with lease heartbeats disabled.
+If cleanup fails again, admission returns a busy response. Completed requests
+can still replay their saved results by idempotency key.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Upgrading an existing checkout
@@ -940,6 +947,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    ```bash
    make dev
    ```
+
+   Local nginx writes temporary files under the checkout's `temp/` directory.
 
 5. **Access**: http://localhost:2026
 
@@ -1168,6 +1177,9 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+Startup-recovered BoxLite VMs use the same private async loop as newly created
+VMs for health checks, commands, and shutdown. Recovery skips boxes removed
+after discovery without creating replacement VMs.
 
 Successful `read_file` calls treat a JSON document's `error` field as file data,
 not a failure of the read tool. This keeps receipts accurate when inspecting
@@ -2736,7 +2748,8 @@ A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
 input budget or smaller source window permits an immediate retry. Model fallback
-and SDK retries can add calls. See the
+and SDK retries can add calls. For vLLM run models, history and retention
+estimates include assistant reasoning replayed to the provider. See the
 [summarization guide](backend/docs/summarization.md).
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
