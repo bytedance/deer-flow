@@ -87,8 +87,8 @@ def _unambiguous_ids(last: AIMessage, calls: list[dict[str, Any]]) -> bool:
 
     ``_addressable`` only asks whether a ``ToolMessage`` can answer the targeted
     calls. An id shared with an ordinary call makes the approval ambiguous in
-    both directions: approving or rejecting one call would also answer the other
-    by id. Such a group is denied before pausing.
+    both directions: approving, rejecting or denying one call would also answer
+    the other by id. Such a group is denied before pausing or answering by result.
     """
     if not _addressable(calls):
         return False
@@ -158,7 +158,11 @@ class HitlApprovalMiddleware(AgentMiddleware):
         return [tc for tc in last.tool_calls if tc["name"] in self.tool_names]
 
     def _deny_all(self, last: AIMessage, calls: list[dict[str, Any]], reason: str) -> dict[str, Any]:
-        if not _addressable(calls):
+        # A denial ``ToolMessage`` answers a call by id, so it needs an id no
+        # other call in the response shares: otherwise the ordinary call is
+        # answered too while staying serialized, and the next request carries
+        # the id twice with two results. Strip the whole colliding group instead.
+        if not _unambiguous_ids(last, calls):
             return _strip_calls(last, calls, reason)
         return {"messages": [_deny_message(tc, reason) for tc in calls]}
 

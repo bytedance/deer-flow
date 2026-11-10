@@ -65,9 +65,12 @@ forever; an empty id is technically matchable, but it is denied as well because
 strict providers reject an empty tool-call id when the conversation is replayed.
 The middleware removes those calls from the model response with a visible
 rejection note instead of pausing, so the tool is never executed and the thread
-stays usable. A pause stored by an older release with a null or duplicated id is
-**not** cleared by this: every resume, including all-reject, is still rejected,
-so continue the work in a new thread. In-place recovery is tracked in
+stays usable. The same uniqueness rule applies when a call is denied by result:
+answering a denial `ToolMessage` also answers any other call that shares its id,
+so a shared id is stripped rather than answered, and the next request cannot
+carry the id twice. A pause stored by an older release with a null or duplicated
+id is **not** cleared by this: every resume, including all-reject, is still
+rejected, so continue the work in a new thread. In-place recovery is tracked in
 [#8071](https://github.com/bytedance/deer-flow/issues/8071).
 
 `waiting_for_input` is not a terminal success or failure. Goal checks, final

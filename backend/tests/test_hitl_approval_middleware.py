@@ -579,3 +579,43 @@ def test_shared_id_with_an_ordinary_call_is_denied_instead_of_pausing():
     assert answer.tool_calls == []
     assert "tool_calls" not in answer.additional_kwargs
     assert "no usable id" in _visible_text(answer.content)
+
+
+def test_deny_path_strips_a_target_sharing_an_id_with_an_ordinary_call():
+    """Denying by result answers a call by id, so a shared id must be stripped.
+
+    ``_deny_all`` routed on ``_addressable`` (uniqueness within the targets), so
+    a target whose id an ordinary call also carried got a deny ``ToolMessage``
+    while the ordinary call stayed serialized. The next request then advertised
+    the id twice with two results, which strict providers reject.
+    """
+    executed: list[str] = []
+
+    @tool
+    def echo(text: str = "") -> str:
+        """Echo text."""
+        executed.append("echo")
+        return "echoed"
+
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_shared"},
+        {"name": "echo", "args": {"text": "hi"}, "id": "call_shared"},
+    ]
+    model = _RawPayloadApprovalModel(responses=[], calls=calls)
+    agent = create_agent(
+        model,
+        tools=[write_file, echo],
+        middleware=[HitlApprovalMiddleware(tool_names={"write_file"}, supports_resume=False)],
+        checkpointer=InMemorySaver(),
+    )
+
+    out = agent.invoke({"messages": [{"role": "user", "content": "go"}]}, {"configurable": {"thread_id": "shared-deny"}})
+
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert executed == []
+    answer = messages[-1]
+    assert answer.tool_calls == []
+    assert "tool_calls" not in answer.additional_kwargs
+    assert "cannot collect approval" in _visible_text(answer.content)

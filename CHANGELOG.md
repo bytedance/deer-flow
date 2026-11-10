@@ -55,7 +55,10 @@ This section accumulates work toward the **2.3.0** milestone
   technically resumable but is denied as well, since strict providers reject it
   when the conversation is replayed. Such calls are now removed from the model
   response with a visible rejection note instead of pausing, and deny paths no
-  longer build an invalid `ToolMessage` for a null id. A pause stored before
+  longer build an invalid `ToolMessage` for a null id. A call whose id an
+  ordinary call also carries is stripped before it can be answered by result,
+  so the next request cannot advertise the id twice with two results.
+  A pause stored before
   this change stays unresolvable; in-place recovery is tracked in [#8071].
   ([#8069])
 
