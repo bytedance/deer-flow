@@ -101,6 +101,12 @@ class TestErrorClassification:
         assert sig is not None
         assert sig.signature == "SYNTAX_ERROR:line_8"
 
+    def test_syntax_error_ignores_frame_text_in_the_source_line(self):
+        err = '  File "/mnt/user-data/workspace/bad.py", line 8\n    x = (\'File "fake.py", line 99\' 1)\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^\nSyntaxError: invalid syntax. Perhaps you forgot a comma?'
+        sig = classify_tool_error(err)
+        assert sig is not None
+        assert sig.signature == "SYNTAX_ERROR:line_8"
+
     def test_permission_denied(self):
         err = "PermissionError: [Errno 13] Permission denied: '/var/run/docker.sock'"
         sig = classify_tool_error(err)
