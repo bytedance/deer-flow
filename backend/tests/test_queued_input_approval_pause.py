@@ -164,11 +164,18 @@ def test_queued_input_runs_after_the_resumed_work(isolated_app, decision):  # no
 
         # The pause is not a failure: the follow-up still waits for the work.
         assert _queued_item(client, tid)["status"] == "pending"
+        from deerflow.runtime.runs.inputs import PAUSED_KEY, RunInputs
+
+        paused_inputs = RunInputs(isolated_app.state.run_manager.input_store, paused_run_id, None)
+        # Written by the worker before the pause became visible.
+        assert client.portal.call(paused_inputs.read)[PAUSED_KEY] is True
 
         resumed = _resume(client, csrf, tid, decision, value="no" if decision == "reject" else None)
         assert resumed.status_code == 200, resumed.text
         resume_run_id = resumed.json()["run_id"]
         assert _wait_run_terminal(client, tid, resume_run_id)["status"] == "success"
+        # The paused row now reads success, yet stays recognisable as an answered pause.
+        assert client.portal.call(paused_inputs.read)[PAUSED_KEY] is True
 
         applied = _wait_queued_status(client, tid, "applied")
         assert applied["target_run_id"] == paused_run_id
@@ -235,15 +242,22 @@ def _chain_agent_runs(store, outcomes: dict[str, str], dispatched: list[str]):
         await source.claim(input_id)
         child = f"child-{input_id}"
         await store.put(child, thread_id="thread", user_id=USER_ID, status="running")
-        await store.update_status(child, outcomes.get(child, "success"))
+        if outcomes.get(child) == "answered":
+            # Paused for approval and answered before the dispatcher's first poll.
+            await RunInputs(store, child, USER_ID).mark_paused()
+        await store.update_status(child, _row_status(outcomes.get(child, "success")))
         await source.dispatched(input_id, child)
         dispatched.append(input_id)
         return SimpleNamespace(run_id=child, status="running", stop_reason=None)
 
     async def wait(*, thread_id, run_id, timeout):
-        return SimpleNamespace(run_id=run_id, status=outcomes.get(run_id, "success"), stop_reason=None)
+        return SimpleNamespace(run_id=run_id, status=_row_status(outcomes.get(run_id, "success")), stop_reason=None)
 
     return SimpleNamespace(dispatch_input=dispatch_input, wait=wait)
+
+
+def _row_status(outcome: str) -> str:
+    return "success" if outcome == "answered" else outcome
 
 
 async def _queued_run(store, run_id, *input_ids, status="success"):
@@ -262,19 +276,20 @@ def _statuses(state):
 
 
 @pytest.mark.asyncio
-async def test_follow_up_that_pauses_holds_the_rest_until_its_resumed_work(chain_store):
+@pytest.mark.parametrize("outcome", ["waiting_for_input", "answered"])
+async def test_follow_up_that_pauses_holds_the_rest_until_its_resumed_work(chain_store, outcome):
     from app.gateway.run_inputs import dispatch_queued_inputs
-    from deerflow.runtime.runs.inputs import CONTINUES_RUN_KEY, RunInputs
+    from deerflow.runtime.runs.inputs import QUEUED_FROM_KEY, RunInputs
 
     source = await _queued_run(chain_store, "source", "A", "B")
     dispatched: list[str] = []
-    agent_runs = _chain_agent_runs(chain_store, {"child-A": "waiting_for_input"}, dispatched)
+    agent_runs = _chain_agent_runs(chain_store, {"child-A": outcome}, dispatched)
 
     await dispatch_queued_inputs(source, agent_runs=agent_runs, thread_id="thread")
     # A paused for approval itself: B waits for A's resumed work, not a failure.
     assert dispatched == ["A"]
     assert _statuses(await source.read()) == {"A": "applied", "B": "pending"}
-    assert (await RunInputs(chain_store, "child-A", USER_ID).read())[CONTINUES_RUN_KEY] == "source"
+    assert (await RunInputs(chain_store, "child-A", USER_ID).read())[QUEUED_FROM_KEY] == "source"
 
     resume = await _queued_run(chain_store, "resume-A")
     await dispatch_queued_inputs(resume, agent_runs=agent_runs, thread_id="thread", continues_run_id="child-A")
@@ -353,3 +368,87 @@ def test_paused_run_lists_its_queued_input_as_pending(monkeypatch):
     monkeypatch.setattr(gateway_run_inputs, "_store", lambda _request: _Store())
     items = asyncio.run(gateway_run_inputs.list_thread_inputs("thread", SimpleNamespace()))["items"]
     assert [item["status"] for item in items] == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_follow_up_that_finishes_does_not_dispatch_its_source_queue(chain_store):
+    """The queued-from link is followed only from a resume Run's predecessors."""
+    from app.gateway.run_inputs import dispatch_queued_inputs
+    from deerflow.runtime.runs.inputs import RunInputs
+
+    source = await _queued_run(chain_store, "source", "A", "B")
+    dispatched: list[str] = []
+    agent_runs = _chain_agent_runs(chain_store, {}, dispatched)
+    await dispatch_queued_inputs(source, agent_runs=agent_runs, thread_id="thread")
+    assert dispatched == ["A", "B"]
+
+    # child-A carries the queued-from link, but its own finalize dispatches nothing.
+    await dispatch_queued_inputs(RunInputs(chain_store, "child-A", USER_ID), agent_runs=agent_runs, thread_id="thread")
+    assert dispatched == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_answered_pause_leaves_dispatch_to_its_resume_run(chain_store):
+    """A pause answered before this Run's own finalize reads success, yet its work is not done."""
+    from app.gateway.run_inputs import dispatch_queued_inputs
+
+    earlier = await _queued_run(chain_store, "earlier", "A")
+    paused = await _queued_run(chain_store, "paused", "B", status="running")
+    await paused.mark_paused()
+    await chain_store.update_status("paused", "success")
+    dispatched: list[str] = []
+    agent_runs = _chain_agent_runs(chain_store, {}, dispatched)
+
+    await dispatch_queued_inputs(paused, agent_runs=agent_runs, thread_id="thread", continues_run_id="earlier")
+    assert dispatched == []
+    assert _statuses(await earlier.read()) == {"A": "pending"}
+
+    resume = await _queued_run(chain_store, "resume")
+    await dispatch_queued_inputs(resume, agent_runs=agent_runs, thread_id="thread", continues_run_id="paused")
+    assert dispatched == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_chain_beyond_the_hop_bound_lapses_its_oldest_runs(chain_store, monkeypatch, caplog):
+    from app.gateway import run_inputs as gateway_run_inputs
+    from deerflow.runtime.runs import inputs as runs_inputs
+
+    monkeypatch.setattr(runs_inputs, "MAX_CONTINUATION_HOPS", 2)
+    monkeypatch.setattr(gateway_run_inputs, "MAX_CONTINUATION_HOPS", 2)
+    previous = None
+    runs = []
+    for index in range(4):
+        run = await _queued_run(chain_store, f"pause-{index}", f"Q{index}")
+        if previous is not None:
+            await run.link_continuation(previous)
+        runs.append(run)
+        previous = run.run_id
+    resume = await _queued_run(chain_store, "resume")
+    dispatched: list[str] = []
+
+    with caplog.at_level("WARNING", logger=gateway_run_inputs.logger.name):
+        await gateway_run_inputs.dispatch_queued_inputs(resume, agent_runs=_chain_agent_runs(chain_store, {}, dispatched), thread_id="thread", continues_run_id=previous)
+    # The two nearest pauses dispatch in order; the two oldest lapse for an explicit retry.
+    assert dispatched == ["Q2", "Q3"]
+    assert [_statuses(await run.read()) for run in runs[:2]] == [{"Q0": "not_applied"}, {"Q1": "not_applied"}]
+    assert "pause-0" in caplog.text and "pause-1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_recovered_resume_finds_the_consumed_pause(chain_store):
+    """Checkpoint-only recovery has no answer handle; the consumed row still holds its queue."""
+    from app.gateway.run_inputs import answered_pause_run_id
+
+    await _queued_run(chain_store, "finished", "A")
+    consumed = await _queued_run(chain_store, "consumed", "B", status="running")
+    await consumed.mark_paused()
+    await consumed.hold()
+    await chain_store.update_status("consumed", "success")
+    await _queued_run(chain_store, "crashed-resume", "C", status="error")
+    await chain_store.put("recovery", thread_id="thread", user_id=USER_ID, status="pending")
+
+    assert await answered_pause_run_id(chain_store, "thread", user_id=USER_ID, exclude_run_id="recovery") == "consumed"
+
+    # Once the held queue is resolved there is nothing to continue.
+    await consumed.pause()
+    assert await answered_pause_run_id(chain_store, "thread", user_id=USER_ID, exclude_run_id="recovery") is None

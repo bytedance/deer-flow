@@ -21,8 +21,17 @@ INPUT_CONTEXT_KEY = "__run_input_control"
 #: this Run's own: the paused Run a resume continued, or the source of a
 #: queued follow-up that paused for approval itself.
 CONTINUES_RUN_KEY = "continues_run_id"
+#: Input-state key on a dispatched queued follow-up naming the Run whose
+#: remaining queue waits behind it, should the follow-up pause for approval.
+#: The chain follows it from predecessors only, so a follow-up that simply
+#: finishes never dispatches its source's queue.
+QUEUED_FROM_KEY = "queued_from_run_id"
 #: Bound on that chain; each hop is one approval pause on one thread.
 MAX_CONTINUATION_HOPS = 32
+#: Input-state flag the worker sets before a pause becomes visible. Answering
+#: the pause flips the row to ``success``, so this is how a reader still tells
+#: an answered pause (its work continues in a resume Run) from a finished Run.
+PAUSED_KEY = "paused_for_input"
 
 
 class InputConflict(ValueError):
@@ -137,6 +146,14 @@ class RunInputs:
 
         await self._change(change)
 
+    async def mark_paused(self) -> None:
+        """Record durably, before the pause is visible, that this Run paused for input."""
+
+        def change(state, row):
+            state[PAUSED_KEY] = True
+
+        await self._change(change)
+
     async def link_continuation(self, run_id: str) -> None:
         """Record, once, the Run whose held queue must dispatch before this Run's own."""
 
@@ -145,21 +162,34 @@ class RunInputs:
 
         await self._change(change)
 
-    async def continuation_chain(self) -> list[RunInputs]:
-        """Held predecessors this Run continues, oldest first (excluding itself)."""
-        chain: list[RunInputs] = []
+    async def link_queued_from(self, run_id: str) -> None:
+        """Record, once, the Run whose remaining queue waits behind this follow-up."""
+
+        def change(state, row):
+            state.setdefault(QUEUED_FROM_KEY, run_id)
+
+        await self._change(change)
+
+    async def continuation_chain(self) -> tuple[list[RunInputs], list[RunInputs]]:
+        """Held predecessors this Run continues, oldest first (excluding itself).
+
+        Returns ``(chain, overflow)``: ``chain`` holds the nearest
+        ``MAX_CONTINUATION_HOPS`` predecessors; ``overflow`` holds the older
+        ones beyond that bound, which the caller must lapse rather than strand.
+        """
+        members: list[RunInputs] = []
         seen = {self.run_id}
         run_id = (await self.read()).get(CONTINUES_RUN_KEY)
-        while isinstance(run_id, str) and run_id not in seen and len(chain) < MAX_CONTINUATION_HOPS:
+        while isinstance(run_id, str) and run_id not in seen:
             seen.add(run_id)
             member = RunInputs(self.store, run_id, self.user_id)
             try:
                 state = await member.read()
             except InputConflict:
                 break
-            chain.append(member)
-            run_id = state.get(CONTINUES_RUN_KEY)
-        return chain[::-1]
+            members.append(member)
+            run_id = state.get(CONTINUES_RUN_KEY) or state.get(QUEUED_FROM_KEY)
+        return members[:MAX_CONTINUATION_HOPS][::-1], members[MAX_CONTINUATION_HOPS:]
 
     async def dispatched(self, input_id: str, run_id: str) -> None:
         def change(state, row):

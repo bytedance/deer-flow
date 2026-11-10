@@ -2804,6 +2804,15 @@ async def start_run(
                         raise
 
                 execution_context = replace(execution_context, verify_artifacts=verify_artifacts)
+            if resumed_approval and execution_context.agent_runs is not None and run_mgr.input_store is not None:
+                from deerflow.runtime.runs.inputs import RunInputs
+
+                # Link before this Run can pause: a fast answer to that pause
+                # must still find the earlier held queues through this Run.
+                try:
+                    await RunInputs(run_mgr.input_store, record.run_id, record.user_id).link_continuation(resumed_approval["run_id"])
+                except Exception:
+                    logger.warning("Could not link Run %s to the paused Run it resumed", record.run_id, exc_info=True)
             try:
                 await run_agent(
                     bridge,
@@ -2980,6 +2989,18 @@ async def start_run(
                             )
                             if current_request_ids != validated_approval_request_ids:
                                 raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                            # No answer was persisted here, so awaiting stays safe.
+                            # The consumed pause may still hold queued inputs.
+                            if run_mgr.input_store is not None:
+                                from app.gateway.run_inputs import answered_pause_run_id
+
+                                try:
+                                    held_run_id = await answered_pause_run_id(run_mgr.input_store, thread_id, user_id=record.user_id, exclude_run_id=record.run_id)
+                                except Exception:
+                                    held_run_id = None
+                                    logger.warning("Could not find queued inputs held by the recovered pause on thread %s", sanitize_log_param(thread_id), exc_info=True)
+                                if held_run_id is not None:
+                                    resumed_approval["run_id"] = held_run_id
                         if answered_approval is not None:
                             resumed_approval["run_id"] = answered_approval.run_id
                     # The stream lease was established before durable admission.

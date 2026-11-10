@@ -10,7 +10,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import get_current_user, get_run_context, get_run_manager
-from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
+from deerflow.runtime.runs.inputs import MAX_CONTINUATION_HOPS, PAUSED_KEY, InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,32 @@ async def list_thread_inputs(thread_id: str, request: Request):
     return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
 
 
+def _paused(row: dict, state: dict) -> bool:
+    """Whether a Run ended at an input pause, answered or not, rather than finishing."""
+    if row.get("stop_reason"):
+        return False
+    return row["status"] == "waiting_for_input" or (row["status"] == "success" and state.get(PAUSED_KEY) is True)
+
+
+async def answered_pause_run_id(store, thread_id: str, *, user_id: str | None, exclude_run_id: str) -> str | None:
+    """Find the answered pause whose queued inputs are still held, if any.
+
+    A resume admitted through checkpoint-only recovery has no answer handle:
+    an earlier attempt consumed the paused row and then died. That row still
+    reads ``success`` with the paused marker and pending queue items, so the
+    recovered resume can continue it instead of stranding them.
+    """
+    for row in await store.list_input_runs(thread_id, user_id=user_id):
+        if row["run_id"] == exclude_run_id:
+            continue
+        state = row.get("run_inputs") or {}
+        if row["status"] == "success" and _paused(row, state):
+            if any(item["mode"] == "queue" and item["status"] == "pending" for item in state.get("items", [])):
+                return row["run_id"]
+            return None
+    return None
+
+
 async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str, continues_run_id: str | None = None):
     """Use normal admission/authorization and its stable idempotency key.
 
@@ -104,9 +130,21 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
             return
         if continues_run_id is not None:
             await inputs.link_continuation(continues_run_id)
-        if row["status"] == "waiting_for_input" and not row.get("stop_reason"):
+        if _paused(row, await inputs.read()):
+            # Paused, or paused and already answered: the resume Run, which
+            # continues this one, dispatches the held queue after its work.
             return
-        chain = await inputs.continuation_chain()
+        chain, overflow = await inputs.continuation_chain()
+        if overflow:
+            logger.warning(
+                "Run %s continues more than %d approval pauses; lapsing the queued inputs of the %d oldest: %s",
+                inputs.run_id,
+                MAX_CONTINUATION_HOPS,
+                len(overflow),
+                ", ".join(member.run_id for member in overflow),
+            )
+            for member in overflow:
+                await member.pause()
         if row["status"] != "success" or row.get("stop_reason"):
             # The resumed work did not finish; leave held inputs for an explicit retry.
             for member in chain:
@@ -143,6 +181,16 @@ async def _dispatch_pending(inputs: RunInputs, *, agent_runs, thread_id: str, ne
                 # admission. The atomic claim proves no Run was started.
                 logger.info("Skipping cancelled queued input %s for Run %s", entry["id"], inputs.run_id)
                 continue
+            # Link before waiting: should the follow-up pause for approval, the
+            # rest of the queue waits for its resumed work, which continues the
+            # newest Run so the whole remaining chain stays reachable. Written
+            # here, the link precedes any answer to that pause.
+            follow_up = RunInputs(inputs.store, run.run_id, inputs.user_id)
+            try:
+                await follow_up.link_queued_from(newest.run_id)
+            except InputConflict:
+                follow_up = None
+                logger.debug("Queued follow-up Run %s has no input row to link", run.run_id)
             while run.status in ("pending", "running"):
                 # AgentRuns.wait retains its capped backoff and revocation
                 # checks; a long task exceeding a wait window is still live.
@@ -150,11 +198,10 @@ async def _dispatch_pending(inputs: RunInputs, *, agent_runs, thread_id: str, ne
                     run = await agent_runs.wait(thread_id=thread_id, run_id=run.run_id, timeout=60)
                 except TimeoutError:
                     continue
-            if run.status == "waiting_for_input" and not run.stop_reason:
-                # The follow-up paused for approval itself. The rest of the
-                # queue waits for its resumed work, which continues the newest
-                # Run so that the whole remaining chain stays reachable.
-                await RunInputs(inputs.store, run.run_id, inputs.user_id).link_continuation(newest.run_id)
+            if run.status in ("waiting_for_input", "success") and not run.stop_reason and _paused({"status": run.status}, await follow_up.read() if follow_up is not None else {}):
+                # Paused for approval, possibly answered within one poll
+                # window (the answer flips the row to success): its resume
+                # Run dispatches the rest of the queue.
                 return "held"
             if run.status != "success" or run.stop_reason:
                 await inputs.pause()

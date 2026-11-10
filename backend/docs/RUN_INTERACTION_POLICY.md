@@ -80,7 +80,11 @@ its queued inputs pending (an undelivered steer lapses); the resume Run links
 back to it and, once it succeeds, dispatches the
 held queues oldest first, including across consecutive approvals and a queued
 follow-up that pauses for approval itself. If the resumed work does not succeed,
-the held inputs become `not_applied` for an explicit retry. Pending approvals do not expire and
+the held inputs become `not_applied` for an explicit retry. The worker marks a
+Run's inputs paused before the pause is visible, so an answered pause, whose row
+reads `success`, is still not treated as finished; checkpoint-only resume
+recovery uses that mark to find the consumed pause's held queue. A chain beyond
+32 approval hops lapses its oldest held inputs with a warning. Pending approvals do not expire and
 block new runs on the same thread until resolved. See
 [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for configuration and
 argument-summary visibility limits.

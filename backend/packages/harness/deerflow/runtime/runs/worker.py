@@ -1897,6 +1897,14 @@ async def run_agent(
                     pre_run_snapshot=pre_run_workspace_snapshot,
                 )
                 delivery_error = _delivery_error(delivery_content)
+            elif input_control is not None:
+                # Durable before the pause is visible (so before any answer can
+                # flip the row to success): queue dispatch reads this to tell an
+                # answered pause from a finished Run.
+                try:
+                    await input_control.inputs.mark_paused()
+                except Exception:
+                    logger.warning("Could not mark Run %s inputs as paused", run_id, exc_info=True)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else (RunStatus.waiting_for_input if pending_pause else RunStatus.success),
