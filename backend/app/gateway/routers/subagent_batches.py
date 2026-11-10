@@ -17,7 +17,7 @@ from app.gateway.deps import (
 from deerflow.utils.thread_id import ThreadId
 
 router = APIRouter(prefix="/api/threads/{thread_id}/subagent-batches", tags=["subagent-batches"])
-_ITEM_STATUSES = {"pending", "queued", "leased", "running", "succeeded", "failed", "cancelled"}
+_ITEM_STATUSES = {"pending", "queued", "leased", "running", "succeeded", "failed", "cancelled", "outcome_unknown"}
 # A full row holds up to max_result_chars of report plus as much evidence JSON:
 # 2M characters at the config ceiling. Export loads one page into memory (and
 # decodes its JSON on the event loop) before streaming it, so keep pages small.

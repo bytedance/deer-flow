@@ -946,6 +946,12 @@ export const enUS: Translations = {
     title: "Subagent batches",
     description: "Background batch work with saved progress.",
     followUpPending: "The requested follow-up will continue after this batch.",
+    followUpUnknown:
+      "Follow-up is waiting for unknown outcomes to be resolved.",
+    outcomeUnknown: "Outcome unknown",
+    outcomeUnknownCount: (count) => `${count} outcome unknown`,
+    outcomeUnknownHint:
+      "The operation may have taken effect before its result was saved. It will not be retried automatically; dependent items remain blocked.",
     followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",

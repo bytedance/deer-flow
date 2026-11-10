@@ -3019,6 +3019,18 @@ slot. For a user-requested summary or delivery after background work, the option
 keeps ownership when active. See [batch dependencies and follow-up](backend/docs/BATCH_CONTINUATION.md)
 for authorization, cancellation, recovery and result semantics.
 
+For conservative crash recovery, set `subagent_batches.recovery_policy: conservative`
+and restart the Gateway. New batches remember this policy. If a worker stops
+after dispatch but before recording the outcome, the item becomes **Outcome unknown**
+and is not replayed. Its dependents and the requested follow-up wait; independent
+items can continue. Recorded successful results remain available. Timeouts also
+stay unknown, and recorded failures require an explicit retry. The default is
+`retry`; existing batches retain their original policy. This first slice is
+verified on a single Gateway with SQLite and does not provide reconciliation of
+unknown outcomes. Upgrade all workers before enabling it; see the
+[recovery contract](backend/docs/BATCH_CONTINUATION.md#conservative-recovery-opt-in)
+for cancellation, migration and verification details.
+
 When a source run fails or hits a hard stop, the Gateway attempts each batch
 cancellation independently. A failed cancellation logs the batch and run IDs.
 

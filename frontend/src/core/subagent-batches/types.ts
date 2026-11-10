@@ -12,10 +12,14 @@ export type SubagentBatchItemStatus =
   | "leased"
   | "running"
   | "succeeded"
+  | "outcome_unknown"
   | "failed"
   | "cancelled";
 
-export type SubagentBatchCounts = Record<SubagentBatchItemStatus, number>;
+export type SubagentBatchCounts = Record<
+  Exclude<SubagentBatchItemStatus, "outcome_unknown">,
+  number
+> & { outcome_unknown?: number };
 
 export type SubagentBatch = {
   id: string;
@@ -26,6 +30,7 @@ export type SubagentBatch = {
   max_live_items: number;
   max_running_items: number;
   max_attempts: number;
+  recovery_policy?: "retry" | "conservative";
   counts: SubagentBatchCounts;
   created_at: string;
   updated_at: string;
@@ -46,6 +51,8 @@ export type SubagentBatchItem = {
   position: number;
   status: SubagentBatchItemStatus;
   attempt: number;
+  attempt_id?: string | null;
+  dispatch_started_at?: string | null;
   model_name: string | null;
   result_preview: string | null;
   result_truncated: boolean;
@@ -83,6 +90,8 @@ export type SubagentBatchItemDetail = {
   position: number;
   status: SubagentBatchItemStatus;
   attempt: number;
+  attempt_id?: string | null;
+  dispatch_started_at?: string | null;
   model_name: string | null;
   report: string | null;
   report_truncated: boolean;

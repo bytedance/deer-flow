@@ -884,6 +884,11 @@ export const zhCN: Translations = {
     title: "子智能体批处理",
     description: "在后台执行并保留进度的批量任务。",
     followUpPending: "这批任务结束后，会继续完成你要求的后续工作。",
+    followUpUnknown: "存在结果未知的条目，后续工作将继续等待。",
+    outcomeUnknown: "结果未知",
+    outcomeUnknownCount: (count) => `${count} 项结果未知`,
+    outcomeUnknownHint:
+      "操作可能已生效，但结果尚未保存。系统不会自动重试，依赖该条目的任务将继续等待。",
     followUpStopped: "已停止自动接续。",
     workerUnavailable:
       "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
