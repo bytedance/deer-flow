@@ -42,6 +42,44 @@ UPLOAD_STAGING_MIN_AGE = timedelta(hours=24)
 
 _MAX_FILENAME_BYTES = 255
 
+# Multi-segment archive suffixes that must be treated as a single extension
+# when deduplicating, so ``report.tar.gz`` becomes ``report_1.tar.gz`` instead
+# of ``report.tar_1.gz``. Sorted longest-first so the longest match wins; the
+# list is deliberately closed (not every compression format is listed), and no
+# entry is a proper suffix of another, so a future addition (e.g. ``.tar.lzo``
+# beside ``.tar.lz``) stays safe regardless of position.
+_COMPOUND_SUFFIXES = (
+    ".tar.lzma",
+    ".tar.bz2",
+    ".tar.zst",
+    ".tar.lz4",
+    ".tar.br",
+    ".tar.gz",
+    ".tar.lz",
+    ".tar.xz",
+    ".tar.z",
+    ".tbz2",
+    ".tzst",
+    ".tgz",
+    ".txz",
+)
+
+
+def _split_stem_suffix(name: str) -> tuple[str, str]:
+    """Split *name* into ``(stem, suffix)``.
+
+    Unlike :meth:`pathlib.Path.stem`/:meth:`pathlib.Path.suffix`, which only
+    strip the final extension, this keeps known compound archive suffixes
+    (``.tar.gz``, ``.tgz``, ...) intact so a deduplication counter lands
+    before the whole archive suffix.
+    """
+    lowered = name.casefold()
+    for compound in _COMPOUND_SUFFIXES:
+        if lowered.endswith(compound):
+            return name[: -len(compound)], name[-len(compound) :]
+    path = Path(name)
+    return path.stem, path.suffix
+
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
@@ -122,7 +160,7 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     if name.casefold() not in claimed:
         seen.add(name)
         return name
-    stem, suffix = Path(name).stem, Path(name).suffix
+    stem, suffix = _split_stem_suffix(name)
     counter = 1
     while True:
         tag = f"_{counter}"

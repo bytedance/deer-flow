@@ -44,6 +44,7 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
         return [ManagedSubagentDefinition.model_validate(row.definition) for row in rows]
 
     def create(self, definition: ManagedSubagentDefinition) -> None:
+        normalize_managed_subagent_name(definition.name, for_creation=True)
         row = ManagedSubagentRow(
             id=uuid.uuid4().hex,
             name=definition.name,

@@ -90,8 +90,8 @@ def test_routing_hints_are_ordered_by_priority_then_name():
     a_index = section.index("`a_tool`")
     z_index = section.index("`z_tool`")
     assert top_index < a_index < z_index
-    assert "When the user's request involves top, or SQL:" in section
-    assert "prefer the `top_tool` tool." in section
+    assert "Capability hints for top, or SQL:" in section
+    assert "consider the `top_tool` tool when its capability fits the task." in section
     assert "priority" not in section
 
 
@@ -101,8 +101,8 @@ def test_deferred_routing_hints_use_tool_search_promotion():
 
     section = get_mcp_routing_hints_prompt_section([routed], deferred_names=deferred_setup.deferred_names)
 
-    assert "When the user's request involves 订单:" in section
-    assert "use `tool_search` to fetch `postgres_query`, then prefer that MCP tool." in section
+    assert "Capability hints for 订单:" in section
+    assert "use `tool_search` to fetch `postgres_query`, when its capability fits the task." in section
     assert "prefer the `postgres_query` tool." not in section
 
 

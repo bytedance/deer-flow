@@ -30,6 +30,12 @@ import { getBackendBaseURL } from "../config";
 import { useRunInputsEnabled } from "../features";
 import { useI18n } from "../i18n/hooks";
 import type { Locale } from "../i18n/locale";
+import type { Translations } from "../i18n/locales";
+import {
+  extractHitlApprovalRequests,
+  type HitlApprovalRequest,
+  type HitlApprovalResponse,
+} from "../messages/human-input";
 import { getMessageRunId, parseRunStartTime } from "../messages/run-duration";
 import { isErrorToolMessage } from "../messages/tool-error";
 import { indexToolResults } from "../messages/tool-result";
@@ -89,6 +95,7 @@ import {
 import type {
   AgentThread,
   AgentThreadState,
+  AppRun,
   RunMessage,
   ThreadTokenUsageResponse,
 } from "./types";
@@ -112,6 +119,10 @@ export type ThreadStreamOptions = {
   onSend?: (threadId: string) => void;
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
+  /** REST detail fallback for reloads and other tabs; live uses thread.interrupt. */
+  restInterrupts?: unknown;
+  restInterruptsLoading?: boolean;
+  restInterruptsError?: boolean;
 };
 
 type SendMessageOptions = {
@@ -137,6 +148,80 @@ type SendMessageOptions = {
    */
   onSent?: () => void;
 };
+
+export const THREAD_RUN_RECURSION_LIMIT = 1000;
+export const HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS = 10_000;
+
+type PausedRunContext = {
+  extraContext?: Record<string, unknown>;
+  conversationReferences?: string[];
+};
+
+type PendingApprovalSubmission = {
+  threadId: string;
+  requestId: string;
+  resolve: (accepted: boolean) => void;
+  timeout: number | undefined;
+};
+
+export function deriveHitlApprovalState({
+  liveInterrupt,
+  restInterrupts,
+  historyLoading,
+  restInterruptsError = false,
+  next,
+  answeredRequestIds,
+}: {
+  liveInterrupt: unknown;
+  restInterrupts?: unknown;
+  historyLoading: boolean;
+  restInterruptsError?: boolean;
+  next: readonly string[];
+  answeredRequestIds: ReadonlySet<string>;
+}) {
+  const requests = extractHitlApprovalRequests([
+    ...extractHitlApprovalRequests(liveInterrupt),
+    ...extractHitlApprovalRequests(restInterrupts),
+  ]);
+  const pendingRequests = requests.filter(
+    (request) => !answeredRequestIds.has(request.request_id),
+  );
+  return {
+    requests: pendingRequests,
+    hasPendingApproval:
+      pendingRequests.length > 0 ||
+      ((historyLoading || restInterruptsError) &&
+        next.includes("HitlApprovalMiddleware.after_model")),
+  };
+}
+
+export function buildHitlApprovalSubmitOptions({
+  threadId,
+  settings,
+  responses,
+  extraContext,
+  conversationReferences,
+}: {
+  threadId: string;
+  settings: LocalSettings["context"];
+  responses: HitlApprovalResponse[];
+} & PausedRunContext) {
+  return {
+    threadId,
+    // The SDK otherwise injects the pre-interrupt history head in this window.
+    checkpoint: null,
+    command: { resume: { responses } },
+    streamMode: ["values" as const],
+    streamResumable: true,
+    config: { recursion_limit: THREAD_RUN_RECURSION_LIMIT },
+    context: buildRunContext({
+      settings,
+      threadId,
+      extraContext,
+      conversationReferences,
+    }),
+  };
+}
 
 type ThreadDeleteClient = {
   threads: {
@@ -1970,6 +2055,30 @@ function getHttpStatus(error: unknown): number | undefined {
   return undefined;
 }
 
+function getStreamErrorToastMessage(
+  error: unknown,
+  t: Translations,
+  showApprovalErrors = false,
+): string {
+  const status = getHttpStatus(error);
+  if (status !== undefined && status >= 500 && status < 600) {
+    console.warn("Chat stream request failed:", getStreamErrorMessage(error));
+    return t.conversation.streamServerError(status);
+  }
+
+  const message = getStreamErrorMessage(error);
+  if (showApprovalErrors) {
+    const errorText = `${JSON.stringify(error) ?? ""} ${message}`;
+    if (errorText.includes("hitl_approval_disabled")) {
+      return t.humanInput.approval.featureDisabled;
+    }
+    if (errorText.includes("no_pending_approval")) {
+      return t.humanInput.approval.noPending;
+    }
+  }
+  return message;
+}
+
 function isThreadMissingError(error: unknown): boolean {
   const status = getHttpStatus(error);
   // Treat 403 like 404 here to avoid disclosing whether an inaccessible thread
@@ -1986,6 +2095,9 @@ export function useThreadStream({
   onSend,
   onStart,
   onFinish,
+  restInterrupts,
+  restInterruptsLoading = false,
+  restInterruptsError = false,
 }: ThreadStreamOptions) {
   const { t, locale } = useI18n();
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
@@ -2020,6 +2132,29 @@ export function useThreadStream({
     onStart,
     onFinish,
   });
+  const [answeredApprovalState, setAnsweredApprovalState] = useState<{
+    threadId: string | null;
+    requestIds: Set<string>;
+  }>({ threadId: null, requestIds: new Set() });
+  const pendingApprovalSubmissionRef = useRef<PendingApprovalSubmission | null>(
+    null,
+  );
+  const timedOutApprovalSubmissionRef = useRef<{
+    threadId: string;
+    requestId: string;
+  } | null>(null);
+  const liveInterruptRef = useRef<unknown>(undefined);
+  const restInterruptsRef = useRef<unknown>(restInterrupts);
+  restInterruptsRef.current = restInterrupts;
+
+  const settlePendingApproval = useCallback((accepted: boolean) => {
+    const pending = pendingApprovalSubmissionRef.current;
+    if (!pending) return;
+    pendingApprovalSubmissionRef.current = null;
+    clearTimeout(pending.timeout);
+    pending.resolve(accepted);
+  }, []);
+  const pausedRunContextsRef = useRef(new Map<string, PausedRunContext>());
 
   const {
     messages: history,
@@ -2037,6 +2172,15 @@ export function useThreadStream({
     () =>
       runsQuery.data?.find((run) => ACTIVE_RUN_STATUSES.has(String(run.status)))
         ?.run_id,
+    [runsQuery.data],
+  );
+  const waitingForInputRunIds = useMemo(
+    () =>
+      new Set(
+        (runsQuery.data ?? [])
+          .filter((run) => run.status === "waiting_for_input")
+          .map((run) => run.run_id),
+      ),
     [runsQuery.data],
   );
   const activeRunRejoinRef = useRef<ActiveRunRejoinState>(
@@ -2058,6 +2202,7 @@ export function useThreadStream({
 
   useEffect(() => {
     const normalizedThreadId = threadId ?? null;
+    timedOutApprovalSubmissionRef.current = null;
     if (!normalizedThreadId) {
       // Reset when the UI moves back to a brand new unsaved thread.
       startedRef.current = false;
@@ -2067,6 +2212,25 @@ export function useThreadStream({
     }
     threadIdRef.current = normalizedThreadId;
   }, [threadId]);
+  useEffect(() => {
+    return () => {
+      timedOutApprovalSubmissionRef.current = null;
+      settlePendingApproval(false);
+    };
+  }, [settlePendingApproval]);
+
+  useEffect(() => {
+    const timedOutApproval = timedOutApprovalSubmissionRef.current;
+    if (!timedOutApproval || restInterruptsLoading || restInterruptsError) {
+      return;
+    }
+    const stillPending = extractHitlApprovalRequests(restInterrupts).some(
+      (request) => request.request_id === timedOutApproval.requestId,
+    );
+    if (!stillPending) {
+      timedOutApprovalSubmissionRef.current = null;
+    }
+  }, [restInterrupts, restInterruptsError, restInterruptsLoading]);
 
   const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
     threadIdRef.current = _threadId;
@@ -2191,6 +2355,27 @@ export function useThreadStream({
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
     onCreated(meta) {
+      const pendingApproval = pendingApprovalSubmissionRef.current;
+      const timedOutApproval = timedOutApprovalSubmissionRef.current;
+      const acceptedRequestId =
+        pendingApproval?.threadId === meta.thread_id
+          ? pendingApproval.requestId
+          : timedOutApproval?.threadId === meta.thread_id
+            ? timedOutApproval.requestId
+            : null;
+      if (pendingApproval?.threadId === meta.thread_id) {
+        settlePendingApproval(true);
+      }
+      if (acceptedRequestId) {
+        timedOutApprovalSubmissionRef.current = null;
+        setAnsweredApprovalState((current) => {
+          const requestIds = new Set(
+            current.threadId === meta.thread_id ? current.requestIds : [],
+          );
+          requestIds.add(acceptedRequestId);
+          return { threadId: meta.thread_id, requestIds };
+        });
+      }
       submittedRunIdRef.current = meta.run_id;
       handleStreamStart(meta.thread_id, meta.run_id);
       const now = new Date().toISOString();
@@ -2335,6 +2520,32 @@ export function useThreadStream({
       }
     },
     onError(error, run) {
+      timedOutApprovalSubmissionRef.current = null;
+      if (pendingApprovalSubmissionRef.current) {
+        settlePendingApproval(false);
+      }
+      const erroredThreadId = run?.thread_id ?? threadIdRef.current;
+      // Acceptance does not prove the replay completed. Reopen only requests
+      // still advertised as pending; completed historical answers stay hidden.
+      const stillPendingRequestIds = new Set(
+        extractHitlApprovalRequests([
+          ...extractHitlApprovalRequests(liveInterruptRef.current),
+          ...extractHitlApprovalRequests(restInterruptsRef.current),
+        ]).map((request) => request.request_id),
+      );
+      setAnsweredApprovalState((current) => {
+        if (current.threadId !== erroredThreadId) {
+          return current;
+        }
+        const requestIds = new Set(
+          [...current.requestIds].filter(
+            (requestId) => !stillPendingRequestIds.has(requestId),
+          ),
+        );
+        return requestIds.size === current.requestIds.size
+          ? current
+          : { threadId: current.threadId, requestIds };
+      });
       scheduleActiveRunRejoinRetry(run);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
@@ -2342,7 +2553,7 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      toast.error(getStreamErrorToastMessage(error, t, true));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2361,6 +2572,7 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      settlePendingApproval(false);
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
       }
@@ -2375,6 +2587,8 @@ export function useThreadStream({
       invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
     },
   });
+  liveInterruptRef.current = thread.interrupt;
+
   const { isLoading: isThreadLoading, joinStream } = thread;
   const runInputAccount = useContext(AuthQueryScopeContext);
   const inputCapability = useRunInputsEnabled(!!runInputAccount && !isMock);
@@ -2589,6 +2803,7 @@ export function useThreadStream({
   );
 
   const stopThread = useCallback(async () => {
+    settlePendingApproval(false);
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
     const pendingReplay = pendingPreparedReplayRef.current;
@@ -2612,6 +2827,7 @@ export function useThreadStream({
     knownActiveRunId,
     isMock,
     queryClient,
+    settlePendingApproval,
     thread,
     threadId,
   ]);
@@ -2693,6 +2909,7 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    settlePendingApproval(false);
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
     transientHistoryOrderRef.current = [];
@@ -2709,7 +2926,8 @@ export function useThreadStream({
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-  }, [threadId]);
+    return () => settlePendingApproval(false);
+  }, [settlePendingApproval, threadId]);
 
   // Confirming a new thread only assigns its SDK id; the displayed
   // conversation and its submitted human anchor have not changed.
@@ -2948,6 +3166,12 @@ export function useThreadStream({
         // Attachments are uploaded, so the send is genuinely dispatched and
         // callers can drop one-time state. A failed upload rejected above
         // without reaching here, leaving that state for a retry.
+        pausedRunContextsRef.current.set(threadId, {
+          extraContext,
+          conversationReferences: options?.conversationReferences
+            ? [...options.conversationReferences]
+            : undefined,
+        });
         options?.onSent?.();
         await thread.submit(
           {
@@ -2966,7 +3190,7 @@ export function useThreadStream({
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
             config: {
-              recursion_limit: 1000,
+              recursion_limit: THREAD_RUN_RECURSION_LIMIT,
             },
             context: buildRunContext({
               settings: context,
@@ -3002,6 +3226,129 @@ export function useThreadStream({
       persistedMessages,
       visibleHistory,
     ],
+  );
+
+  const submitHitlApproval = useCallback(
+    async (
+      threadId: string,
+      request: HitlApprovalRequest,
+      responses: HitlApprovalResponse[],
+    ) => {
+      if (thread.isLoading || sendInFlightRef.current) return false;
+      const expected = new Set(
+        request.actions.map((action) => action.tool_call_id),
+      );
+      const responseIds = new Set<string>();
+      const valid =
+        responses.length === request.actions.length &&
+        responses.every((response) => {
+          const action = request.actions.find(
+            (candidate) => candidate.tool_call_id === response.tool_call_id,
+          );
+          if (
+            !action ||
+            responseIds.has(response.tool_call_id) ||
+            response.request_id !== action.request_id ||
+            response.source !== "hitl_approval" ||
+            response.response_kind !== "option" ||
+            !request.allowed_decisions.includes(response.option_id) ||
+            response.value.length > 2000 ||
+            (response.option_id === "approve" && response.value !== "")
+          ) {
+            return false;
+          }
+          responseIds.add(response.tool_call_id);
+          return true;
+        });
+      if (!valid || responseIds.size !== expected.size) return false;
+
+      const timedOutApproval = timedOutApprovalSubmissionRef.current;
+      if (
+        timedOutApproval?.threadId === threadId &&
+        timedOutApproval.requestId !== request.request_id
+      ) {
+        // Without a request ID echo, a different resume cannot safely share
+        // the thread until the timed-out request resolves or disappears.
+        void queryClient.invalidateQueries({
+          queryKey: ["thread", "metadata", threadId],
+        });
+        return false;
+      }
+
+      sendInFlightRef.current = true;
+      // ES2022 target: Promise.withResolvers is not in the configured libs.
+      let resolveAccepted!: (accepted: boolean) => void;
+      const accepted = new Promise<boolean>((resolve) => {
+        resolveAccepted = resolve;
+      });
+      const submission: PendingApprovalSubmission = {
+        threadId,
+        requestId: request.request_id,
+        resolve: resolveAccepted,
+        timeout: undefined,
+      };
+      pendingApprovalSubmissionRef.current = submission;
+      try {
+        submission.timeout = window.setTimeout(() => {
+          if (pendingApprovalSubmissionRef.current === submission) {
+            timedOutApprovalSubmissionRef.current = {
+              threadId,
+              requestId: request.request_id,
+            };
+            toast.error(t.humanInput.approval.submitTimeout);
+            void stopThread().catch((error: unknown) => {
+              toast.error(getStreamErrorToastMessage(error, t));
+            });
+          }
+        }, HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS);
+        const pausedContext = pausedRunContextsRef.current.get(threadId);
+        // assistantId is fixed on this useStream instance and is therefore the
+        // same lead/custom agent used by the paused run.
+        const queued = thread.submit(
+          null,
+          buildHitlApprovalSubmitOptions({
+            threadId,
+            settings: context,
+            responses,
+            extraContext: pausedContext?.extraContext,
+            conversationReferences: pausedContext?.conversationReferences,
+          }),
+        );
+        // submit() resolves when the SDK has queued consumption, not when the
+        // Gateway has accepted the resume. Acceptance can arrive first, while
+        // onError, onFinish, abort, and the deadline can unblock a submit that
+        // never settles. Only onCreated proves acceptance.
+        const outcome = await Promise.race([
+          queued.then(() => "queued" as const),
+          accepted,
+        ]);
+        const wasAccepted = outcome === "queued" ? await accepted : outcome;
+        if (wasAccepted) {
+          void queryClient.invalidateQueries({
+            queryKey: ["thread", "metadata", threadId],
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["thread", threadId],
+          });
+        }
+        return wasAccepted;
+      } catch (error) {
+        if (
+          timedOutApprovalSubmissionRef.current?.threadId === threadId &&
+          timedOutApprovalSubmissionRef.current.requestId === request.request_id
+        ) {
+          timedOutApprovalSubmissionRef.current = null;
+        }
+        if (pendingApprovalSubmissionRef.current === submission) {
+          settlePendingApproval(false);
+        }
+        toast.error(getStreamErrorToastMessage(error, t, true));
+        return false;
+      } finally {
+        sendInFlightRef.current = false;
+      }
+    },
+    [context, queryClient, settlePendingApproval, stopThread, t, thread],
   );
 
   const submitPreparedReplay = useCallback(
@@ -3100,6 +3447,7 @@ export function useThreadStream({
           setOptimisticMessages(nextOptimisticMessages);
         }
 
+        pausedRunContextsRef.current.set(threadId, {});
         await thread.submit(prepared.input, {
           threadId,
           checkpoint: prepared.checkpoint,
@@ -3107,7 +3455,7 @@ export function useThreadStream({
           // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
           config: {
-            recursion_limit: 1000,
+            recursion_limit: THREAD_RUN_RECURSION_LIMIT,
           },
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
@@ -3141,7 +3489,7 @@ export function useThreadStream({
             removeSetItems(current, preparedSupersededMessageIds),
           );
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(getStreamErrorToastMessage(error, t));
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -3153,6 +3501,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       queryClient,
+      t,
       thread,
       visibleHistory,
     ],
@@ -3430,6 +3779,35 @@ export function useThreadStream({
         pendingUsageBaselineMessageIdsRef.current,
       )
     : [];
+  const answeredApprovalRequestIds = useMemo(
+    () =>
+      answeredApprovalState.threadId === currentViewThreadId
+        ? answeredApprovalState.requestIds
+        : new Set<string>(),
+    [answeredApprovalState, currentViewThreadId],
+  );
+  const approvalState = useMemo(
+    () =>
+      deriveHitlApprovalState({
+        liveInterrupt: thread.interrupt,
+        restInterrupts,
+        restInterruptsError,
+        historyLoading:
+          isHistoryLoading || restInterruptsLoading || thread.isThreadLoading,
+        next: thread.history?.[0]?.next ?? [],
+        answeredRequestIds: answeredApprovalRequestIds,
+      }),
+    [
+      answeredApprovalRequestIds,
+      isHistoryLoading,
+      restInterrupts,
+      restInterruptsError,
+      restInterruptsLoading,
+      thread.history,
+      thread.interrupt,
+      thread.isThreadLoading,
+    ],
+  );
 
   // Merge history, live stream, and optimistic messages for display
   // History messages may overlap with thread.messages; thread.messages take precedence
@@ -3450,6 +3828,10 @@ export function useThreadStream({
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    approvalRequests: approvalState.requests,
+    hasPendingApproval: approvalState.hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
     editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
@@ -3859,14 +4241,14 @@ export function useThreadRuns(
   { enabled = true }: { enabled?: boolean } = {},
 ) {
   const apiClient = getAPIClient();
-  return useQuery<Run[]>({
+  return useQuery<AppRun[]>({
     queryKey: ["thread", threadId],
     queryFn: async () => {
       if (!threadId) {
         return [];
       }
       const response = await apiClient.runs.list(threadId);
-      return response;
+      return response as AppRun[];
     },
     enabled: enabled && Boolean(threadId),
     refetchOnWindowFocus: false,
@@ -4036,11 +4418,11 @@ export function useMoveThreadToProject(options?: {
 
 export function useRunDetail(threadId: string, runId: string) {
   const apiClient = getAPIClient();
-  return useQuery<Run>({
+  return useQuery<AppRun>({
     queryKey: ["thread", threadId, "run", runId],
     queryFn: async () => {
       const response = await apiClient.runs.get(threadId, runId);
-      return response;
+      return response as AppRun;
     },
     refetchOnWindowFocus: false,
   });

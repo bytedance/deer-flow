@@ -148,11 +148,13 @@ def test_apply_prompt_template_preserves_interactive_clarification_guidance(monk
 
     prompt = prompt_module.apply_prompt_template(app_config=config)
 
-    assert "**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**" in prompt
-    assert "DO NOT call any other tool in the same turn as ask_clarification" in prompt
-    assert "❌ DO NOT make assumptions when information is missing - ALWAYS ask" in prompt
-    assert '**Example:**\nUser: "Deploy the application"' in prompt
-    assert 'User: "staging"\nYou: "Deploying to staging..." [proceed]' in prompt
+    assert "continue independent work where possible" in prompt
+    assert "reasonable, reversible assumptions" in prompt
+    assert "when essential information is missing" in prompt
+    assert "authorization is" in prompt
+    assert "sibling tool\ncalls in that turn are dropped" in prompt
+    assert "CLARIFY → PLAN → ACT" not in prompt
+    assert "ALWAYS ask" not in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

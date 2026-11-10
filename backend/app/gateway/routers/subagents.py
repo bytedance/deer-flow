@@ -88,9 +88,9 @@ def _validate_model(model: str, app_config) -> None:
         raise HTTPException(status_code=422, detail=f"Unknown model '{model}'. Use 'inherit' or a configured model name.")
 
 
-def _validate_path_name(name: str) -> str:
+def _validate_path_name(name: str, *, for_creation: bool = False) -> str:
     try:
-        return normalize_managed_subagent_name(name)
+        return normalize_managed_subagent_name(name, for_creation=for_creation)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -181,6 +181,7 @@ async def list_subagents(request: Request) -> SubagentsListResponse:
 @router.post("", response_model=SubagentResponse, status_code=201, summary="Create Managed Subagent")
 async def create_managed_subagent(request: Request, body: ManagedSubagentCreateRequest) -> SubagentResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    _validate_path_name(body.name, for_creation=True)
     try:
         definition = ManagedSubagentDefinition(**body.model_dump(exclude_none=True))
     except ValidationError as exc:

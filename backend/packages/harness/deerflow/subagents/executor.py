@@ -155,7 +155,8 @@ class SubagentResult:
             ``persistent_shell_sessions`` flag resolved from the state that
             carried the evidence (``None`` when unidentifiable — the matcher
             fails closed on it).
-            Accumulated per chunk (merged by ``tool_call_id``) so
+            Accumulated per chunk (merged by result message id, ``tool_call_id``
+            only for entries without one) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
@@ -213,8 +214,9 @@ class SubagentResult:
     def update_bash_executions(self, executions: list[dict[str, Any]] | None) -> None:
         """Merge bash evidence from the latest yielded state while still running.
 
-        Entries merge by ``tool_call_id`` in first-seen order and are capped to
-        the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
+        Entries merge by their result message (``tool_call_id`` when it has no
+        id, since providers can reuse call ids across responses) in first-seen
+        order and are capped to the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
         ``final_state`` scan, accumulation survives summarization compacting
         earlier AI/ToolMessages out of the streamed history. ``None`` leaves
         the field untouched (no evidence this chunk); an empty list still
@@ -227,9 +229,9 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return
-            merged = {str(entry.get("tool_call_id")): entry for entry in (self.bash_executions or [])}
+            merged = {_bash_evidence_key(entry): entry for entry in (self.bash_executions or [])}
             for execution in executions:
-                merged[str(execution.get("tool_call_id"))] = dict(execution)
+                merged[_bash_evidence_key(execution)] = dict(execution)
             self.bash_executions = list(merged.values())[-_BASH_EVIDENCE_MAX_ENTRIES:]
 
     def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
@@ -531,10 +533,22 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
         return None
 
 
+def _bash_evidence_key(execution: dict[str, Any]) -> tuple[str, str]:
+    """Identify one recorded execution across values chunks.
+
+    A provider may reuse a call id in a later response, so the result message
+    id names the execution; entries without one keep the call-id identity.
+    """
+    result_id = execution.get("result_id")
+    if isinstance(result_id, str) and result_id:
+        return ("result", result_id)
+    return ("call", str(execution.get("tool_call_id")))
+
+
 def _harvest_bash_executions(
     final_state: Any,
     *,
-    summary_cache: dict[str, tuple[str, str]] | None = None,
+    summary_cache: dict[tuple[str, str], tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -564,48 +578,47 @@ def _harvest_bash_executions(
             summary_cache.clear()
         return None
     try:
+        from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
         from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
         from deerflow.subagents.acceptance_checks import summarize_test_output
 
-        commands: dict[str, tuple[str, str, bool]] = {}
-        for message in messages:
-            if not isinstance(message, AIMessage):
-                continue
-            for tool_call in message.tool_calls or []:
-                name = str(tool_call.get("name") or "")
-                if name not in _BASH_EVIDENCE_TOOL_NAMES:
-                    continue
-                tool_call_id = str(tool_call.get("id") or "")
-                args = tool_call.get("args")
-                command = args.get("command") if isinstance(args, dict) else None
-                command = command if isinstance(command, str) else ""
-                # A truncated command loses its suffix; the matcher must not
-                # treat shell-structure analysis of the prefix as proof (a
-                # selection-changing suffix like ``-k smoke`` could be cut).
-                commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
-        if not commands:
+        # Tool-call ids are unique per response, not per conversation: pair each
+        # result with the call of its own response, so a reused id never labels
+        # one command's output with another command.
+        bash_calls = [occurrence for occurrence in pair_tool_call_results(messages) if occurrence.name in _BASH_EVIDENCE_TOOL_NAMES]
+        if not bash_calls:
             if summary_cache is not None:
                 summary_cache.clear()
             return []
+        positions = {id(message): index for index, message in enumerate(messages)}
+        answered = sorted((occurrence for occurrence in bash_calls if occurrence.result is not None), key=lambda occurrence: positions[id(occurrence.result)])
         executions: list[dict[str, Any]] = []
         # Only retained executions need full-output parsing. The per-run cache
         # survives values chunks, but keeps at most the same newest 20 outputs.
-        tool_messages = [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id or "") in commands][-_BASH_EVIDENCE_MAX_ENTRIES:]
-        next_cache: dict[str, tuple[str, str]] = {}
-        for message in tool_messages:
-            tool_call_id = str(message.tool_call_id or "")
-            entry = commands[tool_call_id]
-            name, command, command_truncated = entry
+        next_cache: dict[tuple[str, str], tuple[str, str]] = {}
+        for occurrence in answered[-_BASH_EVIDENCE_MAX_ENTRIES:]:
+            message = occurrence.result
+            tool_call_id = occurrence.call_id
+            name = occurrence.name
+            command = occurrence.args.get("command")
+            command = command if isinstance(command, str) else ""
+            # A truncated command loses its suffix; the matcher must not
+            # treat shell-structure analysis of the prefix as proof (a
+            # selection-changing suffix like ``-k smoke`` could be cut).
+            command_truncated = len(command) > _BASH_EVIDENCE_COMMAND_CHARS
+            command = command[:_BASH_EVIDENCE_COMMAND_CHARS]
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
             status, status_marker = _bash_evidence_status(content, meta_status)
-            cached = summary_cache.get(tool_call_id) if summary_cache is not None else None
+            result_id = message.id if isinstance(message.id, str) and message.id else None
+            cache_key = _bash_evidence_key({"result_id": result_id, "tool_call_id": tool_call_id})
+            cached = summary_cache.get(cache_key) if summary_cache is not None else None
             if cached is not None and (cached[0] is content or cached[0] == content):
                 test_summary = cached[1]
             else:
                 test_summary = summarize_test_output(content)
-            next_cache[tool_call_id] = (content, test_summary)
+            next_cache[cache_key] = (content, test_summary)
             output_tail = content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:]
             if len(content) > _BASH_EVIDENCE_OUTPUT_TAIL_CHARS and content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS - 1] != "\n":
                 # A clipped test name/log line can look like a summary after
@@ -614,6 +627,7 @@ def _harvest_bash_executions(
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
+                    "result_id": result_id,
                     "tool_name": name,
                     "command": command,
                     "command_truncated": command_truncated,
@@ -1245,6 +1259,13 @@ class SubagentExecutor:
                 "is" if len(missing) == 1 else "are",
                 self.config.name,
             )
+        bound_tools = list(tools if tools is not None else self.tools)
+        # Native subagents have no resumable checkpoint/runtime. Reuse the lead
+        # builder's configured policy so matching calls fail closed instead of
+        # bypassing approval; disabled configuration remains a no-op.
+        from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
+
+        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1257,7 +1278,6 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
-        bound_tools = list(tools if tools is not None else self.tools)
         agent = create_agent(
             model=model,
             tools=bound_tools,
@@ -1796,7 +1816,7 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
-        bash_summary_cache: dict[str, tuple[str, str]] = {}
+        bash_summary_cache: dict[tuple[str, str], tuple[str, str]] = {}
 
         def current_bash_executions() -> list[dict[str, Any]] | None:
             # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
