@@ -123,14 +123,16 @@ def stored_next_run_at(
     """``next_run_at`` for an admitted schedule, or why it no longer computes.
 
     Admission validates every schedule, but a stored one can stop computing
-    later: a zone the installed tz database no longer has, or a cron expression
-    a newer croniter rejects. Runtime bookkeeping runs inside the shared
-    scheduler poll, so it must not raise for one task; callers take the task
-    off the schedule with :func:`pauses_unschedulable` instead.
+    later: a zone the installed tz database no longer has, a cron expression
+    a newer croniter rejects, or a ``schedule_spec`` an operator edit or an old
+    release left as JSON null, a list or a string. Runtime bookkeeping runs
+    inside the shared scheduler poll, so it must not raise for one task;
+    callers take the task off the schedule with :func:`pauses_unschedulable`
+    instead.
     """
     try:
         return next_run_at(schedule_type, schedule_spec, timezone_name, now=now), None
-    except (ValueError, OverflowError) as exc:
+    except (ValueError, OverflowError, AttributeError) as exc:
         return None, f"{UNSCHEDULABLE_ERROR_PREFIX}{exc}"
 
 
