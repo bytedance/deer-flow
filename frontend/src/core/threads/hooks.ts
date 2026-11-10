@@ -192,6 +192,9 @@ type PendingSend = {
  */
 type ReleasedSend = Pick<PendingSend, "threadId" | "options">;
 
+/** Upper bound on released sends kept for a late acceptance. */
+const MAX_RELEASED_SENDS = 8;
+
 /**
  * Stop pressed after `thread.submit` resolved but before the Gateway accepted
  * the run. Shaped like an abort so the composer treats it as "no turn was
@@ -2163,9 +2166,10 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const pendingSendRef = useRef<PendingSend | null>(null);
-  // A released send can still be accepted later; keep its one-time state
-  // until then so a late acceptance does not strand a stored draft.
-  const releasedSendRef = useRef<ReleasedSend | null>(null);
+  // Sends whose caller was released on navigation can still be accepted later;
+  // keep each one until that acceptance so a late frame cannot strand its draft.
+  // A list, not a slot: release A, start B, release B must not lose A's cleanup.
+  const releasedSendsRef = useRef<ReleasedSend[]>([]);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2284,18 +2288,24 @@ export function useThreadStream({
    * released still gets its `onSent` here when the acceptance names its thread.
    */
   const acceptPendingSend = useCallback((threadId?: string) => {
-    const released = releasedSendRef.current;
-    if (released && threadId === released.threadId) {
-      releasedSendRef.current = null;
-      try {
-        released.options?.onSent?.();
-      } catch (error) {
-        // A caller's one-time cleanup must not break the stream callback that
-        // observed acceptance; surface it instead of swallowing it.
-        console.error(
-          "Failed to retire one-time composer state for an accepted send.",
-          error,
-        );
+    // A released send is retired only by an acceptance that names its thread:
+    // an id-less frame from an older stream must never consume a newer send's
+    // cleanup, and vice versa.
+    if (threadId) {
+      const released = releasedSendsRef.current;
+      const match = released.findIndex((send) => send.threadId === threadId);
+      if (match >= 0) {
+        const [accepted] = released.splice(match, 1);
+        try {
+          accepted?.options?.onSent?.();
+        } catch (error) {
+          // A caller's one-time cleanup must not break the stream callback that
+          // observed acceptance; surface it instead of swallowing it.
+          console.error(
+            "Failed to retire one-time composer state for an accepted send.",
+            error,
+          );
+        }
       }
     }
     const pending = pendingSendRef.current;
@@ -2342,10 +2352,13 @@ export function useThreadStream({
     }
     pending.settled = true;
     pendingSendRef.current = null;
-    releasedSendRef.current = {
-      threadId: pending.threadId,
-      options: pending.options,
-    };
+    // Keep one cleanup per released send, bounded: a long session must not
+    // accumulate drafts, and the oldest attempt is the least likely to be
+    // accepted after this much navigation.
+    releasedSendsRef.current = [
+      ...releasedSendsRef.current.slice(-MAX_RELEASED_SENDS + 1),
+      { threadId: pending.threadId, options: pending.options },
+    ];
     pending.resolve();
   }, []);
 
@@ -2533,14 +2546,21 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
-    onMetadataEvent(_data) {
+    onMetadataEvent(data) {
       // The run's metadata frame means the Gateway accepted this send even
       // when the response header is unreadable (e.g. a proxy that hides
-      // Content-Location); see `PendingSend`.
-      acceptPendingSend();
+      // Content-Location). Only the thread it names can be accepted: an
+      // id-less acceptance could retire a newer send from an older stream.
+      const eventThreadId =
+        typeof data === "object" &&
+        data !== null &&
+        "thread_id" in data &&
+        typeof (data as { thread_id?: unknown }).thread_id === "string"
+          ? (data as { thread_id: string }).thread_id
+          : undefined;
+      acceptPendingSend(eventThreadId);
     },
     onUpdateEvent(data, { mutate }) {
-      acceptPendingSend();
       if (hasRenderedThreadStateUpdate(data)) {
         mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
       }
@@ -2588,7 +2608,9 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
-      acceptPendingSend();
+      // Not an acceptance signal: a custom frame carries no thread identity,
+      // so accepting here could retire a newer send from an older stream.
+      // `onMetadataEvent`, `handleStreamStart` and `onFinish` name their thread.
       // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
       // task_* events, so the per-branch re-narrowing below reads this single
       // source of truth instead of re-checking the object shape each time.
@@ -3165,11 +3187,12 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
-      // A new send on this conversation supersedes a released attempt whose
-      // acceptance never arrived: its one-time state is already stale.
-      if (releasedSendRef.current?.threadId === threadId) {
-        releasedSendRef.current = null;
-      }
+      // A new send on this conversation supersedes released attempts for the
+      // same conversation whose acceptance never arrived: their one-time state
+      // is already stale, while other conversations' attempts stay tracked.
+      releasedSendsRef.current = releasedSendsRef.current.filter(
+        (send) => send.threadId !== threadId,
+      );
 
       const text = message.text.trim();
       let pendingSend: PendingSend | null = null;
@@ -3385,7 +3408,12 @@ export function useThreadStream({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
-        rejectPendingSend(error);
+        // This invocation owns the rejection only while it is still the pending
+        // send: after navigation, an upload failure from an older attempt must
+        // not report a newer send as failed.
+        if (pendingSendRef.current === pendingSend) {
+          rejectPendingSend(error);
+        }
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);

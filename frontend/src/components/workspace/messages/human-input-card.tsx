@@ -613,6 +613,15 @@ export function HumanInputCard({
               {t.humanInput.answeredValue(answeredResponse.value)}
             </p>
           ) : null}
+
+          {/* An option-only card mounts neither the text form nor the form
+              branch: without this node a rejected option submit would set the
+              error and never render it. */}
+          {!allowText && !isForm && error ? (
+            <p className="text-destructive text-sm" role="alert">
+              {error}
+            </p>
+          ) : null}
         </div>
       </div>
     </section>

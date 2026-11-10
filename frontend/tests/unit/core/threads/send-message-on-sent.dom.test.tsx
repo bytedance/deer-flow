@@ -16,6 +16,7 @@ import type { UploadResponse } from "@/core/uploads/api";
 
 type StreamCallbacks = {
   onCreated?: (meta: { thread_id: string; run_id: string }) => void;
+  onMetadataEvent?: (data: unknown) => void;
   onError?: (error: unknown, run?: unknown) => void;
 };
 
@@ -29,6 +30,7 @@ rs.mock("@langchain/langgraph-sdk/react", () => ({
   useStream: (options: StreamCallbacks) => {
     mocks.callbacks = {
       onCreated: options.onCreated,
+      onMetadataEvent: options.onMetadataEvent,
       onError: options.onError,
     };
     return {
@@ -151,6 +153,39 @@ async function acceptRun() {
     mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
   });
 }
+
+test("ignores an acceptance frame that names another thread", async () => {
+  const { result } = await renderThreadStream();
+  const onSent = rs.fn();
+
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "thread-1",
+      { text: "hi", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+
+  // A frame from an older stream names its own thread; accepting it here would
+  // retire this send's draft even though its own run was never acknowledged.
+  await act(async () => {
+    mocks.callbacks.onMetadataEvent?.({
+      thread_id: "thread-2",
+      run_id: "run-2",
+    });
+  });
+  await flushFrames();
+  expect(onSent).not.toHaveBeenCalled();
+
+  await acceptRun();
+  await act(async () => {
+    await sendPromise;
+  });
+  expect(onSent).toHaveBeenCalledTimes(1);
+});
 
 test("does not report a send whose attachment upload fails", async () => {
   stubUploadFetch(
