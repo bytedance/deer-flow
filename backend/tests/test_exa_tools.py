@@ -1,9 +1,31 @@
 """Unit tests for the Exa community tools."""
 
 import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
+
+
+@pytest.mark.parametrize(
+    ("time_range", "now", "expected_start"),
+    [
+        ("day", "2025-01-01T12:30:00Z", "2024-12-31T12:30:00Z"),
+        ("week", "2025-01-01T12:30:00Z", "2024-12-25T12:30:00Z"),
+        ("month", "2025-01-01T12:30:00Z", "2024-12-02T12:30:00Z"),
+        ("year", "2025-01-01T12:30:00Z", "2024-01-02T12:30:00Z"),
+        ("day", "2024-03-01T00:00:00Z", "2024-02-29T00:00:00Z"),
+        ("month", "2024-03-31T00:00:00Z", "2024-03-01T00:00:00Z"),
+    ],
+)
+def test_published_date_filters(time_range, now, expected_start):
+    from deerflow.community.exa.tools import _published_date_filters
+
+    assert _published_date_filters(time_range, now=datetime.fromisoformat(now)) == {
+        "start_published_date": expected_start,
+        "end_published_date": now,
+    }
 
 
 @pytest.fixture
@@ -31,6 +53,60 @@ def mock_exa_client():
 
 
 class TestWebSearchTool:
+    @pytest.mark.parametrize(
+        ("time_range", "expected_start"),
+        [("day", "2024-12-31T12:30:00.123456Z"), ("week", "2024-12-25T12:30:00.123456Z"), ("month", "2024-12-02T12:30:00.123456Z"), ("year", "2024-01-02T12:30:00.123456Z"), (None, None)],
+    )
+    def test_time_range_sdk_request(self, mock_app_config, time_range, expected_start):
+        """Exercise the real SDK's validation and snake_case to camelCase conversion."""
+        from exa_py import Exa
+
+        from deerflow.community.exa.tools import web_search_tool
+
+        sent = {}
+
+        def fake_request(self, endpoint, data=None, *args, **kwargs):
+            assert endpoint == "/search"
+            sent.update(data or {})
+            return {"results": [{"id": "https://example.com", "url": "https://example.com", "title": "Release", "highlights": ["New release"]}], "requestId": "req"}
+
+        with patch("deerflow.community.exa.tools.datetime") as clock, patch.object(Exa, "request", fake_request):
+            clock.now.return_value = datetime(2025, 1, 1, 12, 30, microsecond=123456, tzinfo=UTC)
+            result = web_search_tool.invoke({"query": "agent releases", "time_range": time_range})
+
+        expected = {"query": "agent releases", "type": "auto", "numResults": 5, "contents": {"highlights": {"maxCharacters": 1000}}}
+        if expected_start is not None:
+            expected.update(startPublishedDate=expected_start, endPublishedDate="2025-01-01T12:30:00.123456Z")
+            clock.now.assert_called_once_with(UTC)
+        else:
+            clock.now.assert_not_called()
+        assert sent == expected
+        assert json.loads(result) == [{"title": "Release", "url": "https://example.com", "snippet": "New release"}]
+
+    @pytest.mark.parametrize("time_range", ["", "Week", "quarter", "x" * 1000, 7])
+    def test_invalid_time_range_rejected_before_request(self, mock_app_config, mock_exa_client, time_range):
+        from deerflow.community.exa.tools import web_search_tool
+
+        with pytest.raises(ValidationError):
+            web_search_tool.invoke({"query": "releases", "time_range": time_range})
+        mock_exa_client.search.assert_not_called()
+
+    def test_filtered_search_error_does_not_retry_without_filters(self, mock_app_config, mock_exa_client):
+        from deerflow.community.exa.tools import web_search_tool
+
+        mock_exa_client.search.side_effect = ValueError("Unsupported date filter")
+        assert web_search_tool.invoke({"query": "releases", "time_range": "week"}) == "Error: Unsupported date filter"
+        mock_exa_client.search.assert_called_once()
+        assert "start_published_date" in mock_exa_client.search.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_filtered_search_async_empty_results(self, mock_app_config, mock_exa_client):
+        from deerflow.community.exa.tools import web_search_tool
+
+        mock_exa_client.search.return_value = MagicMock(results=[])
+        assert await web_search_tool.ainvoke({"query": "releases", "time_range": "day"}) == "[]"
+        assert "start_published_date" in mock_exa_client.search.call_args.kwargs
+
     def test_basic_search(self, mock_app_config, mock_exa_client):
         """Test basic web search returns normalized results."""
         mock_result_1 = MagicMock()
