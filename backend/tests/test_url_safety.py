@@ -98,34 +98,26 @@ def _must_not_resolve(_host):
 # A raw bracket in the userinfo slot is malformed per RFC 3986. urlparse()
 # rejects some of these forms itself; the others are caught by the userinfo
 # check in _parse_url(), which mirrors the SkillScan host parser (#8017).
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://[::1/api",  # unmatched IPv6 bracket: urlparse() raises ValueError
-        "http://[::1]@Example.COM/api",  # bracketed userinfo: urlparse() raises on some versions
-        "http://[]@example.com/api",  # empty bracketed host in userinfo: urlparse() raises
-        "http://[@[::1]/",  # raw "[" in userinfo: urlparse() succeeds, userinfo check fires
-        "http://u]@[::1]/",  # raw "]" in userinfo: exercises the closing-bracket half
-        "http://a@b[c]@[2606:4700:4700::1111]/",  # the last "@" separates userinfo from host
-    ],
-)
+# One list drives both validators so a newly discovered malformed shape is
+# covered by both at once.
+_MALFORMED_URLS = [
+    "http://[::1/api",  # unmatched IPv6 bracket: urlparse() raises ValueError
+    "http://[::1]@Example.COM/api",  # bracketed userinfo: urlparse() raises on some versions
+    "http://[]@example.com/api",  # empty bracketed host in userinfo: urlparse() raises
+    "http://[@[::1]/",  # raw "[" in userinfo: urlparse() succeeds, userinfo check fires
+    "http://u]@[::1]/",  # raw "]" in userinfo: exercises the closing-bracket half
+    "http://a@b[c]@[2606:4700:4700::1111]/",  # the last "@" separates userinfo from host
+]
+
+
+@pytest.mark.parametrize("url", _MALFORMED_URLS)
 def test_public_validator_returns_error_for_malformed_url(url):
     error = validate_public_http_url(url, resolver=_must_not_resolve)
 
     assert error == "Error: URL could not be parsed"
 
 
-@pytest.mark.parametrize(
-    "url",
-    [
-        "http://[::1/api",
-        "http://[::1]@Example.COM/api",
-        "http://[]@example.com/api",
-        "http://[@[::1]/",
-        "http://u]@[::1]/",
-        "http://a@b[c]@[2606:4700:4700::1111]/",
-    ],
-)
+@pytest.mark.parametrize("url", _MALFORMED_URLS)
 def test_delegated_backend_validator_returns_error_for_malformed_url(url):
     error = validate_delegated_backend_url(url, resolver=_must_not_resolve)
 

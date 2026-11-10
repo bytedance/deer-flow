@@ -252,6 +252,19 @@ This section accumulates work toward the **2.3.0** milestone
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
 
+- **community:** The shared SSRF guard now returns its documented `Error: ...`
+  rejection for malformed URLs instead of raising `ValueError`.
+  `validate_public_http_url` and `validate_delegated_backend_url` called
+  `urlparse()` unguarded, so an authority it rejects, such as the unmatched
+  IPv6 bracket in `http://[::1/api`, escaped to the caller. That surfaced as an
+  unhandled 500 from the personal MCP router and as generic exception text in
+  the crawl4ai and fastCRW `web_fetch` tools. Both validators now reject any
+  malformed authority before the scheme check and the private-address escape
+  hatches, including a raw bracket in userinfo, which RFC 3986 forbids and
+  Python versions disagree on. This is a fail-closed contract fix plus
+  version-drift hardening: no host reachable through a well-formed URL becomes
+  blocked. ([#8079])
+
 ## [2.2.0] — 2026-10-29
 
 This section accumulates work toward the **2.2.0** milestone
@@ -16182,3 +16195,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8079]: https://github.com/bytedance/deer-flow/pull/8079
