@@ -89,6 +89,9 @@ class KnowledgeRequestContext:
     user_id: str
     agent_name: str | None = None
     scope: dict[str, Any] | None = None
+    # Set only by a host authentication boundary, not from serialized run context.
+    # Providers must compare it to user_id before granting shared user access.
+    authenticated_user_id: str | None = None
 
 
 class RetrievalCatalogItem(BaseModel):

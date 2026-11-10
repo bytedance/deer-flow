@@ -26,10 +26,22 @@
 
 ### 修复
 
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
+
+- **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
+  `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
+  返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
+  `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
+  可以再次删除。([#7992])
+
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
   且脱敏的地址与此前完全相同。([#8006])
+
 - **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
   已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
@@ -45,6 +57,12 @@
   的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
   把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
   `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
   
 - **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
@@ -84,6 +102,10 @@
   `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
+
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -342,6 +364,13 @@
   选择器缺失、是目录或不可读时会在调用 Docker 之前直接失败，而文件删除后
   `make down` 仍能停止整个栈；不设置或为空的选择器保持可选的仓库根 `.env`
   默认值。([#6522])
+- **HITL：** 可选的高风险工具调用人工审批。`hitl_approval.tools`（由宿主管理）通过
+  LangGraph `interrupt()` 暂停匹配的调用，运行进入 `waiting_for_input`，Web UI 展示
+  带逐字段参数摘要的审批卡片。批准后执行调用；拒绝则不执行，并将原因返回给模型。
+  IM 渠道、GitHub 运行和定时任务遵循 `hitl_approval.non_interactive`（默认 `deny`，
+  可选 `allow`）。子代理及不支持 resume 的运行环境无论该设置如何，始终拒绝匹配的
+  调用。`hitl_approval.max_actions` 配置审批批次的调用数量上限（默认 32，0 表示关闭）。
+  默认关闭；`config_version` 65。
 
 - **MCP：** 按未变更的服务器缓存完成包装的工具，仅在绑定对账后重新发现缺失或配置
   发生变化的服务器。将成功但未发现工具的结果与发现失败分开保存，并保留代际、共享
@@ -12820,5 +12849,8 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064

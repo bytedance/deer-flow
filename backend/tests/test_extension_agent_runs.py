@@ -360,7 +360,7 @@ async def test_real_interrupt_resume_conflict_and_cancel(runtime):
     runs, _, _, entered, _ = runtime
     thread = await runs.create_thread(thread_id="interrupt-test")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "approve"}]})
-    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "waiting_for_input"
     assert (await runs.get_state(thread_id=thread))["next"] == ["answer"]
     resumed = await runs.resume(thread_id=thread, resume="yes")
     assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"

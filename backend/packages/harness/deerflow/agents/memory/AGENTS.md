@@ -250,6 +250,10 @@ to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
+FTS5 scores all SQL-filtered matches before selecting composite `top_k`.
+Do not pre-limit by BM25 alone. A streaming heap bounds retained Python
+rows, not SQLite ranking work.
+
 The SQLite index is rebuildable derived data below `retrieval_index_path`
 (empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
 `paths.retrieval_index_directory` is the one resolver). Instances sharing
@@ -260,6 +264,8 @@ multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
+Index startup recreates files only for SQLite CORRUPT/NOTADB codes; operational
+failures select substring fallback without deleting the existing index.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.

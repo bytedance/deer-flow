@@ -691,6 +691,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "serper": "SERPER_API_KEY",
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
                 "webz": "WEBZ_API_KEY",
             },
@@ -700,6 +701,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
             },
             "image_search": {
