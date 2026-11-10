@@ -698,7 +698,7 @@ def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict
         path = entry.get("path")
         if not isinstance(path, str) or not path:
             raise HTTPException(status_code=400, detail=f"{location}[{index}].path must be a non-empty string")
-        normalized.append(dict(entry))
+        normalized.append({**entry, "name": str(entry.get("name") or "")})
     return normalized
 
 
