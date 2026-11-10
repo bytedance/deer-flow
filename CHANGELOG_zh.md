@@ -29,7 +29,7 @@
 - **网关：** 运行指定的自定义智能体不存在或名称无效时，现在会明确说明原因。此前向一个
   自定义智能体已被删除的对话发消息，或传入格式错误的 `agent_name`，即使与知识库范围无关，
   也会返回 422 和 "knowledge_scope assistant configuration could not be resolved"。现在
-  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。
+  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。([#8087])
 
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
@@ -12859,3 +12859,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087

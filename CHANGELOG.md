@@ -52,7 +52,7 @@ This section accumulates work toward the **2.3.0** milestone
   `agent_name`, returned the 422 detail "knowledge_scope assistant configuration
   could not be resolved" even when no knowledge scope was involved. The 422 now
   reports `Agent '<name>' not found`, an invalid `agent_name`, or an agent
-  config that could not be loaded.
+  config that could not be loaded. ([#8087])
 
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
@@ -16245,4 +16245,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
 
