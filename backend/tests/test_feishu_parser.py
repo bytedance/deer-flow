@@ -1374,6 +1374,57 @@ def test_feishu_post_user_written_file_placeholder_is_not_replaced():
     _run(go())
 
 
+def test_feishu_post_mixed_inline_and_top_level_keeps_appended_slot_last():
+    """Pin the mixed inline + top-level behavior: only the appended slot is protected.
+
+    Inline rich-text attachments still match placeholders left to right, exactly as
+    on ``main``, so a user-typed ``[file]`` ahead of an inline attachment is consumed
+    first. This test documents that pre-existing limitation; the fix here only
+    guarantees the appended top-level slot (the last one) is never displaced.
+    """
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [
+                [{"tag": "text", "text": "见 [file] 整理", "style": []}],
+                [{"tag": "file", "file_key": "file_inline"}],
+            ],
+            "files": [{"file_key": "file_top", "file_name": "top.csv", "is_folder": False}],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    kwargs = mock_make_inbound.call_args[1]
+    assert kwargs["text"] == "见 [file] 整理\n\n[file]\n\n[file]"
+    assert kwargs["files"] == [{"file_key": "file_inline"}, {"file_key": "file_top"}]
+    assert kwargs["metadata"][feishu_module._POST_FILES_COUNT_METADATA_KEY] == 1
+
+    async def go():
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text=kwargs["text"],
+            thread_ts="msg_post",
+            files=kwargs["files"],
+            metadata=kwargs["metadata"],
+        )
+        channel._receive_single_file = AsyncMock(side_effect=["/mnt/user-data/uploads/inline.csv", "/mnt/user-data/uploads/top.csv"])
+        result = await channel.receive_file(msg, "thread_1")
+        # Pre-existing inline behavior: the user-typed literal is consumed first and
+        # the inline slot keeps its ``[file]``; the appended top-level slot is last.
+        assert result.text == "见 /mnt/user-data/uploads/inline.csv 整理\n\n[file]\n\n/mnt/user-data/uploads/top.csv"
+        # The count is consumed, so it does not ride along on outbound metadata.
+        assert feishu_module._POST_FILES_COUNT_METADATA_KEY not in msg.metadata
+
+    _run(go())
+
+
 def test_feishu_post_ignores_non_list_files_field():
     """A malformed top-level ``files`` value must not take the whole message down."""
     channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})

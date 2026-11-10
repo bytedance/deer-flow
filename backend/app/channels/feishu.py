@@ -719,7 +719,7 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] received message with no files: %s", msg)
             return msg
         text = msg.text
-        post_file_count = msg.metadata.get(_POST_FILES_COUNT_METADATA_KEY, 0)
+        post_file_count = msg.metadata.pop(_POST_FILES_COUNT_METADATA_KEY, 0)
         if not isinstance(post_file_count, int) or post_file_count < 0:
             post_file_count = 0
         search_from = 0
@@ -741,10 +741,12 @@ class FeishuChannel(Channel):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
                 downloaded.append(("[file]", virtual_path))
 
-        # Top-level post attachments append their placeholders after the parsed
-        # body, so their slots are the final ``post_file_count`` ones. Fill them
-        # from the end first: a literal ``[file]`` / ``[image]`` typed by the user
-        # must not consume an attachment path before the real slot does.
+        # Top-level post attachments append their ``[file]`` placeholders
+        # after the parsed body, so their slots are the final
+        # ``post_file_count`` ones. Fill them from the end first: a literal
+        # ``[file]`` typed by the user must not consume a top-level
+        # attachment's path. Inline rich-text attachments keep the historical
+        # left-to-right matching below; that path is deliberately unchanged.
         post_file_count = min(post_file_count, len(downloaded))
         suffix_end = len(text)
         for placeholder, virtual_path in reversed(downloaded[len(downloaded) - post_file_count :] if post_file_count else []):
