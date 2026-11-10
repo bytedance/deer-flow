@@ -154,13 +154,43 @@ def test_start_accepts_comment_on_sandbox_heading(script_name, value, expected, 
 @pytest.mark.parametrize(
     "config",
     [
-        "custom:\n  sandbox: # unrelated nested configuration\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n" + _sandbox_config(None, "deerflow.sandbox.local:LocalSandboxProvider"),
+        "custom:\n  sandbox:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\nsandbox: # actual sandbox\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
         "sandbox: # sandbox config\n  custom:\n    use: deerflow.community.aio_sandbox:AioSandboxProvider\n  use: deerflow.sandbox.local:LocalSandboxProvider\n",
     ],
     ids=["nested-sandbox", "nested-use"],
 )
 def test_start_ignores_nested_sandbox_keys(script_name, config, tmp_path):
     _assert_launcher_selects_sandbox_services(script_name, config, "local", tmp_path)
+
+
+@pytest.mark.parametrize("script_name", ["docker.sh", "deploy.sh"])
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param(
+            "sandbox: # settings\n  use: custom:OtherProvider # deerflow.community.aio_sandbox:AioSandboxProvider\n",
+            "local",
+            id="provider-in-comment",
+        ),
+        pytest.param(
+            "sandbox: # settings\n  use: 'custom:OtherProvider # deerflow.community.aio_sandbox:AioSandboxProvider'\n",
+            "local",
+            id="provider-in-quoted-text",
+        ),
+        pytest.param(
+            'sandbox: # settings\n    use: "deerflow.community.aio_sandbox:AioSandboxProvider" # deerflow.sandbox.local:LocalSandboxProvider\n    provisioner_url: http://provisioner:8002\n',
+            "provisioner",
+            id="four-space-quoted-provider-with-comment",
+        ),
+        pytest.param(
+            "sandbox: # settings\n  use: 'deerflow.community.aio_sandbox:AioSandboxProvider' # local AIO\n",
+            "aio",
+            id="single-quoted-provider",
+        ),
+    ],
+)
+def test_start_uses_the_provider_scalar(script_name, config, expected, tmp_path):
+    _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path)
 
 
 def _assert_launcher_selects_sandbox_services(script_name, config, expected, tmp_path):

@@ -33,6 +33,8 @@ awk '
     in_sandbox && indent == child_indent && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
         sandbox_use=$0
         sub(/^[[:space:]]*use:[[:space:]]*/, "", sandbox_use)
+        sub(/[[:blank:]]+#.*$/, "", sandbox_use)
+        sub(/[[:space:]]+$/, "", sandbox_use)
         seen_use=1
     }
     in_sandbox && indent == child_indent && !seen_url && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
@@ -41,9 +43,8 @@ awk '
         seen_url=1
     }
     END {
-        if (index(sandbox_use, "deerflow.sandbox.local:LocalSandboxProvider")) {
-            print "local"
-        } else if (index(sandbox_use, "deerflow.community.aio_sandbox:AioSandboxProvider")) {
+        aio_provider = "deerflow.community.aio_sandbox:AioSandboxProvider"
+        if (sandbox_use == aio_provider || sandbox_use == "\"" aio_provider "\"" || sandbox_use == "\047" aio_provider "\047") {
             print empty_scalar(provisioner_url) ? "aio" : "provisioner"
         } else {
             print "local"
