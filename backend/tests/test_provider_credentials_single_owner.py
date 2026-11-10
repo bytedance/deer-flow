@@ -105,6 +105,27 @@ def test_resolve_api_key_normalizes_without_rejecting(raw: Any, expected: str | 
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        "your-jina-api-key",
+        "  your-tavily-api-key\n",
+        "YOUR-EXA-API-KEY",
+        SecretStr("your-infoquest-api-key"),
+        "your-github-token",
+        "your-feishu-app-secret",
+    ],
+)
+def test_resolve_api_key_reads_an_env_template_placeholder_as_unset(raw: Any) -> None:
+    """``make config`` copies ``.env.example`` verbatim, so its ``your-...`` values are not keys."""
+    assert owner.resolve_api_key(raw) is None
+
+
+@pytest.mark.parametrize("raw", ["sk-your-jina-api-key", "your-jina-api-key-2f9c", "jina_your-key", "yourkey"])
+def test_resolve_api_key_keeps_real_keys_that_mention_your(raw: str) -> None:
+    assert owner.resolve_api_key(raw) == raw
+
+
+@pytest.mark.parametrize(
     ("value", "secret", "expected"),
     [
         (f"a {PROVIDER_KEY} b {PROVIDER_KEY} c", PROVIDER_KEY, f"a {owner.REDACTION_MARKER} b {owner.REDACTION_MARKER} c"),

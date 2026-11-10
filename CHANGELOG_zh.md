@@ -26,6 +26,12 @@
 
 ### 修复
 
+- **网页抓取：** 全新安装后默认的 `web_fetch` 不再失效。`make config` 和 `make setup` 会把
+  `.env.example` 复制成 `.env`（Compose 部署也读取这个文件），其中九个服务的 Key 被设成了
+  `JINA_API_KEY=your-jina-api-key` 这样的示例值。无需 Key 的 Jina Reader 把这段文字当作 Key
+  发送，每次抓取都返回 401。现在模板把这些行注释掉；通过共享凭据规则读取 Key 的服务也会把
+  `your-...-key` / `-token` / `-secret` 形式的值视为未配置，已有的 `.env` 无需修改即可正常使用。
+
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。

@@ -47,6 +47,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **web fetch:** A fresh install no longer breaks the default `web_fetch`.
+  `make config` and `make setup` copy `.env.example` into `.env` (which the
+  Compose stacks also read), and that set nine provider keys to example values such as
+  `JINA_API_KEY=your-jina-api-key`. The keyless Jina Reader sent that text as a
+  key and every fetch failed with 401. The template now leaves those lines
+  commented, and providers that resolve keys through the shared credential rule
+  treat a `your-...-key` / `-token` / `-secret` value as unset, so existing
+  `.env` files work without editing.
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the

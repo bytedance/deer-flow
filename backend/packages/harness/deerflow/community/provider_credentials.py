@@ -19,10 +19,15 @@ the contract: provider tests and operators' log grep patterns assert on them.
 
 from __future__ import annotations
 
+import re
+
 from pydantic import AnyHttpUrl, SecretStr
 
 REDACTION_MARKER = "[REDACTED]"
 URL_USERINFO_ERROR = "base_url must not contain username or password information"
+
+# Example values from ``.env.example`` (``your-jina-api-key``, ``your-github-token``).
+_ENV_TEMPLATE_PLACEHOLDER = re.compile(r"your-[a-z0-9-]*(?:key|token|secret)", re.IGNORECASE)
 
 
 def resolve_api_key(raw: str | SecretStr | None) -> str | None:
@@ -31,10 +36,15 @@ def resolve_api_key(raw: str | SecretStr | None) -> str | None:
     Blank or absent reads as ``None``: a missing key is not an error, it is an
     unconfigured provider. Unwrapping happens only here, so no provider can end
     up comparing (or printing) the repr of a ``SecretStr`` instead of its value.
+
+    An ``.env.example`` placeholder also reads as ``None``. ``make config`` copies
+    that template verbatim, and sending ``your-jina-api-key`` as a key made the
+    keyless Jina Reader fail every fetch with 401 instead of using its free tier.
     """
     value = raw.get_secret_value() if isinstance(raw, SecretStr) else raw
     if isinstance(value, str) and value.strip():
-        return value.strip()
+        value = value.strip()
+        return None if _ENV_TEMPLATE_PLACEHOLDER.fullmatch(value) else value
     return None
 
 
