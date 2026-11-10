@@ -295,9 +295,8 @@ Interaction/HITL rules: [policy](docs/RUN_INTERACTION_POLICY.md).
 
 ### Context Summarization
 
-Automatic conversation summarization when approaching token limits, configured
-under the `summarization` key in `config.yaml` (triggers: tokens, messages, or
-fraction of max input); recent messages are kept while older ones are summarized.
+`summarization` in `config.yaml` triggers on tokens, messages or max-input fraction.
+Keep recent messages; summarize older ones.
 - Manual compaction uses `POST /api/threads/{id}/compact`, reuses the same `DeerFlowSummarizationMiddleware`, writes a new checkpoint with updated `messages`/`summary_text`, and bumps only those channel versions. The route uses the shared `reserve_checkpoint_write()` boundary (also used by manual state updates); its short-lived `checkpoint_write` operation shares the durable active-thread uniqueness constraint with run admission, preventing worker-local and cross-worker checkpoint-write races.
 - Cache only first-candidate no-ops; never suppress primary retries with fallback results. See [reuse and telemetry](docs/summarization.md#reuse-and-telemetry) for cache and counter contracts.
 
