@@ -3245,7 +3245,7 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
                     continue
                 if not isinstance(pending_ids, list) or any(not isinstance(call_id, str) for call_id in pending_ids):
                     continue
-                if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
+                if set(pending_ids) != response_ids or not isinstance(actions, list):
                     continue
                 matched.extend(action for action in actions if isinstance(action, Mapping))
         return matched

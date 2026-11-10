@@ -22,7 +22,10 @@ ApprovalIdentity = dict[str, str] | InvalidApprovalIdentity
 
 def invalid_approval_identity(payload: Any) -> InvalidApprovalIdentity | None:
     """Return an identity only for the legacy ID defects, never arbitrary damage."""
-    if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval" or payload.get("version") != 1:
+    if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
+        return None
+    version = payload.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
         return None
     request_id = payload.get("request_id")
     ids = payload.get("pending_tool_call_ids")

@@ -17,7 +17,7 @@ target the same digest. Normal valid-pause identity matching is unchanged.
 On graph replay, unaddressable calls are removed from all provider-serialized
 surfaces, including ordinary calls sharing their IDs. Add a visible rejection
 note; no fabricated result for a null ID and no approval of an ambiguous call.
-Do not add a pre-interrupt guard (owned by #8070), a migration, a new endpoint,
+Keep the pre-interrupt guard merged in #8070; do not add a migration, a new endpoint,
 an execution bypass, or an automatic retry of tools. No new persistent data.
 
 Verification: red/green legacy null/duplicate recovery, mixed-decision refusal,
@@ -29,3 +29,9 @@ Record missing real-provider, PostgreSQL and full-suite checks explicitly.
 Upstream #8073 shares matched durable actions between replay-gate names and
 journal adoption. Legacy recovery performs its exact all-reject match in that
 action lookup, preserving ordinary history reconciliation and stale-pause checks.
+
+After #8070 merged, retain its whole-response ambiguity guard and last-message
+denial API. Use its single `_strip_calls` path for prevention, denial and legacy
+replay, extending cleanup to null-ID siblings, matching invalid calls and
+unidentifiable legacy function_call metadata. Keep legacy identity admission
+exact and require integer version 1 excluding booleans.

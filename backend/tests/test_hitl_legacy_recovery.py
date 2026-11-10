@@ -76,6 +76,13 @@ def test_recovery_preserves_legacy_unicode_size_boundary():
     assert invalid_approval_identity(payload) is None
 
 
+@pytest.mark.parametrize("version", [True, 1.0], ids=["boolean-version", "float-version"])
+def test_identity_rejects_non_integer_version(version):
+    payload = _payload()
+    payload["version"] = version
+    assert invalid_approval_identity(payload) is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[None], ["same", "same"], [None, ""], ["", ""]])
 async def test_gateway_recovery_rejects_mixed_stale_and_partial_responses(monkeypatch, ids):
@@ -169,7 +176,8 @@ async def test_old_recovery_identity_cannot_answer_a_new_pause(run_store, next_i
 
 
 @pytest.mark.parametrize("ids", [[None], ["same", "same"]])
-def test_replayed_rejection_removes_colliding_provider_surfaces(ids):
+@pytest.mark.parametrize("entry", ["replay", "fresh", "denial"])
+def test_rejection_removes_colliding_provider_surfaces(ids, entry, monkeypatch):
     from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
 
     calls = [{"name": "write_file", "args": {}, "id": call_id} for call_id in ids]
@@ -183,14 +191,23 @@ def test_replayed_rejection_removes_colliding_provider_surfaces(ids):
         invalid_tool_calls=[{"name": "write_file", "args": "{", "id": ids[0], "error": "invalid arguments"}],
     )
     middleware = HitlApprovalMiddleware(tool_names={"write_file"})
-    result = middleware._process_responses(message, calls[:-2], {"responses": []})["messages"][0]
+    if entry == "fresh":
+        monkeypatch.setattr(middleware, "_can_resume", lambda runtime: True)
+        update = middleware.after_model({"messages": [message]}, SimpleNamespace(context={}))
+    elif entry == "denial":
+        update = middleware._deny_all(message, calls[:-2], "The calls were rejected and not executed.")
+    else:
+        update = middleware._process_responses(message, calls[:-2], {"responses": []})
+    result = update["messages"][0]
     assert result.id == message.id
     assert not result.invalid_tool_calls
     assert "function_call" not in result.additional_kwargs
     assert [call["id"] for call in result.tool_calls] == ["healthy"]
     assert [call["id"] for call in result.additional_kwargs["tool_calls"]] == ["healthy"]
     assert [block["id"] for block in result.content if block.get("type") == "tool_use"] == ["healthy"]
-    assert any(block.get("type") == "text" and "rejected" in block["text"] for block in result.content)
+    assert any(block.get("type") == "text" and "not executed" in block["text"] for block in result.content)
+    assert message.invalid_tool_calls
+    assert "function_call" in message.additional_kwargs
 
 
 @pytest.mark.asyncio
