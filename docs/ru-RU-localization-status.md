@@ -57,10 +57,14 @@ for those server-generated messages; they have NOT been translated to Russian.
 
 - `frontend/scripts/audit-ru-localization.cjs`: compares leaf dictionary
   keys with explicit Russian overrides. 1,845/1,916 keys localized.
-- `frontend/scripts/audit-ru-hardcoded-ui.cjs`: scans 180 workspace TSX
-  components for likely English JSX copy; initial 8 findings were addressed.
-  The follow-up heuristic scan found **0** candidates. This is a heuristic,
-  not a comprehensive UI-browser E2E assessment.
+- `frontend/scripts/audit-ru-hardcoded-ui.cjs`: scans 269 frontend TSX
+  components and routes for likely English JSX copy. First pass found 35
+  candidates, including 8 workspace labels. The 8 workspace findings and
+  most authentication/setup labels have been addressed.
+  The final scan still finds 20 candidates, mostly on the separate marketing
+  landing page (feature descriptions and demonstration animation), one
+  generic sidebar accessibility sentence and an intentionally unchanged
+  example email address. The audit is heuristic, not a browser E2E test.
 - Regression tests cover Russian navigation, user/model settings, token usage,
   prompt suggestions, file selection and relative date localization.
 - The 11 frontend i18n tests passed and TypeScript completed successfully

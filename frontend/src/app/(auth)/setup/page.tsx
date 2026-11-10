@@ -25,7 +25,7 @@ export default function SetupPage() {
   const router = useRouter();
   const { user, isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [mode, setMode] = useState<SetupMode>("loading");
   const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
@@ -88,11 +88,17 @@ export default function SetupPage() {
     }
 
     if (newPassword !== confirmPassword) {
-      setError("Passwords do not match");
+      setError(
+        locale === "ru-RU" ? "Пароли не совпадают." : "Passwords do not match",
+      );
       return;
     }
     if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError(
+        locale === "ru-RU"
+          ? "Пароль должен содержать не менее 8 символов."
+          : "Password must be at least 8 characters",
+      );
       return;
     }
 
@@ -122,7 +128,7 @@ export default function SetupPage() {
 
       router.push("/workspace");
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.login.networkError);
     } finally {
       setLoading(false);
     }
@@ -141,11 +147,17 @@ export default function SetupPage() {
       return;
     }
     if (newPassword !== confirmPassword) {
-      setError("Passwords do not match");
+      setError(
+        locale === "ru-RU" ? "Пароли не совпадают." : "Passwords do not match",
+      );
       return;
     }
     if (newPassword.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError(
+        locale === "ru-RU"
+          ? "Пароль должен содержать не менее 8 символов."
+          : "Password must be at least 8 characters",
+      );
       return;
     }
 
@@ -180,7 +192,7 @@ export default function SetupPage() {
 
       router.push("/workspace");
     } catch {
-      setError("Network error. Please try again.");
+      setError(t.login.networkError);
     } finally {
       setLoading(false);
     }
@@ -191,7 +203,9 @@ export default function SetupPage() {
   if (mode === "loading") {
     return (
       <div className="flex min-h-screen items-center justify-center">
-        <p className="text-muted-foreground text-sm">Loading…</p>
+        <p className="text-muted-foreground text-sm">
+          {t.common.loadingPage ?? "Loading…"}
+        </p>
       </div>
     );
   }
@@ -246,15 +260,19 @@ export default function SetupPage() {
         <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
           <div className="text-center">
             <h1 className="font-serif text-3xl">DeerFlow</h1>
-            <p className="text-muted-foreground mt-2">Create admin account</p>
+            <p className="text-muted-foreground mt-2">
+              {t.login.createAdminAccount}
+            </p>
             <p className="text-muted-foreground mt-1 text-xs">
-              Set up the administrator account to get started.
+              {locale === "ru-RU"
+                ? "Для начала создайте учётную запись администратора."
+                : "Set up the administrator account to get started."}
             </p>
           </div>
           <form onSubmit={handleInitAdmin} noValidate className="space-y-2">
             <div className="flex flex-col space-y-1">
               <label htmlFor="email" className="text-sm font-medium">
-                Email
+                {t.login.email}
               </label>
               <Input
                 id="email"
@@ -267,12 +285,16 @@ export default function SetupPage() {
             </div>
             <div className="flex flex-col space-y-1">
               <label htmlFor="password" className="text-sm font-medium">
-                Password
+                {locale === "ru-RU" ? "Пароль" : "Password"}
               </label>
               <Input
                 id="password"
                 type="password"
-                placeholder="Password (min. 8 characters)"
+                placeholder={
+                  locale === "ru-RU"
+                    ? "Пароль (не менее 8 символов)"
+                    : "Password (min. 8 characters)"
+                }
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
@@ -281,12 +303,14 @@ export default function SetupPage() {
             </div>
             <div className="flex flex-col space-y-1">
               <label htmlFor="confirmPassword" className="text-sm font-medium">
-                Confirm Password
+                {locale === "ru-RU" ? "Подтвердите пароль" : "Confirm Password"}
               </label>
               <Input
                 id="confirmPassword"
                 type="password"
-                placeholder="Confirm password"
+                placeholder={
+                  locale === "ru-RU" ? "Повторите пароль" : "Confirm password"
+                }
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 required
@@ -299,7 +323,11 @@ export default function SetupPage() {
             />
             {error && <p className="ms-1 text-sm text-red-500">{error}</p>}
             <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? "Creating account…" : "Create Admin Account"}
+              {loading
+                ? locale === "ru-RU"
+                  ? "Создание учётной записи…"
+                  : "Creating account…"
+                : t.login.createAdminAccount}
             </Button>
           </form>
         </div>
@@ -322,30 +350,38 @@ export default function SetupPage() {
         <div className="text-center">
           <h1 className="font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            Complete admin account setup
+            {locale === "ru-RU"
+              ? "Завершение настройки администратора"
+              : "Complete admin account setup"}
           </p>
           <p className="text-muted-foreground mt-1 text-xs">
-            Set your real email and a new password.
+            {locale === "ru-RU"
+              ? "Укажите свою почту и новый пароль."
+              : "Set your real email and a new password."}
           </p>
         </div>
         <form onSubmit={handleChangePassword} noValidate className="space-y-4">
           <Input
             type="email"
-            placeholder="Your email"
+            placeholder={
+              locale === "ru-RU" ? "Ваша электронная почта" : "Your email"
+            }
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
           />
           <Input
             type="password"
-            placeholder="Current password"
+            placeholder={
+              locale === "ru-RU" ? "Текущий пароль" : "Current password"
+            }
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
             required
           />
           <Input
             type="password"
-            placeholder="New password"
+            placeholder={locale === "ru-RU" ? "Новый пароль" : "New password"}
             value={newPassword}
             onChange={(e) => setNewPassword(e.target.value)}
             required
@@ -353,7 +389,11 @@ export default function SetupPage() {
           />
           <Input
             type="password"
-            placeholder="Confirm new password"
+            placeholder={
+              locale === "ru-RU"
+                ? "Подтвердите новый пароль"
+                : "Confirm new password"
+            }
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
@@ -365,7 +405,13 @@ export default function SetupPage() {
           />
           {error && <p className="text-sm text-red-500">{error}</p>}
           <Button type="submit" className="w-full" disabled={loading}>
-            {loading ? "Setting up…" : "Complete Setup"}
+            {loading
+              ? locale === "ru-RU"
+                ? "Настройка…"
+                : "Setting up…"
+              : locale === "ru-RU"
+                ? "Завершить настройку"
+                : "Complete Setup"}
           </Button>
         </form>
       </div>

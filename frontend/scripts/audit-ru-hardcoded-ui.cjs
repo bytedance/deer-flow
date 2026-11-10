@@ -8,7 +8,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const ts = require("typescript");
 const base = path.resolve(__dirname, "../src");
-const roots = ["components/workspace", "app/workspace"];
+const roots = ["components", "app"];
 const skip = /(?:^|\/)(?:generated|node_modules)(?:\/|$)/;
 const plainAttrs = new Set([
   "placeholder",
