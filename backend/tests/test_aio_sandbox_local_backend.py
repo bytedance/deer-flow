@@ -376,7 +376,7 @@ def test_absent_cleanup_keeps_unreleased_ports_when_lease_is_lost(monkeypatch):
     backend = _restricted_backend()
     backend._runtime = "container"
     backend._pending_cleanup_ports = {"first": ("existing", 18080), "second": ("existing", 18081)}
-    backend._unknown_cleanup_ports = {"existing": {18080, 18081}}
+    backend._unknown_cleanup_ports = {"existing": {18080: object(), 18081: object()}}
     released = []
     monkeypatch.setattr(local_backend_module, "release_port", released.append)
 
@@ -390,7 +390,7 @@ def test_absent_cleanup_keeps_unreleased_ports_when_lease_is_lost(monkeypatch):
     assert len(released) == 1
     remaining = {18080, 18081} - set(released)
     assert {entry[1] for entry in backend._pending_cleanup_ports.values()} == remaining
-    assert backend._unknown_cleanup_ports["existing"] == remaining
+    assert set(backend._unknown_cleanup_ports["existing"]) == remaining
     backend.complete_absent_teardown("existing")
     assert sorted(released) == [18080, 18081]
     assert not backend._pending_cleanup_ports and not backend._unknown_cleanup_ports

@@ -153,14 +153,19 @@ def test_responses_signal_not_combined_across_containers():
 
 
 @pytest.mark.parametrize("content", ["", "Partial answer"])
-def test_filtered_text_keeps_existing_empty_and_visible_behavior(content):
+def test_filtered_text_marks_stop_and_preserves_visible_content(content):
     message = AIMessage(content=content, response_metadata={"status": "incomplete", "incomplete_details": {"reason": "content_filter"}})
-    update = SafetyFinishReasonMiddleware().after_model({"messages": [message]}, SimpleNamespace(context={}))
+    runtime = SimpleNamespace(context={})
+    update = SafetyFinishReasonMiddleware().after_model({"messages": [message]}, runtime)
+    assert update is not None
+    patched = update["messages"][0]
+    assert runtime.context["stop_reason"] == "safety_capped"
+    assert patched.additional_kwargs["safety_termination"]["suppressed_tool_call_count"] == 0
+    assert patched.response_metadata == message.response_metadata
     if content:
-        assert update is None
+        assert patched.content == content
     else:
-        assert update is not None
-        assert "returned no content" in update["messages"][0].content
+        assert "returned no content" in patched.content
 
 
 @pytest.mark.parametrize("native", [False, True])

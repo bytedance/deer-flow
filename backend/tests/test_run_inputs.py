@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.run.sql import RunRepository
-from deerflow.runtime.runs.inputs import InputConflict, RunInputs
+from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 USER_ID = "00000000-0000-0000-0000-000000000001"
@@ -170,8 +171,117 @@ async def test_dispatch_and_remove_serialize_and_recovery_retains_the_same_key(i
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_at", ["before_snapshot", "while_waiting", "before_claim"])
+async def test_queue_dispatch_skips_cancelled_input_and_runs_its_successor(input_store, cancel_at, caplog):
+    from app.gateway.run_inputs import dispatch_queued_inputs
+
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    for input_id in ("B", "C", "D"):
+        await inputs.submit(input_id, f"Reply {input_id}_DONE", "queue")
+    await input_store.update_status("run", "success")
+    if cancel_at == "before_snapshot":
+        await inputs.cancel("C")
+    dispatched = []
+
+    async def dispatch_input(*, thread_id, run_id, input_id):
+        if input_id == "C" and cancel_at == "before_claim":
+            # Even a fresh read before dispatch cannot rule out cancellation
+            # while admission yields, before the store's atomic claim.
+            await inputs.cancel("C")
+        await inputs.claim(input_id)
+        dispatched.append(input_id)
+        await inputs.dispatched(input_id, f"child-{input_id}")
+        return SimpleNamespace(run_id=f"child-{input_id}", status="running")
+
+    async def wait(*, thread_id, run_id, timeout):
+        if run_id == "child-B" and cancel_at == "while_waiting":
+            await inputs.cancel("C")
+        return SimpleNamespace(run_id=run_id, status="success", stop_reason=None)
+
+    with caplog.at_level("INFO", logger="app.gateway.run_inputs"):
+        await dispatch_queued_inputs(inputs, agent_runs=SimpleNamespace(dispatch_input=dispatch_input, wait=wait), thread_id="thread")
+
+    assert dispatched == ["B", "D"]
+    expected_logs = [] if cancel_at == "before_snapshot" else ["Skipping cancelled queued input C for Run run"]
+    assert [record.getMessage() for record in caplog.records if record.name == "app.gateway.run_inputs"] == expected_logs
+    state = await inputs.read()
+    assert [(x["id"], x["status"], x.get("run_id")) for x in state["items"]] == [
+        ("B", "applied", "child-B"),
+        ("C", "cancelled", None),
+        ("D", "applied", "child-D"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["conflict", "permission", "uncertain_admission", "wait", "cancelled_wait"])
+async def test_queue_dispatch_stops_on_errors_other_than_confirmed_input_cancellation(input_store, failure):
+    from deerflow_extension_api.agent_runs import AgentRunError
+
+    from app.gateway.run_inputs import dispatch_queued_inputs
+
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    for input_id in ("B", "C", "D"):
+        await inputs.submit(input_id, f"Reply {input_id}_DONE", "queue")
+    await input_store.update_status("run", "success")
+    attempted = []
+
+    async def dispatch_input(*, thread_id, run_id, input_id):
+        attempted.append(input_id)
+        if failure == "conflict":
+            raise InputConflict("Input not found or removed")
+        if failure == "permission":
+            raise AgentRunError(403, "Permission denied: runs:create")
+        await inputs.claim(input_id)
+        if failure == "uncertain_admission":
+            raise RuntimeError("Admission outcome unknown")
+        await inputs.dispatched(input_id, f"child-{input_id}")
+        return SimpleNamespace(run_id=f"child-{input_id}", status="running")
+
+    async def wait(**kwargs):
+        # Cancellation of another queued input must not mask a wait failure.
+        await inputs.cancel("C")
+        if failure == "cancelled_wait":
+            raise InputCancelled("Cancellation was reported while waiting, not claiming")
+        raise RuntimeError("Cannot read child Run status")
+
+    await dispatch_queued_inputs(inputs, agent_runs=SimpleNamespace(dispatch_input=dispatch_input, wait=wait), thread_id="thread")
+
+    assert attempted == ["B"]
+    state = await inputs.read()
+    assert state["items"][2]["status"] == "pending"
+    assert "run_id" not in state["items"][2]
+    if failure == "uncertain_admission":
+        assert state["items"][0]["status"] == "dispatching"
+        assert (await inputs.claim("B", retry=True))["id"] == "B"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_id,error,detail", [("cancelled", InputCancelled, "This input was cancelled"), ("missing", InputConflict, "Input not found or removed")])
+async def test_dispatch_one_input_preserves_claim_error_without_admitting_run(input_store, monkeypatch, input_id, error, detail):
+    from unittest.mock import AsyncMock
+
+    from app.gateway import run_inputs
+    from app.gateway.routers import thread_runs
+
+    inputs = RunInputs(input_store, "run", USER_ID, "worker")
+    await inputs.submit("cancelled", "Do not execute", "queue")
+    await inputs.cancel("cancelled")
+    await input_store.update_status("run", "success")
+    monkeypatch.setattr(run_inputs, "get_current_user", AsyncMock(return_value=USER_ID))
+    monkeypatch.setattr(run_inputs, "_store", lambda _: input_store)
+    create_run = AsyncMock()
+    monkeypatch.setattr(thread_runs, "create_run", create_run)
+
+    with pytest.raises(error, match=detail) as caught:
+        await run_inputs.dispatch_one_input("thread", "run", input_id, SimpleNamespace())
+
+    assert type(caught.value) is error
+    create_run.assert_not_awaited()
+    assert (await inputs.read())["items"][0]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_http_input_admission_and_status_are_owner_scoped(input_store, monkeypatch):
-    from types import SimpleNamespace
     from uuid import UUID, uuid4
 
     from _router_auth_helpers import make_authed_test_app
@@ -205,6 +315,87 @@ async def test_http_input_admission_and_status_are_owner_scoped(input_store, mon
         items = (await client.get("/api/threads/thread/inputs")).json()["items"]
         assert len(items) == 1 and "context" not in items[0]
         assert (await client.delete(url + "/one")).status_code == 200
+        await input_store.update_status("run", "success")
+        retry = await client.post(url + "/one/retry")
+        assert retry.status_code == 409, retry.text
+        assert retry.json()["detail"] == "This input was cancelled"
         user = User(id=uuid4(), email="other@example.com", password_hash="unused")
         assert (await client.post(url, json=body)).status_code == 404
         assert (await client.get("/api/threads/thread/inputs")).json() == {"items": [], "active_run_id": None}
+
+
+@pytest.mark.asyncio
+async def test_list_thread_inputs_keeps_retryable_inputs_ahead_of_terminal_receipts(monkeypatch):
+    """Regression for #7972: 32 recent receipts must not hide an older retryable input."""
+    from app.gateway import run_inputs as gateway_run_inputs
+
+    def entry(index: int, status: str):
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
+
+    # The store returns runs newest-first; list_thread_inputs reverses them.
+    failed_row = {
+        "run_id": "run-failed",
+        "status": "failed",
+        "stop_reason": "error",
+        "run_inputs": {"items": [entry(0, "pending")]},
+    }
+    later_rows = []
+    for run_index in (1, 2):
+        items = [entry(run_index * 16 + i, "applied" if i % 16 else "cancelled") for i in range(16)]
+        later_rows.append({"run_id": f"run-{run_index}", "status": "success", "run_inputs": {"items": items}})
+    rows = list(reversed(later_rows)) + [failed_row]
+
+    class _FakeStore:
+        async def list_input_runs(self, thread_id, *, user_id):
+            return rows
+
+        async def active_input_run(self, thread_id, *, user_id):
+            return "run-2"
+
+    async def _current_user(_request):
+        return USER_ID
+
+    monkeypatch.setattr(gateway_run_inputs, "get_current_user", _current_user)
+    monkeypatch.setattr(gateway_run_inputs, "_store", lambda _request: _FakeStore())
+
+    result = await gateway_run_inputs.list_thread_inputs("thread", SimpleNamespace())
+    items = result["items"]
+    assert len(items) == 32
+    assert items[0]["id"] == "input-000" and items[0]["status"] == "not_applied"
+    assert items[-1]["id"] == "input-047"
+    assert [i["id"] for i in items] == sorted(i["id"] for i in items)
+    assert "context" not in items[0]
+    assert result["active_run_id"] == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_list_thread_inputs_starves_receipts_when_all_inputs_are_unresolved(monkeypatch):
+    """Record the deliberate trade-off: >32 unresolved inputs leave no receipt slots."""
+    from app.gateway import run_inputs as gateway_run_inputs
+
+    def entry(index: int, status: str):
+        return {"id": f"input-{index:03d}", "status": status, "text": f"instruction {index}", "mode": "queue"}
+
+    rows = [
+        {"run_id": "run-a", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(i, "pending") for i in range(16)]}},
+        {"run_id": "run-b", "status": "failed", "stop_reason": "error", "run_inputs": {"items": [entry(16 + i, "pending") for i in range(16)]}},
+        {"run_id": "run-c", "status": "success", "run_inputs": {"items": [entry(32, "applied")]}},
+    ]
+
+    class _FakeStore:
+        async def list_input_runs(self, thread_id, *, user_id):
+            return rows
+
+        async def active_input_run(self, thread_id, *, user_id):
+            return None
+
+    async def _current_user(_request):
+        return USER_ID
+
+    monkeypatch.setattr(gateway_run_inputs, "get_current_user", _current_user)
+    monkeypatch.setattr(gateway_run_inputs, "_store", lambda _request: _FakeStore())
+
+    items = (await gateway_run_inputs.list_thread_inputs("thread", SimpleNamespace()))["items"]
+    assert len(items) == 32
+    assert all(i["status"] == "not_applied" for i in items)
+    assert not any(i["id"] == "input-032" for i in items)

@@ -1,5 +1,6 @@
 """Host-bound run control: authorization, lifecycle and ordinary admission."""
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -209,6 +210,61 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
+async def test_team_artifact_import_is_authorized_idempotent_and_confined(runtime):
+    import asyncio
+    import hashlib
+
+    from deerflow.config.paths import get_paths
+
+    runs, state, request, entered, _ = runtime
+    runs = runs.for_plugin("artifact-fixture")
+    thread = await runs.create_thread(thread_id="artifact-recipient")
+    content = b"%PDF-1.7\n\x00\xff immutable source"
+    imported = await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content)
+    assert imported["sha256"] == hashlib.sha256(content).hexdigest()
+    assert imported["size"] == len(content)
+    target = get_paths().sandbox_uploads_dir(thread, user_id=str(request.state.user.id)) / imported["filename"]
+    assert await asyncio.to_thread(target.read_bytes) == content
+    assert await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content) == imported
+    assert len(await asyncio.to_thread(lambda: list(target.parent.iterdir()))) == 1
+    await asyncio.to_thread(target.write_bytes, b"recipient edited its copy")
+    with pytest.raises(AgentRunError) as changed:
+        await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content)
+    assert changed.value.status_code == 422
+    assert await asyncio.to_thread(target.read_bytes) == b"recipient edited its copy"
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    await asyncio.wait_for(entered.wait(), 5)
+    with pytest.raises(AgentRunError) as busy:
+        await runs.import_artifact(thread_id=thread, filename="other.pdf", content=content)
+    assert busy.value.status_code == 409
+    with pytest.raises(AgentRunError) as capture_busy:
+        await runs.read_artifact(thread_id=thread, path="/mnt/user-data/outputs/report.pdf")
+    assert capture_busy.value.status_code == 409
+    await runs.cancel(thread_id=thread, run_id=run.run_id)
+    await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
+async def test_team_artifact_import_rechecks_permission_owner_and_payload(runtime, monkeypatch):
+    runs, state, request, _, _ = runtime
+    thread = await runs.create_thread(thread_id="artifact-recipient")
+    runs = runs.for_plugin("artifact-fixture")
+    for filename, content in (("../escape.txt", b"x"), ("/etc/passwd", b"x"), ("bad\nname.txt", b"x"), ("report.pdf", b"x" * (2 * 1024 * 1024 + 1))):
+        with pytest.raises(AgentRunError) as invalid:
+            await runs.import_artifact(thread_id=thread, filename=filename, content=content)
+        assert invalid.value.status_code == 422
+    with pytest.raises(AgentRunError) as missing:
+        await runs.import_artifact(thread_id="unknown-thread", filename="report.txt", content=b"x")
+    assert missing.value.status_code == 404
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", AsyncMock(return_value=["threads:read"]))
+    with pytest.raises(AgentRunError) as denied:
+        await runs.import_artifact(thread_id=thread, filename="report.txt", content=b"x")
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("launcher", ["scheduled", "mcp"])
 async def test_internal_launchers_work_with_installed_host_without_delegation(runtime, launcher, monkeypatch):
     from app.gateway.services import launch_mcp_task_notification_run, launch_scheduled_thread_run
@@ -304,7 +360,7 @@ async def test_real_interrupt_resume_conflict_and_cancel(runtime):
     runs, _, _, entered, _ = runtime
     thread = await runs.create_thread(thread_id="interrupt-test")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "approve"}]})
-    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "waiting_for_input"
     assert (await runs.get_state(thread_id=thread))["next"] == ["answer"]
     resumed = await runs.resume(thread_id=thread, resume="yes")
     assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"

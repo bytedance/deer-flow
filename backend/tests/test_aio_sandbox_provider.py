@@ -104,10 +104,12 @@ def test_bash_command_timeout_rejects_non_finite_values(value):
         SandboxConfig(bash_command_timeout=value)
 
 
-def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
+@pytest.mark.parametrize("bash_capacity", [1, 50])
+def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path, bash_capacity):
     aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
     provider = _make_provider(tmp_path)
     provider._config["command_timeout"] = 42
+    provider._config["max_bash_sessions"] = bash_capacity
     provider._warm_pool = {}
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
@@ -123,6 +125,7 @@ def test_register_created_sandbox_forwards_configured_command_timeout(tmp_path):
         base_url="http://sandbox",
         request_headers=info.request_headers,
         default_command_timeout=42,
+        max_bash_sessions=bash_capacity,
         lark_cli_broker=False,
     )
 
@@ -176,7 +179,7 @@ def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeyp
     monkeypatch.setattr(local_mod.LocalContainerBackend, "_detect_runtime", lambda _self: "docker")
     backend = provider._create_backend()
     if remote:
-        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity}
+        payload = {"sandbox_id": "example", "sandbox_url": "http://sandbox:8080", "max_shell_sessions": persisted_capacity, "max_bash_sessions": 50}
 
         def get(url, **_kwargs):
             data = {"sandboxes": [payload]} if url.endswith("/api/sandboxes") else payload
@@ -2506,12 +2509,14 @@ def test_initial_quarantined_stop_checks_the_lease_between_backend_operations(fa
         sandbox.close()
         provider._backend.discover = MagicMock(return_value=type(info).from_dict(info.to_dict()))
 
+    first_operation = threading.Event()
     lost = threading.Event()
     claim, release = provider._ownership.claim, provider._ownership.release
     operations = []
 
     def lose_claim(sandbox_id, *, for_destroy=False):
         if threading.current_thread().name == "sandbox-teardown-lease":
+            first_operation.wait(10)
             return False
         return claim(sandbox_id, for_destroy=for_destroy)
 
@@ -2522,6 +2527,7 @@ def test_initial_quarantined_stop_checks_the_lease_between_backend_operations(fa
 
     def stop(_info, *, check=None):
         operations.append("stop-proxy")
+        first_operation.set()
         assert lost.wait(10)
         if check is not None:
             check()
@@ -2531,13 +2537,16 @@ def test_initial_quarantined_stop_checks_the_lease_between_backend_operations(fa
     monkeypatch.setattr(provider._ownership, "release", observe_heartbeat_release)
     provider._backend.destroy.side_effect = stop
     expectation = contextlib.nullcontext() if entrypoint == "warm-reap" else pytest.raises(module.SandboxPolicyReplacementDeferredError)
-    with expectation:
-        if entrypoint == "destroy":
-            provider.destroy(info.sandbox_id)
-        elif entrypoint == "warm-reap":
-            provider._reap_expired_warm(1)
-        else:
-            provider.acquire("thread-failure-recovery", user_id="alice")
+    try:
+        with expectation:
+            if entrypoint == "destroy":
+                provider.destroy(info.sandbox_id)
+            elif entrypoint == "warm-reap":
+                provider._reap_expired_warm(1)
+            else:
+                provider.acquire("thread-failure-recovery", user_id="alice")
+    finally:
+        first_operation.set()
     assert operations == ["stop-proxy"]
     assert provider._quarantine_store().contains(info)
     assert info.sandbox_id in provider._cleanup_retries

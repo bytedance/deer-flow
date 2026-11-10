@@ -11,13 +11,197 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
+  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
+  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
+  approval card with per-field argument summaries. Approve executes the call,
+  reject returns the reason to the model without executing. IM channels,
+  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
+  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
+  support always reject matching calls regardless of that setting.
+  `hitl_approval.max_actions` configures the approval-batch count limit
+  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
+
+- **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
+  access for authenticated users, without maintaining a per-user allowlist.
+  Exact-user allowlists remain the default; shared access requires matching
+  host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
+
+- **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
+  ranked results with a direct answer when the sources agree on one, and fetch
+  returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))
+
+- **subagents:** Durable batch items can wait for explicitly named prerequisites.
+  An optional, once-only lead-Agent follow-up completes a previously requested
+  summary or delivery after the batch ends, with persisted admission, cancellation
+  and authorization checks. Active Goals retain continuation ownership. ([#7839](https://github.com/bytedance/deer-flow/pull/7839))
 
 - **chat:** Running Web chats offer Queue and Steer in the composer. Queue
   waits for the next turn; Steer lets the main Agent handle updates while
   native subagents pause and resume. Unconfirmed messages can be retried
   after a Gateway restart. ([#7729])
 
+- **models:** Administrators can select StepFun in **Settings → Models** and
+  connect an ordinary StepFun API account with an API key and model ID.
+  ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
 ### Fixed
+
+- **sandbox:** AIO commands from independent subagents now run concurrently when
+  they carry per-call environment variables, including Lark CLI commands.
+  Commands within one subagent remain ordered and client cleanup drains them.
+
+- **gateway:** Deleting a thread no longer reports success while its
+  conversation stays readable. When the checkpoint store failed during
+  `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
+  thread's metadata row and returned success; any signed-in user could then
+  read the leftover title and messages through `GET /threads/{id}`, `/state`,
+  `/history` and `/goal`, and the owner could not retry. The delete now
+  returns a 500 and keeps the thread, so the owner can delete it again.
+  ([#7992])
+
+- **middleware:** With PII redaction enabled, a long run of text without
+  spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
+  detector was quadratic in the length of such a run, and redaction re-scans
+  every user message on every model call, so one 100 KB paste blocked every
+  thread for about 6 s per model call. The scan is now linear, and it redacts
+  exactly the same addresses as before. ([#8006])
+  
+- **subagents:** Managed subagent creation now rejects Windows reserved device
+  names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
+  `normalize_managed_subagent_name(..., for_creation=True)` validator and
+  Gateway `/api/subagents` boundary before attempting filesystem writes,
+  preventing `OSError` failures on Windows hosts while keeping existing
+  read and delete operations permissive.
+
+- **scheduler:** A stored `schedule_spec` that is JSON null, a list or a string
+  no longer aborts the scheduler poll. `stored_next_run_at` caught the value
+  errors from a dropped zone or a newer cron parser, but a non-object spec
+  fails on `.get`; the launch-failure handler recomputed it again, so the
+  `AttributeError` escaped `run_once`'s claimed-task loop. Such a task is now
+  paused with the reason, like the other unusable schedules. The poll loop also
+  isolates one task's dispatch failure from the rest of its claimed batch, so a
+  future per-record raise costs one tick instead of every other claimed task.
+  ([#7998])
+
+- **scheduler:** One scheduled task whose saved schedule can no longer be
+  computed no longer stops every other task. When a stored timezone or cron
+  expression stopped working (a zone missing from the time zone database
+  after an upgrade, a cron expression a newer croniter rejects), recomputing
+  its next run raised inside the scheduler poll; once its launch lease
+  expired, every later poll failed before admitting any due task. That task
+  is now paused with the reason as its last error, and resuming it reports
+  the problem until the schedule is fixed. ([#7993])
+  
+- **community:** A search or fetch API key that ends in a newline no longer
+  leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
+  Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
+  header as read, so a key from a file (a Kubernetes Secret created with
+  `--from-file`) made the transport fail with `Illegal header value b'Bearer
+  <key>\n'`. That message, key included, became the tool result the model and
+  the conversation history kept, and four of them also logged it. Keys now go
+  through `provider_credentials.resolve_api_key` like the other providers', and
+  a blank configured key falls back to the environment for Tavily, Exa,
+  Firecrawl and fastCRW. fastCRW without a key of its own no longer lets the
+  Firecrawl SDK send `FIRECRAWL_API_KEY` to the fastCRW endpoint, and a blank
+  `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
+  instead of reaching the SDK as is. ([#7981])
+  
+- **docker:** Images built from a checkout no longer contain its local
+  configuration. `.dockerignore` did not exclude `config.yaml`,
+  `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
+  checkout that keeps them in the legacy `backend/` location baked its model
+  API keys and MCP credentials into every gateway image layer through
+  `COPY backend ./backend`. `frontend/.env.local` reached the frontend image the
+  same way. They are now excluded at the root and in `backend/`, along with
+  `.env*.local` at any depth, `frontend/*.pem`, and the credential files the
+  extension manager refuses inside extension snapshots. A locally built
+  frontend image no longer inlines `NEXT_PUBLIC_*` values from
+  `frontend/.env.local`; the Docker stack's single nginx origin needs none of
+  them. Published CI images were not affected; rebuild local images that were
+  pushed or shared. ([#7958])
+  
+- **agents:** Unfinished todos no longer trigger additional model calls or
+  tool execution after a loop-detection, run token-budget, provider-safety, or
+  model output-length stop. Todo state is preserved so users can continue in a
+  later run. ([#7953])
+
+- **channels:** Long Feishu/Lark answers are no longer lost. Card text was
+  unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
+  the card request exceed Feishu's 30 KB limit (`230025`); the final patch and
+  its reply fallback were both rejected, and the running card stayed on its
+  last streamed text or a bare `▉`. Cards now send CJK unescaped and are
+  budgeted by the bytes they add to the request. A streamed update shows what
+  fits, and a longer final answer continues in up to 10 cards replied to the
+  same message, split at line breaks; a retry resumes after the cards already
+  delivered. ([#7798])
+  
+- **channels:** WeCom group messages now have their own conversation. Every
+  message used the sender's userid as both chat and topic ID, so a member's
+  private chat and every group they wrote in shared one DeerFlow thread
+  wherever no group binding kept them apart: in auth-disabled mode, with
+  `require_bound_identity: false`, and under legacy group bindings. A group
+  reply could then draw on the member's private chat or another group, and a
+  reply sent without its frame went to the private chat. Groups are now keyed
+  by `chatid` with one thread per member, and private chats keep their
+  threads. A group bound with its own `/connect` keeps its thread; a legacy
+  group binding, which covers every group of the bot, starts a new one in
+  each group. ([#7794])
+  
+- **memory:** An agent-scoped memory write whose `agent_name` is a Windows
+  reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
+  on the two routes that create that scope, `POST /memory/facts` and
+  `POST /memory/import`. DeerMem resolves the scope to
+  `{storage}/users/{uid}/agents/{name}/facts` and creates it on the first write;
+  the character-class check admitted such names, so the write raised
+  `FileNotFoundError` and the endpoint answered an opaque `500`. The check reuses
+  `windows_incompatible_segment()` and applies on every platform. Read and delete
+  routes stay permissive, so a scope with a reserved-name identifier that an
+  older release stored on a Linux host can still be exported and cleared.
+  ([#7941])
+
+- **skills:** A custom skill name that is a Windows reserved device name
+  (`nul`, `con`, `com1`, ...) is now rejected when the skill is created —
+  `skill_manage` `create` and `.skill` archive install — on every platform. The
+  hyphen-case grammar admitted such names, and the skill name becomes a
+  directory under `custom/`, so creating one "succeeded" on Windows without
+  producing a directory and the first write inside it failed with
+  `FileNotFoundError`; on Linux the install succeeded but could never be
+  copied, mounted or exported to a Windows host. The archive path also refuses
+  member path segments that cannot be created on every host, matching support
+  file writes. Reading and deleting an existing skill stay permissive, so a
+  skill an older release created on a Linux host can still be inspected and
+  removed. ([#7945])
+
+- **sandbox:** Fresh lazy AIO runs with an explicit authorized skill view no
+  longer create or acquire a sandbox before the first sandbox-backed tool
+  call. Existing sandbox bindings and providers that require skill uploads
+  retain their eager synchronization behavior. ([#7782])
+
+- **parsing:** Follow-up suggestions and the `/goal` evaluator keep a literal
+  `<think>` tag that appears inside a JSON string value, such as an answer
+  quoting the tag, while reasoning around the JSON is still removed. An
+  unclosed literal tag inside a string no longer truncates the document and
+  fails parsing, and reasoning outside the payload still strips and truncates
+  as before. ([#7907])
+
+- **gateway:** A caller-supplied thread ID that is a Windows reserved device
+  name (`NUL`, `CON`, `COM1`, ...) is now rejected at the shared
+  `validate_thread_id()` boundary. Such IDs previously passed validation but
+  failed workspace creation on Windows hosts with `FileNotFoundError`. The
+  check reuses `windows_incompatible_segment()` and applies on every platform,
+  so threads with reserved-name IDs created on Linux hosts will fail
+  validation on read/resume/upload routes after upgrade (deletion still
+  works). ([#7892])
+
+- **extensions:** Context-compaction observers now learn which task a
+  compaction happened in. Inside a lead run or subagent they receive that
+  task's store instead of a detached one, and `CompactionEvent` gains
+  `task_id`, `run_id` and `thread_id` (default `None`), copied from the
+  `TaskInfo` the host now seeds into every task store even when no lifecycle
+  contributor is registered. A manual `/compact` still gets a detached store
+  and `None` ids. `deerflow-extension-api` is now 0.2.10; existing
+  extensions keep working. ([#7831])
 
 - **channels:** A DingTalk reply in AI card mode (`card_template_id`) is no
   longer lost when a card request fails, for example without card permission
@@ -61,6 +245,9 @@ This section accumulates work toward the **2.3.0** milestone
   path but walked the unresolved tree, so no document matched and every
   original older than 24 hours was removed as an orphan, at Gateway startup
   and from `GET /api/trash/documents`. ([#7732])
+
+- **chat:** Cancelling a queued input after dispatch starts no longer
+  prevents subsequent queued inputs from executing. ([#7746])
 
 - **dev:** `scripts/dev_multi_instance.sh logs all` now prints the nginx logs
   as well as both Gateway logs; it printed only the Gateway logs, the same as
@@ -15994,7 +16181,24 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7727]: https://github.com/bytedance/deer-flow/pull/7727
 [#7729]: https://github.com/bytedance/deer-flow/pull/7729
 [#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
 [#7762]: https://github.com/bytedance/deer-flow/pull/7762
 [#7772]: https://github.com/bytedance/deer-flow/pull/7772
 [#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
 [#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7892]: https://github.com/bytedance/deer-flow/pull/7892
+[#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7941]: https://github.com/bytedance/deer-flow/pull/7941
+[#7945]: https://github.com/bytedance/deer-flow/issues/7945
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006
+
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998

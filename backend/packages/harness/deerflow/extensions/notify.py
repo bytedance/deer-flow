@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import dataclasses
 import logging
 import threading
 import time
@@ -529,7 +530,11 @@ def dispatch_system_model_observation(
             coro.close()
 
 
-def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtensions | None = None) -> None:
+def notify_context_compacted(
+    event: CompactionEvent,
+    extensions: LoadedExtensions | None = None,
+    task_store: ExtensionData | None = None,
+) -> None:
     """Fan a completed compaction out to observers, fire-and-forget.
 
     The compaction seam sits in the summarization middleware's ``before_model`` /
@@ -539,10 +544,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     loop the same non-blocking way a synchronous system-model-call cancellation does,
     reusing the same fail-open cancellation containment inside ``_notify_each``.
 
-    There is no live task for this hook to attach observers to (unlike lifecycle or
-    system-model-call notification, which run from an awaited call site holding the
-    real task store), so observers receive a detached store — the same fallback
-    ``notify_system_model_call`` uses when its caller has none.
+    Inside a lead run or subagent the caller passes the live task store it recovered
+    from the runtime context — the same store the summary system call is observed
+    with. Observers receive it, and the event's ``task_id``/``run_id``/``thread_id``
+    are filled from the ``TaskInfo`` the host seeded into it. A compaction outside any
+    task (manual ``/compact``) passes none, so observers receive a detached store —
+    the same fallback ``notify_system_model_call`` uses — and the ids stay ``None``.
     """
     resolved = extensions
     if resolved is None:
@@ -553,7 +560,12 @@ def notify_context_compacted(event: CompactionEvent, extensions: LoadedExtension
     if not observers:
         return
     app_store = resolved.app_store
-    task_store = ExtensionData("detached")
+    if task_store is None:
+        task_store = ExtensionData("detached")
+    else:
+        info = task_store.get(TaskInfo)
+        if info is not None:
+            event = dataclasses.replace(event, task_id=info.task_id, run_id=info.run_id, thread_id=info.thread_id)
     what = f"compaction ({event.transform_kind})"
     dispatch_system_model_observation(
         _notify_each(

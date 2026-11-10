@@ -109,7 +109,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
 **模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
-Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+Moonshot/Kimi、智谱/Z.AI、MiniMax 和阶跃星辰（StepFun）的端点、认证与适配器，地域和 Coding Plan
 使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
 新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
 
@@ -853,6 +853,11 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
+
+显式后台 `batch_task` 可用 `depends_on` 声明同批条目的前置关系，前置工作完成后即可继续，
+无需等待无关任务。用户已要求后续汇总或交付时，可用可选的 `continuation` 登记一次主 Agent 接续；
+启用 Goal 时仍由 Goal 负责续跑。执行、取消、授权和恢复范围见
+[批次依赖与完成接续说明](backend/docs/BATCH_CONTINUATION.md)。
 
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 

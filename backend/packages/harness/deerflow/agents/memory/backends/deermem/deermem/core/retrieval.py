@@ -14,12 +14,15 @@ without importing storage and creating a circular dependency.
 
 from __future__ import annotations
 
+import heapq
 import json
 import logging
 import math
 import re
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -406,6 +409,7 @@ class FTS5Retrieval:
 
         where_clause = " AND ".join(conditions)
 
+        # Stable heap selection uses this BM25 order to break composite score ties.
         sql = f"""
             SELECT doc_id, content, raw_content, category, scope_user, scope_agent,
                    created_at, confidence, source, fact_json,
@@ -413,20 +417,31 @@ class FTS5Retrieval:
             FROM memory_fts
             WHERE {where_clause}
             ORDER BY bm25_score
-            LIMIT ?
         """
-        params.append(top_k * 2)
+
+        matched_count = 0
+
+        def score_matches(cursor: sqlite3.Cursor) -> Iterator[tuple[float, sqlite3.Row]]:
+            nonlocal matched_count
+            for row in cursor:
+                matched_count += 1
+                score = self._compute_final_score(bm25_score=-row["bm25_score"], confidence=row["confidence"], created_at=row["created_at"])
+                yield score, row
 
         with self._lock:
             try:
-                conn = self._conn
-                rows = conn.execute(sql, params).fetchall()
+                # Hold the shared connection lock through cursor iteration and
+                # composite scoring of every match. The heap bounds retained
+                # rows, while lock time grows with the match count.
+                with closing(self._conn.execute(sql, params)) as cursor:
+                    cursor.row_factory = sqlite3.Row
+                    rows = heapq.nlargest(top_k, score_matches(cursor), key=lambda item: item[0])
             except sqlite3.OperationalError as e:
                 logger.debug("FTS5 query syntax error: %s (query: %s)", e, fts5_query)
                 return None
 
         results: list[dict[str, Any]] = []
-        for row in rows:
+        for score, row in rows:
             (
                 doc_id,
                 indexed_content,
@@ -440,12 +455,6 @@ class FTS5Retrieval:
                 fact_json,
                 bm25_score,
             ) = row
-
-            score = self._compute_final_score(
-                bm25_score=-bm25_score,  # FTS5 returns negative
-                confidence=confidence,
-                created_at=created_at,
-            )
 
             fact: dict[str, Any] = {}
             if fact_json:
@@ -466,17 +475,17 @@ class FTS5Retrieval:
             results.append(fact)
 
         logger.debug(
-            "FTS5 raw SQL: fts5_query=%r scope_user=%r scope_agent=%r category=%r -> %d rows. bm25 raw: %s",
+            "FTS5 composite top-k: fts5_query=%r scope_user=%r scope_agent=%r category=%r matched=%d retained=%d bm25=%s",
             fts5_query,
             scope_user,
             scope_agent,
             category,
+            matched_count,
             len(rows),
             [(r["id"], r["bm25_score"]) for r in results[:10]],
         )
 
-        results.sort(key=lambda r: r["score"], reverse=True)
-        return results[:top_k]
+        return results
 
     def _compute_final_score(
         self,
