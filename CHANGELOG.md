@@ -58,10 +58,11 @@ This section accumulates work toward the **2.3.0** milestone
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
 
-- **gateway:** SQL-backed thread creation now returns the existing
-  non-disclosing `404 Thread not found` response instead of 500 when a
-  caller-supplied ID belongs to another user. Same-owner retries remain
-  idempotent, and the original conversation is preserved.
+- **persistence:** SQL thread metadata creation now reports the same typed
+  ownership conflict as memory storage for IDs owned by another user or
+  legacy unowned rows. Direct store callers no longer receive a raw database
+  integrity error for those collisions; same-owner duplicates and unrelated
+  integrity failures retain their existing error signals.
   ([#8054](https://github.com/bytedance/deer-flow/pull/8054))
 
 - **gateway:** Deleting a thread no longer reports success while its
