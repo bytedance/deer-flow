@@ -125,25 +125,34 @@ def test_contract_constants_parity_with_localsandbox() -> None:
     assert count_file_lines("x\u2028y\n") == 1  # \u2028 not a line separator
 
 
-def _model_read(tmp_path, monkeypatch, content, **kwargs):
+def _model_read(tmp_path, monkeypatch, content, *, directory="uploads", **kwargs):
     runtime = _local_runtime(tmp_path)
     runtime.tool_call_id = "read-1"
-    (tmp_path / "uploads" / "five.txt").write_bytes(content)
+    (tmp_path / directory / "five.txt").write_bytes(content)
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox("t1"))
-    return read_file_tool.func(runtime=runtime, path="/mnt/user-data/uploads/five.txt", **kwargs)
+    return read_file_tool.func(runtime=runtime, path=f"/mnt/user-data/{directory}/five.txt", **kwargs)
 
 
-def test_short_model_range_labels_original_source_lines(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("directory", ["uploads", "workspace"])
+def test_short_model_range_labels_original_source_lines(tmp_path, monkeypatch, directory) -> None:
     result = _model_read(
         tmp_path,
         monkeypatch,
         "first\r\nsource\u2028note\r\n\r\n12 | literal payload\r\nlast\r\n".encode(),
+        directory=directory,
         start_line=2,
         end_line=4,
     )
     assert result.content == ("Source lines (for exact edits, copy the text after the first ' | '):\n2 | source\u2028note\n3 | \n4 | 12 | literal payload")
     assert result.status == "success"
     assert result.additional_kwargs["deerflow_tool_meta"]["status"] == "success"
+
+
+@pytest.mark.parametrize("start_line", [1, 2])
+def test_model_start_only_range_labels_trailing_blank_line(tmp_path, monkeypatch, start_line) -> None:
+    result = _model_read(tmp_path, monkeypatch, b"a\nb\n\n", start_line=start_line)
+
+    assert result.content.split("\n")[1:] == ["1 | a", "2 | b", "3 | "][start_line - 1 :]
 
 
 def test_model_full_read_keeps_original_display(tmp_path, monkeypatch) -> None:

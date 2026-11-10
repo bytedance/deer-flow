@@ -11,6 +11,10 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
+  display source line numbers when the result contains 1–40 lines and the
+  labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+
 - **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
   `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
   `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
