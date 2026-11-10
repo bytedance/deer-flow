@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -32,7 +33,8 @@ class Crawl4AiClient:
 
         logger.debug(f"Fetching URL via Crawl4AI: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Client construction loads TLS trust synchronously; keep it off the loop.
+            async with await asyncio.to_thread(httpx.AsyncClient, timeout=self.timeout_s) as client:
                 resp = await client.post(f"{self.base_url}/md", json=payload, headers=headers)
 
                 if resp.status_code != 200:

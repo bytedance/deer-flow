@@ -15,6 +15,18 @@ namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Run Admission
 
+Finished thread operations retain their exact run ID and captured owner until
+their durable release succeeds. Retry these releases under the existing
+same-thread admission gate before admitting new work, using the bounded Store
+retry policy. Register completion before cleanup awaits so cancellation remains
+retryable. Live reservations stay exclusive; failed releases return a conflict.
+Replay local and stored idempotent results before cleanup. A conflicting new
+key retries admission once after release; start new leases after gate and cleanup waits.
+The retry ledger holds identities only and schedules no background tasks.
+Coverage: `tests/test_thread_operation_release_recovery.py`.
+
+Goal operation observation preserves producer artifacts when normalizing checkpoint results; page titles never establish failure.
+
 Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only
 owner-bound text; acknowledge it after a durable graph receipt. Queue dispatch
 uses ordinary AgentRuns admission after the old worker finalizes. Steer releases
@@ -153,7 +165,7 @@ from `on_llm_end` before inspecting the response or touching any run state.
 **Skill history:** `record_skill_usage` saves lead-run snapshots on terminal
 answers for paginated history. See `docs/skill-usage-ui.md`.
 
-**Run delivery receipts:** Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
+**Run delivery receipts:** `present_files` and `present_shared_artifact` count as verified presentation. Finalize artifact evidence and terminal status before clearing an ordinary satisfied goal, under a checkpoint-write reservation. Delivery failure retains the goal without continuing. Only that clear writes `goal_outcome`; other goal writes remove it. Historical replay keeps the current goal and budget, and drops the old outcome. Scheduled exception below; details: `backend/docs/runtime-guidance-details.md`.
 
 **Workspace change detection:** Truncated snapshots cannot prove absence. Mark skipped delivery verification in the receipt. Details: `backend/docs/runtime-guidance-details.md`.
 
@@ -369,6 +381,8 @@ once, with the original evidence. Recheck cancellation, Goal identity and
 checkpoint/messages first. Each complete evaluator invocation keeps its own usage
 ID and observer call; one final decision updates Goal counters. Valid verdicts,
 length/safety stops, and transport/configuration errors are not format retries.
+
+Batch/job/task registration or a scheduled continuation is not Goal completion: require the requested result or artifact to exist or be delivered. This prevents asynchronous acceptance from being misread as delivery.
 
 Goal evaluator usage crosses a JSON-safe sink into
 `RunJournal.record_external_llm_usage_records` before response parsing or observer

@@ -74,6 +74,12 @@ receive a transient hint on the next model request.
 
 ### Sandbox System
 
+With lazy initialization, a fresh AIO run prepares its authorized Agent skill
+view without acquiring a container until a sandbox-backed tool needs one.
+Existing sandbox state still requires eager policy rebinding; upload-based
+providers still acquire and synchronize skills eagerly. Explicit sandbox
+prewarming remains a separate opt-in behavior.
+
 Per-thread isolated execution with virtual path translation:
 
 - **Abstract interface**: `execute_command`, `read_file`, `write_file`, `list_dir`
@@ -104,6 +110,10 @@ queued claims use conditional database writes, so competing workers cannot claim
 the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
+
+If the local retrieval index is busy, read-only, or temporarily unavailable,
+DeerMem falls back to substring search without deleting it. Automatic index
+recreation is reserved for SQLite-confirmed corruption or a non-database file.
 
 LLM-powered persistent context retention across conversations:
 

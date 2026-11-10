@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import threading
 import time
@@ -34,6 +35,9 @@ TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
 # Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
 TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS = 4.0
 TELEGRAM_BRIDGE_DRAIN_TIMEOUT_SECONDS = 1.0
+# Outbound listeners await sends inline. Bound each flood wait while still
+# allowing a full group rate-limit window.
+TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 60.0
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
 # Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
 # so stream edits there must pace well below the private-chat 1 msg/s guideline.
@@ -967,6 +971,24 @@ class TelegramChannel(Channel):
             "last_text": last_text,
         }
 
+    def _outbound_retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Extend the shared backoff for new plain or Rich final-reply sends.
+
+        Only sends through ``_send_with_retry`` use this policy. The running
+        acknowledgment and intermediate stream updates are best effort.
+        Final edits have their own retry path.
+        """
+        delay = super()._outbound_retry_delay(attempt, exc)
+        if not self._is_retry_after(exc):
+            return delay
+        try:
+            hint = self._retry_after_seconds(exc)
+        except (TypeError, ValueError, OverflowError):
+            return delay
+        if not math.isfinite(hint):
+            return delay
+        return max(delay, min(hint, TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
+
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
         return getattr(exc, "retry_after", None) is not None
@@ -1008,7 +1030,7 @@ class TelegramChannel(Channel):
         return chunks
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
-        """Send a 'Working on it...' reply and register it as the stream target."""
+        """Send a best-effort acknowledgment before dispatching inbound work."""
         if not self._application:
             return
         try:
