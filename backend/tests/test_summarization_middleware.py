@@ -1798,6 +1798,25 @@ def test_suffix_trim_counter_does_not_scale_usage_metadata(monkeypatch: pytest.M
     assert unscaled == count_tokens_approximately(messages, chars_per_token=4.0, use_usage_metadata_scaling=False)
 
 
+def test_reasoning_replay_is_detected_from_the_adapter() -> None:
+    """The counter is gated on the adapter's own serializer (#8090 review).
+
+    vLLM echoes assistant reasoning back to the provider and MiniMax drops it from
+    the payload, so the predicate must follow the real serializers rather than a
+    class list; an object without a serializer must not be charged either.
+    """
+    from deerflow.agents.middlewares.summarization_middleware import _replays_reasoning
+    from deerflow.models.patched_minimax import PatchedChatMiniMax
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    vllm = VllmChatModel(model="qwen", api_key="test", base_url="http://127.0.0.1:1")
+    minimax = PatchedChatMiniMax(model="MiniMax-M2", api_key="test", base_url="http://127.0.0.1:1")
+
+    assert _replays_reasoning(vllm) is True
+    assert _replays_reasoning(minimax) is False
+    assert _replays_reasoning(object()) is False
+
+
 def test_display_only_adapter_keeps_history_uncompacted(monkeypatch: pytest.MonkeyPatch) -> None:
     """A real non-replaying adapter must not compact or trim on reasoning (#8074).
 
