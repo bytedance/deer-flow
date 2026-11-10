@@ -468,7 +468,13 @@ class ScheduledTaskService:
                 # failure (e.g. the candidate query) must not skip admission or
                 # queue draining for this poll.
                 logger.exception("Failed to reconcile terminal scheduled runs")
-        await self._expire_waiting_runs(now=now)
+        try:
+            await self._expire_waiting_runs(now=now)
+        except Exception:
+            # A failed timeout sweep must not skip queue draining or this
+            # poll's due-task admission. Individual rows are also isolated by
+            # expire_queued_runs; this guard covers the candidate query/session.
+            logger.exception("Failed to expire queued scheduled runs")
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()

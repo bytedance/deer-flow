@@ -122,10 +122,11 @@ This section accumulates work toward the **2.3.0** milestone
   future per-record raise costs one tick instead of every other claimed task.
   ([#7998])
 
-- **scheduler:** Exceptions escaping the queued-occurrence drain are now contained
-  to that occurrence. The scheduler logs the failed row and continues with the
-  other queued work and the tasks claimed in the same poll; lease and
-  queue-timeout recovery remain responsible for the failed row. ([#7998])
+- **scheduler:** Exceptions escaping the queue-timeout sweep or the
+  queued-occurrence drain are now contained to that occurrence. The
+  scheduler logs the failed row and continues with the remaining queue
+  and the tasks claimed in the same poll; lease and queue-timeout recovery
+  remain responsible for the failed row. ([#7998])
 
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron

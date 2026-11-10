@@ -719,48 +719,57 @@ class ScheduledTaskRunRepository:
 
         expired: list[dict[str, Any]] = []
         for row_id, task_id in candidate_keys:
-            async with self._sf() as session:
-                task = await self._lock_task(session, task_id)
-                row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
-                if row is None or row.status != "queued":
-                    await session.rollback()
-                    continue
+            try:
+                async with self._sf() as session:
+                    task = await self._lock_task(session, task_id)
+                    row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
+                    if row is None or row.status != "queued":
+                        await session.rollback()
+                        continue
 
-                row.status = "failed"
-                row.error = error
-                row.finished_at = now
-                row.lease_owner = None
-                row.lease_expires_at = None
+                    row.status = "failed"
+                    row.error = error
+                    row.finished_at = now
+                    row.lease_owner = None
+                    row.lease_expires_at = None
 
-                if task is not None and can_project(task, row):
-                    if task.status == "paused":
-                        # A concurrent/later pause owns the parent presentation.
-                        task.lease_owner = None
-                        task.lease_expires_at = None
-                    else:
-                        schedule_error = None
-                        if row.trigger == "manual":
-                            next_at = task.next_run_at
-                            task_status = task.status or "enabled"
+                    if task is not None and can_project(task, row):
+                        if task.status == "paused":
+                            # A concurrent/later pause owns the parent presentation.
+                            task.lease_owner = None
+                            task.lease_expires_at = None
                         else:
-                            next_at, schedule_error = stored_next_run_at(
-                                task.schedule_type,
-                                task.schedule_spec,
-                                task.timezone,
-                                now=now,
-                            )
-                            task_status = "failed" if task.schedule_type == "once" else "enabled"
-                        task.status = task_status
-                        task.next_run_at = next_at
-                        task.last_thread_id = row.thread_id
-                        task.last_error = error
-                        task.lease_owner = None
-                        task.lease_expires_at = None
-                        pause_unschedulable(task, schedule_error)
-                    task.updated_at = datetime.now(UTC)
+                            schedule_error = None
+                            if row.trigger == "manual":
+                                next_at = task.next_run_at
+                                task_status = task.status or "enabled"
+                            else:
+                                next_at, schedule_error = stored_next_run_at(
+                                    task.schedule_type,
+                                    task.schedule_spec,
+                                    task.timezone,
+                                    now=now,
+                                )
+                                task_status = "failed" if task.schedule_type == "once" else "enabled"
+                            task.status = task_status
+                            task.next_run_at = next_at
+                            task.last_thread_id = row.thread_id
+                            task.last_error = error
+                            task.lease_owner = None
+                            task.lease_expires_at = None
+                            pause_unschedulable(task, schedule_error)
+                        task.updated_at = datetime.now(UTC)
 
-                await session.commit()
-                expired.append(self._row_to_dict(row))
+                    await session.commit()
+                    expired.append(self._row_to_dict(row))
+            except Exception:
+                # The session above rolls back this row's uncommitted changes.
+                # Keep the remaining candidates eligible for this pass instead
+                # of letting one damaged parent block every queue-timeout write.
+                logger.exception(
+                    "Failed to expire queued scheduled occurrence %s; continuing with the remaining queue",
+                    row_id,
+                )
         return expired
 
     async def fail_launching_run(
