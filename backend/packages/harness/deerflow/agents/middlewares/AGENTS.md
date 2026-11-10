@@ -1,6 +1,6 @@
 ### Middleware Chain
 
-ToolProgress fences late results/hint retries by entry epoch, even for one run.
+ToolProgress fences late results/hint retries by live entry epoch, even for one run.
 
 JSON depth failures preserve content and never abort graphs. Unclassified
 explicit failures stay `unknown` / recoverable / `try_alternative`; incidental

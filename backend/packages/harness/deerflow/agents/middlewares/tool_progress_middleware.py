@@ -55,6 +55,7 @@ from collections import OrderedDict, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, override
+from weakref import WeakValueDictionary
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -64,7 +65,6 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.agents.middlewares.audit_context import (
     TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
@@ -252,6 +252,12 @@ def _block_reason(meta: ToolResultMeta) -> str:
 # Middleware
 
 
+class _EntryEpoch:
+    """Identity held by wrappers that can still publish entry-scoped state."""
+
+    __slots__ = ("__weakref__",)
+
+
 class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     """State-machine-based tool stagnation guard (RFC #3177)."""
 
@@ -281,9 +287,9 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         self._lock = threading.Lock()
         # LRU-evicting store: thread_id → {tool_name → ToolPhaseState}
         self._phase_states: OrderedDict[str, dict[str, ToolPhaseState]] = OrderedDict()
-        # Results retain the epoch captured before their handler started. A new
-        # graph entry invalidates in-flight assessments, even for the same run.
-        self._entry_epochs: BoundedDict[str, object] = BoundedDict(max_tracked_threads)
+        # Wrappers hold epochs while they can still publish state. This cache
+        # must not evict a live epoch merely because other threads enter graphs.
+        self._entry_epochs: WeakValueDictionary[str, _EntryEpoch] = WeakValueDictionary()
         # Pending hint queue: (thread_id, run_id) → [hint texts]
         self._pending: dict[tuple[str, str], list[str]] = defaultdict(list)
 
@@ -315,11 +321,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     def _pending_key(self, runtime: Runtime) -> tuple[str, str]:
         return self._thread_id(runtime), self._run_id(runtime)
 
-    def _entry_epoch(self, runtime: Runtime) -> object:
+    def _entry_epoch(self, runtime: Runtime) -> _EntryEpoch:
         thread_id = self._thread_id(runtime)
         with self._lock:
-            epoch = self._entry_epochs.setdefault(thread_id, object())
-            self._entry_epochs.move_to_end(thread_id)
+            epoch = self._entry_epochs.get(thread_id)
+            if epoch is None:
+                epoch = _EntryEpoch()
+                self._entry_epochs[thread_id] = epoch
             return epoch
 
     def _record_phase_transition(
@@ -376,6 +384,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
             self._phase_states[thread_id] = {}
             while len(self._phase_states) > self._max_tracked_threads:
                 evicted_thread, _ = self._phase_states.popitem(last=False)
+                self._entry_epochs.pop(evicted_thread, None)
                 # Evict pending hints for the evicted thread to prevent unbounded growth.
                 for key in [k for k in self._pending if k[0] == evicted_thread]:
                     del self._pending[key]
@@ -422,7 +431,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         tool_call_id: str,
         *,
         hook: Literal["wrap_tool_call", "awrap_tool_call"],
-        entry_epoch: object,
+        entry_epoch: _EntryEpoch,
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
         message = _result_tool_message(result, tool_call_id)
@@ -575,7 +584,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
     # ------------------------------------------------------------------
     # Pending queue helpers
 
-    def _queue_assessment(self, runtime: Runtime, text: str, *, entry_epoch: object | None = None) -> None:
+    def _queue_assessment(self, runtime: Runtime, text: str, *, entry_epoch: _EntryEpoch | None = None) -> None:
         key = self._pending_key(runtime)
         thread_id = key[0]
         with self._lock:
@@ -595,7 +604,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         with self._lock:
             return self._pending.pop(key, [])
 
-    def _restore_pending(self, runtime: Runtime, hints: list[str], *, entry_epoch: object | None = None) -> None:
+    def _restore_pending(self, runtime: Runtime, hints: list[str], *, entry_epoch: _EntryEpoch | None = None) -> None:
         """Requeue hints taken for a model call that raised.
 
         LLMErrorHandlingMiddleware sits outside this middleware and retries a
@@ -649,7 +658,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         thread_id = self._thread_id(runtime)
         transitions: list[tuple[str, ToolPhaseState, ToolPhaseState]] = []
         with self._lock:
-            self._entry_epochs[thread_id] = object()
+            self._entry_epochs.pop(thread_id, None)
             thread_tools = self._phase_states.get(thread_id)
             if thread_tools is None:
                 return

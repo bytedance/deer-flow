@@ -57,6 +57,7 @@ Middlewares execute in strict order, each handling a specific concern:
 Starting a new graph invocation resets tool-progress tracking. Results and model
 retries still finishing from an earlier invocation cannot block its tools or
 restore obsolete progress hints, including same-run goal continuations.
+Model-only entries in other threads do not discard active tool assessments.
 
 | # | Middleware | Purpose |
 |---|-----------|---------|
