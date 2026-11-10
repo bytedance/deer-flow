@@ -133,6 +133,8 @@ Fork lookups reject invalidated clients; cancelled acquires leave borrowers a pe
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
 
+Exempt closer division only in verified expression spans.
+
 Case-insensitive literal grep uses KMP + single-character `re.IGNORECASE` for
 linear work and Unicode parity. Regression: `tests/test_local_grep_long_lines.py`.
 
@@ -146,7 +148,7 @@ symlinks, and visible depth/size bounds.
 - `ls` - Directory listing (tree format, max 2 levels). Remote commands precheck root existence and emit `__DF_FIND_STATUS__:missing`; `find` status 1 is always an incomplete-traversal `OSError`. `AioSandbox.list_dir` parses only `completed`/`None` on #5634's selected generation: `hard_timeout` raises `TimeoutError` and keeps that generation reusable; an ambiguous timeout or status raises `OSError`, replays nothing, and fences that generation. Missing-session 404s drop the stale id without replay. Persistent/scoped shells fence all `httpx.TransportError`s before cleanup.
 - `glob` - Find files or directories below a root directory with bounded results
 - `grep` - Search one text file or recursively search a directory, with optional glob filtering and bounded line-level results
-- `read_file` - Read file contents with optional line range; full reads keep stored line endings (Local `read_file`/`grep` read `newline="\n"`, writes `newline=""`), ranged reads join with `\n`; remote providers slice with `split_file_lines`, not `splitlines()`
+- `read_file` - Read file contents with optional line range; full reads keep stored line endings (Local `read_file`/`grep` read `newline="\n"`, writes `newline=""`), ranged reads join with `\n`; remote providers slice with `split_file_lines`, not `splitlines()`. Stamp `deerflow_tool_meta` from execution, including async init errors; never file prose. No-ID Python calls retain strings.
 - `write_file` - Create/overwrite text, or append with `append=True`. Enforces read-before-write when enabled. Reject exact elision placeholders before sync/async sandbox initialization; [matching rules](../agents/middlewares/TOOL_OUTPUT_PERSISTENCE.md#model-bound-write-elision).
 - `str_replace` - Substring replacement (single or all occurrences); `_match_line_endings` gives `old_str`/`new_str` a CRLF file's endings; same-path serialization is scoped to `(sandbox.id, path)` so isolated sandboxes do not contend on identical virtual paths inside one process; subject to the read-before-write gate when `read_before_write.enabled` (see Middleware Chain)
 

@@ -30,6 +30,33 @@ receipts fence reuse through existing quarantine. New output from a running
 command needs its next offset; empty polls retain the previous offsets.
 Markers support cooperative cleanup, not hostile-code isolation.
 
+Scoped env calls register in the same scope table and hold its lock through
+fresh bash creation, execution, polling and cleanup. Only that private path
+skips the shared implicit-shell lock. Releasing entries reject admission and stay
+visible to close until drained; queued calls recheck identity. Keep same-scope
+ordering, fresh env sessions, cancellation ownership and closed admission.
+Close also retains draining entries. Retire the command owner only after the
+scope lock drains, under the registry identity check, so cancellation during
+release/close reaches the active command and concurrent releases stay idempotent.
+`scope_lock_held=True` requires ownership of the registered scope lock for the
+whole invocation, including retries. Release has no separate drain deadline;
+HTTP cleanup bounds do not bound that lock wait. A timed-out release must retain
+ownership until work drains before client detach or reuse can be safe.
+All env calls share a cancellable Bash semaphore, held through cleanup. Scoped
+calls acquire it after the scope lock, then recheck registry admission; unscoped
+calls acquire it after the shared lock. `AIO_BASH_MAX_SESSIONS` (default 50) sets
+both provisioning and client limits. Docker reuse checks persisted env; remote
+reuse requires Pod-attested capacity. Unknown metadata defers, never proves a
+need for replacement. Keep this pool independent of persistent Shell capacity.
+Regressions: `tests/test_aio_scoped_env_concurrency.py`, `tests/test_aio_bash_capacity.py`.
+
+## Readiness polling
+
+Build the async readiness client off the event loop. Drain construction and
+close a late client on caller cancellation. If construction or close is
+itself cancelled, log it and preserve the caller's original cancellation.
+Regression: `tests/blocking_io/test_aio_sandbox_readiness_ssl.py`.
+
 ## Reuse admission
 
 Open-mode creation returns its port reservation when the Docker or Apple
@@ -38,6 +65,20 @@ Catch these only around the CLI call, preserving the original exception;
 post-start errors cannot prove absence. Restricted creation must not opt in:
 its proxy may already own the port, even if the final sandbox CLI cannot start.
 Regressions: `tests/test_aio_sandbox_spawn_ports.py`.
+
+Restricted creation tracks only the current call's proxy `docker create` boundary.
+A definite non-creation, confirmed proxy removal, or authoritative proxy absence
+permits returning its port. Preserve the creation error through ordinary
+rollback/probe failures and log their diagnostics. Register the reservation in
+`_unknown_cleanup_ports` before resources become discoverable; compare its token
+before release. Destroy transfers that token to its existing teardown entry so
+late startup failures cannot release a successor's port. Successful creation
+forgets only its own token without releasing the port.
+Uncertain reservations remain for the existing fenced `complete_absent_teardown`
+path or process restart. Ordinary creation does not reconcile earlier failures,
+and empty-URL destruction does not infer ports from unrelated unknown entries.
+Durable creation identity and automatic recovery are separate work. Regressions:
+`tests/test_aio_sandbox_restricted_creation_ports.py`.
 
 An implicit-shell fence is sticky for the container's lifetime, even after a
 successful explicit recovery session. `requires_container_recycle` includes

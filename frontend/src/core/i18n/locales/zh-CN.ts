@@ -585,6 +585,7 @@ export const zhCN: Translations = {
       waitingForYou: "等你回复",
       waiting: "等待中",
       paused: "已暂停",
+      waitingApproval: "等待审批",
       autoContinuedOnce: "自动续跑了 1 次",
       autoContinuedMany: "自动续跑了 {count} 次",
       details: "详情",
@@ -614,6 +615,9 @@ export const zhCN: Translations = {
           "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
         needsInputCard: "回答上面的问题即可继续。",
         needsInputReply: "回复补充缺少的信息即可继续。",
+        needsApproval: "查看并处理上面的工具审批即可继续。",
+        needsApprovalReload:
+          "审批详情加载失败，请使用上方的重新加载错误面板重试。",
         external: "目标检查：正在等待外部条件，就绪后发送消息即可继续。",
         unchecked: "{reason}。下次发消息后会重新检查。",
         unknown: "发送消息即可继续。",
@@ -1534,6 +1538,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    streamServerError: (status) =>
+      `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",
     outlineAttachmentFallback: "图片或文件消息",
   },
@@ -1821,6 +1827,27 @@ export const zhCN: Translations = {
     requiredA11yLabel: "必填",
     selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
+    approval: {
+      title: "工具调用需要审批",
+      description:
+        "继续前请检查每个操作。较长的值可能在显示时被截断，但省略的内容仍会完整参与执行。批准后将尝试执行工具，其他执行检查仍然有效。",
+      waiting: "等待审批",
+      loading: "正在加载审批详情...",
+      loadFailed:
+        "无法加载审批详情。此对话仍在等待审批，请重新加载详情后再继续。",
+      reload: "重新加载审批详情",
+      approve: "批准",
+      reject: "拒绝",
+      approveAll: "全部批准",
+      rejectAll: "全部拒绝并结束",
+      submitDecisions: "提交所选决定",
+      reasonLabel: "拒绝理由（可选）",
+      reasonPlaceholder: "告诉智能体不应执行这些工具的原因……",
+      submitFailed: "审批提交失败。请检查所选决定后重试。",
+      submitTimeout: "审批提交超时，已停止本次提交。请检查所选决定后重试。",
+      featureDisabled: "工具审批现已关闭，仍可安全地全部拒绝并结束。",
+      noPending: "该审批已不再挂起，请重新加载对话后重试。",
+    },
   },
 
   uploads: {
