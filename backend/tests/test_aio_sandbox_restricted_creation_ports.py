@@ -9,6 +9,7 @@ import json
 import logging
 import socket
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -661,5 +662,70 @@ def test_known_destroy_keeps_release_ownership_when_unknown_destroy_overlaps(res
     successor_port = urlparse(successors[0].sandbox_url).port
     assert allocator._reserved_ports == {successor_port}
     backend.complete_absent_teardown("sandbox")
+    assert allocator._reserved_ports == {successor_port}
+    assert history.released == [port]
+
+
+@pytest.mark.parametrize("lose_lease", [False, True], ids=["lease-held", "lease-lost"])
+def test_overlapping_destroy_retains_port_until_guarded_cleanup_finishes(restricted_backend, monkeypatch, lose_lease):
+    backend, allocator, history, docker = restricted_backend(None)
+    info = backend.create("thread", "sandbox")
+    port = history.allocated[0]
+    unknown_info = local_backend.SandboxInfo(
+        sandbox_id=info.sandbox_id,
+        sandbox_url=info.sandbox_url,
+        container_name=info.container_name,
+    )
+    interleaved = False
+    lease_lost = False
+
+    def check_lease():
+        if lease_lost:
+            raise RuntimeError("teardown lease lost")
+
+    def overlap_before_stop_receipt(cmd, **kwargs):
+        nonlocal interleaved, lease_lost
+        if not interleaved and cmd[1] == "stop" and cmd[-1] == info.container_id:
+            interleaved = True
+            backend.destroy(unknown_info)
+            assert_reserved(allocator, port)
+            assert history.released == []
+            try:
+                return docker.run(cmd, **kwargs)
+            finally:
+                lease_lost = lose_lease
+        return docker.run(cmd, **kwargs)
+
+    monkeypatch.setattr(local_backend.subprocess, "run", overlap_before_stop_receipt)
+    if lose_lease:
+        with pytest.raises(RuntimeError, match="teardown lease lost"):
+            backend.destroy(info, check=check_lease)
+        assert_reserved(allocator, port)
+        assert history.released == []
+    else:
+        backend.destroy(info, check=check_lease)
+        assert_released_once(allocator, history, port)
+    assert interleaved
+    assert backend.is_absent("sandbox") is True
+
+    lease_lost = False
+    backend.complete_absent_teardown("sandbox", check=check_lease)
+    assert_released_once(allocator, history, port)
+    # Another process can occupy a released host port between these operations.
+    # Control only this OS probe so reuse still exercises the real allocator's
+    # reservation checks, lock and ledger without depending on host traffic.
+    with monkeypatch.context() as port_probe:
+        port_probe.setattr(
+            network,
+            "socket",
+            SimpleNamespace(
+                AF_INET=socket.AF_INET,
+                SOCK_STREAM=socket.SOCK_STREAM,
+                socket=lambda *_: nullcontext(SimpleNamespace(bind=lambda address: None)),
+            ),
+        )
+        successor_port = allocator.allocate(port)
+    assert successor_port == port
+    backend.complete_absent_teardown("sandbox", check=check_lease)
     assert allocator._reserved_ports == {successor_port}
     assert history.released == [port]

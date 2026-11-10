@@ -231,16 +231,22 @@ def _build_aio_provider(monkeypatch, backend, sandbox_ids):
 
 
 @pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
-def test_stop_signal_with_main_thread_provider_destroys_sandboxes_only_after_run_drain(monkeypatch, restore_signal_handlers, signum):
+def test_stop_signal_with_main_thread_provider_destroys_sandboxes_only_after_run_drain(monkeypatch, restore_signal_handlers, signum, tmp_path):
     """G6/S0: a provider built on the event-loop thread must not tear down from its signal handler."""
     from app.gateway.app import _runtime_with_mcp_pool_shutdown
+    from deerflow.community.aio_sandbox import aio_sandbox_provider
+    from deerflow.config.paths import Paths
     from deerflow.sandbox import sandbox_provider as registry
+
+    monkeypatch.setattr(aio_sandbox_provider, "get_paths", lambda: Paths(base_dir=tmp_path))
 
     sandbox_ids = ["sbx-0", "sbx-1", "sbx-2"]
     events = []
 
     class Backend:
-        def destroy(self, info):
+        def destroy(self, info, *, check=None):
+            if check is not None:
+                check()
             events.append(f"destroy:{info.sandbox_id}")
 
         def list_running(self):

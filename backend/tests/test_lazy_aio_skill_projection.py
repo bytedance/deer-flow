@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,13 +45,17 @@ class _RecordingContainerBackend(LocalContainerBackend):
     def is_alive(self, info: SandboxInfo) -> bool:
         return info.sandbox_id in self.running
 
-    def destroy(self, info: SandboxInfo) -> None:
+    def destroy(self, info: SandboxInfo, *, check: Callable[[], None] | None = None) -> None:
+        if check is not None:
+            check()
         self.running.pop(info.sandbox_id, None)
 
     def is_absent(self, sandbox_id: str) -> bool:
         return sandbox_id not in self.running
 
-    def complete_absent_teardown(self, sandbox_id: str) -> None:
+    def complete_absent_teardown(self, sandbox_id: str, *, check: Callable[[], None] | None = None) -> None:
+        if check is not None:
+            check()
         assert self.is_absent(sandbox_id)
 
 

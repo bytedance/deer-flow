@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import httpx
@@ -211,11 +211,12 @@ class SandboxBackend(ABC):
         ...
 
     @abstractmethod
-    def destroy(self, info: SandboxInfo) -> None:
+    def destroy(self, info: SandboxInfo, *, check: Callable[[], None] | None = None) -> None:
         """Destroy/cleanup a sandbox and release its resources.
 
         Args:
             info: The sandbox metadata to destroy.
+            check: Optional lease check; call before each new resource operation.
         """
         ...
 
@@ -260,7 +261,7 @@ class SandboxBackend(ABC):
         """
         return False
 
-    def complete_absent_teardown(self, sandbox_id: str) -> None:
+    def complete_absent_teardown(self, sandbox_id: str, *, check: Callable[[], None] | None = None) -> None:
         """Finish cleanup bookkeeping after authoritative runtime absence.
 
         The provider must confirm ``is_absent(sandbox_id) is True`` and hold
@@ -269,7 +270,11 @@ class SandboxBackend(ABC):
         scoped to this absent logical ID. Failure must raise so quarantine is
         retained and cleanup can be retried before creating a replacement.
         Backends without pending cleanup require no completion work.
+        Call ``check`` before starting each resource operation when provided;
+        it raises if the caller has lost its teardown lease.
         """
+        if check is not None:
+            check()
 
     def inspect_runtime(self, sandbox_id: str) -> SandboxInfo | None:
         """Inspect the runtime generation independently of endpoint readiness.

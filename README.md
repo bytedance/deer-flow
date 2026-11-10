@@ -1142,7 +1142,10 @@ backend instances.
 AIO teardown failures retain a generation-bound cleanup record. Partial shutdown
 reports failure and can be retried; retries verify the runtime identity and absence
 before completing cleanup. Healthy replacements with the same logical ID remain
-reusable, including after background recovery into the warm pool.
+reusable, including after background recovery into the warm pool. Cleanup retires
+only the quarantine record versions captured before that verification, preserving
+newer fences even if its ownership lease expires. Confirmed lease loss defers
+further cleanup until the current owner can retry it.
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode. For absolute skills paths and custom directory mappings on Linux, macOS, Windows, WSL, or a Docker Gateway, see [Skills and sandbox paths](backend/docs/CONFIGURATION.md#skills-and-sandbox-paths).
 
@@ -3122,10 +3125,21 @@ after the backend confirms that no container or Pod remains, while holding the
 normal teardown fences. This also permits recovery when a runtime cannot report
 a generation. If a partial deletion leaves a container or a Pod behind, the
 Gateway inspects it independently of health checks and Service availability,
-then retries cleanup only for a quarantined generation. A replacement generation
-keeps its resources. A delete acknowledgement or failed health check is
-insufficient to clear the records.
+then retries destruction only when its generation and quarantine still match
+the observation captured before those probes. New marks survive stale cleanup,
+including interrupted writes beside older records. If the running generation
+cannot be identified, cleanup defers until absence is confirmed. Confirmed lease
+loss also defers cleanup and keeps it retryable, including at completion.
+Warm-pool cleanup uses the same checked recovery after a failed DELETE or lease
+loss at completion. Unknown quarantine records block reuse but cannot authorize
+destruction of a replacement. Adopting a verified new generation starts its own
+lifecycle while retaining its predecessor's durable cleanup records.
+A replacement generation keeps its resources. A delete acknowledgement or
+failed health check is insufficient to clear the records.
 Recovery also clears leftover local proxy and network resources before recreation.
+Update all Gateways sharing these runtimes to preserve this behavior. Before
+rolling back, let the updated Gateways finish quarantine cleanup for interrupted
+writes; older versions do not recognize the new pending records.
 
 Lark broker provisioning requires confirmed capabilities. Probe failures cannot
 select credential mounts or overwrite a known broker requirement. Update the

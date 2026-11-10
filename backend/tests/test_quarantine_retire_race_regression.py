@@ -1,23 +1,7 @@
-"""Red/green regression: retire() must survive a peer fencing concurrently.
+"""Retirement keeps newer fences and tolerates already-completed cleanup.
 
-`retire()` unlinks every record then calls `directory.rmdir()` unguarded.
-Between `iterdir()` and `rmdir()`, a concurrent `mark()` — a peer fencing the
-same logical sandbox — can create a fresh record, so `rmdir()` fails with
-ENOTEMPTY and the exception escapes into `_retire_absent_quarantine`'s
-teardown path. Its sibling `retire_replaced_generations()` guards the identical
-`rmdir` with `try/except OSError` for exactly this reason; `retire()` does not.
-
-Deterministic: the race is replayed by wrapping `Path.rmdir` so a peer record
-lands between the `iterdir()` and the `rmdir()` call.
-The `rmdir()` window above is closed. Two windows ahead of it are not, in both
-`retire()` and `retire_replaced_generations()`: the `iterdir()` listing and each
-`record.unlink()`. A peer running the same teardown one step ahead can remove the
-directory, or one record, in exactly those windows, and the `FileNotFoundError`
-then escapes the unwrapped `_retire_absent_quarantine()` call at the top of
-sandbox creation. The class already reports that interleaving as a normal answer
-two methods away: `_exists()` maps it to "no quarantine" and `contains()` catches
-it on its own listing. The cases below replay each remaining window by
-monkeypatching `Path.iterdir` or `Path.unlink`, so they stay deterministic.
+Listing happens in the pre-proof snapshot. Direct filesystem mutations replay
+older peers finishing their own cleanup or writing an empty legacy record.
 """
 
 from __future__ import annotations
@@ -52,7 +36,7 @@ def test_retire_survives_a_peer_fencing_between_listing_and_rmdir(tmp_path, monk
 
     monkeypatch.setattr(Path, "rmdir", racing_rmdir)
 
-    store.retire(info)  # must not raise
+    store.retire(info, snapshot=store.snapshot(info))  # must not raise
 
     assert directory.exists()
     assert (directory / store._key("gen-2")).exists()
@@ -86,7 +70,7 @@ def test_teardown_survives_the_directory_disappearing_before_the_listing(tmp_pat
 
     monkeypatch.setattr(Path, "iterdir", racing_iterdir)
 
-    getattr(store, method)(info)  # must not raise
+    getattr(store, method)(info, snapshot=store.snapshot(info))  # must not raise
 
     assert not directory.exists()
 
@@ -116,7 +100,7 @@ def test_retire_survives_a_record_disappearing_mid_loop(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "unlink", racing_unlink)
 
-    store.retire(info)  # must not raise
+    store.retire(info, snapshot=store.snapshot(info))  # must not raise
 
     assert not raced_record.exists()
     # The loop reached the second record, so the emptied directory was removed.
@@ -149,7 +133,7 @@ def test_retire_replaced_generations_keeps_the_live_fence_when_a_peer_drops_a_st
 
     monkeypatch.setattr(Path, "unlink", racing_unlink)
 
-    store.retire_replaced_generations(live)  # must not raise
+    store.retire_replaced_generations(live, snapshot=store.snapshot(live))  # must not raise
 
     assert not raced_record.exists()
     assert (directory / store._key("gen-2")).exists()
