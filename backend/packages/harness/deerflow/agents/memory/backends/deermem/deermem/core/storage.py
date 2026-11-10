@@ -2160,9 +2160,15 @@ class FileMemoryStorage(MemoryStorage):
                     if manifest_path is not None:
                         synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_path])
                     records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
-                except Exception:
+                except Exception as exc:
                     logger.exception("Failed to rebuild retrieval index for %s", path)
                     failed += 1
+                    read_error = exc.__cause__ if isinstance(exc, MemoryStorageCorruption) else exc
+                    if isinstance(read_error, OSError) and not isinstance(read_error, FileNotFoundError):
+                        # An unreadable file is not evidence of malformed data.
+                        # Keep the previous index/signatures intact so a later
+                        # scoped search can retry instead of trusting partial rows.
+                        return {"supported": True, "indexed": 0, "failed": failed, "fatal": True}
         else:
             for scope in scopes:
                 kwargs = self._scope_kwargs(scope)

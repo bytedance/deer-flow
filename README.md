@@ -3579,6 +3579,10 @@ become available in the next batch, when rejected additions can be retried.
 
 ### Long-Term Memory
 
+If a temporary file-read failure interrupts DeerMem's full index rebuild, the
+previous index is preserved and later scoped searches can retry after access
+recovers. Malformed fact files are still logged and skipped.
+
 DeerMem trims oversized user/history summaries against the configured token
 counter, including the omission marker and retained facts. Mixed-language text
 does not rely on an average character/token ratio; the existing guaranteed-fact

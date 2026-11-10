@@ -262,8 +262,8 @@ filesystems, and the full rebuild and one-shot corruption recovery touch only
 that local index. `deps._validate_memory_retrieval_index` warns when a declared
 multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
-Malformed facts are logged and skipped during rebuild.
-A fatal rebuild failure keeps lazy retry active.
+Malformed/dangling facts are logged and skipped. Canonical I/O failures abort
+full rebuilds before index/signature publication; fatal failures keep scoped retry active.
 Index startup recreates files only for SQLite CORRUPT/NOTADB codes; operational
 failures select substring fallback without deleting the existing index.
 
