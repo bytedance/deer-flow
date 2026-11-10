@@ -1007,6 +1007,11 @@ request timeout is capped by the remaining budget; the outer deadline also bound
 responses that keep delivering data. The existing `timeout` remains Jina's
 `X-Timeout` header and the per-request HTTP timeout limit.
 
+The tool's `timeout` accepts positive integers and integer strings representable
+as finite HTTP timeouts. Zero, negative and unrepresentable values fall back to
+10 seconds, as do booleans, fractional numbers and invalid strings. This
+normalization applies to both the `X-Timeout` header and the HTTPX request timeout.
+
 HTTP 502/503/504 and HTTPX connection-establishment errors (`ConnectError`,
 `ConnectTimeout`) are retryable. HTTP 429 is retried **only** with a valid
 `Retry-After` header; missing or malformed hints leave it terminal. HTTP 503
