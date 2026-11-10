@@ -56,6 +56,7 @@ This section accumulates work toward the **2.3.0** milestone
   feeds a snapshot only the rest. The record is in-process: a failed
   extraction, a pre-screen skip, a message without an id, and a restart or
   another Gateway replica still get the whole snapshot.
+  ([#8105](https://github.com/bytedance/deer-flow/pull/8105))
 
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's
