@@ -33,6 +33,7 @@ awk '
     in_sandbox && indent == child_indent && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
         sandbox_use=$0
         sub(/^[[:space:]]*use:[[:space:]]*/, "", sandbox_use)
+        # Keep the exact match below so truncated quoted values fall back to local.
         sub(/[[:blank:]]+#.*$/, "", sandbox_use)
         sub(/[[:space:]]+$/, "", sandbox_use)
         seen_use=1
