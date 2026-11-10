@@ -76,7 +76,7 @@ The INSERT trigger takes the shared cutover lock last; offline activation takes
 only its exclusive counterpart. Off-mode triggers take only the shared gate and
 recheck policy, aborting on activation; retained-snapshot isolation fails closed.
 Strict startup cannot downgrade durable policy.
-[Offline cutover](../../../../../README.md#configuration).
+[Offline cutover](../../../../../docs/guide/configuration.md).
 
 `RunRepository.update_status`/`finalize_if_not_cancelled` with an owner, and
 `merge_owned_metadata`, require that owner and a live lease. Increment the
