@@ -11,6 +11,7 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
@@ -85,13 +86,18 @@ def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UN
     if cfg is _UNSET:
         cfg = _get_tool_config(tool_name)
     base_url = DEFAULT_BASE_URL
-    token = os.getenv("BROWSERLESS_TOKEN", "")
+    token = resolve_api_key(os.getenv("BROWSERLESS_TOKEN"))
     timeout_s = 30.0
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        token = cfg.get("token", token)
+        if "token" in cfg:
+            # An explicitly configured value is authoritative, including "" and
+            # null: a self-hosted capture endpoint opts out of the cloud token,
+            # and falling back to BROWSERLESS_TOKEN would send that credential to
+            # it. Only an omitted key falls back to the environment.
+            token = resolve_api_key(cfg.get("token"))
         timeout_s = _resolve_timeout(cfg, timeout_s)
-    return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
+    return BrowserlessClient(base_url=base_url, token=token or "", timeout_s=timeout_s)
 
 
 def _as_bool(value: object, default: bool) -> bool:
