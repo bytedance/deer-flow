@@ -382,10 +382,17 @@ export default function AgentChatPage() {
         runContext,
         executionOptions,
       );
-      if (message.files.length > 0) {
-        return sendPromise;
+      try {
+        await sendPromise;
+      } catch (error) {
+        // A first send whose run request was rejected never became a turn
+        // (upstream #8039): put the welcome layout back. The hook keeps the
+        // composer's text and draft and discards the zero-message thread.
+        if (submissionEpochRef.current === submissionEpoch && isNewThread) {
+          setIsWelcomeMode(true);
+        }
+        throw error;
       }
-      void sendPromise;
     },
     [
       currentKnowledgeScopeSnapshot,

@@ -29,7 +29,12 @@ import type { UploadResponse } from "@/core/uploads/api";
 // Drives the real composer through the real sendMessage, as the chat pages
 // wire them, so a failed upload is observed where the user sees it.
 
-const mocks = rs.hoisted(() => ({ submit: rs.fn(async () => undefined) }));
+const mocks = rs.hoisted(() => ({
+  submit: rs.fn(async () => undefined),
+  onCreated: undefined as
+    | ((meta: { thread_id: string; run_id: string }) => void)
+    | undefined,
+}));
 
 rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), refresh: rs.fn() }),
@@ -49,13 +54,18 @@ rs.mock("@/core/models/hooks", () => ({
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
-  useStream: () => ({
-    isLoading: false,
-    messages: [],
-    stop: rs.fn(async () => undefined),
-    submit: mocks.submit,
-    values: { artifacts: [], messages: [], title: "", todos: [] },
-  }),
+  useStream: (options: {
+    onCreated?: (meta: { thread_id: string; run_id: string }) => void;
+  }) => {
+    mocks.onCreated = options.onCreated;
+    return {
+      isLoading: false,
+      messages: [],
+      stop: rs.fn(async () => undefined),
+      submit: mocks.submit,
+      values: { artifacts: [], messages: [], title: "", todos: [] },
+    };
+  },
 }));
 
 const ATTACHMENT: AttachProjectDocumentResult = {
@@ -143,7 +153,12 @@ let firstUploadResponse: () => Response;
 beforeEach(() => {
   uploadAttempts = 0;
   firstUploadResponse = () => json({ detail: "disk full" }, 500);
-  mocks.submit.mockClear();
+  mocks.submit.mockReset();
+  // The SDK creates the run after `thread.submit` returns; report acceptance so
+  // a successful send clears the composer like the real Gateway does.
+  mocks.submit.mockImplementation(async () => {
+    mocks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
+  });
   // happy-dom's File is not a Node Blob, so the composer's preview URL needs
   // a stand-in.
   rs.spyOn(URL, "createObjectURL").mockReturnValue("blob:attachment");

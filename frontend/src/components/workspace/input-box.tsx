@@ -1589,6 +1589,18 @@ export function InputBox({
       };
       const submit = () => onSubmit?.(message, submitOptions);
 
+      // A send whose run request never started rejects here. PromptInput keeps
+      // the text, and flushing the same draft keeps it across a reload too; a
+      // successful send retires the draft through `onSent` at run acceptance.
+      const submitAndRetainDraft = async () => {
+        try {
+          return await submit();
+        } catch (error) {
+          flushLatestDraft(draftKey);
+          throw error;
+        }
+      };
+
       // Guard against submitting before the initial model auto-selection
       // effect has flushed thread settings to storage/state.
       if (resolvedModelName && context.model_name !== resolvedModelName) {
@@ -1602,18 +1614,19 @@ export function InputBox({
         );
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
-            Promise.resolve(submit()).then(resolve).catch(reject);
+            Promise.resolve(submitAndRetainDraft()).then(resolve).catch(reject);
           }, 0);
         });
       }
 
-      return submit();
+      return submitAndRetainDraft();
     },
     [
       context,
       textInput.value,
       conversationReferences,
       draftKey,
+      flushLatestDraft,
       invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,

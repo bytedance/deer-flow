@@ -10,22 +10,35 @@ import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import type { UploadResponse } from "@/core/uploads/api";
 
 // onSent tells callers they may drop one-time composer state (quotes,
-// references, staged files, the stored draft). It must not fire for a send
-// whose attachments never upload, or a retry goes out without that context.
+// references, staged files, the stored draft). It fires only when the Gateway
+// accepted the run: `thread.submit` merely enqueues the SDK stream, so a
+// rejected run request arrives later through onError and the send rejects.
+
+type StreamCallbacks = {
+  onCreated?: (meta: { thread_id: string; run_id: string }) => void;
+  onError?: (error: unknown, run?: unknown) => void;
+};
 
 const mocks = rs.hoisted(() => ({
   events: [] as string[],
   submit: rs.fn(async () => undefined),
+  callbacks: {} as StreamCallbacks,
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
-  useStream: () => ({
-    isLoading: false,
-    messages: [],
-    stop: rs.fn(async () => undefined),
-    submit: mocks.submit,
-    values: { artifacts: [], messages: [], title: "", todos: [] },
-  }),
+  useStream: (options: StreamCallbacks) => {
+    mocks.callbacks = {
+      onCreated: options.onCreated,
+      onError: options.onError,
+    };
+    return {
+      isLoading: false,
+      messages: [],
+      stop: rs.fn(async () => undefined),
+      submit: mocks.submit,
+      values: { artifacts: [], messages: [], title: "", todos: [] },
+    };
+  },
 }));
 
 const UPLOAD_RESPONSE: UploadResponse = {
@@ -120,6 +133,7 @@ async function renderThreadStream() {
 
 beforeEach(() => {
   mocks.events = [];
+  mocks.callbacks = {};
   mocks.submit.mockReset();
   mocks.submit.mockImplementation(async () => {
     mocks.events.push("submit");
@@ -129,6 +143,12 @@ beforeEach(() => {
 afterEach(() => {
   rs.unstubAllGlobals();
 });
+
+async function acceptRun() {
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
+  });
+}
 
 test("does not report a send whose attachment upload fails", async () => {
   stubUploadFetch(
@@ -152,7 +172,7 @@ test("does not report a send whose attachment upload fails", async () => {
   expect(onSent).not.toHaveBeenCalled();
 });
 
-test("reports the send after its attachments upload, right before the run is submitted", async () => {
+test("reports the send after its attachments upload and the run is accepted", async () => {
   let finishUpload!: () => void;
   stubUploadFetch(
     () =>
@@ -184,15 +204,22 @@ test("reports the send after its attachments upload, right before the run is sub
   expect(onSent).not.toHaveBeenCalled();
 
   finishUpload();
+  await flushFrames();
+  // Dispatch alone is not delivery: the run is submitted, but nothing is
+  // retired until the Gateway acknowledges it.
+  expect(mocks.events).toEqual(["upload", "submit"]);
+  expect(onSent).not.toHaveBeenCalled();
+
+  await acceptRun();
   await act(async () => {
     await sendPromise;
   });
 
-  expect(mocks.events).toEqual(["upload", "onSent", "submit"]);
+  expect(mocks.events).toEqual(["upload", "submit", "onSent"]);
   expect(onSent).toHaveBeenCalledTimes(1);
 });
 
-test("reports a text-only send before the run is submitted", async () => {
+test("reports a text-only send once the run is accepted", async () => {
   stubUploadFetch(async () => {
     throw new Error("no upload expected");
   });
@@ -201,14 +228,91 @@ test("reports a text-only send before the run is submitted", async () => {
     mocks.events.push("onSent");
   });
 
-  await act(async () => {
-    await result.current.sendMessage(
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
       "thread-1",
       { text: "Hello", files: [] },
       undefined,
       { onSent },
     );
   });
+  await flushFrames();
+  expect(mocks.events).toEqual(["submit"]);
+  expect(onSent).not.toHaveBeenCalled();
 
-  expect(mocks.events).toEqual(["onSent", "submit"]);
+  await acceptRun();
+  await act(async () => {
+    await sendPromise;
+  });
+
+  expect(mocks.events).toEqual(["submit", "onSent"]);
+});
+
+test("rejects a send whose run request fails before the run exists", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result } = await renderThreadStream();
+  const onSent = rs.fn(() => {
+    mocks.events.push("onSent");
+  });
+
+  let sendError: unknown;
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current
+      .sendMessage("thread-1", { text: "Hello", files: [] }, undefined, {
+        onSent,
+      })
+      .catch((error: unknown) => {
+        sendError = error;
+      });
+  });
+  await flushFrames();
+  expect(mocks.events).toEqual(["submit"]);
+
+  await act(async () => {
+    mocks.callbacks.onError?.(new Error("HTTP 502"), undefined);
+  });
+  await act(async () => {
+    await sendPromise;
+  });
+
+  expect(sendError).toBeInstanceOf(Error);
+  expect(onSent).not.toHaveBeenCalled();
+});
+
+test("does not retire a second time when an accepted send fails later", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result } = await renderThreadStream();
+  const onSent = rs.fn(() => {
+    mocks.events.push("onSent");
+  });
+
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "thread-1",
+      { text: "Hello", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+  await acceptRun();
+  await act(async () => {
+    await sendPromise;
+  });
+  await act(async () => {
+    mocks.callbacks.onError?.(new Error("stream dropped"), {
+      thread_id: "thread-1",
+      run_id: "run-1",
+    });
+  });
+
+  expect(onSent).toHaveBeenCalledTimes(1);
+  expect(mocks.events).toEqual(["submit", "onSent"]);
 });

@@ -137,14 +137,15 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
-   * Invoked exactly once when the send is genuinely dispatched: after the
-   * in-flight guard and after any attachments upload, right before the run is
-   * submitted. It never fires for a dropped send or one whose attachments fail
-   * to prepare or upload, so callers can safely perform one-time cleanup (e.g.
-   * clearing quoted references) without losing state a retry still needs.
-   * The guarantee ends at dispatch: a run that fails afterwards does not
-   * reject `thread.submit` (the SDK reports it through the stream's
-   * `onError`), so the send resolves and the composer is cleared as a whole.
+   * Invoked exactly once when the run was actually accepted: after the
+   * in-flight guard, after any attachments upload, and after the Gateway
+   * acknowledged the run (its `Content-Location` metadata or the first stream
+   * frame). A send whose run request is rejected never calls it, because the
+   * SDK creates the run after `thread.submit` resolves, so dispatch alone does
+   * not prove the turn exists. Callers can therefore retire one-time composer
+   * state (quotes, references, staged files, the stored draft) without losing
+   * anything a retry still needs: `sendMessage` rejects instead, and the
+   * composer restores its text and draft.
    */
   onSent?: () => void;
 };
@@ -162,6 +163,25 @@ type PendingApprovalSubmission = {
   requestId: string;
   resolve: (accepted: boolean) => void;
   timeout: number | undefined;
+};
+
+/**
+ * The one send this mounted client is waiting to see accepted.
+ *
+ * `thread.submit` only enqueues the stream, so its resolution proves nothing:
+ * the SDK creates the run afterwards and reports a rejected request through
+ * `onError`. This records the acceptance promise so `sendMessage` resolves
+ * only for a run the Gateway accepted, and rejects for one it refused.
+ * `onSent` belongs to acceptance, so one-time composer state survives a
+ * failed first attempt for a retry.
+ */
+type PendingSend = {
+  threadId: string;
+  options?: SendMessageOptions;
+  settled: boolean;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
 };
 
 export function deriveHitlApprovalState({
@@ -226,6 +246,14 @@ export function buildHitlApprovalSubmitOptions({
 type ThreadDeleteClient = {
   threads: {
     delete: (threadId: string) => Promise<unknown>;
+    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
+  };
+};
+
+type ThreadDiscardClient = {
+  threads: {
+    delete: (threadId: string) => Promise<unknown>;
+    getState: (threadId: string) => Promise<unknown>;
     search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
   };
 };
@@ -2123,6 +2151,7 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  const pendingSendRef = useRef<PendingSend | null>(null);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2232,38 +2261,95 @@ export function useThreadStream({
     }
   }, [restInterrupts, restInterruptsError, restInterruptsLoading]);
 
-  const handleStreamStart = useCallback((_threadId: string, _runId: string) => {
-    threadIdRef.current = _threadId;
-    setOptimisticThreadId((currentOptimisticThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentOptimisticThreadId &&
-        (currentOptimisticThreadId === currentView ||
-          currentOptimisticThreadId === _threadId)
-      ) {
-        return _threadId;
-      }
-      return currentOptimisticThreadId;
-    });
-    setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
-      const currentView = currentViewThreadIdRef.current;
-      if (
-        currentLiveMessagesThreadId &&
-        (currentLiveMessagesThreadId === currentView ||
-          currentLiveMessagesThreadId === _threadId)
-      ) {
-        return _threadId;
-      }
-      return currentLiveMessagesThreadId;
-    });
-    if (!startedRef.current) {
-      listeners.current.onStart?.(_threadId, _runId);
-      startedRef.current = true;
+  /**
+   * A stream frame (or the run's Content-Location metadata) proves the run was
+   * created: retire the send's one-time composer state and let `sendMessage`
+   * resolve.
+   */
+  const queryClient = useQueryClient();
+
+  const acceptPendingSend = useCallback((threadId?: string) => {
+    const pending = pendingSendRef.current;
+    if (!pending || pending.settled) {
+      return;
     }
-    setOnStreamThreadId(_threadId);
+    if (threadId && threadId !== pending.threadId) {
+      return;
+    }
+    pending.settled = true;
+    pendingSendRef.current = null;
+    pending.options?.onSent?.();
+    pending.resolve();
   }, []);
 
-  const queryClient = useQueryClient();
+  const rejectPendingSend = useCallback(
+    (error: unknown) => {
+      const pending = pendingSendRef.current;
+      if (!pending || pending.settled) {
+        return;
+      }
+      pending.settled = true;
+      pendingSendRef.current = null;
+      // A rejected run request can still have passed Gateway admission, which
+      // creates the zero-message thread row. Roll back only a row without a
+      // checkpoint; `discardUnwrittenThread` owns that decision. Detached so a
+      // slow read/delete never delays the send failure the user must see.
+      void discardUnwrittenThread(queryClient, pending.threadId);
+      pending.reject(error);
+    },
+    [queryClient],
+  );
+
+  /**
+   * The view moved on before acceptance arrived. Let the caller finish without
+   * retiring its one-time composer state: the abandoned conversation may still
+   * need its draft if the run turns out to have failed.
+   */
+  const releasePendingSend = useCallback(() => {
+    const pending = pendingSendRef.current;
+    if (!pending || pending.settled) {
+      return;
+    }
+    pending.settled = true;
+    pendingSendRef.current = null;
+    pending.resolve();
+  }, []);
+
+  const handleStreamStart = useCallback(
+    (_threadId: string, _runId: string) => {
+      threadIdRef.current = _threadId;
+      setOptimisticThreadId((currentOptimisticThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentOptimisticThreadId &&
+          (currentOptimisticThreadId === currentView ||
+            currentOptimisticThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentOptimisticThreadId;
+      });
+      setLiveMessagesThreadId((currentLiveMessagesThreadId) => {
+        const currentView = currentViewThreadIdRef.current;
+        if (
+          currentLiveMessagesThreadId &&
+          (currentLiveMessagesThreadId === currentView ||
+            currentLiveMessagesThreadId === _threadId)
+        ) {
+          return _threadId;
+        }
+        return currentLiveMessagesThreadId;
+      });
+      if (!startedRef.current) {
+        listeners.current.onStart?.(_threadId, _runId);
+        startedRef.current = true;
+      }
+      setOnStreamThreadId(_threadId);
+      acceptPendingSend();
+    },
+    [acceptPendingSend],
+  );
+
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
 
@@ -2413,7 +2499,14 @@ export function useThreadStream({
           .catch(() => ({}));
       }
     },
+    onMetadataEvent(_data) {
+      // The run's metadata frame means the Gateway accepted this send even
+      // when the response header is unreadable (e.g. a proxy that hides
+      // Content-Location); see `PendingSend`.
+      acceptPendingSend();
+    },
     onUpdateEvent(data, { mutate }) {
+      acceptPendingSend();
       if (hasRenderedThreadStateUpdate(data)) {
         mutate((previous) => reduceThreadStateUpdates(previous, data) ?? {});
       }
@@ -2461,6 +2554,7 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown) {
+      acceptPendingSend();
       // Narrow `event.type` once; taskEventToSubtaskUpdate already validated the
       // task_* events, so the per-branch re-narrowing below reads this single
       // source of truth instead of re-checking the object shape each time.
@@ -2521,6 +2615,14 @@ export function useThreadStream({
     },
     onError(error, run) {
       timedOutApprovalSubmissionRef.current = null;
+      // The run request itself was refused, so no stream frame ever arrived:
+      // the send never became a turn. Reject it so the composer can keep the
+      // text and draft for a retry. `run` is only present once the Gateway
+      // created the run (which is what `acceptPendingSend` records), so an
+      // error carrying run metadata is a later stream failure, not this send.
+      if (!run) {
+        rejectPendingSend(error);
+      }
       if (pendingApprovalSubmissionRef.current) {
         settlePendingApproval(false);
       }
@@ -2572,6 +2674,9 @@ export function useThreadStream({
       }
     },
     onFinish(state, run) {
+      // A stream that finished without an explicit run metadata frame still
+      // created its run; the send must not stay pending forever.
+      acceptPendingSend(run?.thread_id);
       settlePendingApproval(false);
       if (run) {
         completedRunIdsRef.current.add(run.run_id);
@@ -2909,6 +3014,7 @@ export function useThreadStream({
   useEffect(() => {
     startedRef.current = false;
     sendInFlightRef.current = false;
+    releasePendingSend();
     settlePendingApproval(false);
     messagesRef.current = [];
     transientHistoryBridgeRef.current = [];
@@ -2926,8 +3032,11 @@ export function useThreadStream({
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-    return () => settlePendingApproval(false);
-  }, [settlePendingApproval, threadId]);
+    return () => {
+      releasePendingSend();
+      settlePendingApproval(false);
+    };
+  }, [releasePendingSend, settlePendingApproval, threadId]);
 
   // Confirming a new thread only assigns its SDK id; the displayed
   // conversation and its submitted human anchor have not changed.
@@ -3018,6 +3127,7 @@ export function useThreadStream({
       sendInFlightRef.current = true;
 
       const text = message.text.trim();
+      let pendingSend: PendingSend | null = null;
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -3163,16 +3273,37 @@ export function useThreadStream({
           }
         }
 
-        // Attachments are uploaded, so the send is genuinely dispatched and
-        // callers can drop one-time state. A failed upload rejected above
-        // without reaching here, leaving that state for a retry.
+        // Attachments are uploaded, so the send is dispatched. `onSent` still
+        // waits for the run to be accepted: the SDK only enqueues the stream
+        // here, and a rejected run request must leave one-time composer state
+        // (draft, quotes, references, staged files) untouched for the retry.
         pausedRunContextsRef.current.set(threadId, {
           extraContext,
           conversationReferences: options?.conversationReferences
             ? [...options.conversationReferences]
             : undefined,
         });
-        options?.onSent?.();
+        // ES2022 target: Promise.withResolvers is not in the configured libs.
+        let resolveAccepted!: () => void;
+        let rejectAccepted!: (error: unknown) => void;
+        const accepted = new Promise<void>((resolve, reject) => {
+          resolveAccepted = resolve;
+          rejectAccepted = reject;
+        });
+        // The submit path may throw before it awaits this promise; keep the
+        // rejection observed so a failed submit never surfaces as an
+        // unhandled rejection. `sendMessage` still rethrows the same error.
+        void accepted.catch(() => undefined);
+        const pending: PendingSend = {
+          threadId,
+          options,
+          settled: false,
+          promise: accepted,
+          resolve: resolveAccepted,
+          reject: rejectAccepted,
+        };
+        pendingSend = pending;
+        pendingSendRef.current = pending;
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
@@ -3201,11 +3332,15 @@ export function useThreadStream({
             }),
           },
         );
+        // Resolves once the Gateway acknowledged the run; rejects when the run
+        // request failed, so a failed send keeps the composer and draft.
+        await pending.promise;
         void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
         void queryClient.invalidateQueries({
           queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
         });
       } catch (error) {
+        rejectPendingSend(error);
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -3213,6 +3348,9 @@ export function useThreadStream({
         localTurnAnchorRef.current = null;
         throw error;
       } finally {
+        if (pendingSendRef.current === pendingSend) {
+          pendingSendRef.current = null;
+        }
         sendInFlightRef.current = false;
       }
     },
@@ -3225,6 +3363,7 @@ export function useThreadStream({
       humanMessageCount,
       persistedMessages,
       visibleHistory,
+      rejectPendingSend,
     ],
   );
 
@@ -4461,6 +4600,58 @@ async function deleteThreadEverywhere(
     if (getHttpStatus(error) !== 404) throw error;
   }
   await deleteLocalThreadData(threadId);
+}
+
+/**
+ * Roll back the side effect of a first send whose run was never created.
+ *
+ * A rejected run request still passes Gateway admission, whose detached
+ * metadata task can create the thread row: that is the zero-message
+ * `Untitled` session left in the sidebar (upstream #8039). Delete it only when
+ * the thread has no checkpoint (`GET .../state` 404). A checkpoint means the
+ * row was created deliberately by something else — a project pre-create, a
+ * saved goal or a conversation-default model — or a run already wrote state;
+ * neither may be rolled back here. Any read/delete failure keeps the row.
+ */
+export async function discardUnwrittenThread(
+  queryClient: QueryClient,
+  threadId: string,
+): Promise<boolean> {
+  const apiClient = getAPIClient() as unknown as ThreadDiscardClient;
+  try {
+    await apiClient.threads.getState(threadId);
+    return false;
+  } catch (error) {
+    if (getHttpStatus(error) !== 404) {
+      return false;
+    }
+  }
+
+  try {
+    await deleteThreadEverywhere(apiClient, threadId);
+  } catch (error) {
+    console.warn(`Failed to discard the unwritten thread ${threadId}`, error);
+    return false;
+  }
+
+  queryClient.setQueriesData(
+    { queryKey: ["threads", "search"], exact: false },
+    (oldData: Array<AgentThread> | undefined) =>
+      oldData?.filter((thread) => thread.thread_id !== threadId),
+  );
+  queryClient.setQueriesData(
+    { queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX, exact: false },
+    (oldData: InfiniteThreadsData | undefined) =>
+      filterInfiniteThreadsCache(
+        oldData,
+        (thread) => thread.thread_id !== threadId,
+      ),
+  );
+  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
+  void queryClient.invalidateQueries({
+    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+  });
+  return true;
 }
 
 export async function findSidecarThreadIdsForParent(

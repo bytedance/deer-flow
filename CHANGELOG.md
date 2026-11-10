@@ -47,6 +47,14 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **chat:** A first message whose run request is rejected no longer loses the
+  draft or leaves a zero-message session behind. The composer keeps the text
+  (and its stored draft survives a reload), the new-chat welcome layout comes
+  back, and the thread created only for that rejected send is deleted when it
+  holds no checkpoint. `thread.submit` alone no longer counts as delivered:
+  the send resolves only once the Gateway accepted the run, so one-time
+  composer state is retired at acceptance instead of at dispatch. ([#8039])
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the
