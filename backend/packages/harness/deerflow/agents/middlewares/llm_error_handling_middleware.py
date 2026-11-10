@@ -41,6 +41,8 @@ _BUSY_PATTERNS = (
 )
 _QUOTA_PATTERNS = (
     "insufficient_quota",
+    "insufficient balance",  # DeepSeek: 402 "Insufficient Balance"
+    "insufficient_balance",
     "quota",
     "billing",
     "credit",
@@ -141,6 +143,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
 
+        # 402 Payment Required is the account being out of credit, whatever the
+        # provider's wording. Never retriable.
+        if status_code == 402:
+            return False, "quota"
         if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):

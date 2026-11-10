@@ -437,3 +437,31 @@ async def test_async_circuit_breaker_trips_and_recovers(monkeypatch: pytest.Monk
     assert result.content == "Success"
     assert middleware._circuit_failure_count == 0  # RESET
     assert middleware._check_circuit() is False
+
+
+def test_classify_deepseek_402_insufficient_balance_is_quota() -> None:
+    # Exact shape DeepSeek returned in AlphaFRS production, 2026-11-10. Its
+    # code is the generic "invalid_request_error", so only the 402 or the
+    # "Insufficient Balance" wording can identify it.
+    middleware = _build_middleware()
+    exc = FakeError(
+        "Error code: 402 - {'error': {'message': 'Insufficient Balance', "
+        "'type': 'insufficient_balance_error', 'param': None, 'code': 'invalid_request_error'}}",
+        status_code=402,
+        code="invalid_request_error",
+    )
+    assert middleware._classify_error(exc) == (False, "quota")
+
+
+def test_classify_402_without_quota_wording_is_quota() -> None:
+    # The message must avoid every _QUOTA_PATTERNS word ("payment" is one), or
+    # this passes without the status check.
+    middleware = _build_middleware()
+    exc = FakeError("upstream refused the call", status_code=402)
+    assert middleware._classify_error(exc) == (False, "quota")
+
+
+def test_classify_insufficient_balance_wording_without_status_is_quota() -> None:
+    middleware = _build_middleware()
+    exc = FakeError("Insufficient Balance (request_id: x)")
+    assert middleware._classify_error(exc) == (False, "quota")
