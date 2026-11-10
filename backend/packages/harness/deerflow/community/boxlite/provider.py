@@ -35,7 +35,7 @@ from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
 from .box import BoxliteBox
 
 if TYPE_CHECKING:
-    from boxlite import SimpleBox
+    from boxlite import ExecResult, SimpleBox
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +83,13 @@ def _import_simplebox() -> type[SimpleBox]:
     return SimpleBox
 
 
-def _import_sync_boxlite_runtime():
-    """Import BoxLite's sync runtime lazily for startup reconciliation."""
+def _import_boxlite_runtime():
+    """Import BoxLite's async runtime lazily for startup reconciliation."""
     try:
-        from boxlite import SyncBoxlite
+        from boxlite import Boxlite
     except ImportError as e:  # pragma: no cover - depends on the optional dependency
         raise ImportError("BoxliteProvider requires the optional 'boxlite' dependency. Install it with: pip install 'deerflow-harness[boxlite]' or pip install boxlite.") from e
-    return SyncBoxlite
+    return Boxlite
 
 
 class _EventLoopThread:
@@ -147,11 +147,10 @@ class _EventLoopThread:
             loop.close()
 
 
-class _SyncBoxAdapter:
-    """Adapt a sync BoxLite ``Box`` handle to the async ``SimpleBox`` methods we use."""
+class _AsyncBoxAdapter:
+    """Expose SimpleBox command results for an existing async Box without creating a VM."""
 
-    def __init__(self, runtime: Any, box: Any) -> None:
-        self._runtime = runtime
+    def __init__(self, box: Any) -> None:
         self._box = box
 
     async def exec(
@@ -162,28 +161,43 @@ class _SyncBoxAdapter:
         user: str | None = None,
         timeout: float | None = None,
         cwd: str | None = None,
-    ) -> Any:
-        return self._box.exec(
+    ) -> ExecResult:
+        from boxlite import ExecResult
+
+        execution = await self._box.exec(
             cmd,
-            *args,
-            env=env,
+            list(args) or None,
+            list(env.items()) if env else None,
             user=user,
-            timeout=timeout,
+            timeout_secs=timeout,
             cwd=cwd,
         )
 
-    async def stop(self) -> None:
+        async def collect(stream_name: str) -> str:
+            chunks: list[str] = []
+            try:
+                stream = getattr(execution, stream_name)()
+                if stream is not None:
+                    async for chunk in stream:
+                        chunks.append(chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else chunk)
+            except Exception:
+                logger.exception("Failed to collect recovered BoxLite %s", stream_name)
+            return "".join(chunks)
+
+        # Like SimpleBox.exec, drain both streams before waiting, retaining partial output on stream errors.
+        stdout, stderr = await asyncio.gather(collect("stdout"), collect("stderr"))
+        error_message = None
         try:
-            self._box.stop()
-        finally:
-            self._runtime.stop()
+            result = await execution.wait()
+            exit_code = result.exit_code
+            error_message = result.error_message
+        except Exception:
+            logger.exception("Failed to wait for recovered BoxLite execution")
+            exit_code = -1
+        return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr, error_message=error_message)
 
-
-def _run_sync_adapter[T](coro: Awaitable[T], *, timeout: float | None = None) -> T:
-    """Run sync-adapter coroutines without using the BoxLite async loop."""
-    if timeout is None:
-        return asyncio.run(coro)
-    return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+    async def stop(self) -> None:
+        await self._box.stop()
 
 
 class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
@@ -337,46 +351,38 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
             logger.info("Startup reconciliation adopted %s BoxLite box(es)", adopted)
 
     def _adopt_existing_boxes(self) -> int:
-        runtime_cls = _import_sync_boxlite_runtime()
-        adopted = 0
+        runtime_cls = _import_boxlite_runtime()
 
-        list_runtime = runtime_cls.default().start()
-        try:
-            infos = list_runtime.list_info()
-        finally:
-            list_runtime.stop()
-
-        for info in infos:
-            name = getattr(info, "name", None)
-            sandbox_id = self._sandbox_id_from_box_name(name)
-            if sandbox_id is None:
-                continue
-            with self._lock:
-                if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
+        async def adopt() -> int:
+            runtime = runtime_cls.default()
+            infos = await runtime.list_info()
+            adopted = 0
+            for info in infos:
+                name = getattr(info, "name", None)
+                sandbox_id = self._sandbox_id_from_box_name(name)
+                if sandbox_id is None:
                     continue
-
-            box_runtime = runtime_cls.default().start()
-            try:
-                box = box_runtime.get(name)
-            except Exception as e:
-                box_runtime.stop()
-                logger.warning("Failed to retrieve existing BoxLite box %s: %s", name, e)
-                continue
-            if box is None:
-                box_runtime.stop()
-                continue
-
-            wrapped = BoxliteBox(sandbox_id, _SyncBoxAdapter(box_runtime, box), _run_sync_adapter, default_env=self._config["environment"], on_terminal_failure=self._invalidate_box)
-            with self._lock:
-                if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
-                    box_runtime.stop()
+                with self._lock:
+                    if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
+                        continue
+                try:
+                    box = await runtime.get(name)
+                except Exception as e:
+                    logger.warning("Failed to retrieve existing BoxLite box %s: %s", name, e)
                     continue
-                self._warm_pool[sandbox_id] = (wrapped, time.monotonic())
-                self._warm_pool_identity[sandbox_id] = None
-                adopted += 1
-            logger.info("Adopted existing BoxLite box %s (%s) into warm pool", sandbox_id, name)
+                if box is None:
+                    continue
+                wrapped = BoxliteBox(sandbox_id, _AsyncBoxAdapter(box), self._loop.run, default_env=self._config["environment"], on_terminal_failure=self._invalidate_box)
+                with self._lock:
+                    if sandbox_id in self._boxes or sandbox_id in self._warm_pool:
+                        continue
+                    self._warm_pool[sandbox_id] = (wrapped, time.monotonic())
+                    self._warm_pool_identity[sandbox_id] = None
+                    adopted += 1
+                logger.info("Adopted existing BoxLite box %s (%s) into warm pool", sandbox_id, name)
+            return adopted
 
-        return adopted
+        return self._loop.run(adopt())
 
     # ── Acquire / release ────────────────────────────────────────────────
 

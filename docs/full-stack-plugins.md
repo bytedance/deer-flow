@@ -435,15 +435,20 @@ visiting an unavailable page directly does not mount a plugin.
 Inline modules use authenticated fetch plus a released Blob URL. Manifest assets use
 native credentialed module scripts, preserving relative imports and resource URLs.
 Both honor the backend base and prefixes; transport and cache semantics are documented in
-`docs/full-stack-plugins.md`. Host copy belongs in the typed locale dictionaries.
+`docs/full-stack-plugins.md`. Host UI labels belong in the typed locale dictionaries;
+package purpose and usage come from `deerflow-extension.json` (see the
+[authoring contract](../examples/README.md#describe-the-extension)). Installed copy
+takes precedence over the generated bundled snapshot; omit empty prerequisites.
 Conversation action factories, shapes and availability callbacks are guarded per plugin;
 only validated value snapshots reach the toolbar/sidebar render paths.
 `PluginNavigation` and the dynamic workspace extension route consume page declarations;
 Capability Center defaults to the repository examples in `core/extensions/catalog.ts`,
 merged by explicit namespace with runtime descriptors. Catalog-only entries are discovery
-metadata, never module-loader inputs or proof of installation. Backend-only examples may
-have no plugin descriptor; keep their runtime status unasserted. Details link to package
-installation instructions. Keep the catalog aligned with `examples/deerflow-extension-*`.
+metadata, never module-loader inputs or proof of installation. Documented backend
+extensions with successful registrations have runtime-only descriptors without browser
+modules. Other catalog-only entries retain an unknown runtime status. Details show usage
+steps and optional documentation links; launch links require actual enabled page
+registrations through `pluginPages`. Keep the catalog aligned with `examples/deerflow-extension-*`.
 Agent teams uses `community.agent-teams`; merge its installed descriptor into the
 localized catalog entry without asserting runtime status for a catalog-only row.
 Conversation action slots augment normal/custom-agent toolbars and sidebar menus without replacing native export or notification.
