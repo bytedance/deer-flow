@@ -26,12 +26,10 @@
 
 ### 修复
 
-- **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
-  都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
-  `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
-  `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
-  的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
-  请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。([#8061])
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
 
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
@@ -49,6 +47,15 @@
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
   之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
   在修复计划之前，恢复该任务会提示具体问题。([#7993])
+
+- **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
+  都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
+  `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
+  `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
+  的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
+  请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -104,6 +111,10 @@
   `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
+
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -12851,4 +12862,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
-[#8061]: https://github.com/bytedance/deer-flow/pull/8061
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064

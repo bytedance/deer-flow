@@ -47,15 +47,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **models:** A Claude model using a Claude Code OAuth token no longer fails
-  every request once the request carries `betas`. The OAuth betas
-  (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
-  header, and the SDK sends a request's `betas` as that header instead, so a
-  configured `betas` list (even `[]`), per-call `betas`, or a server tool for
-  which langchain-anthropic adds a beta left them out and Anthropic rejected
-  the token. The OAuth betas now lead any request `betas` and any
-  `anthropic-beta` in `extra_headers`. ([#8061])
-
+- **gateway:** Posting feedback twice for the same run now returns a 409
+  instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
+  feedback row per user and run; a retry, or feedback on another message of the
+  same run, hit that unique key and the Gateway failed with an unhandled
+  database error. The 409 points callers at `PUT` on the same route, which
+  updates the existing feedback. ([#8064])
+  
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
@@ -82,6 +80,11 @@ This section accumulates work toward the **2.3.0** milestone
   every user message on every model call, so one 100 KB paste blocked every
   thread for about 6 s per model call. The scan is now linear, and it redacts
   exactly the same addresses as before. ([#8006])
+
+- **agents:** Token budgets count separate accepted model calls even when a
+  provider reuses message IDs, so repeated IDs no longer bypass the configured
+  cap. Hard stops preserve already-completed structured-output tool results.
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
   
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
@@ -109,6 +112,16 @@ This section accumulates work toward the **2.3.0** milestone
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
   
+- **models:** A Claude model using a Claude Code OAuth token no longer fails
+  every request once the request carries `betas`. The OAuth betas
+  (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
+  header, and the SDK sends a request's `betas` as that header instead, so a
+  configured `betas` list (even `[]`), per-call `betas`, or a server tool for
+  which langchain-anthropic adds a beta left them out and Anthropic rejected
+  the token. The OAuth betas now lead any request `betas` and any
+  `anthropic-beta` in `extra_headers`.
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
@@ -16228,4 +16241,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
-[#8061]: https://github.com/bytedance/deer-flow/pull/8061
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
+
