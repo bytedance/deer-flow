@@ -3190,11 +3190,6 @@ async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: 
     return _hitl_action_tool_names(await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input))
 
 
-async def _pending_hitl_resume_calls(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> dict[str, str]:
-    """Map each paused call this resume answers to its tool name."""
-    return _hitl_action_calls(await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input))
-
-
 def _hitl_action_tool_names(actions: list[Mapping[str, Any]]) -> set[str]:
     """Names for the replay gate: every action naming a tool, with or without a usable call id."""
     return {action["tool_name"] for action in actions if isinstance(action.get("tool_name"), str)}
