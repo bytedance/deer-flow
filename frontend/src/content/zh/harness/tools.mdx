@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Autom", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -170,6 +170,20 @@ tools:
     # vertical: news   # 或 scholar；默认为普通 Google 搜索
 ```
 以 JSON 形式返回实时 Google 搜索结果。需要 [Serply](https://serply.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言。详见 [Serply 文档](https://serply.io/docs)。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.autom.tools:web_search_tool
+    api_key: $AUTOM_API_KEY
+    # vertical: news   # 默认为普通 Google 搜索
+```
+以 JSON 形式返回实时 Google 搜索结果。需要 [Autom](https://autom.dev) API Key。设置 `vertical: news` 可用同一个 Key 搜索 Google News；`gl` 和 `hl` 用于设置结果的国家和语言，`tbs`（例如 `qdr:w`）用于按时间筛选结果。详见 [Autom 文档](https://docs.autom.dev)。
 
 无需额外依赖。
 

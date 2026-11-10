@@ -700,6 +700,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="autom",
+        display_name="Autom",
+        description="Google Search and News results, API key required",
+        use="deerflow.community.autom.tools:web_search_tool",
+        env_var="AUTOM_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="sofya",
         display_name="Sofya",
         description="Search results include page content, API key required",

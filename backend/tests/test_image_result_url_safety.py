@@ -93,6 +93,11 @@ def _stub_specstream(module, url):
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_specstream_request", return_value=(data, None))], _sync(module.web_search_tool)
 
 
+def _stub_autom(module, url):
+    data = {"organic_results": [{"title": "t", "link": url, "snippet": "c"}]}
+    return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_autom_get", return_value=(data, None))], _sync(module.web_search_tool)
+
+
 def _stub_serply(module, url):
     data = {"results": [{"title": "t", "link": url, "description": "c"}]}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_serply_get", return_value=(data, None))], _sync(module.web_search_tool)
@@ -172,6 +177,7 @@ _TEXT_SEARCH_STUBS = {
     "youcom": _stub_youcom,
     "tencent_wsa": _stub_tencent_wsa,
     "serply": _stub_serply,
+    "autom": _stub_autom,
     "groundroute": _stub_groundroute,
     "sofya": _stub_sofya,
     "specstream": _stub_specstream,

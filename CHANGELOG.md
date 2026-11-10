@@ -27,6 +27,10 @@ This section accumulates work toward the **2.3.0** milestone
   Exact-user allowlists remain the default; shared access requires matching
   host-verified identity and grants no management permissions. ([#7944](https://github.com/bytedance/deer-flow/pull/7944))
 
+- **community:** New Autom `web_search` provider. It returns live Google
+  results through the Autom SERP API (`AUTOM_API_KEY`); `vertical: news` switches
+  to Google News with the same key, and `time_range` maps to Google's `tbs`.
+
 - **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
   ranked results with a direct answer when the sources agree on one, and fetch
   returns a page or document as markdown. ([#7968](https://github.com/bytedance/deer-flow/pull/7968))

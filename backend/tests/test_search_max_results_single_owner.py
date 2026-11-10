@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.community.autom import tools as autom_tools
 from deerflow.community.ddg_search import tools as ddg_search_tools
 from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
@@ -47,6 +48,7 @@ SHARED_OWNER_PROVIDERS = {
     "image_search": ("DDG image search", image_search_tools),
     "serper": ("Serper", serper_tools),
     "serply": ("Serply", serply_tools),
+    "autom": ("Autom", autom_tools),
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
