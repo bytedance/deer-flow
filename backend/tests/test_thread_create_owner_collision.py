@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from app.gateway.auth.models import User
 from app.gateway.routers import threads
 from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta.base import ThreadOwnershipConflictError
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 
 
@@ -28,6 +29,18 @@ async def store(request, tmp_path):
         yield ThreadMetaRepository(get_session_factory())
     finally:
         await close_engine()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("original_owner", ["owner-a", None])
+async def test_direct_store_create_reports_typed_ownership_conflict(store, original_owner):
+    # This public store contract is independent of the HTTP-only fix in #8057.
+    await store.create("direct-conflict", user_id=original_owner, metadata={"marker": "original"})
+    original = await store.get("direct-conflict", user_id=None)
+    with pytest.raises(ThreadOwnershipConflictError):
+        await store.create("direct-conflict", user_id="owner-b", metadata={"marker": "replacement"})
+    assert await store.get("direct-conflict", user_id=None) == original
+    assert await store.get("direct-conflict", user_id="owner-b") is None
 
 
 @pytest.mark.anyio
