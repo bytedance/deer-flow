@@ -208,6 +208,18 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
+def _is_empty_text_item(block) -> bool:
+    """True for a content-list item that carries no text at all.
+
+    Covers both shapes the sanitizer normalizes away: an empty bare string and
+    an empty ``{"type": "text", "text": ""}`` block. Neither contributes text,
+    and both are rejected inside a content list by strict serializers.
+    """
+    if isinstance(block, str):
+        return not block
+    return isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str) and not block["text"]
+
+
 class _FramedUserText(str):
     """Request-local encoding provenance; JSON/plain strings cannot carry it.
 
@@ -337,7 +349,11 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         content = msg.content
         normalized_message = None
         if isinstance(content, list):
-            filtered = [block for block in content if not (isinstance(block, str) and not block)]
+            # Empty bare strings and empty typed text blocks both carry no text.
+            # Dropping them here keeps them out of both the extractor and the
+            # rebuilt list; an empty text part is rejected by serializers that
+            # validate content-part text, just like an untyped bare string.
+            filtered = [block for block in content if not _is_empty_text_item(block)]
             if len(filtered) != len(content):
                 # Normalize before early returns, including image-only and
                 # already-framed messages. Use an empty string rather than
