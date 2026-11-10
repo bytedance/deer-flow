@@ -47,6 +47,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **summarization:** vLLM compaction counts reasoning tokens replayed to the
+  model when checking the trigger and estimating how much history to keep.
+  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
