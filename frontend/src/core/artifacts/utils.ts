@@ -162,7 +162,7 @@ function extractSharedArtifactPaths(
     const receipt = `Successfully presented shared artifact; origin_thread_id=${origin_thread_id}; sha256=${sha256}`;
     const matching = results.filter((result) => result.tool_call_id === id);
     if (
-      matching.length === 0 ||
+      matching.length !== 1 ||
       matching.some(
         (result) =>
           isErrorToolMessage(result) ||

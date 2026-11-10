@@ -513,6 +513,21 @@ describe("artifact URL helpers", () => {
       ]);
     });
 
+    test("skips handoffs with duplicate success receipts", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [handoff("duplicate", `${outputs}/report.md`)],
+        },
+        result("duplicate", { id: "receipt-1", status: "success" }),
+        result("duplicate", { id: "receipt-2", status: "success" }),
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([]);
+    });
+
     test("keeps reused call IDs scoped to their assistant occurrence", async () => {
       const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
       const delivered = `${outputs}/first.md`;
