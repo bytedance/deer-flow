@@ -118,6 +118,19 @@ def _extract_text(content: Any) -> str:
     return str(content)
 
 
+def _response_finish_reason(response: Any) -> str | None:
+    """Return the provider stop reason carried by a langchain response, if any.
+
+    ``finish_reason == "length"`` means the provider stopped at the output
+    ``max_tokens`` cap, so any JSON in the content is necessarily incomplete.
+    """
+    metadata = getattr(response, "response_metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    finish_reason = metadata.get("finish_reason")
+    return finish_reason if isinstance(finish_reason, str) else None
+
+
 _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
 _FACT_CLASSIFICATION_FIELDS = ("scope", "durability", "authority")
 
@@ -1978,7 +1991,16 @@ class MemoryUpdater:
                 self._watermark_set(watermark_key, _message_identity(messages[-1]))
             return success
         except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response for memory update: %s", e)
+            if _response_finish_reason(response) == "length":
+                # The output cap was hit, so the JSON is truncated rather than
+                # malformed. Say so: the generic parse message sends operators
+                # hunting for a bad prompt when the fix is a larger max_tokens.
+                logger.warning(
+                    "Memory update LLM response was truncated at the output token limit (finish_reason='length'), so no JSON memory update could be parsed and memory was not updated. Raise the memory model's max_tokens: %s",
+                    e,
+                )
+            else:
+                logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
