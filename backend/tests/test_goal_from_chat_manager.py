@@ -96,8 +96,11 @@ def test_from_chat_success_confirms_objective_then_starts_one_run(monkeypatch):
     assert calls[0].method == "POST"
     assert calls[0].url.path == "/api/threads/t-1/goal/from-chat"
     # The synthesized objective is shown to the user before the run starts.
+    # It must be a final outbound: a progress update would be dropped by
+    # QQ/DingTalk or overwritten by the run's stream on Feishu/Telegram.
     assert len(replies) == 1
     assert objective in replies[0].text
+    assert replies[0].is_final is True
     chat.assert_awaited_once()
     started = chat.await_args.args[0]
     assert started.text == objective

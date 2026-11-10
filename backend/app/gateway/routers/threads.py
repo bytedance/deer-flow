@@ -1642,8 +1642,16 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
         # The agreement is incomplete: the user still owes the assistant an
         # answer. Running now would force the model to guess that decision.
         raise HTTPException(status_code=422, detail={"code": "pending_clarification"})
+    app_config = get_config()
     summary_text = values.get("summary_text")
-    context = build_synthesis_context(messages_list, summary_text if isinstance(summary_text, str) else None)
+    # Redaction is part of the builder so it runs before the budget can split
+    # an identifier; synthesize_goal_objective redacts the composed prompt once
+    # more as defense in depth.
+    context = build_synthesis_context(
+        messages_list,
+        summary_text if isinstance(summary_text, str) else None,
+        pii_redaction=getattr(app_config, "pii_redaction", None),
+    )
     if not context.strip():
         raise HTTPException(status_code=422, detail={"code": "no_context"})
 
@@ -1653,7 +1661,7 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
         objective = await synthesize_goal_objective(
             context=context,
             guidance=body.guidance or "",
-            app_config=get_config(),
+            app_config=app_config,
             thread_id=thread_id,
         )
     except GoalSynthesisUnclear:

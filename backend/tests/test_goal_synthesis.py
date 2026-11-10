@@ -12,8 +12,9 @@ contracts the Gateway route and the IM manager rely on:
 * an unclear conversation raises ``GoalSynthesisUnclear`` carrying a reason
   that is for server logs only — never user-facing text;
 * malformed or oversized model output raises ``GoalSynthesisError``;
-* PII redaction applies to the model input when enabled, matching the goal
-  evaluator's direct-call treatment.
+* PII redaction applies to whole lines and the summary before the budget can
+  split an identifier, and again to the model input when enabled, matching the
+  goal evaluator's direct-call treatment.
 """
 
 from __future__ import annotations
@@ -114,6 +115,23 @@ def test_context_keeps_the_opening_of_one_overlong_message():
     assert context.endswith(" …")
     assert len(context) <= 300
     assert "omitted" not in context.lower()
+
+
+def test_context_redacts_a_message_before_the_budget_can_split_it():
+    # The budget cut must never turn an email into an unmatchable prefix: the
+    # line is redacted first, then truncated (the evaluator's rule for its
+    # direct model call).
+    message = HumanMessage(content=("a" * 144) + " bob@example.com trailing detail")
+    context = build_synthesis_context([message], None, budget_chars=200, pii_redaction=_PII)
+    assert "bob@exam" not in context
+    assert "bob@example.com" not in context
+
+
+def test_context_redacts_the_summary_before_the_budget_can_split_it():
+    summary = ("a" * 50) + " bob@example.com"
+    context = build_synthesis_context([], summary, budget_chars=200, pii_redaction=_PII)
+    assert "bob@exa" not in context
+    assert "bob@example.com" not in context
 
 
 def test_context_summary_is_bounded_when_budget_is_small():

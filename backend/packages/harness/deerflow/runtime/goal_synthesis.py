@@ -7,9 +7,10 @@ writer path) and the run starts through each surface's existing run path.
 
 Model input hygiene follows ``runtime.goal.evaluate_goal_completion``'s
 data-not-instructions rule: the conversation is treated as data (anti-injection
-instruction), PII redaction applies to the composed prompt when
-``pii_redaction`` is enabled, and the model call goes through
-``run_oneshot_llm`` (non-thinking, Langfuse-attributed). The context builder
+instruction), PII redaction applies to whole lines before the budget can split
+an identifier and once more to the composed prompt when ``pii_redaction`` is
+enabled, and the model call goes through ``run_oneshot_llm`` (non-thinking,
+Langfuse-attributed). The context builder
 is deliberately narrower than the evaluator's evidence window: synthesis keeps
 agreement turns plus the human-input protocol (clarification questions and
 card answers) and drops evidence tool results, which the evaluator needs to
@@ -127,6 +128,7 @@ def build_synthesis_context(
     summary_text: str | None,
     *,
     budget_chars: int = DEFAULT_SYNTHESIS_CONTEXT_CHARS,
+    pii_redaction: Any = None,
 ) -> str:
     """The conversation slice the synthesis model reads.
 
@@ -143,11 +145,22 @@ def build_synthesis_context(
     carry agreement through a tool call or a hidden message. When older
     messages fall out of the budget, an omission marker says so — context is
     never dropped silently.
+
+    PII redaction runs on whole lines and the summary **before** the budget
+    truncation, so a cut cannot split an identifier into an unmatchable prefix
+    (the same rule the goal evaluator follows for its direct model call).
     """
     summary = " ".join(str(summary_text or "").split())
     lines = [line for line in (_context_line(message) for message in messages or []) if line]
     if not summary and not lines:
         return ""
+
+    if pii_redaction is not None and getattr(pii_redaction, "enabled", False):
+        from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+
+        if summary:
+            summary = redact_text(summary, pii_redaction)
+        lines = [redact_text(line, pii_redaction) for line in lines]
 
     room = max(budget_chars - _OMISSION_MARKER_ROOM, 0)
     summary_line = ""
@@ -222,9 +235,9 @@ async def synthesize_goal_objective(
     Returns the normalized objective. Raises :class:`GoalSynthesisUnclear` when
     the model finds no clear task (its reason is never echoed or logged
     verbatim), and :class:`GoalSynthesisError` for provider failures, malformed
-    output, or an unusable objective. ``model_name=None`` uses the deployment default model,
-    the same choice the goal evaluator makes; a dedicated synthesis model is a
-    follow-up.
+    output, or an unusable objective. ``model_name=None`` uses the deployment
+    default model; the goal evaluator instead uses the run's recorded model. A
+    dedicated synthesis model is a follow-up.
     """
     from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
 

@@ -2163,14 +2163,21 @@ class ChannelManager:
 
         self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
 
-    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
+    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str, *, is_final: bool = False) -> None:
+        """Publish a turn update; progress by default, final for standalone replies.
+
+        A non-final outbound joins the run's stream: streaming channels update
+        the same message with later chunks (and the final answer), while QQ and
+        DingTalk card mode drop it before a stream exists. Callers that must
+        stay visible on every channel publish ``is_final=True``.
+        """
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel_name=msg.channel_name,
                 chat_id=msg.chat_id,
                 thread_id=thread_id,
                 text=text,
-                is_final=False,
+                is_final=is_final,
                 thread_ts=msg.thread_ts,
                 connection_id=msg.connection_id,
                 owner_user_id=msg.owner_user_id,
@@ -4237,10 +4244,13 @@ class ChannelManager:
             return await self._goal_reply(msg, "from_chat_failed")
 
         # Show the synthesized objective, then start exactly one run with it as
-        # the task text (same run path as the literal set branch).
+        # the task text (same run path as the literal set branch). This must be
+        # a final outbound: on Feishu/Telegram a non-final update is folded into
+        # the run's stream card and overwritten by its output, and QQ/DingTalk
+        # card mode drop non-final updates before a stream exists.
         locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
         try:
-            await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective))
+            await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective), is_final=True)
         except Exception:
             # The goal is already saved; a failed confirmation card must not
             # keep the run from starting.

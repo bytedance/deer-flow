@@ -129,6 +129,8 @@ def _mock_synthesis(monkeypatch, *, objective: str = "Reconcile vendors A and B,
 @pytest.fixture(autouse=True)
 def _stable_now(monkeypatch):
     monkeypatch.setattr(threads, "now_iso", lambda: "2026-11-09T00:00:00+00:00")
+    # build_goal_state stamps the goal through the harness module, not the router.
+    monkeypatch.setattr("deerflow.runtime.goal.now_iso", lambda: "2026-11-09T00:00:00+00:00")
 
 
 def test_from_chat_busy_precheck_409s_before_any_llm_call(monkeypatch):
