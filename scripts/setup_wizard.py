@@ -33,6 +33,7 @@ def main() -> int:
             bold,
             cyan,
             green,
+            print_error,
             print_header,
             print_info,
             print_success,
@@ -122,7 +123,11 @@ def main() -> int:
             env_pairs[fetch_provider.env_var] = fetch_api_key
 
         if env_pairs:
-            write_env_file(env_path, env_pairs)
+            try:
+                write_env_file(env_path, env_pairs)
+            except ValueError as exc:
+                print_error(str(exc))
+                return 1
             print_success(f"API keys written to: {env_path.relative_to(project_root)}")
 
         frontend_env = project_root / "frontend" / ".env"
