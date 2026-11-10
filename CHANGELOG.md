@@ -51,6 +51,10 @@ This section accumulates work toward the **2.3.0** milestone
   disabled or the gated tools change during a pause, now reaches the thread's
   message history under the resume run instead of existing only in checkpoint
   state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+  
+- **summarization:** vLLM compaction counts reasoning tokens replayed to the
+  model when checking the trigger and estimating how much history to keep.
+  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
 
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
@@ -62,6 +66,10 @@ This section accumulates work toward the **2.3.0** milestone
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
+
+- **sandbox:** BoxLite VMs recovered at startup now run health checks, commands,
+  and cleanup on the provider's event loop, avoiding sync/async SDK mismatches
+  that made healthy recovered VMs fail their first command. ([#8072])
 
 - **uploads:** Re-uploading a file whose name collides with a compound archive
   suffix no longer inserts the dedupe counter inside the suffix. A second
@@ -16243,4 +16251,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8072]: https://github.com/bytedance/deer-flow/pull/8072
 

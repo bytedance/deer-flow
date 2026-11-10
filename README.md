@@ -1170,6 +1170,9 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+Startup-recovered BoxLite VMs use the same private async loop as newly created
+VMs for health checks, commands, and shutdown. Recovery skips boxes removed
+after discovery without creating replacement VMs.
 
 Successful `read_file` calls treat a JSON document's `error` field as file data,
 not a failure of the read tool. This keeps receipts accurate when inspecting
@@ -2734,7 +2737,8 @@ A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
 input budget or smaller source window permits an immediate retry. Model fallback
-and SDK retries can add calls. See the
+and SDK retries can add calls. For vLLM run models, history and retention
+estimates include assistant reasoning replayed to the provider. See the
 [summarization guide](backend/docs/summarization.md).
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
