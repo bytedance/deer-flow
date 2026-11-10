@@ -46,6 +46,8 @@ def invalid_approval_identity(payload: Any) -> InvalidApprovalIdentity | None:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, RecursionError):
         return None
-    if len(encoded) > 32_000:
+    # The legacy producer named this a byte limit but measured Python chars.
+    # Preserve that admission boundary, including non-ASCII argument summaries.
+    if len(str(payload)) > 32_000:
         return None
     return InvalidApprovalIdentity(request_id, hashlib.sha256(encoded).hexdigest())

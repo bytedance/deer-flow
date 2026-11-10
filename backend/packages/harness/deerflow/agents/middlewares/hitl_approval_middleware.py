@@ -116,7 +116,10 @@ class HitlApprovalMiddleware(AgentMiddleware):
         # including invalid/ordinary siblings, from every serialized surface.
         ids = [tc["id"] for tc in targets]
         kept = [tc for tc in last.tool_calls if tc.get("id") not in ids]
-        last = last.model_copy(update={"invalid_tool_calls": [tc for tc in last.invalid_tool_calls if tc.get("id") not in ids]})
+        additional_kwargs = dict(last.additional_kwargs)
+        # Legacy function_call has no ID and cannot prove it names a survivor.
+        additional_kwargs.pop("function_call", None)
+        last = last.model_copy(update={"invalid_tool_calls": [tc for tc in last.invalid_tool_calls if tc.get("id") not in ids], "additional_kwargs": additional_kwargs})
         note = _invalid_response_reason()
         content = [*last.content, {"type": "text", "text": note}] if isinstance(last.content, list) else f"{last.content}\n\n{note}"
         return {"messages": [clone_ai_message_with_tool_calls(last, kept, content=content)]}

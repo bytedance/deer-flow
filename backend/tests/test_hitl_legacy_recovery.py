@@ -33,7 +33,7 @@ def _responses(payload):
     return [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "reject"} for action in payload["actions"]]
 
 
-@pytest.mark.parametrize("ids", [[None], ["same", "same"], [None, "valid"]])
+@pytest.mark.parametrize("ids", [[None], ["same", "same"], [None, "valid"], [None, ""], ["", ""]])
 def test_identity_binds_entire_invalid_pause_without_retaining_contents(ids):
     payload = _payload(ids)
     identity = invalid_approval_identity(payload)
@@ -66,8 +66,18 @@ def test_identity_does_not_enable_recovery_for_other_damage(change):
     assert invalid_approval_identity(payload) is None
 
 
+def test_recovery_preserves_legacy_unicode_size_boundary():
+    payload = _payload()
+    payload["actions"][0]["args_summary"] = {"command": "中" * 12_000}
+    assert len(str(payload)) < 32_000
+    assert len(str(payload).encode("utf-8")) > 32_000
+    assert invalid_approval_identity(payload) is not None
+    payload["actions"][0]["args_summary"]["command"] = "中" * 32_001
+    assert invalid_approval_identity(payload) is None
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ids", [[None], ["same", "same"]])
+@pytest.mark.parametrize("ids", [[None], ["same", "same"], [None, ""], ["", ""]])
 async def test_gateway_recovery_rejects_mixed_stale_and_partial_responses(monkeypatch, ids):
     from app.gateway import hitl_approval as gateway
 
@@ -169,13 +179,14 @@ def test_replayed_rejection_removes_colliding_provider_surfaces(ids):
         id="original-message",
         content=[{"type": "tool_use", "id": call["id"], "name": call["name"], "input": {}} for call in calls],
         tool_calls=calls,
-        additional_kwargs={"tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": "{}"}} for call in calls]},
+        additional_kwargs={"function_call": {"name": "write_file", "arguments": "{}"}, "tool_calls": [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": "{}"}} for call in calls]},
         invalid_tool_calls=[{"name": "write_file", "args": "{", "id": ids[0], "error": "invalid arguments"}],
     )
     middleware = HitlApprovalMiddleware(tool_names={"write_file"})
     result = middleware._process_responses(message, calls[:-2], {"responses": []})["messages"][0]
     assert result.id == message.id
     assert not result.invalid_tool_calls
+    assert "function_call" not in result.additional_kwargs
     assert [call["id"] for call in result.tool_calls] == ["healthy"]
     assert [call["id"] for call in result.additional_kwargs["tool_calls"]] == ["healthy"]
     assert [block["id"] for block in result.content if block.get("type") == "tool_use"] == ["healthy"]
@@ -183,7 +194,7 @@ def test_replayed_rejection_removes_colliding_provider_surfaces(ids):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ids", [[None], ["same", "same"]])
+@pytest.mark.parametrize("ids", [[None], ["same", "same"], [None, ""], ["", ""]])
 async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
     from langgraph.checkpoint.memory import InMemorySaver
     from langgraph.graph import MessagesState, StateGraph

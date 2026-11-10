@@ -118,7 +118,25 @@ class _LegacyApprovalModel(_StateAwareModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
-@pytest.mark.parametrize("legacy_ids", [[None], ["duplicate", "duplicate"]], ids=["null", "duplicate"])
+def _legacy_approval_pause(self, state, runtime):
+    """Seed a pre-#8070 checkpoint; only used while creating the old pause."""
+    from langgraph.types import interrupt
+
+    from deerflow.agents.middlewares.hitl_approval_middleware import summarize_args
+
+    last = state["messages"][-1]
+    targets = self._target_calls(last) if isinstance(last, AIMessage) else []
+    if not targets:
+        return None
+    actions = [
+        {"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": summarize_args(call.get("args", {}), pii_config=self.pii_config), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"}
+        for call in targets
+    ]
+    interrupt({"kind": "hitl_approval", "version": 1, "request_id": actions[0]["request_id"], "actions": actions, "allowed_decisions": ["approve", "reject"], "pending_tool_call_ids": [call["id"] for call in targets]})
+    raise AssertionError("legacy seeding hook must not handle recovery")
+
+
+@pytest.mark.parametrize("legacy_ids", [[None], ["duplicate", "duplicate"], [None, ""], ["", ""]], ids=["null", "duplicate", "null-empty", "duplicate-empty"])
 @pytest.mark.parametrize("recovery_mode", ["normal", "disabled", "checkpoint-only", "lowered-limit"])
 def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_deer_flow_home, legacy_ids, recovery_mode):  # noqa: F811
     _enable_approval()
@@ -126,13 +144,16 @@ def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_d
     def legacy_model(*args, **kwargs):
         return _LegacyApprovalModel(responses=[], legacy_ids=legacy_ids)
 
+    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+
     with patch(_MODEL_PATCH, new=legacy_model), TestClient(isolated_app) as client:
         csrf = _register_user(client)
         tid = _create_thread(client, csrf)
-        initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
-        assert initial.status_code == 200, initial.text
-        assert _wait_run_status(client, tid, initial.json()["run_id"], "waiting_for_input")["status"] == "waiting_for_input"
-        state = _wait_for_approval(client, tid)
+        with patch.object(HitlApprovalMiddleware, "after_model", new=_legacy_approval_pause):
+            initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
+            assert initial.status_code == 200, initial.text
+            assert _wait_run_status(client, tid, initial.json()["run_id"], "waiting_for_input")["status"] == "waiting_for_input"
+            state = _wait_for_approval(client, tid)
         payload = next(item for group in state["interrupts"].values() for item in group)["value"]
         assert payload["pending_tool_call_ids"] == legacy_ids
         blocked = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "must remain blocked"}]}))
