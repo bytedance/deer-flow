@@ -1953,6 +1953,25 @@ class FeishuChannel(Channel):
             text = ""
         text = text.strip()
 
+        # Feishu desktop attaches files to a message as a post whose rich-text
+        # body holds the caption and whose top-level ``files`` array holds the
+        # attachments. The body may be empty. Append one placeholder per
+        # downloadable attachment so ``receive_file`` can substitute the
+        # uploaded virtual paths in order; folders are not downloadable files,
+        # and an attachment already present as a rich-text element is not
+        # downloaded twice.
+        attachments = content.get("files") if isinstance(content, dict) else None
+        for attachment in attachments or []:
+            if not isinstance(attachment, dict) or attachment.get("is_folder"):
+                continue
+            file_key = attachment.get("file_key")
+            if not isinstance(file_key, str) or not file_key:
+                continue
+            if any(existing.get("file_key") == file_key for existing in files_list):
+                continue
+            files_list.append({"file_key": file_key})
+            text = f"{text}\n\n[file]" if text else "[file]"
+
         logger.info(
             "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
             chat_id,

@@ -1219,6 +1219,121 @@ def test_feishu_store_bridge_refuses_to_block_the_gateway_loop_itself(caplog):
     _run(go())
 
 
+def _make_post_event(content: dict, *, message_id: str = "msg_post"):
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = message_id
+    event.event.message.root_id = None
+    event.event.message.parent_id = None
+    event.event.message.thread_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps(content)
+    return event
+
+
+def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
+    """Feishu desktop attaches files to a post message in a top-level ``files`` array."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "帮我核对这两张发票和采购订单，看看有没有差异。", "style": []}]],
+            "content_v2": [[{"tag": "text", "text": "帮我核对这两张发票和采购订单，看看有没有差异。", "style": []}]],
+            "files": [
+                {"file_key": "file_inv_a", "file_name": "INV-A-20260815.csv", "is_folder": False},
+                {"file_key": "file_inv_b", "file_name": "INV-B-20260903.csv", "is_folder": False},
+                {"file_key": "file_po", "file_name": "PO-2026-08.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "帮我核对这两张发票和采购订单，看看有没有差异。\n\n[file]\n\n[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
+
+
+def test_feishu_files_only_post_is_not_treated_as_empty():
+    """A files-only post has an empty rich-text body; the attachments still make it non-empty."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[]],
+            "content_v2": [[]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "file_b", "file_name": "B.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_a"}, {"file_key": "file_b"}]
+
+
+def test_feishu_post_skips_folders_and_duplicate_attachments():
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "见附件"}, {"tag": "file", "file_key": "file_a"}]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "folder_x", "file_name": "资料", "is_folder": True},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "见附件 [file]"
+        assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_a"}]
+
+
+def test_feishu_post_merges_inline_and_top_level_files_in_order():
+    """Inline rich-text files come first; top-level files append without re-adding duplicates."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "见附件"}, {"tag": "file", "file_key": "file_inline"}]],
+            "files": [
+                {"file_key": "file_inline", "file_name": "inline.csv", "is_folder": False},
+                {"file_key": "file_top1", "file_name": "top1.csv", "is_folder": False},
+                {"file_key": "file_top2", "file_name": "top2.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["text"] == "见附件 [file]\n\n[file]\n\n[file]"
+        assert mock_make_inbound.call_args[1]["files"] == [
+            {"file_key": "file_inline"},
+            {"file_key": "file_top1"},
+            {"file_key": "file_top2"},
+        ]
+
+
 def _make_text_event(
     text: str,
     *,
