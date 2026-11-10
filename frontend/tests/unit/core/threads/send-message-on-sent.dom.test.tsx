@@ -187,6 +187,36 @@ test("ignores an acceptance frame that names another thread", async () => {
   expect(onSent).toHaveBeenCalledTimes(1);
 });
 
+test("accepts a new-chat send whose thread id the frame supplies", async () => {
+  // A send started from the new-chat page does not know its thread yet; the
+  // acceptance names it and must still retire the draft.
+  const { result } = await renderThreadStream();
+  const onSent = rs.fn();
+
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "",
+      { text: "hi", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+  expect(onSent).not.toHaveBeenCalled();
+
+  await act(async () => {
+    mocks.callbacks.onMetadataEvent?.({
+      thread_id: "thread-new",
+      run_id: "run-new",
+    });
+  });
+  await act(async () => {
+    await sendPromise;
+  });
+  expect(onSent).toHaveBeenCalledTimes(1);
+});
+
 test("does not report a send whose attachment upload fails", async () => {
   stubUploadFetch(
     async () =>

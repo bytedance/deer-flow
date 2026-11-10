@@ -2290,10 +2290,18 @@ export function useThreadStream({
   const acceptPendingSend = useCallback((threadId?: string) => {
     // A released send is retired only by an acceptance that names its thread:
     // an id-less frame from an older stream must never consume a newer send's
-    // cleanup, and vice versa.
+    // cleanup, and vice versa. A send started from the new-chat page has no
+    // thread id yet, so it is matched when it is the only unknown one.
     if (threadId) {
       const released = releasedSendsRef.current;
-      const match = released.findIndex((send) => send.threadId === threadId);
+      let match = released.findIndex((send) => send.threadId === threadId);
+      if (match < 0) {
+        const unknown = released.filter((send) => !send.threadId);
+        const candidate = unknown[0];
+        if (unknown.length === 1 && candidate) {
+          match = released.indexOf(candidate);
+        }
+      }
       if (match >= 0) {
         const [accepted] = released.splice(match, 1);
         try {
@@ -2312,8 +2320,13 @@ export function useThreadStream({
     if (!pending || pending.settled) {
       return;
     }
-    if (threadId && threadId !== pending.threadId) {
+    // A new-chat send starts without a thread id; the acceptance names it. Only
+    // a send that already knows its thread rejects a mismatched acceptance.
+    if (threadId && pending.threadId && threadId !== pending.threadId) {
       return;
+    }
+    if (!pending.threadId && threadId) {
+      pending.threadId = threadId;
     }
     pending.settled = true;
     pendingSendRef.current = null;
