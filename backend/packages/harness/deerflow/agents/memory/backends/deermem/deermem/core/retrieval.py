@@ -318,6 +318,7 @@ class FTS5Retrieval:
         scope_agent: str | None = None,
         category: str | None = None,
         top_k: int = 5,
+        fact_filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """FTS5 BM25 search with category and scope filtering.
 
@@ -352,7 +353,7 @@ class FTS5Retrieval:
         )
 
         # Try search
-        results = self._execute_search(fts5_query, scope_user, scope_agent, category, top_k)
+        results = self._execute_search(fts5_query, scope_user, scope_agent, category, top_k, fact_filters)
         if results is not None:
             logger.debug(
                 "FTS5Retrieval.search: strategy=%r returned %d results in %.1fms",
@@ -367,7 +368,7 @@ class FTS5Retrieval:
             fallback = _build_fallback_query(query)
             if fallback and fallback != fts5_query:
                 logger.debug("FTS5Retrieval.search: advanced syntax failed, retrying with tokenized fts5_query=%r", fallback)
-                results = self._execute_search(fallback, scope_user, scope_agent, category, top_k)
+                results = self._execute_search(fallback, scope_user, scope_agent, category, top_k, fact_filters)
                 if results is not None:
                     logger.debug(
                         "FTS5Retrieval.search: tokenized fallback returned %d results in %.1fms",
@@ -389,6 +390,7 @@ class FTS5Retrieval:
         scope_agent: str | None,
         category: str | None,
         top_k: int,
+        fact_filters: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]] | None:
         """Execute FTS5 query. Return None on syntax error."""
         if not fts5_query:
@@ -421,12 +423,17 @@ class FTS5Retrieval:
 
         matched_count = 0
 
-        def score_matches(cursor: sqlite3.Cursor) -> Iterator[tuple[float, sqlite3.Row]]:
+        def score_matches(cursor: sqlite3.Cursor) -> Iterator[tuple[float, sqlite3.Row, dict[str, Any] | None]]:
             nonlocal matched_count
             for row in cursor:
                 matched_count += 1
+                fact = None
+                if fact_filters:
+                    fact = self._fact_from_row(row)
+                    if any(key in ("score", "bm25_score") or key not in fact or fact[key] != value for key, value in fact_filters.items()):
+                        continue
                 score = self._compute_final_score(bm25_score=-row["bm25_score"], confidence=row["confidence"], created_at=row["created_at"])
-                yield score, row
+                yield score, row, fact
 
         with self._lock:
             try:
@@ -441,37 +448,11 @@ class FTS5Retrieval:
                 return None
 
         results: list[dict[str, Any]] = []
-        for score, row in rows:
-            (
-                doc_id,
-                indexed_content,
-                raw_content,
-                cat,
-                s_user,
-                s_agent,
-                created_at,
-                confidence,
-                source,
-                fact_json,
-                bm25_score,
-            ) = row
-
-            fact: dict[str, Any] = {}
-            if fact_json:
-                try:
-                    decoded = json.loads(fact_json)
-                    if isinstance(decoded, dict):
-                        fact = decoded
-                except (TypeError, ValueError):
-                    logger.debug("FTS5 fact metadata was not valid JSON for doc_id=%r", doc_id)
-            fact.setdefault("id", doc_id)
-            fact.setdefault("content", raw_content if raw_content is not None else indexed_content)
-            fact.setdefault("category", cat)
-            fact.setdefault("confidence", confidence)
-            fact.setdefault("createdAt", created_at)
-            fact.setdefault("source", source if source is not None else "fts5")
+        for score, row, fact in rows:
+            if fact is None:
+                fact = self._fact_from_row(row)
             fact["score"] = score
-            fact["bm25_score"] = -bm25_score
+            fact["bm25_score"] = -row["bm25_score"]
             results.append(fact)
 
         logger.debug(
@@ -486,6 +467,24 @@ class FTS5Retrieval:
         )
 
         return results
+
+    @staticmethod
+    def _fact_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        fact: dict[str, Any] = {}
+        if fact_json := row["fact_json"]:
+            try:
+                decoded = json.loads(fact_json)
+                if isinstance(decoded, dict):
+                    fact = decoded
+            except (TypeError, ValueError):
+                logger.debug("FTS5 fact metadata was not valid JSON for doc_id=%r", row["doc_id"])
+        fact.setdefault("id", row["doc_id"])
+        fact.setdefault("content", row["raw_content"] if row["raw_content"] is not None else row["content"])
+        fact.setdefault("category", row["category"])
+        fact.setdefault("confidence", row["confidence"])
+        fact.setdefault("createdAt", row["created_at"])
+        fact.setdefault("source", row["source"] if row["source"] is not None else "fts5")
+        return fact
 
     def _compute_final_score(
         self,
@@ -639,7 +638,10 @@ class FTS5RetrievalAdapter:
             raise ValueError("retrieval category filter must be a string")
 
         results: list[dict[str, Any]] = []
-        per_scope_limit = top_k * 4
+        # Category already narrows the SQL query. Other fact metadata lives in
+        # the row payload and must be checked before the engine's bounded heap.
+        fact_filters = filters if any(key != "category" for key in filters) else None
+        per_scope_limit = top_k if fact_filters else top_k * 4
         for scope in scopes:
             scope_user, scope_agent = _scope_key(scope)
             for candidate in self._engine.search(
@@ -648,11 +650,12 @@ class FTS5RetrievalAdapter:
                 scope_agent=scope_agent,
                 category=category,
                 top_k=per_scope_limit,
+                fact_filters=fact_filters,
             ):
                 fact = dict(candidate)
                 score = float(fact.pop("score", 0.0))
                 bm25_score = float(fact.pop("bm25_score", 0.0))
-                if any(fact.get(key) != value for key, value in filters.items()):
+                if fact_filters is None and any(fact.get(key) != value for key, value in filters.items()):
                     continue
                 results.append(
                     {

@@ -419,6 +419,33 @@ def test_adapter_composite_ranking_preserves_category_and_limit(category: str | 
         adapter.close()
 
 
+@pytest.mark.parametrize("indexed", [True, False], ids=["fts5", "substring"])
+def test_storage_filters_fact_metadata_before_top_k(tmp_path: Path, indexed: bool) -> None:
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    source = {"type": "test", "threadId": "wanted"}
+    retrieval = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3") if indexed else None
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)), retrieval=retrieval)
+    try:
+        facts = [{**_fact(f"other-{index}", "Python deployment", category="preference"), "confidence": 1.0, "source": {"type": "test", "threadId": "other"}} for index in range(9)]
+        facts.extend(
+            [
+                {**_fact("wanted", "Python deployment", category="preference"), "confidence": 0.5, "source": source},
+                {**_fact("wrong-category", "Python deployment", category="context"), "confidence": 1.0, "source": source},
+            ]
+        )
+        storage.apply_changes({"upserts": facts}, user_id="alice", agent_name="agent-a")
+        storage.upsert_fact({**_fact("wrong-scope", "Python deployment", category="preference"), "confidence": 1.0, "source": source}, user_id="bob", agent_name="agent-a")
+
+        filters = {"category": "preference", "source": source}
+        matches = storage.search_facts("Python", scopes=[scope], top_k=1, filters=filters)
+
+        assert [row["fact"]["id"] for row in matches] == ["wanted"]
+        assert matches[0]["matchType"] == ("fts5" if indexed else "substring")
+        assert storage.search_facts("Python", scopes=[scope], top_k=1, filters={"missing": None}) == []
+    finally:
+        storage.close()
+
+
 def test_engine_composite_score_ties_keep_bm25_and_insertion_order() -> None:
     from datetime import UTC, datetime
 
