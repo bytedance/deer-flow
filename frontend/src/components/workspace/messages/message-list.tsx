@@ -872,7 +872,10 @@ export function MessageList({
         return result;
       } catch (error) {
         clearPendingHumanInput(request.request_id);
-        toast.error(error instanceof Error ? error.message : String(error));
+        // The stream already surfaced a localized failure toast, and the card
+        // renders its own retryable error. A raw toast here would duplicate
+        // both and leak the server's detail text.
+        console.warn("Human-input submission failed", error);
         return false;
       }
     },
