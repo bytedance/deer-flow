@@ -9,6 +9,7 @@ import json
 import logging
 import socket
 import subprocess
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from urllib.parse import urlparse
@@ -710,7 +711,20 @@ def test_overlapping_destroy_retains_port_until_guarded_cleanup_finishes(restric
     lease_lost = False
     backend.complete_absent_teardown("sandbox", check=check_lease)
     assert_released_once(allocator, history, port)
-    successor_port = allocator.allocate(port)
+    # Another process can occupy a released host port between these operations.
+    # Control only this OS probe so reuse still exercises the real allocator's
+    # reservation checks, lock and ledger without depending on host traffic.
+    with monkeypatch.context() as port_probe:
+        port_probe.setattr(
+            network,
+            "socket",
+            SimpleNamespace(
+                AF_INET=socket.AF_INET,
+                SOCK_STREAM=socket.SOCK_STREAM,
+                socket=lambda *_: nullcontext(SimpleNamespace(bind=lambda address: None)),
+            ),
+        )
+        successor_port = allocator.allocate(port)
     assert successor_port == port
     backend.complete_absent_teardown("sandbox", check=check_lease)
     assert allocator._reserved_ports == {successor_port}
