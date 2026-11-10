@@ -1,3 +1,7 @@
+Project facts: `projects/memory.py` owns the bounded SQL pool and DeerMem host
+hook. User edits fence queued writes; capture copies pin scope; injection honors
+agent/global memory opt-outs. See README Project memory.
+
 ### Memory System
 
 `locale.py::with_memory_locale` captures a supported run `context.locale` on

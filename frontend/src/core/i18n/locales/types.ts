@@ -676,7 +676,15 @@ export interface Translations {
     viewTrash: string;
     documentsLoadFailed: string;
     threadFilesLoadFailed: string;
-    interimMemoryNotice: string;
+    memoryTitle: string;
+    memoryAutoExtract: string;
+    memoryDescription: string;
+    memoryEmpty: string;
+    memoryPromote: string;
+    memoryPromoted: string;
+    memorySaveFirst: string;
+    memoryLoadFailed: string;
+    memoryActionFailed: string;
   };
 
   // Trash view (Projects Phase 2)

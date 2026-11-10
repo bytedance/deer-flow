@@ -3700,7 +3700,7 @@ the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backe
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 Legacy memory files are normalized when read or imported, including recoverable fact metadata, so older local data remains usable as the schema evolves. Frontend and backend normalization use confidence `0.5` when missing or invalid, default blank sources to `unknown`, and trim fact content. A stored confidence that cannot become a finite float, such as an unbounded JSON integer in a hand-edited file, also falls back to `0.5` instead of failing a memory read, import, prompt build or relevance ranking.
 
-In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
+In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. The user memory pool stores only durable, descriptive user-level facts. Conversations assigned to an explicit Project can also retain durable, descriptive project facts in a separate project pool (see [Project memory](#project-memory)); temporary task state and one-time action permissions are not stored. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
 
 When a fact scope reaches `max_facts`, DeerMem still uses the historical confidence-only eviction order by default. Operators can opt in to `memory.backend_config.fact_eviction_policy: hybrid-v1`, which combines bounded confidence (65%), explicit-confirmation freshness (25%), and query-driven access heat (10%). Hybrid signal metadata is collected only while hybrid-v1 or shadow mode is enabled. Automatic confirmation from lexical reinforcement signals and model-selected fact IDs is disabled: a phrase elsewhere in a batch cannot establish that the user confirmed a particular fact. Existing confirmation metadata remains readable; extraction and injection never increment it. Custom prompts may retain factsToReinforce for compatibility, but that proposal alone cannot update confirmation counters or reset staleness. Access heat is stored in a separate decaying sidecar and increases only when `memory_search` actually returns the fact, so reads do not rewrite canonical Markdown or its `updatedAt`. Hybrid mode also reserves a bounded minimum of correction slots (10% of the cap, at most 10; unused slots return to normal competition). Capacity deletion remains physical, but a bounded metadata-only audit records fact IDs, categories, policy scores, and reasons without copying fact content. `fact_eviction_shadow_enabled: true` evaluates hybrid-v1 alongside the default policy without changing actual retention. This feature adds no LLM invocation and can be rolled back by selecting `confidence`.
 
@@ -3904,6 +3904,29 @@ new run sees the latest saved instructions. Instructions are capped at
 `projects.instructions_max_bytes` UTF-8 bytes (default 8192, range 256–262144);
 multi-byte characters count as their UTF-8 byte length. Oversized instructions
 are rejected with a `422` at write time and are never silently truncated.
+
+### Project memory
+
+With DeerMem automatic memory enabled, project conversations also accumulate
+short project facts in a separate pool (up to 30 facts and 2 KiB of rendered
+context). The same extraction call classifies user and project facts; personal
+facts keep their existing user scope. Unassigned conversations have no project
+pool. Project facts are pinned with the instructions at run start and are used
+only inside that project. They are background context, subordinate to explicit
+instructions and the current request.
+
+The Instructions tab shows these facts below the editor. Delete incorrect or
+outdated facts, turn automatic extraction off, or move a fact into instructions.
+Turning extraction off preserves existing facts and their injection; deleting
+one removes it from subsequent runs. Promotion saves the instruction and removes
+the fact atomically; save any pending instruction edits first. User edits fence
+already-queued extraction so old results cannot undo them. Archived projects
+retain their facts for reading and do not collect new ones.
+
+Document summaries are enabled by default for newly uploaded or promoted shelf
+files (`projects.summaries_enabled: false` disables generation). Each eligible
+file uses a separate best-effort summary call; existing files are not backfilled.
+The document shelf remains user-curated.
 
 ### Document shelf
 

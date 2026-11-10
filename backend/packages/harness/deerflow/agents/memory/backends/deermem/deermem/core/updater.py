@@ -1868,6 +1868,15 @@ class MemoryUpdater:
             # at recent turns, a veto answers for the batch.
             batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
             batch_text = format_conversation_for_update(feed_messages)
+            project = None
+            if callable(self._config.project_memory):
+                try:
+                    project = self._config.project_memory(feed_messages, thread_id, user_id)
+                except Exception:
+                    logger.warning("Project memory preparation failed; deferring extraction", exc_info=True)
+                    return False
+            # The user-profile pre-screen cannot decide whether a batch contains
+            # project facts. An active project pool therefore vetoes its skip.
             # The memory judge (when the host injected one) runs here: still off the
             # turn path, before any LLM call, on exactly the text the extractor would
             # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
@@ -1886,7 +1895,7 @@ class MemoryUpdater:
             verdict_payload = getattr(verdict, "payload", None)
             if isinstance(verdict_payload, dict):
                 metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
-            if getattr(verdict, "skip", False):
+            if getattr(verdict, "skip", False) and project is None:
                 # The pre-screen decided this batch is not worth a call: consume it
                 # and advance the watermark (nothing else runs -- no prompt, no
                 # invoke, no apply). Advancing is what makes the saving real; leaving
@@ -1914,6 +1923,10 @@ class MemoryUpdater:
                 return False
 
             current_memory, prompt = prepared
+            if project is not None:
+                prompt = list(prompt)
+                prompt[0] = prompt[0].model_copy(update={"content": prompt[0].content + "\n\n" + project["instruction"]})
+                prompt[-1] = prompt[-1].model_copy(update={"content": prompt[-1].content + "\n\n" + project["context"]})
             model_name = self._config.model.model
             model = self._llm
             if model is None:
@@ -1970,6 +1983,8 @@ class MemoryUpdater:
                 metrics=metrics,
                 signals=frozenset(feed_signals),
             )
+            if success and project is not None:
+                project["apply"](_parse_memory_update_response(response.content), self._config.fact_confidence_threshold)
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
                 # suffix, so this is messages[-1]). Skipped on the emergency

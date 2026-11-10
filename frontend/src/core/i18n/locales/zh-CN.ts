@@ -807,8 +807,16 @@ export const zhCN: Translations = {
     viewTrash: "回收站",
     documentsLoadFailed: "无法加载项目文档",
     threadFilesLoadFailed: "无法加载对话文件",
-    interimMemoryNotice:
-      "记忆目前仍为全局：在第三阶段之前，项目中讨论的内容仍可能进入你的全局记忆。",
+    memoryTitle: "项目记忆",
+    memoryAutoExtract: "自动提取",
+    memoryDescription:
+      "从项目对话中提炼长期有效的事实，仅用于本项目。关闭自动提取会保留已有记忆；不再需要的内容可直接删除。自动提取需开启全局记忆功能。",
+    memoryEmpty: "还没有项目记忆。项目对话中形成的约定和经验会显示在这里。",
+    memoryPromote: "转入指令",
+    memoryPromoted: "已转入项目指令",
+    memorySaveFirst: "请先保存上方的指令修改，再转入记忆。",
+    memoryLoadFailed: "无法加载项目记忆。",
+    memoryActionFailed: "项目记忆更新失败，请刷新后重试。",
   },
 
   trash: {

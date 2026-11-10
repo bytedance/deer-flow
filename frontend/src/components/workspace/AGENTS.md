@@ -11,3 +11,8 @@ server deduplicates by connection, credential and model under the catalog lock.
 single-model editing and catalog imports. Destination edits drop draft keys and
 saved-source references; blank keys retain, explicit removal sends an empty key.
 Parents own their model capabilities, revisions and independent draft lifetimes.
+
+Project memory lives below the Instructions editor, using `core/projects/memory`.
+Promotion is disabled while instructions have unsaved edits and sends the saved
+value as a compare guard. Failed mutations keep the displayed server state;
+query keys include project identity, and successful promotion refetches details.
