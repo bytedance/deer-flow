@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 BACKEND = Path(__file__).resolve().parents[1]
 MODULE = "scripts.benchmark.context_memory_comparison"
 MANIFEST = BACKEND / "scripts/benchmark/context_memory_comparison/manifest.json"
@@ -52,6 +54,7 @@ def test_offline_cli_records_real_gateway_context(tmp_path: Path) -> None:
         assert turn["context_token_estimate"]["project"] == turn["context_token_estimate"]["documents"] == 0
     rejected = scope["project_only_fact"]
     assert rejected["update_succeeded"] and rejected["passed"]
+    assert rejected["scope_rejections"] == 1
     assert not rejected["stored"]
     assert fixture["project_only_fact"] not in rejected["other_thread"]["present"]
 
@@ -73,25 +76,42 @@ def test_offline_cli_records_real_gateway_context(tmp_path: Path) -> None:
     assert code == (0 if report["passed"] else 1)
 
 
-def test_failed_extraction_cannot_pass_scope_isolation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_mode", ["extraction_error", "no_scope_rejection"])
+def test_scope_isolation_requires_a_scope_rejection(tmp_path: Path, failure_mode: str) -> None:
     driver = """
+import sys
+
 from scripts.benchmark.context_memory_comparison import runner
 from scripts.benchmark.context_memory_comparison.cli import main
 
 generate = runner.OfflineModel._generate
+failure_mode = sys.argv.pop(1)
 
-def fail_project_extraction(self, *args, **kwargs):
+def change_project_extraction(self, *args, **kwargs):
     update = runner._SCRIPTED_UPDATE.get()
     if self.model == "extract" and update and any(fact["scope"] == "project" for fact in update["newFacts"]):
-        raise OSError("Synthetic extraction failure")
+        if failure_mode == "extraction_error":
+            raise OSError("Synthetic extraction failure")
+        token = runner._SCRIPTED_UPDATE.set({**update, "newFacts": []})
+        try:
+            return generate(self, *args, **kwargs)
+        finally:
+            runner._SCRIPTED_UPDATE.reset(token)
     return generate(self, *args, **kwargs)
 
-runner.OfflineModel._generate = fail_project_extraction
+runner.OfflineModel._generate = change_project_extraction
 raise SystemExit(main())
 """
-    code, report = _run(tmp_path, ["-c", driver])
+    code, report = _run(tmp_path, ["-c", driver, failure_mode])
     assert code == 1
     scope = report["scope_isolation"]
     assert all(turn["passed"] for turn in scope["threads"].values())
-    assert scope["project_only_fact"] == {"passed": False, "update_succeeded": False}
+    project_fact = scope["project_only_fact"]
+    assert not project_fact["passed"]
+    if failure_mode == "extraction_error":
+        assert not project_fact["update_succeeded"]
+    else:
+        assert project_fact["update_succeeded"]
+        assert not project_fact["stored"] and project_fact["other_thread"]["passed"]
+        assert project_fact["scope_rejections"] == 0
     assert not scope["passed"] and not report["passed"]

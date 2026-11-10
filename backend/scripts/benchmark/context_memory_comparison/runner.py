@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "manifest.json"
 REPLY = "Offline benchmark response."
 DAY = "2026-11-09, Monday"
+_PROJECT_SCOPE_TRACE = "benchmark-project-scope"
 _EMPTY_UPDATE = {"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}
 _SCRIPTED_UPDATE: ContextVar[dict[str, Any] | None] = ContextVar("offline_memory_update", default=None)
 
@@ -103,7 +104,7 @@ def _observe(messages: list[BaseMessage], canaries: set[str], expected: set[str]
     }
 
 
-def _extract(thread_id: str, instruction: str, *, new_facts: list[dict], removals: list[dict]) -> bool:
+def _extract(thread_id: str, instruction: str, *, new_facts: list[dict], removals: list[dict], trace_id: str | None = None) -> bool:
     from deerflow.agents.memory import get_memory_manager
     from deerflow.agents.memory.backends.deermem.deermem.core.paths import DEFAULT_AGENT_BUCKET
     from deerflow.runtime.user_context import DEFAULT_USER_ID
@@ -117,6 +118,7 @@ def _extract(thread_id: str, instruction: str, *, new_facts: list[dict], removal
             thread_id=thread_id,
             user_id=DEFAULT_USER_ID,
             agent_name=DEFAULT_AGENT_BUCKET,
+            trace_id=trace_id,
             bypass_watermark=True,
         )
     finally:
@@ -131,7 +133,7 @@ def _extracted_fact(content: str, scope: str) -> dict:
     return {**_fact(content), "scope": scope, "durability": "durable", "authority": "descriptive"}
 
 
-def _scope_isolation(client: TestClient, fixture: dict) -> dict:
+def _scope_isolation(client: TestClient, fixture: dict, project_extraction_metrics: dict) -> dict:
     default_fact = fixture["default_fact"]
     agent = fixture["agent"]
     agent_fact = fixture["agent_fact"]
@@ -160,12 +162,14 @@ def _scope_isolation(client: TestClient, fixture: dict) -> dict:
         "Apply this preference only in the current project.",
         new_facts=[_extracted_fact(rejected, "project")],
         removals=[],
+        trace_id=_PROJECT_SCOPE_TRACE,
     )
     project_fact = {"update_succeeded": updated, "passed": False}
     if updated:
+        scope_rejections = project_extraction_metrics.get("scope_gate_rejections", {}).get("facts", {}).get("scope", 0)
         stored = bool(_present(json.dumps(_request(client, "GET", "/api/memory")), {rejected}))
         beta = _observe(_prompt(client, threads["beta"], question), canaries, {default_fact, *project_canaries["beta"]})
-        project_fact.update({"stored": stored, "other_thread": beta, "passed": not stored and beta["passed"]})
+        project_fact.update({"scope_rejections": scope_rejections, "stored": stored, "other_thread": beta, "passed": scope_rejections == 1 and not stored and beta["passed"]})
 
     return {
         "passed": all(turn["passed"] for turn in observations.values()) and project_fact["passed"],
@@ -253,6 +257,12 @@ def run_offline() -> dict:
 
     config_bytes = json.dumps(_config(), sort_keys=True).encode("utf-8")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    project_extraction_metrics: dict[str, Any] = {}
+
+    def record_project_extraction(payload: dict[str, Any]) -> None:
+        # The explicit project update has its own trace. Ignore background extractions.
+        if payload.get("trace_id") == _PROJECT_SCOPE_TRACE:
+            project_extraction_metrics.update(payload)
 
     with TemporaryDirectory(prefix="deerflow-context-memory-", ignore_cleanup_errors=True) as directory:
         root = Path(directory).resolve()
@@ -271,8 +281,12 @@ def run_offline() -> dict:
         with patch.dict(os.environ, env, clear=True), chdir(root):
             from app.gateway.app import app
 
-            with patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value=DAY), TestClient(app) as client:
-                scope = _scope_isolation(client, fixture)
+            with (
+                patch("deerflow.agents.memory.manager._host_default_extraction_callback", new=record_project_extraction),
+                patch("deerflow.agents.middlewares.dynamic_context_middleware._format_current_date", return_value=DAY),
+                TestClient(app) as client,
+            ):
+                scope = _scope_isolation(client, fixture, project_extraction_metrics)
                 invalidation = {name: _invalidation(client, fixture, case) for name, case in fixture["invalidation"].items()}
 
     return {

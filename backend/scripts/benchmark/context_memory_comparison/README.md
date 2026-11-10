@@ -16,8 +16,9 @@ the source revision, benchmark and fixture hashes, and the observations below.
 
 - Two projects and an unassigned thread must see only their own context and
   the default memory bucket. A custom agent must see its own memory bucket.
-  The project-only fact must be rejected by DeerMem and absent from the other
-  thread. A failed extraction makes that check fail.
+  The project-only check requires a successful update with exactly one fact
+  rejected for scope (`scope_rejections` in the report). The fact must also be
+  absent from default memory and from the other thread's prompt.
 - Replacement and deletion are observed in the store, in the original thread's
   next turn, and in a fresh thread. A first-turn canary verifies checkpoint reuse.
   The fresh thread is a control. If the original thread keeps a memory block
