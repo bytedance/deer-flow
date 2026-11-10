@@ -26,6 +26,11 @@
 
 ### 修复
 
+- **网关：** 运行指定的自定义智能体不存在或名称无效时，现在会明确说明原因。此前向一个
+  自定义智能体已被删除的对话发消息，或传入格式错误的 `agent_name`，即使与知识库范围无关，
+  也会返回 422 和 "knowledge_scope assistant configuration could not be resolved"。现在
+  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。
+
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。

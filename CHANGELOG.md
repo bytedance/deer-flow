@@ -47,6 +47,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** A run that names a missing or invalid custom agent now says so.
+  Messaging a chat whose custom agent was deleted, or passing a malformed
+  `agent_name`, returned the 422 detail "knowledge_scope assistant configuration
+  could not be resolved" even when no knowledge scope was involved. The 422 now
+  reports `Agent '<name>' not found`, an invalid `agent_name`, or an agent
+  config that could not be loaded.
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the
