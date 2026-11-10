@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "catalog/knowledge",
+  "locales": {
+    "zh-CN": {
+      "title": "知识范围选择示例",
+      "description": "用示例文档演示知识库和文件范围选择、检索及来源引用。",
+      "usage": [
+        {
+          "title": "选择示例知识范围",
+          "description": "在对话的知识范围选择器中选择 Synthetic guides，可进一步选择 Synthetic knowledge note。"
+        },
+        {
+          "title": "提问并查看引用",
+          "description": "让 Agent 搜索 Cedar，检查回答中的来源引用。此插件使用公开的虚构演示文档。"
+        }
+      ],
+      "requirements": [
+        "管理员已启用知识检索工具和范围选择，并将工具连接到此示例 Provider。"
+      ]
+    },
+    "en-US": {
+      "title": "Knowledge scope example",
+      "description": "Search sample documents within selected knowledge bases or files and inspect source citations.",
+      "usage": [
+        {
+          "title": "Select the example scope",
+          "description": "Choose Synthetic guides in the chat scope selector, optionally narrowing it to Synthetic knowledge note."
+        },
+        {
+          "title": "Ask and inspect citations",
+          "description": "Ask the Agent to search for Cedar and inspect its source citations. This example uses a public synthetic document."
+        }
+      ],
+      "requirements": [
+        "The administrator must enable knowledge retrieval and scope selection and connect the tool to this example provider."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge#readme"
+}
