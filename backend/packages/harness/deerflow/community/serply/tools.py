@@ -17,6 +17,7 @@ import re
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
@@ -51,21 +52,18 @@ def _get_api_key(tool_name: str = "web_search") -> str | None:
     return None
 
 
-def _coerce_max_results(
-    value: object,
-    *,
-    default: int = _DEFAULT_MAX_RESULTS,
-    max_allowed: int = _SERPLY_MAX_RESULTS,
-) -> int:
-    try:
-        coerced = int(value)
-    except (TypeError, ValueError, OverflowError):
-        logger.warning("Invalid Serply max_results=%r; using default %s", value, default)
-        coerced = default
-    if coerced < 1:
-        logger.warning("Invalid Serply max_results=%r; using default %s", value, default)
-        coerced = default
-    return min(coerced, max_allowed)
+def _count_for_request(value: object) -> int:
+    """Coerce ``max_results`` via the shared owner, then mirror Serply's clamp.
+
+    ``deerflow.community.search_max_results.coerce_max_results`` owns what
+    "invalid" means (booleans, non-integral floats and ``OverflowError`` all
+    fall back to the default); the 1-100 cap stays here because clamping
+    policy is deliberately per-provider.
+    """
+    return min(
+        coerce_max_results(value, provider="Serply", logger=logger, default=_DEFAULT_MAX_RESULTS),
+        _SERPLY_MAX_RESULTS,
+    )
 
 
 def _coerce_vertical(value: object) -> str:
@@ -197,7 +195,7 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     extra = (config.model_extra or {}) if config is not None else {}
     if "max_results" in extra:
         max_results = extra["max_results"]
-    max_results = _coerce_max_results(max_results)
+    max_results = _count_for_request(max_results)
     vertical = _coerce_vertical(extra.get("vertical"))
     query = _clean_query(query)
 
