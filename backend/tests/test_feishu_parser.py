@@ -1334,6 +1334,69 @@ def test_feishu_post_merges_inline_and_top_level_files_in_order():
         ]
 
 
+def test_feishu_post_user_written_file_placeholder_is_not_replaced():
+    """A literal ``[file]`` typed by the user must not consume an attachment's path."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "请按 [file] 格式整理", "style": []}]],
+            "files": [
+                {"file_key": "file_a", "file_name": "A.csv", "is_folder": False},
+                {"file_key": "file_b", "file_name": "B.csv", "is_folder": False},
+            ],
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+    kwargs = mock_make_inbound.call_args[1]
+    assert kwargs["text"] == "请按 [file] 格式整理\n\n[file]\n\n[file]"
+    assert kwargs["metadata"][feishu_module._POST_FILES_COUNT_METADATA_KEY] == 2
+
+    async def go():
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text=kwargs["text"],
+            thread_ts="msg_post",
+            files=kwargs["files"],
+            metadata=kwargs["metadata"],
+        )
+        channel._receive_single_file = AsyncMock(side_effect=["/mnt/user-data/uploads/A.csv", "/mnt/user-data/uploads/B.csv"])
+        result = await channel.receive_file(msg, "thread_1")
+        assert result.text == "请按 [file] 格式整理\n\n/mnt/user-data/uploads/A.csv\n\n/mnt/user-data/uploads/B.csv"
+
+    _run(go())
+
+
+def test_feishu_post_ignores_non_list_files_field():
+    """A malformed top-level ``files`` value must not take the whole message down."""
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    event = _make_post_event(
+        {
+            "title": "",
+            "content": [[{"tag": "text", "text": "先看文字", "style": []}]],
+            "files": 3,
+        }
+    )
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        kwargs = mock_make_inbound.call_args[1]
+        assert kwargs["text"] == "先看文字"
+        assert kwargs["files"] == []
+        assert feishu_module._POST_FILES_COUNT_METADATA_KEY not in kwargs["metadata"]
+
+
 def _make_text_event(
     text: str,
     *,

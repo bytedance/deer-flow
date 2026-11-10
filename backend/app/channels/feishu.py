@@ -55,6 +55,9 @@ PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 FEISHU_STOP_TIMEOUT_SECONDS = 5
 FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
+# Number of trailing ``[file]`` placeholders that came from a post's top-level
+# ``files`` array; ``receive_file`` fills those from the end of the text.
+_POST_FILES_COUNT_METADATA_KEY = "_feishu_post_files_count"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -107,6 +110,7 @@ class _ParsedMessage:
     chat_type: str | None
     text: str
     files: list[dict[str, Any]]
+    post_file_count: int = 0
     msg_type: InboundMessageType = InboundMessageType.CHAT
 
 
@@ -715,6 +719,9 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] received message with no files: %s", msg)
             return msg
         text = msg.text
+        post_file_count = msg.metadata.get(_POST_FILES_COUNT_METADATA_KEY, 0)
+        if not isinstance(post_file_count, int) or post_file_count < 0:
+            post_file_count = 0
         search_from = 0
 
         def replace_next_placeholder(placeholder: str, replacement: str) -> None:
@@ -725,13 +732,30 @@ class FeishuChannel(Channel):
             text = f"{text[:idx]}{replacement}{text[idx + len(placeholder) :]}"
             search_from = idx + len(replacement)
 
+        downloaded: list[tuple[str, str]] = []
         for file in files:
             if file.get("image_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
-                replace_next_placeholder("[image]", virtual_path)
+                downloaded.append(("[image]", virtual_path))
             elif file.get("file_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
-                replace_next_placeholder("[file]", virtual_path)
+                downloaded.append(("[file]", virtual_path))
+
+        # Top-level post attachments append their placeholders after the parsed
+        # body, so their slots are the final ``post_file_count`` ones. Fill them
+        # from the end first: a literal ``[file]`` / ``[image]`` typed by the user
+        # must not consume an attachment path before the real slot does.
+        post_file_count = min(post_file_count, len(downloaded))
+        suffix_end = len(text)
+        for placeholder, virtual_path in reversed(downloaded[len(downloaded) - post_file_count :] if post_file_count else []):
+            idx = text.rfind(placeholder, 0, suffix_end)
+            if idx < 0:
+                continue
+            text = f"{text[:idx]}{virtual_path}{text[idx + len(placeholder) :]}"
+            suffix_end = idx
+
+        for placeholder, virtual_path in downloaded[: len(downloaded) - post_file_count]:
+            replace_next_placeholder(placeholder, virtual_path)
         msg.text = text
         return msg
 
@@ -1615,6 +1639,8 @@ class FeishuChannel(Channel):
             }
             if source_preview:
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
+            if parsed.post_file_count:
+                metadata[_POST_FILES_COUNT_METADATA_KEY] = parsed.post_file_count
             if routing.clarification_card_id:
                 metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
@@ -1959,9 +1985,13 @@ class FeishuChannel(Channel):
         # downloadable attachment so ``receive_file`` can substitute the
         # uploaded virtual paths in order; folders are not downloadable files,
         # and an attachment already present as a rich-text element is not
-        # downloaded twice.
+        # downloaded twice. ``post_file_count`` marks how many of the trailing
+        # placeholders came from this array so they can be filled from the end.
         attachments = content.get("files") if isinstance(content, dict) else None
-        for attachment in attachments or []:
+        if not isinstance(attachments, list):
+            attachments = []
+        post_file_count = 0
+        for attachment in attachments:
             if not isinstance(attachment, dict) or attachment.get("is_folder"):
                 continue
             file_key = attachment.get("file_key")
@@ -1970,6 +2000,7 @@ class FeishuChannel(Channel):
             if any(existing.get("file_key") == file_key for existing in files_list):
                 continue
             files_list.append({"file_key": file_key})
+            post_file_count += 1
             text = f"{text}\n\n[file]" if text else "[file]"
 
         logger.info(
@@ -1997,6 +2028,7 @@ class FeishuChannel(Channel):
             chat_type=chat_type,
             text=text,
             files=files_list,
+            post_file_count=post_file_count,
         )
 
     def _on_message(self, event) -> None:
