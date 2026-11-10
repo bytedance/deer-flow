@@ -128,10 +128,7 @@ def _legacy_approval_pause(self, state, runtime):
     targets = self._target_calls(last) if isinstance(last, AIMessage) else []
     if not targets:
         return None
-    actions = [
-        {"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": summarize_args(call.get("args", {}), pii_config=self.pii_config), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"}
-        for call in targets
-    ]
+    actions = [{"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": summarize_args(call.get("args", {}), pii_config=self.pii_config), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"} for call in targets]
     interrupt({"kind": "hitl_approval", "version": 1, "request_id": actions[0]["request_id"], "actions": actions, "allowed_decisions": ["approve", "reject"], "pending_tool_call_ids": [call["id"] for call in targets]})
     raise AssertionError("legacy seeding hook must not handle recovery")
 

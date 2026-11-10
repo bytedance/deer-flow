@@ -3236,10 +3236,7 @@ def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
     return (
         isinstance(responses, list)
         and bool(responses)
-        and all(
-            isinstance(response, dict) and response.get("option_id") == "reject" and "tool_call_id" in response and (response["tool_call_id"] is None or isinstance(response["tool_call_id"], str))
-            for response in responses
-        )
+        and all(isinstance(response, dict) and response.get("option_id") == "reject" and "tool_call_id" in response and (response["tool_call_id"] is None or isinstance(response["tool_call_id"], str)) for response in responses)
     )
 
 
