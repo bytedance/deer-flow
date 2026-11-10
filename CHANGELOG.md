@@ -58,6 +58,10 @@ This section accumulates work toward the **2.3.0** milestone
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
 
+- **sandbox:** BoxLite VMs recovered at startup now run health checks, commands,
+  and cleanup on the provider's event loop, avoiding sync/async SDK mismatches
+  that made healthy recovered VMs fail their first command. ([#8072])
+
 - **uploads:** Re-uploading a file whose name collides with a compound archive
   suffix no longer inserts the dedupe counter inside the suffix. A second
   `report.tar.gz` is now named `report_1.tar.gz` (matching `report_1.tar` and
@@ -16238,4 +16242,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8072]: https://github.com/bytedance/deer-flow/pull/8072
 
