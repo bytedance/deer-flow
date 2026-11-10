@@ -47,6 +47,11 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **runtime:** A message queued with Queue during a run that pauses for HITL
+  approval is no longer dropped. The pause used to mark it `not_applied`, and
+  approving the call never dispatched it. It now stays pending through the
+  pause, including consecutive approvals, and runs after the resumed work
+  succeeds; it becomes retryable only if that work does not finish.
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
   (`None`) or repeats one within a response made the middleware pause with an

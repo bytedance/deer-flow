@@ -72,7 +72,8 @@ async def list_thread_inputs(thread_id: str, request: Request):
     for row in reversed(rows):
         for entry in (row.get("run_inputs") or {}).get("items", []):
             status = entry["status"]
-            if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success") or row.get("stop_reason")):
+            # An approval pause holds queued inputs for the resumed work.
+            if status in ("pending", "applying") and (row["status"] not in ("pending", "running", "success", "waiting_for_input") or row.get("stop_reason")):
                 status = "not_applied"
             items.append({key: value for key, value in {**entry, "status": status, "target_run_id": row["run_id"]}.items() if key != "context"})
     # Rank unresolved inputs (pending / not_applied / ...) ahead of terminal
@@ -86,15 +87,50 @@ async def list_thread_inputs(thread_id: str, request: Request):
     return {"items": [items[i] for i in sorted(keep)], "active_run_id": await _store(request).active_input_run(thread_id, user_id=user_id)}
 
 
-async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str):
+async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: str, continues_run_id: str | None = None):
     """Use normal admission/authorization and its stable idempotency key.
 
     This runs after the previous worker has fully finalized. No second main
     Agent, task queue service or recovery scheduler is introduced.
+
+    An approval pause (``waiting_for_input``) is not an outcome: the paused
+    Run's queued inputs stay held until the work it paused finishes in a
+    resume Run. ``continues_run_id`` names the paused Run this Run resumed;
+    held predecessors dispatch first, oldest first, each from its own row.
     """
+    try:
+        row = await inputs.store.get(inputs.run_id, user_id=inputs.user_id)
+        if row is None:
+            return
+        if continues_run_id is not None:
+            await inputs.link_continuation(continues_run_id)
+        if row["status"] == "waiting_for_input" and not row.get("stop_reason"):
+            return
+        chain = await inputs.continuation_chain()
+        if row["status"] != "success" or row.get("stop_reason"):
+            # The resumed work did not finish; leave held inputs for an explicit retry.
+            for member in chain:
+                await member.pause()
+            return
+    except Exception:
+        logger.warning("Queued inputs held for Run %s could not be resolved", inputs.run_id, exc_info=True)
+        return
+    members = [*chain, inputs]
+    for index, member in enumerate(members):
+        outcome = await _dispatch_pending(member, agent_runs=agent_runs, thread_id=thread_id, newest=members[-1])
+        if outcome == "failed":
+            # As for a single Run, a failed follow-up leaves the rest for an explicit retry.
+            for later in members[index + 1 :]:
+                await later.pause()
+        if outcome != "done":
+            return
+
+
+async def _dispatch_pending(inputs: RunInputs, *, agent_runs, thread_id: str, newest: RunInputs) -> str:
+    """Dispatch one Run's pending queue in order: ``done``, ``held``, ``failed`` or ``uncertain``."""
     row = await inputs.store.get(inputs.run_id, user_id=inputs.user_id)
     if row is None or row["status"] != "success" or row.get("stop_reason"):
-        return
+        return "done"
     state = await inputs.read()
     for entry in state["items"]:
         if entry["mode"] != "queue" or entry["status"] != "pending":
@@ -114,14 +150,21 @@ async def dispatch_queued_inputs(inputs: RunInputs, *, agent_runs, thread_id: st
                     run = await agent_runs.wait(thread_id=thread_id, run_id=run.run_id, timeout=60)
                 except TimeoutError:
                     continue
+            if run.status == "waiting_for_input" and not run.stop_reason:
+                # The follow-up paused for approval itself. The rest of the
+                # queue waits for its resumed work, which continues the newest
+                # Run so that the whole remaining chain stays reachable.
+                await RunInputs(inputs.store, run.run_id, inputs.user_id).link_continuation(newest.run_id)
+                return "held"
             if run.status != "success" or run.stop_reason:
                 await inputs.pause()
-                return
+                return "failed"
         except Exception:
             # Unknown admission outcomes retain the original key and input;
             # retrying can reconcile the same Run instead of running it twice.
             logger.warning("Queued input remains undelivered for Run %s", inputs.run_id, exc_info=True)
-            return
+            return "uncertain"
+    return "done"
 
 
 async def dispatch_one_input(thread_id, run_id, input_id, request, *, retry=False):

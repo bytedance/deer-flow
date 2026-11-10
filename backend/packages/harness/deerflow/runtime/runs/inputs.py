@@ -17,6 +17,12 @@ MAX_INPUTS = 16
 MAX_INPUT_BYTES = 16 * 1024
 MAX_TOTAL_BYTES = 64 * 1024
 INPUT_CONTEXT_KEY = "__run_input_control"
+#: Input-state key naming the Run whose held queued inputs dispatch before
+#: this Run's own: the paused Run a resume continued, or the source of a
+#: queued follow-up that paused for approval itself.
+CONTINUES_RUN_KEY = "continues_run_id"
+#: Bound on that chain; each hop is one approval pause on one thread.
+MAX_CONTINUATION_HOPS = 32
 
 
 class InputConflict(ValueError):
@@ -114,6 +120,46 @@ class RunInputs:
                     item["status"] = "not_applied"
 
         await self._change(change)
+
+    async def hold(self) -> None:
+        """Close an approval-paused Run's inputs but keep queued follow-ups pending.
+
+        ``waiting_for_input`` is not a terminal outcome: the approved work
+        continues in a resume Run, after which the queue is dispatched. An
+        undelivered steer targeted the now-frozen work, so it lapses as usual.
+        """
+
+        def change(state, row):
+            state["closed"] = True
+            for item in state["items"]:
+                if item["mode"] == "steer" and item["status"] in ("pending", "applying"):
+                    item["status"] = "not_applied"
+
+        await self._change(change)
+
+    async def link_continuation(self, run_id: str) -> None:
+        """Record, once, the Run whose held queue must dispatch before this Run's own."""
+
+        def change(state, row):
+            state.setdefault(CONTINUES_RUN_KEY, run_id)
+
+        await self._change(change)
+
+    async def continuation_chain(self) -> list[RunInputs]:
+        """Held predecessors this Run continues, oldest first (excluding itself)."""
+        chain: list[RunInputs] = []
+        seen = {self.run_id}
+        run_id = (await self.read()).get(CONTINUES_RUN_KEY)
+        while isinstance(run_id, str) and run_id not in seen and len(chain) < MAX_CONTINUATION_HOPS:
+            seen.add(run_id)
+            member = RunInputs(self.store, run_id, self.user_id)
+            try:
+                state = await member.read()
+            except InputConflict:
+                break
+            chain.append(member)
+            run_id = state.get(CONTINUES_RUN_KEY)
+        return chain[::-1]
 
     async def dispatched(self, input_id: str, run_id: str) -> None:
         def change(state, row):

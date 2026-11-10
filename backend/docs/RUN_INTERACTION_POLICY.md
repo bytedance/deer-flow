@@ -74,8 +74,13 @@ rejected, so continue the work in a new thread. In-place recovery is tracked in
 [#8071](https://github.com/bytedance/deer-flow/issues/8071).
 
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
-artifact delivery checks, and batch continuation cancellation must not treat a
-pending approval as a completed source run. Pending approvals do not expire and
+artifact delivery checks, batch continuation cancellation, and Queue dispatch
+must not treat a pending approval as a completed source run. A paused Run keeps
+its queued inputs pending (an undelivered steer lapses); the resume Run links
+back to it and, once it succeeds, dispatches the
+held queues oldest first, including across consecutive approvals and a queued
+follow-up that pauses for approval itself. If the resumed work does not succeed,
+the held inputs become `not_applied` for an explicit retry. Pending approvals do not expire and
 block new runs on the same thread until resolved. See
 [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for configuration and
 argument-summary visibility limits.

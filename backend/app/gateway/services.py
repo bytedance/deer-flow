@@ -2653,6 +2653,10 @@ async def start_run(
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
 
+        # Set await-free once this run answers an approval pause: the paused
+        # Run's queued inputs dispatch after this resumed work succeeds.
+        resumed_approval: dict[str, str] = {}
+
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
                 _ensure_thread_metadata(
@@ -2823,7 +2827,12 @@ async def start_run(
                 from app.gateway.run_inputs import dispatch_queued_inputs
                 from deerflow.runtime.runs.inputs import RunInputs
 
-                await dispatch_queued_inputs(RunInputs(run_mgr.input_store, record.run_id, record.user_id), agent_runs=execution_context.agent_runs, thread_id=thread_id)
+                await dispatch_queued_inputs(
+                    RunInputs(run_mgr.input_store, record.run_id, record.user_id),
+                    agent_runs=execution_context.agent_runs,
+                    thread_id=thread_id,
+                    continues_run_id=resumed_approval.get("run_id"),
+                )
 
         try:
             async with goal_thread_lock(thread_id):
@@ -2971,6 +2980,8 @@ async def start_run(
                             )
                             if current_request_ids != validated_approval_request_ids:
                                 raise HTTPException(status_code=409, detail={"code": "no_pending_approval", "message": "No resumable pause exists for this thread"})
+                        if answered_approval is not None:
+                            resumed_approval["run_id"] = answered_approval.run_id
                     # The stream lease was established before durable admission.
                     # Once resume persistence succeeds, keep task attachment
                     # await-free so cancellation cannot strand a pending row.

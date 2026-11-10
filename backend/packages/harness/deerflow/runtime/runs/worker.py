@@ -2010,7 +2010,11 @@ async def run_agent(
                         await input_control.close()
                         if not record.ownership_lost:
                             await input_control.confirm_checkpoint()
-                            if record.status != RunStatus.success or record.stop_reason:
+                            if record.status == RunStatus.waiting_for_input and not record.stop_reason:
+                                # An approval pause is not an outcome: queued
+                                # follow-ups wait for the resume Run's result.
+                                await input_control.inputs.hold()
+                            elif record.status != RunStatus.success or record.stop_reason:
                                 await input_control.inputs.pause()
                     except Exception:
                         logger.warning("Could not finalize Run input receipts for %s", run_id, exc_info=True)
