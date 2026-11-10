@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "kind": "synthetic-offline-retrieval",
+  "fixture_sha256": "202d76f35ac3f56d0890b88e00888a2f79708247f416a0f1a7ae5fd3fa0f1e0f",
+  "repeats": 30,
+  "warmup_calls": 1,
+  "adapters": {
+    "keywords": {
+      "implementation": "build_tool_search_tool.invoke",
+      "query_mode": "keywords",
+      "k": 5
+    },
+    "regex": {
+      "implementation": "build_tool_search_tool.invoke",
+      "query_mode": "regex",
+      "k": 5
+    },
+    "auto-promote": {
+      "implementation": "McpRoutingMiddleware.before_model",
+      "k": 5
+    },
+    "schemarouter": {
+      "implementation": "schemarouter.SchemaRouter.retrieve",
+      "version": "0.17.0",
+      "package_sources_sha256": "7ecbd3f7574aa49f0b9763672a021fcd0b95e38d79ed6d9f67c4eb781ccdb55a",
+      "k": 5
+    }
+  },
+  "summary": {
+    "keywords": {
+      "positive_cases": 17,
+      "tool_recall_macro": 0.8823529411764706,
+      "input_field_recall_macro": 0.8666666666666667,
+      "unsupported_cases": 5,
+      "unsupported_rejected": 2,
+      "false_positive_tool_count": 53,
+      "mean_loaded_tools": 3.1818181818181817,
+      "mean_schema_bytes": 1135.6818181818182,
+      "median_case_p50_ms": 0.2715797600103542
+    },
+    "regex": {
+      "positive_cases": 17,
+      "tool_recall_macro": 0.029411764705882353,
+      "input_field_recall_macro": 0.0,
+      "unsupported_cases": 5,
+      "unsupported_rejected": 5,
+      "false_positive_tool_count": 0,
+      "mean_loaded_tools": 0.045454545454545456,
+      "mean_schema_bytes": 17.09090909090909,
+      "median_case_p50_ms": 0.1520782388979569
+    },
+    "auto-promote": {
+      "positive_cases": 17,
+      "tool_recall_macro": 1.0,
+      "input_field_recall_macro": 1.0,
+      "unsupported_cases": 5,
+      "unsupported_rejected": 3,
+      "false_positive_tool_count": 22,
+      "mean_loaded_tools": 1.8636363636363635,
+      "mean_schema_bytes": 655.0909090909091,
+      "median_case_p50_ms": 0.012012009392492473
+    },
+    "schemarouter": {
+      "positive_cases": 17,
+      "tool_recall_macro": 1.0,
+      "input_field_recall_macro": 1.0,
+      "unsupported_cases": 5,
+      "unsupported_rejected": 1,
+      "false_positive_tool_count": 82,
+      "mean_loaded_tools": 4.590909090909091,
+      "mean_schema_bytes": 1657.0454545454545,
+      "median_case_p50_ms": 1.1427960125729442
+    }
+  },
+  "provenance": {
+    "git_revision": "8543b796582ce9ba82c41e9c14eeb7f26f3dc88b",
+    "git_dirty": false,
+    "python": "3.12.3",
+    "platform": "Linux",
+    "fixture_sha256": "202d76f35ac3f56d0890b88e00888a2f79708247f416a0f1a7ae5fd3fa0f1e0f",
+    "sources": {
+      "packages/harness/deerflow/agents/middlewares/mcp_routing_middleware.py": "0d1843a60fbd9d3a3c538540e17e60e4f49dec335b2aded8bbdd4233890752b0",
+      "packages/harness/deerflow/tools/builtins/tool_search.py": "9399017f773357ef9ab8ac91c8fc05ebbe446864e5fd555e48635e3a56425c0e",
+      "packages/harness/deerflow/tools/mcp_metadata.py": "374684de91b33a37916a119a449e09c0e8649a7206e8bb60813012849e003cac",
+      "scripts/benchmark/deferred_tools/__init__.py": "cdb7ff4e9a07dbb429c71f04c9c46f20e4798483d77e9fdf2de3e23753c661fa",
+      "scripts/benchmark/deferred_tools/__main__.py": "74fff10eb2bd330c92909b27a5a9ae84f41b3f268a5c04f51f849276919f19c6",
+      "scripts/benchmark/deferred_tools/adapters.py": "cd300971bd37e17833fb707c0b6c3805534c25e7f76dd0889d1888c9ac3dc12f",
+      "scripts/benchmark/deferred_tools/protocol.py": "aedb5e443fa8eb919fbd54aed8887934992c49a85e60689d4b797c1154a9660e",
+      "scripts/benchmark/deferred_tools/runner.py": "acc58f79601e6976fb15e3085ff96657d7e4f4bd9f18a45cdeff7287785b0d71"
+    },
+    "packages": {
+      "langchain": "1.3.14",
+      "langchain-core": "1.4.9",
+      "langgraph": "1.2.9",
+      "pydantic": "2.13.3"
+    },
+    "network_calls": 0,
+    "tool_executions": 0,
+    "seed": null,
+    "clock": "perf_counter; warm local discovery only"
+  },
+  "measurement_context": "Local WSL development host with concurrent backend validation; timings are observations, not isolated performance claims.",
+  "interpretation": "Small synthetic retrieval-only contract fixture. Raw regex and hint-based auto-promotion are distinct controls. Input-field recall measures schema availability, not arguments or execution correctness."
+}

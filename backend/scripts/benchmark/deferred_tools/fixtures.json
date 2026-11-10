@@ -1,0 +1,836 @@
+{
+  "version": 1,
+  "kind": "synthetic",
+  "tools": [
+    {
+      "name": "github_search_repositories",
+      "description": "Search GitHub repositories by topic and programming language.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Repository search text"
+          },
+          "language": {
+            "type": "string",
+            "description": "Programming language filter"
+          }
+        },
+        "required": [
+          "query",
+          "language"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "github",
+        "repository"
+      ]
+    },
+    {
+      "name": "github_get_issue",
+      "description": "Read one GitHub issue and its discussion.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "description": "Owner/repository"
+          },
+          "issue_number": {
+            "type": "integer",
+            "description": "Issue identifier"
+          }
+        },
+        "required": [
+          "repository",
+          "issue_number"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "github",
+        "issue"
+      ]
+    },
+    {
+      "name": "github_create_issue",
+      "description": "Create an issue in a GitHub repository.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "description": "Owner/repository"
+          },
+          "title": {
+            "type": "string",
+            "description": "Issue summary"
+          },
+          "body": {
+            "type": "string",
+            "description": "Issue details"
+          }
+        },
+        "required": [
+          "repository",
+          "title",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "github",
+        "issue"
+      ]
+    },
+    {
+      "name": "gitlab_search_projects",
+      "description": "Search GitLab projects and repository metadata.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "search": {
+            "type": "string",
+            "description": "Project query"
+          },
+          "visibility": {
+            "type": "string",
+            "description": "Project visibility filter"
+          }
+        },
+        "required": [
+          "search",
+          "visibility"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "gitlab",
+        "repository"
+      ]
+    },
+    {
+      "name": "slack_search_messages",
+      "description": "Search Slack channel messages by text and date.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Message search text"
+          },
+          "channel": {
+            "type": "string",
+            "description": "Slack channel"
+          },
+          "before": {
+            "type": "string",
+            "description": "Last date"
+          }
+        },
+        "required": [
+          "query",
+          "channel",
+          "before"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "slack",
+        "message"
+      ]
+    },
+    {
+      "name": "slack_send_message",
+      "description": "Send a new message to a Slack channel.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Destination channel"
+          },
+          "text": {
+            "type": "string",
+            "description": "Message body"
+          }
+        },
+        "required": [
+          "channel",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "slack",
+        "message"
+      ]
+    },
+    {
+      "name": "jupyter_create_notebook",
+      "description": "Create a Jupyter notebook with a chosen kernel.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Notebook path"
+          },
+          "kernel": {
+            "type": "string",
+            "description": "Kernel name"
+          }
+        },
+        "required": [
+          "path",
+          "kernel"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "jupyter",
+        "notebook"
+      ]
+    },
+    {
+      "name": "jupyter_run_cell",
+      "description": "Execute one existing Jupyter notebook cell.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "notebook": {
+            "type": "string",
+            "description": "Notebook path"
+          },
+          "cell_id": {
+            "type": "string",
+            "description": "Cell identifier"
+          }
+        },
+        "required": [
+          "notebook",
+          "cell_id"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "jupyter",
+        "cell"
+      ]
+    },
+    {
+      "name": "calendar_list_events",
+      "description": "List calendar events within a date range.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "start_date": {
+            "type": "string",
+            "description": "First date"
+          },
+          "end_date": {
+            "type": "string",
+            "description": "Last date"
+          },
+          "calendar_id": {
+            "type": "string",
+            "description": "Calendar identifier"
+          }
+        },
+        "required": [
+          "start_date",
+          "end_date",
+          "calendar_id"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "calendar",
+        "event"
+      ]
+    },
+    {
+      "name": "calendar_create_event",
+      "description": "Create a calendar event and invite attendees.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "Start timestamp"
+          },
+          "attendees": {
+            "type": "array",
+            "description": "Attendee addresses",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title",
+          "start_time",
+          "attendees"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "calendar",
+        "event"
+      ]
+    },
+    {
+      "name": "archive_search_records",
+      "description": "检索归档记录，按作者和主题筛选。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "author": {
+            "type": "string",
+            "description": "作者"
+          },
+          "topic": {
+            "type": "string",
+            "description": "主题"
+          }
+        },
+        "required": [
+          "author",
+          "topic"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "归档",
+        "作者"
+      ]
+    },
+    {
+      "name": "admin_delete_repository",
+      "description": "Permanently delete a private GitHub repository. Administrator only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "description": "Repository identifier"
+          },
+          "confirmation": {
+            "type": "boolean",
+            "description": "Confirm deletion"
+          }
+        },
+        "required": [
+          "repository",
+          "confirmation"
+        ],
+        "additionalProperties": false
+      },
+      "routing_keywords": [
+        "github",
+        "repository",
+        "delete"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "repo-language",
+      "query": "Search GitHub repositories by programming language",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_search_repositories"
+      ],
+      "required_fields": {
+        "github_search_repositories": [
+          "language"
+        ]
+      }
+    },
+    {
+      "id": "gitlab-visibility",
+      "query": "Search GitLab projects by visibility",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "gitlab_search_projects"
+      ],
+      "required_fields": {
+        "gitlab_search_projects": [
+          "visibility"
+        ]
+      }
+    },
+    {
+      "id": "issue-read",
+      "query": "Read GitHub issue discussion by issue_number",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_get_issue"
+      ],
+      "required_fields": {
+        "github_get_issue": [
+          "issue_number",
+          "repository"
+        ]
+      }
+    },
+    {
+      "id": "issue-write",
+      "query": "Create GitHub issue with a title and body",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_create_issue"
+      ],
+      "required_fields": {
+        "github_create_issue": [
+          "title",
+          "body"
+        ]
+      }
+    },
+    {
+      "id": "slack-history",
+      "query": "Search Slack messages before a date in a channel",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "slack_search_messages"
+      ],
+      "required_fields": {
+        "slack_search_messages": [
+          "before",
+          "channel"
+        ]
+      }
+    },
+    {
+      "id": "slack-send",
+      "query": "Send Slack message to channel",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "slack_send_message"
+      ],
+      "required_fields": {
+        "slack_send_message": [
+          "channel",
+          "text"
+        ]
+      }
+    },
+    {
+      "id": "notebook-kernel",
+      "query": "Create Jupyter notebook with kernel",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "jupyter_create_notebook"
+      ],
+      "required_fields": {
+        "jupyter_create_notebook": [
+          "kernel"
+        ]
+      }
+    },
+    {
+      "id": "notebook-cell",
+      "query": "Execute Jupyter notebook cell_id",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "jupyter_run_cell"
+      ],
+      "required_fields": {
+        "jupyter_run_cell": [
+          "cell_id"
+        ]
+      }
+    },
+    {
+      "id": "calendar-read",
+      "query": "List calendar events from start_date to end_date",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "calendar_list_events"
+      ],
+      "required_fields": {
+        "calendar_list_events": [
+          "start_date",
+          "end_date"
+        ]
+      }
+    },
+    {
+      "id": "calendar-invite",
+      "query": "Create calendar event with attendees",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "calendar_create_event"
+      ],
+      "required_fields": {
+        "calendar_create_event": [
+          "attendees"
+        ]
+      }
+    },
+    {
+      "id": "unicode-archive",
+      "query": "按作者检索归档记录",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "archive_search_records"
+      ],
+      "required_fields": {
+        "archive_search_records": [
+          "author"
+        ]
+      }
+    },
+    {
+      "id": "multiple-providers",
+      "query": "Search GitHub repositories and GitLab projects",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_search_repositories",
+        "gitlab_search_projects"
+      ],
+      "required_fields": {
+        "github_search_repositories": [
+          "query"
+        ],
+        "gitlab_search_projects": [
+          "search"
+        ]
+      }
+    },
+    {
+      "id": "ambiguous-issue",
+      "query": "GitHub issue",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_get_issue",
+        "github_create_issue"
+      ],
+      "required_fields": {}
+    },
+    {
+      "id": "field-only",
+      "query": "issue_number",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_get_issue"
+      ],
+      "required_fields": {
+        "github_get_issue": [
+          "issue_number"
+        ]
+      }
+    },
+    {
+      "id": "reordered-notebook",
+      "query": "notebook Jupyter kernel",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "jupyter_create_notebook"
+      ],
+      "required_fields": {
+        "jupyter_create_notebook": [
+          "kernel"
+        ]
+      }
+    },
+    {
+      "id": "no-route-weather",
+      "query": "Predict next month weather",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [],
+      "required_fields": {}
+    },
+    {
+      "id": "no-route-refund",
+      "query": "Refund a customer credit card payment",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [],
+      "required_fields": {}
+    },
+    {
+      "id": "denied-admin-delete",
+      "query": "Permanently delete a private GitHub repository",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "jupyter_create_notebook",
+        "calendar_list_events",
+        "archive_search_records"
+      ],
+      "expected_tools": [],
+      "required_fields": {}
+    },
+    {
+      "id": "denied-send",
+      "query": "Send Slack message to channel",
+      "allowed_tools": [
+        "slack_search_messages"
+      ],
+      "expected_tools": [],
+      "required_fields": {}
+    },
+    {
+      "id": "empty-policy",
+      "query": "Search GitHub repositories",
+      "allowed_tools": [],
+      "expected_tools": [],
+      "required_fields": {}
+    },
+    {
+      "id": "literal-regex-punctuation",
+      "query": "[draft] a+b notebook",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "github_create_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "slack_send_message",
+        "jupyter_create_notebook",
+        "jupyter_run_cell",
+        "calendar_list_events",
+        "calendar_create_event",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "jupyter_create_notebook"
+      ],
+      "required_fields": {}
+    },
+    {
+      "id": "read-policy-collision",
+      "query": "Read GitHub issue by issue_number",
+      "allowed_tools": [
+        "github_search_repositories",
+        "github_get_issue",
+        "gitlab_search_projects",
+        "slack_search_messages",
+        "jupyter_create_notebook",
+        "calendar_list_events",
+        "archive_search_records"
+      ],
+      "expected_tools": [
+        "github_get_issue"
+      ],
+      "required_fields": {
+        "github_get_issue": [
+          "issue_number"
+        ]
+      }
+    }
+  ]
+}
