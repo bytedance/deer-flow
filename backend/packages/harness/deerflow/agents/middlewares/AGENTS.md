@@ -69,7 +69,7 @@ Adapters and the legacy `langchain_openai:ChatOpenAI` factory must raise
 `EmptyModelResponseError` for HTTP-success empty choices before LangChain indexing.
 
 **Removing calls.** Use `clone_ai_message_with_tool_calls` to sync provider
-surfaces. HITL recovery drops colliding IDs with a rejection note; null IDs
+surfaces. HITL drops colliding IDs with a rejection note; null IDs
 cannot carry results.
 
 Read marks bind to request `tool_call_id`, including `Command` results.
