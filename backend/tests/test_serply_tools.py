@@ -115,16 +115,15 @@ class TestCountForRequest:
 
         assert _count_for_request(999) == 100
 
-    def test_invalid_values_fall_back_to_default(self):
+    @pytest.mark.parametrize(
+        "raw",
+        ["oops", None, 0, -3, True, False, 3.5, float("inf")],
+        ids=["invalid-string", "none", "zero", "negative", "true", "false", "non-integral-float", "yaml-inf"],
+    )
+    def test_invalid_values_fall_back_to_default(self, raw):
         from deerflow.community.serply.tools import _count_for_request
 
-        assert _count_for_request("oops") == 5
-        assert _count_for_request(None) == 5
-        assert _count_for_request(0) == 5
-        assert _count_for_request(-3) == 5
-        assert _count_for_request(True) == 5
-        assert _count_for_request(False) == 5
-        assert _count_for_request(3.5) == 5
+        assert _count_for_request(raw) == 5
 
 
 class TestCoerceVertical:
@@ -379,15 +378,3 @@ class TestWebSearchTool:
 
         assert result["total_results"] == 1
         assert mock_get.call_args.kwargs["headers"]["X-Api-Key"] == "env-key"
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [float("inf"), True, 3.5],
-    ids=["yaml-inf", "bool", "non-integral-float"],
-)
-def test_invalid_max_results_shapes_fall_back_to_default(raw):
-    """A YAML `.inf`, bool, or fractional max_results must fall back to default."""
-    import deerflow.community.serply.tools as serply_mod
-
-    assert serply_mod._count_for_request(raw) == serply_mod._DEFAULT_MAX_RESULTS

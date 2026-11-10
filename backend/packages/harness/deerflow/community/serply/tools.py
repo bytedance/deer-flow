@@ -52,12 +52,7 @@ def _get_api_key(tool_name: str = "web_search") -> str | None:
     return None
 
 
-def _count_for_request(
-    value: object,
-    *,
-    default: int = _DEFAULT_MAX_RESULTS,
-    max_allowed: int = _SERPLY_MAX_RESULTS,
-) -> int:
+def _count_for_request(value: object) -> int:
     """Coerce ``max_results`` via the shared owner, then mirror Serply's clamp.
 
     ``deerflow.community.search_max_results.coerce_max_results`` owns what
@@ -66,8 +61,8 @@ def _count_for_request(
     policy is deliberately per-provider.
     """
     return min(
-        coerce_max_results(value, provider="Serply", logger=logger, default=default),
-        max_allowed,
+        coerce_max_results(value, provider="Serply", logger=logger, default=_DEFAULT_MAX_RESULTS),
+        _SERPLY_MAX_RESULTS,
     )
 
 
