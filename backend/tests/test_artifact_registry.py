@@ -757,6 +757,91 @@ def test_extraction_registers_the_full_delimited_path_once():
     assert entries[0]["artifact_type"] == "file"
 
 
+@pytest.mark.parametrize(("opener", "closer"), [('"', '"'), ("'", "'"), ("`", "`"), ("“", "”"), ("‘", "’"), ("「", "」"), ("『", "』")])
+@pytest.mark.parametrize("content_block", [False, True])
+def test_quoted_remote_urls_preserve_literal_terminal_punctuation(opener, closer, content_block):
+    url = "https://files.example/report.PdF?token=literal."
+    text = f"Download {opener}{url}{closer}，done。"
+    result = ToolMessage(content=[{"type": "text", "text": text}] if content_block else text, tool_call_id="quoted-url", name="remote_report")
+
+    entries = extract_artifacts_from_result(result, thread_id="quoted-url")
+
+    assert [entry["real_ref"] for entry in entries] == [url]
+
+
+@pytest.mark.parametrize("suffix", ["?token=literal;", "?token=literal,", "?token=literal)", "#section:", "#section]", "#section}"])
+def test_quoted_remote_urls_keep_query_and_fragment_punctuation(suffix):
+    url = f"https://files.example/report.pdf{suffix}"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f'"{url}".')] == [url]
+
+
+@pytest.mark.parametrize("delimiter", ['"', "'", "`"])
+@pytest.mark.parametrize("escape_count", [1, 3])
+def test_quoted_remote_urls_honor_backslash_escaped_wrappers(delimiter, escape_count):
+    url = "https://files.example/report.pdf?token=literal."
+    marker = "\\" * escape_count + delimiter
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"log: {marker}{url}{marker}.")] == [url]
+
+
+@pytest.mark.parametrize(("opener", "closer"), [('"', '"'), ('\\"', '\\"'), ("“", "”"), ("「", "」")])
+@pytest.mark.parametrize("content_block", [False, True])
+def test_quoted_remote_urls_deduplicate_structured_refs_and_keep_order(opener, closer, content_block):
+    first = "https://files.example/report.pdf?token=literal."
+    second = "https://files.example/second.csv#section:"
+    text = f"{opener}{first}{closer}, {opener}{second}{closer}, {opener}{first}{closer}."
+    result = ToolMessage(
+        content=[{"type": "text", "text": text}] if content_block else text,
+        artifact={"structured_content": {"url": first}},
+        tool_call_id="quoted-urls",
+    )
+
+    entries = extract_artifacts_from_result(result, thread_id="quoted-url")
+
+    assert [entry["real_ref"] for entry in entries] == [first, second]
+    assert len({entry["handle"] for entry in entries}) == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"https://files.example/report.pdf?token=literal.',
+        "「https://files.example/report.pdf?token=literal.",
+        '"https://files.example/report.pdf?token=literal. with prose"',
+        "「https://files.example/report.pdf?token=literal.\tmore」",
+        '"https://files.example/report.pdf?token=literal.\nmore"',
+        "「https://files.example/report.pdf?token=literal.\u2028more」",
+        r'\"https://files.example/report.pdf?token=literal. dequoted"',
+    ],
+)
+def test_quoted_remote_urls_skip_partial_spans_but_find_later_refs(text):
+    later = "https://files.example/next.csv"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"{text}\nSaved {later}.")] == [later]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://files.example/report.pdf/download",
+        "https://files.example/download?name=report.pdf",
+        "https://files.example/report.pdf?token=" + "界" * 1400,
+        "https://files.example/report.pdf?token=<invalid>",
+        "https://files.example/report.pdf?token=`invalid`",
+    ],
+)
+def test_quoted_remote_urls_keep_suffix_size_and_character_bounds(url):
+    assert _detect_refs_in_text(f'"{url}"') == []
+
+
+def test_quoted_remote_urls_stop_before_adjacent_prose_and_urls():
+    first = "https://files.example/report.pdf?token=literal."
+    second = "https://files.example/next.csv?token=literal;"
+
+    assert [ref["ref"] for ref in _detect_refs_in_text(f"「{first}」然后「{second}」。")] == [first, second]
+
+
 @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029", "\t"])
 @pytest.mark.parametrize("delimiter", ['"', "'", "`"])
 def test_delimited_sandbox_path_rejects_line_breaks_and_tabs(separator, delimiter):

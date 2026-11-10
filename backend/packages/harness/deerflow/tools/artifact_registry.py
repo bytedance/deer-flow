@@ -31,8 +31,8 @@ _HANDLE_LENGTH = 8
 _SANDBOX_PATH_PREFIX = "/mnt/user-data/"
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 
-# Delimiters a tool result may wrap a path in. A delimited span is one value, so a
-# filename inside it keeps its spaces; the bare token scan below keeps its
+# Delimiters a tool result may wrap a reference in. A delimited span is one value, so a
+# sandbox filename inside it keeps its spaces; the bare token scan below keeps its
 # whitespace boundary, because nothing tells it where such a name would end.
 _REF_QUOTE_DELIMITERS = {'"': '"', "'": "'", "`": "`", "“": "”", "‘": "’", "「": "」", "『": "』"}
 _REF_LINE_BOUNDARY_PATTERN = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]")
@@ -159,7 +159,7 @@ def _strip_ref_trailing_noise(raw: str) -> str:
 
 
 def _classify_span(text: str, start: int) -> tuple[str, int | None]:
-    """How the sandbox path at ``start`` is delimited, and where a quoted span ends.
+    """How the reference at ``start`` is delimited, and where a quoted span ends.
 
     ``bare`` paths keep the whitespace boundary. A ``quoted`` span ends at the matching
     delimiter on the same line, which is what keeps ``"report final.pdf"`` whole;
@@ -232,8 +232,22 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
                 "display": _display_name_for_ref(raw),
             }
         )
-    for match in _REMOTE_URL_PATTERN.finditer(text):
-        raw = _strip_ref_trailing_noise(match.group(0))
+    cursor = 0
+    while (match := _REMOTE_URL_PATTERN.search(text, cursor)) is not None:
+        cursor = match.end()
+        kind, span_end = _classify_span(text, match.start())
+        if kind == _SPAN_UNTERMINATED:
+            continue
+        if kind == _SPAN_QUOTED:
+            assert span_end is not None
+            raw = text[match.start() : span_end]
+            cursor = span_end
+            # A quoted URL is literal, but keeps the bare scan's character
+            # boundaries: never register a prefix of a malformed quoted value.
+            if _REMOTE_URL_PATTERN.fullmatch(raw) is None:
+                continue
+        else:
+            raw = _strip_ref_trailing_noise(match.group(0))
         if raw in seen or not _is_referenceable_url(raw):
             continue
         if not _REMOTE_FILE_EXTENSION_PATTERN.search(urlsplit(raw).path):
