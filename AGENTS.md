@@ -222,6 +222,9 @@ Repo-wide conventions:
 
 - Update `README.md` for user-facing changes and the relevant `AGENTS.md` for
   development/architecture changes in the same change set.
+- **Agent guidance budgets** — inherited `AGENTS.md` chains warn above 80 KiB;
+  the hard cap is temporarily 100 KiB to unblock CI. Compact guidance before
+  increasing this budget again.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
