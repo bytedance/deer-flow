@@ -62,6 +62,12 @@ This section accumulates work toward the **2.3.0** milestone
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
 
+- **uploads:** Re-uploading a file whose name collides with a compound archive
+  suffix no longer inserts the dedupe counter inside the suffix. A second
+  `report.tar.gz` is now named `report_1.tar.gz` (matching `report_1.tar` and
+  `report_1.txt`), instead of `report.tar_1.gz`, so the extension stays intact
+  for file-type detection. ([#8042](https://github.com/bytedance/deer-flow/pull/8042))
+
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
   `DELETE /api/threads/{id}`, the route logged it at DEBUG, removed the
