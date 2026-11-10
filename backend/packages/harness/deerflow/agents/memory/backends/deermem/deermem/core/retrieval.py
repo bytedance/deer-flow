@@ -741,7 +741,10 @@ def create_fts5_retrieval(config: Any) -> FTS5RetrievalAdapter | None:
     try:
         return FTS5RetrievalAdapter(db_path)
     except sqlite3.DatabaseError as exc:
-        if db_path == ":memory:":
+        # Busy/locked, permissions, I/O and unavailable FTS5 are not evidence
+        # of corruption. Extended SQLite codes retain the primary low byte.
+        error_code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+        if db_path == ":memory:" or error_code not in {sqlite3.SQLITE_CORRUPT, sqlite3.SQLITE_NOTADB}:
             logger.warning("SQLite FTS5 is unavailable; DeerMem will use substring retrieval: %s", exc)
             return None
 
