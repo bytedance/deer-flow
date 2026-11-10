@@ -122,3 +122,42 @@ persists a request for the existing run owner; never fall back to local cancella
 when the extension generation is stale. Extension-owned state/quota/control logic
 stays in its package. Tests: `test_extension_execution_fence.py` (PostgreSQL via
 `DEERFLOW_TEST_WORKFLOW_POSTGRES`).
+
+## Scheduled-task product notes
+
+Scheduled-task note:
+- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
+  through Gateway capability admission. Interactive turns create/manage their
+  schedules; scheduled turns can request stopping only their own schedule.
+  Per-occurrence goal success does not end a recurring schedule.
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
+  background scheduler gated by `config.yaml -> scheduler.enabled`.
+- Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
+  `disable_clarification`, and `github_token` are honored only for internally-authenticated
+  callers; client-supplied copies are dropped.
+- Busy occurrences persist as `queued`; `scheduler.queue_timeout_seconds` bounds the wait.
+  Do not reintroduce skip-on-overlap.
+
+## Scheduled-task runtime notes
+
+- Scheduled runs use Gateway's normal run path. `launch_scheduled_thread_run` reads `get_app_config()` at dispatch: `scheduler.recursion_limit` defaults to 1000 (web UI), capped by `max_recursion_limit`; YAML changes apply next run without restart. IM enqueue checks recipients before locking preferences in the outcome transaction.
+
+- Run-history `status` filters are occurrence states, not task states. `ScheduledTaskRunStatus` in `persistence/scheduled_tasks/model.py` is the shared API/repository vocabulary and must match the active and terminal occurrence-status sets. Keep owner lookup before reading history, and apply SQL task/status predicates before pagination; omitted status preserves the existing response.
+
+- The background scheduler is single-instance by default. `scheduler.multi_instance=true` opts into lease-aware recovery across Gateway instances and requires shared Postgres, `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`; otherwise startup rejects the configuration. Live scheduled runs are preserved when a peer starts; expired launch claims return to the durable queue, expired run leases are atomically taken over, stale launch writes are fenced by lease ownership, and the Postgres advisory-locked budget makes `max_concurrent_runs` a shared global cap for `launching`/`running` rows.
+
+- The multi-process startup gate also fires on `deployment.multi_instance: true`; contract in `docs/CONFIGURATION.md`.
+
+- Scheduled-task dispatch: `uq_scheduled_task_run_active` permits one `queued`/`launching`/`running` occurrence per task. Queues survive restarts; only lease-fenced `launching` calls Gateway; `running` references the durable run. Stable admission keys reuse it after recovery. Reused-thread `ConflictError` requeues; other launch errors fail. Claims exclude waiting rows and enforce `max_concurrent_runs`/per-owner caps: serialize count+UPDATE with the Postgres advisory lock or SQLite `BEGIN IMMEDIATE`. Coalesce triggers; preserve same-thread FIFO. Admission, PATCH/resume, pause/delete lock parent before occurrence, freezing active definitions. Pause/delete atomically cancel queued work and reject launching/running; PATCH/resume reject all active states. Only queued conflicts offer pause cancellation. Manual triggers run/queue while paused; trial origins reuse admitted `scheduled_for` for idempotent retries.
+
+- `POST /api/scheduled-tasks/preview-cron` requires authenticated `threads:read`. Bounded cron previews call the shared scheduler calculator in `asyncio.to_thread`, preserving its DST semantics. Capture the optional aware reference once; return UTC and offset-bearing local occurrences without acquiring task/thread/run stores or dispatching work. This advisory API does not reserve execution.
+
+## MCP durable task runtime
+
+- Long-running MCP work uses a separate durable task runtime (`McpTaskService` + `mcp_tasks`, lease-based recovery) rather than keeping remote task IDs or status polling inside the Agent loop; only submit remains Agent-visible, the database is the source of truth, and `ThreadState` receives only a bounded current-thread projection. Full contract — including notification retries, dead-lettering, and the cancel endpoint's worker-stopped 503 (leases, cancellation fencing, delivery idempotency, management-tool exposure): [packages/harness/deerflow/mcp/AGENTS.md](../mcp/AGENTS.md).
+
+## Thread metadata JSON filters
+
+`ThreadMetaStore.search()` keeps JSON filter semantics identical across memory,
+SQLite, and PostgreSQL: missing differs from null, bool differs from int, and
+float filters accept integer or real JSON numbers through `json_value_matches`.

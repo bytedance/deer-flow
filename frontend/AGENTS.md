@@ -2,6 +2,19 @@
 
 Frontend guidance; `CLAUDE.md` imports `@AGENTS.md`.
 
+Feature rules live next to the code. Read the guide before you change that area:
+
+- [src/AGENTS.md](src/AGENTS.md) — data flow, threads, streaming
+- [src/components/workspace/AGENTS.md](src/components/workspace/AGENTS.md) — model
+  picker, artifact previews, Capability Center, plugin UI, composer references
+- [src/components/workspace/browser-view/AGENTS.md](src/components/workspace/browser-view/AGENTS.md) — browser view
+- [src/core/models/AGENTS.md](src/core/models/AGENTS.md) — model catalog, shared model
+  settings, reasoning capabilities, provider presets
+- [src/core/auth/AGENTS.md](src/core/auth/AGENTS.md) — authentication, admin user management
+- [src/core/memory/AGENTS.md](src/core/memory/AGENTS.md),
+  [src/core/background-tasks/AGENTS.md](src/core/background-tasks/AGENTS.md),
+  [tests/e2e/AGENTS.md](tests/e2e/AGENTS.md)
+
 ## Project Overview
 
 Next.js 16 frontend for LangGraph conversations, streaming, artifacts, skills and tools.
@@ -277,85 +290,6 @@ organization requests can otherwise roll back each other's confirmed state.
 Run-created optimistic snapshots have no archive flag: refresh archive-filtered
 lists from the server instead of inserting those snapshots into either view.
 
-### Delimited artifact preview
-
-CSV/TSV previews share `artifact-table-preview.tsx` between the panel and standalone viewer. Papa Parse runs only inside `delimited-preview.worker.ts`; `use-delimited-preview.ts` bounds input before transfer, cancels stale work, and enforces a five-second timeout. The parser detects the first record separator outside quoted fields and passes it explicitly to Papa Parse, so embedded newlines in an incomplete quoted field cannot corrupt newline detection. It retains at most 202 logical records and 50 columns, discarding an incomplete final record from truncated input. UI pagination displays at most 200 data rows in pages of 50. Keep the table mounted but inactive when switching to source so header/pagination state survives; changing file identity resets it. Pending `write_file` content stays in source mode until success.
-
-For a truncated sample whose first separator is LF or CRLF, strip a terminal CR
-before parsing so a split CRLF separator cannot make a quoted final field
-invalidate the whole preview, including LF-first files with later CRLF records.
-The terminal record remains incomplete and is discarded; complete CR-only files
-and malformed quotes retain their existing behavior.
-
-Custom skill export is admin-only and disabled in static demos. The lazy
-`skill-export-dialog.tsx` must abort requests and ignore stale callbacks on close
-or user/skill changes. `core/skills/export.ts` owns the revision-bound Blob download;
-HTTP 409 requires explicit preview refresh. Keep file lists paginated and diagnostics
-localized. Browser handoff does not prove the file was saved to disk.
-
-`core/skills/error-detail.ts` reads error JSON as unknown for skill management
-and export. Narrow records and string fields before use; malformed bodies must
-preserve typed HTTP failures and the upload API's soft-failure contract.
-
-Sidebar rows request deletion through `ThreadDeleteDialogProvider`, hosted in
-`WorkspaceSidebar` outside the virtualized flat/project lists. Keep the selected
-thread snapshot and retry UI alive when a partial deletion removes its row.
-Focus Cancel on open and after a failed deletion has re-enabled the actions;
-block dismissal while deletion is pending. Show the error message when available,
-with a localized fallback, and log the rejection for debugging. The shared
-delete helper accepts remote 404 (not 403) before retrying local cleanup, and
-`onDeleted` runs only after both deletion steps succeed.
-
-## Capability Center
-
-`skill-diagnostics.tsx` mounts only for administrators outside static demos. Its
-user-keyed diagnostics query is separate from `useSkills()` and every picker.
-Reload posts `/api/skills/reload` before invalidating both normal skills and
-diagnostics; failures retain the warning and show localized retry feedback.
-Never interpret raw parser exception wording in the UI.
-Keep the scope note visible even when diagnostics are empty. It must describe
-the YAML-syntax-only check and its exclusions (missing frontmatter, metadata
-validation, unreadable and non-UTF-8 files); it is not a package-validity check.
-
-`/workspace/capabilities` owns Plugins and Skills navigation. Plugins composes the
-MCP manager and a lazily loaded Lark configuration dialog; installation, OAuth,
-mutation permissions, and cache ownership remain in the existing hooks. Skill display names/summaries are presentation
-metadata; runtime names and full descriptions remain unchanged. Public, custom,
-integration, and legacy sources must stay distinct. Community currently offers
-archive import, not a remote marketplace. Screenshot E2E fixtures are demo data.
-`backend/packages/harness/deerflow/capabilities/builtin.json` owns localized
-catalog manifests. Refresh the generated demo snapshot with `pnpm catalog:sync`
-after changing the catalog; unit tests enforce equality with the source. Demo
-business projections derive provider IDs from the catalog adapter metadata. The
-sync script uses decoded filesystem paths for formatter configuration lookup.
-`plugin-catalog.ts` only resolves localized text and explicit
-installation metadata; never infer provider identity from server display names.
-`plugin-directory.tsx` groups rows and applies search/category/installed filters.
-`core/capabilities` consumes catalog and safe status projections; MCP secrets and
-raw settings remain in the administrator-only editor. `plugin-adapters.tsx`
-registers integration-specific settings flows once, independent of catalog size.
-The `business` form uses manifest credential fields without asking for an MCP URL;
-its backend adapter generates bundled DingTalk/WeCom notification or HubSpot CRM
-connections. These also appear in MCP discovery, so deduplicate projections by
-installation ID. Keep their labels as configuration, not package installation.
-Keep installation, enabled state, configured credentials, and verified authorization
-distinct. Agent `mcp_plugins` uses stable installation IDs; null means all, [] means
-none. The settings dialog submits only selections changed from its opening
-snapshot, preserving concurrent updates on unrelated saves and treating restored
-selections as unchanged. It is runtime selection, not a replacement authorization policy. See
-`docs/capability-center.md` for the complete contract and extension example.
-`PluginIcon` is shared by recommendations, configured entries, and the editor;
-brand assets and their provenance live in `public/images/plugins/`. Brand icons
-require explicit catalog metadata; a custom server name never selects a brand.
-Ambiguous installation IDs remain visible but cannot be selected for an Agent. The icon picker
-accepts local PNG/JPEG/WebP up to 2 MiB, checks the signature, decodes and contains
-the image in a 128px PNG, and stages changes until the existing targeted MCP save.
-`presentation.icon` is a bounded PNG data URL carried by the API's existing extra
-metadata support; it must never enter transport parameters. Preserve sibling
-presentation fields and masked credentials; cancel/reset/unmount must fence stale
-image-decoding results. Uploaded remote URLs and SVG are never rendered. Existing
-shared-MCP administrator checks remain authoritative; this adds no personal scope.
-
 <!-- BEGIN:nextjs-agent-rules -->
 
 ## This is NOT the Next.js you know
@@ -365,90 +299,3 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
-
-### Shared model settings
-
-Settings → Models (`?settings=models`) offers administrator-only catalog management
-through `/api/managed-models`. YAML entries are read-only. `core/models/management.ts`
-whitelists editable fields so source metadata and `has_api_key` never get posted.
-Draft credentials stay in editor state, never query cache or browser storage; blank
-keeps the saved key, explicit removal sends an empty key. Saving invalidates both the
-admin catalog and `MODELS_QUERY_KEY`. Editor unmount aborts probes and fences late
-callbacks. Static demos and non-admin users must not query the management API.
-
-### Admin user management
-
-Settings → Users (admin-only nav entry; `?settings=users`) suspends and restores
-accounts through `core/auth/admin-users.ts` → `/api/v1/admin/users`. The page
-reuses `userSchema` for rows — both endpoints parse against it, so a
-malformed payload fails the load instead of rendering a phantom row
-(`disabled` optional — absent means not disabled) — and PATCHes only
-`{disabled}`; role stays a read-only column. Like model management, the page
-also gates on `isStaticWebsiteOnly()` (the demo user is nominally an admin,
-but there is no Gateway to query), and the settings dialog falls back to the
-first nav section when a deep link or stale store activates a section the
-current user's nav does not offer. The Gateway's rejection detail
-(last-active-admin 409) renders verbatim. A session
-that turns out to be disabled maps `account_disabled` (see `AUTH_ERROR_CODES`)
-to a login redirect with a stated reason (login surface only — sign-up keeps
-the backend message so a suspended account cannot be probed) on all three
-surfaces: SSR
-`AuthResult` tag (consumed exhaustively by the workspace/artifacts/auth
-layouts), the shared fetcher's 401 interception, and `AuthProvider.refreshUser`.
-Direct auth-page visits with a live suspended-session cookie get the SSR
-verdict via `AuthDisabledContext`, so the login form states the known reason
-without waiting for a deliberately generic login failure.
-
-Other sign-in bounces keep path, query and fragment via `currentReturnPath()`. The
-workspace layout cannot read the URL, so `unauthenticated` renders
-`WorkspaceLoginRedirect` (never `children`), not `redirect()`.
-
-### Model reasoning capabilities
-
-`/api/models` projects a per-model `reasoning` contract (issue #5073) beside the
-deprecated `supports_thinking` / `supports_reasoning_effort` booleans.
-`core/models/reasoning.ts` is the only place that interprets it: it falls back to
-the booleans for older Gateways, clamps the chat mode (`getResolvedMode` never
-yields `flash` for a required-thinking model), lists the effort options the
-composer and the sidecar render, and maps mode presets and remembered values
-through the contract's aliases/default (`resolveReasoningEffort`). Effort values
-are open strings (`ReasoningEffortValue`), so provider-specific tokens such as
-`max` flow through local settings and account preferences unchanged; the custom
-agent dialog offers only the intersection with the per-agent `low/medium/high`
-schema and blocks new "off" for required-thinking models. Do not read the booleans in
-components directly. Legacy `resolveReasoningEffort` keeps only advertised generic
-values, dropping provider tokens after a switch; backend requests stay unchanged.
-Agent settings omit untouched reasoning, show invalid saved values for clearing,
-and require a known model to save a model switch.
-
-## Full-stack plugin UI
-
-Follow [plugin invariants](../docs/full-stack-plugins.md#frontend-implementation-invariants).
-Use `pluginPages` only for enabled runtime entries; catalogs never imply activation.
-Package documentation and bundled-copy sync: `examples/README.md`. Hide empty requirements.
-Optional `requestBackend` binds viewers, rejects redirects, never retries; routes retain authorization.
-
-### Composer references
-
-`components/workspace/mentions/` owns cursor-local `@` detection, the picker,
-and atomic references. Render labels as DOM text, never HTML; canonical tokens
-preserve draft positions. Submission expands tokens to `@label` and sends up to
-16 unique skill IDs in `additional_kwargs.skill_references`; the backend checks
-each against the user registry and agent allowlist. The web slash picker lists
-only `/goal` and `/compact`; skill selection uses `@`. Legacy typed slash text
-continues through normal message submission for backend and channel compatibility.
-Project files require confirmed `additional_kwargs.files`. Conversation context
-is reconciled from tokens against the current capability and limit. Only successful
-discovery may flatten references; pending/errors preserve IDs and block reference
-sends, with retry on failure. Polish restores whole labels longest-first in one
-pass. Confirmed thread creation seeds metadata before migration; references stay
-locked during attachment. Deleting an object removes its context; undo restores
-references already attached to the draft. Labels grant no read authority. IME,
-caret, thread changes and attachment fences apply to editor and picker. Commit
-mention text before restoring focus synchronously; a delayed callback must not
-overwrite subsequent typing or caret movement. The `@`
-and attachment buttons share the picker.
-
-### Web model provider presets
-
-Settings → Models obtains provider form metadata from the admin-only backend `/api/managed-models/providers`; do not copy endpoints, protocols or adapter maps into the UI. New models need only provider, API key and arbitrary model ID, with server-generated stable names. Custom endpoint fields and legacy edits stay supported. Provider/endpoint changes clear test results and saved-key reuse; omitted keys retain only the same connection. Capability overrides belong in Advanced settings. Successful saves/toggles invalidate both managed-model queries and MODELS_QUERY_KEY so existing chat/Agent selectors refresh. Keep locale text and administrator/static-mode restrictions aligned.

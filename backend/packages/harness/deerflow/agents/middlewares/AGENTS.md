@@ -223,3 +223,13 @@ Scope / known provider compatibility limits (#8038, #8037 review):
 - All-empty lists become `content=""`; this middleware replaces
   messages in place rather than dropping turns, and an empty user turn can still
   be rejected. No upstream Gateway / IM empty-turn handling is assumed.
+
+### Context Summarization
+
+- Manual compaction uses `POST /api/threads/{id}/compact`, reuses the same `DeerFlowSummarizationMiddleware`, writes a new checkpoint with updated `messages`/`summary_text`, and bumps only those channel versions. The route uses the shared `reserve_checkpoint_write()` boundary (also used by manual state updates); its short-lived `checkpoint_write` operation shares the durable active-thread uniqueness constraint with run admission, preventing worker-local and cross-worker checkpoint-write races.
+
+- Cache only first-candidate no-ops; never suppress primary retries with fallback results. See [reuse and telemetry](../../../../../docs/summarization.md#reuse-and-telemetry) for cache and counter contracts.
+
+### Vision Support
+
+For models with `supports_vision: true`: `ViewImageMiddleware` processes images and adds `view_image_tool`. Images reach the model as base64 in a hidden message carrying a reserved ID prefix plus a server-owned metadata marker (Gateway strips the marker from untrusted input; the middleware requires both to recognize its own message). The injection happens inside `wrap_model_call`, so payloads never enter graph state — checkpoints keep only lightweight `viewed_images` metadata, and client-chosen IDs survive; the middleware also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent.

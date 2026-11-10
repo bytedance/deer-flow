@@ -9,6 +9,14 @@ Module guides:
 - **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
+Subsystem rules live in the `AGENTS.md` nearest to the code. Before you edit a
+directory, read every `AGENTS.md` from that directory up to the repo root; not every
+coding agent loads the nested ones automatically. Root-level scopes:
+[docker/](docker/AGENTS.md) (nginx, Compose, provisioner, production start),
+[skills/](skills/AGENTS.md) (skill review, skill tests, text encoding),
+[scripts/](scripts/AGENTS.md) (orchestration scripts, `scripts/pnpm.py`),
+`examples/*/AGENTS.md` (extension examples).
+
 ## What is DeerFlow
 
 DeerFlow combines LangGraph and Next.js with thread-isolated sandbox execution,
@@ -28,24 +36,8 @@ A single `make dev` / Docker stack runs four cooperating services:
 Nginx serves the frontend and proxies `/api/*` to Gateway, rewriting
 `/api/langgraph/*` to native routes. See [backend/AGENTS.md](backend/AGENTS.md).
 It compresses HTML and configured text assets. SSE, fonts, images, audio, and
-video stay uncompressed.
-
-Put the `/api/threads/{thread_id}/browser/stream` WebSocket regex before the
-generic threads regex in Docker, local, and Helm configs.
-`backend/tests/test_nginx_browser_websocket.py` pins upgrade headers and the
-600s read timeout. Helm uses nginx defaults for Gateway connect/send timeouts.
-Keep local temp paths checkout-relative and aligned with `serve.sh` and `nginx.sh`.
-
-Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`.
-Bare `"${PORT}:2026"` binds `0.0.0.0`. Require explicit bind addresses for new
-published ports. `backend/tests/test_compose_default_bind_host.py` pins both files.
-Root `PORT` controls Docker ingress only. Local Next.js stays on `3000` so
-`.env` cannot redirect the dev port wait. Nginx's IPv4/IPv6 `default_server`
-and Gateway's `0.0.0.0:8001` stay container-internal. Only published nginx is external.
-
-Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
-Lark broker credential mounts reuse it with their existing subPaths and read-only
-flags. Keep credential mounts broker-only and keep distinct volumes in hostPath mode.
+video stay uncompressed. Route order, bind addresses and provisioner volumes:
+[docker/AGENTS.md](docker/AGENTS.md).
 
 ## Repository Map
 
@@ -105,28 +97,6 @@ Root runtime configs: copy `config.example.yaml` → `config.yaml` and
 Both are gitignored and Gateway-editable; schema/resolution:
 [backend/AGENTS.md](backend/AGENTS.md).
 
-Skill quality review note:
-- `skills/public/skill-reviewer/` is the built-in read-only reviewer (harness tool
-  `review_skill_package`, contracts in `contracts/skill_review/`). Model-visible review
-  data is tag-neutralized; raw payloads stay in tool artifacts. See
-  [backend/AGENTS.md](backend/AGENTS.md) for the ownership boundaries.
-- CI waivers live in `.github/skill-review-waivers.v1.json`, enforced by
-  `scripts/review_changed_public_skills.py`. Only the manifest from the trusted base
-  revision can suppress a run, and blocker findings can never be waived.
-
-Scheduled-task note:
-- `scheduler.tool_enabled` (default off) offers owner-bound schedule tools only
-  through Gateway capability admission. Interactive turns create/manage their
-  schedules; scheduled turns can request stopping only their own schedule.
-  Per-occurrence goal success does not end a recurring schedule.
-- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a
-  background scheduler gated by `config.yaml -> scheduler.enabled`.
-- Scheduled runs are non-interactive: `ask_clarification` is excluded. `non_interactive`,
-  `disable_clarification`, and `github_token` are honored only for internally-authenticated
-  callers; client-supplied copies are dropped.
-- Busy occurrences persist as `queued`; `scheduler.queue_timeout_seconds` bounds the wait.
-  Do not reintroduce skip-on-overlap.
-
 ## Commands: Root vs. Module
 
 **Root stack commands** (from repo root):
@@ -150,13 +120,6 @@ make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
-
-Production uses image Python (`uv run --no-sync`) and `exec` for SIGTERM;
-Compose sets `init: true` (`backend/tests/test_gateway_sigterm_delivery.py`).
-`make up` waits for Gateway `/health`; failures show Compose status and Gateway logs.
-
-Docker logs/restarts resolve `DEER_FLOW_ROOT` from this checkout before Compose,
-as start/stop do.
 
 Full list: `make help`.
 
@@ -229,18 +192,8 @@ Repo-wide conventions:
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.
-  Skill-creator tests must preserve YAML values/body, restore bytecode settings,
-  and check invalid metadata through offline CLI subprocesses.
-  Public skill script regressions live in `tests/skills/` and run in Skill Review CI
-  independently of package review. Exercise dependency fallbacks with the optional
-  import unavailable and mock HTTP transport to keep tests offline.
-  Video, podcast, and chart-visualization CLI failures exit non-zero;
-  diagnostics on stderr, success URLs on stdout; test offline.
 - **Before pushing** — backend `make format`, frontend `pnpm check`.
   Backend CI enforces `ruff format --check`.
-- **Skill text encoding** — use explicit UTF-8 for textual skill resources.
-  Read `SKILL.md` with `encoding="utf-8-sig"` to strip a leading BOM; write with
-  `encoding="utf-8"`. Never rely on the platform locale.
 - **Version lockstep** — keep `backend/pyproject.toml`,
   `backend/packages/harness/pyproject.toml`, `frontend/package.json`, and
   `deploy/helm/deer-flow/Chart.yaml` (`version`/`appVersion`) identical.

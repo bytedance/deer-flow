@@ -38,3 +38,7 @@ AsyncTavilyClient through an offline HTTPX MockTransport; non-object top-level
 payloads stub the client because the SDK's public wrappers reject that shape before
 the tools see it. Cover null search fields individually and together, and mixed
 fetch lists so the first retained object supplies the result or extraction error.
+
+### Tavily Fetch
+
+Title fallback: result URL, then request URL.

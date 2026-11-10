@@ -54,3 +54,15 @@ same resulting prompt. Empty overlays preserve bytes.
   counts the thread's full delegation ledger (fail-restrictive) and emits a warning.
 
 **Direct subagent runtime**: Inject `create_deerflow_agent(..., subagent_runtime=runtime)` for direct graph calls; share one `deerflow.subagents.SubagentRuntime` per application capacity boundary. With subagents enabled, it binds middleware concurrency/total limits, `task`, one execution controller and any durable-batch submitter to one snapshot. A caller-owned batch repository requires `await runtime.start()` (or `async with runtime`) before graph construction and `stop()` at shutdown. The factory rejects stopped workers; bound batch tools must fail unavailable after stop, never fall back to a process-global submitter. The factory creates no SQL infrastructure, does not render the caller's `system_prompt`, or mount Gateway API/UI routes. Full middleware takeover is incompatible; direct callers and custom subagent middleware own model-visible call-policy wording.
+
+### Package import hygiene
+
+Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
+roots expose heavyweight graph/executor entrypoints lazily. The
+`deerflow.agents:make_lead_agent` LangGraph Server entrypoint is a concrete thin
+module-level function because the server resolves graph factories directly from
+the module dictionary; the wrapper keeps the lead-agent and skill-cache imports
+inside the function so importing the package remains lightweight. Internal
+modules that only need lightweight types, config, or registries should import
+the concrete submodule instead of adding eager package-root imports that pull in
+the tool graph or subagent executor during state/schema imports.

@@ -531,3 +531,7 @@ cases in `test_support_bundle.py` run the real block; harnesses that copy
 async outbound callback before sending the next inbound message. Keep the real
 worker-pool concurrency, preserve per-turn artifact assertions, and stop the
 manager in `finally` so a failure cannot leave tasks using a closed test loop.
+
+## Community client tests
+
+Jina logging tests use dummy keys; the Jina redirect regression runs offline via `httpx.MockTransport` and keeps POST across temporary redirects; InfoQuest connect/read timeout is 30s, separate from crawl timeouts (`tests/test_jina_client.py`, `tests/test_infoquest_http_timeout.py`).

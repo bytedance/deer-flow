@@ -459,3 +459,11 @@ remain supported; they must not acquire another connection from the writer's poo
 Memory guard/deletion locks are per-thread, so a slow guard cannot block another
 thread. Coverage: `tests/test_recovery_terminal_pool.py` (PostgreSQL via
 `TEST_POSTGRES_URI`).
+
+## Streaming and subagent identity
+
+- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches for multi-mode `messages-tuple` consumers; single-mode message consumers retain the original per-chunk contract. Non-message frames flush pending batches, and `values` remains an optional complete-state snapshot rather than a prerequisite for batching.
+
+- `stream_subgraphs` preserves subgraph SSE namespaces (`values|<ns>`, LangGraph Platform style); bare `values` would overwrite the SDK thread view (#4399). Delegated subagents inherit the parent's checkpoint namespace. Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend uses root `task_*` events without subgraph streaming.
+
+- Subagent IDs: provider `tool_call_id` correlates `ToolMessage`, `task_*` SSE/persisted events, frontend cards and `ExtensionData.scope_id` (`SubagentResult.external_task_id`). Unique server `execution_id` owns `SubagentResult.task_id`, registry, polling, cancellation, timeout and cleanup. Provider IDs can collide across parent runs: scheduler closures retain their own result, never recover ownership through the mutable registry. Attribute terminal usage from the current run's `ToolMessage.additional_kwargs` and message state, never a global provider-ID cache.

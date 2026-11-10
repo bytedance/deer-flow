@@ -248,3 +248,7 @@ thread/process lock, checking the saved source revision before deduplication
 by provider, endpoint, key and model ID. Ordinary edits
 retain revision checks. `_managed_provider` is private runtime display metadata;
 it must never enter serialized config or SDK request kwargs.
+
+### Runtime writes to `extensions_config.json`
+
+- Gateway MCP/skill updates write `extensions_config.json` at runtime. Production Compose mounts it read-write (`config.yaml` stays `:ro`); Helm seeds a writable home-volume copy. Hold both `extensions_config_write_lock` and the sidecar advisory `extensions_config_file_lock` during read-modify-write to prevent lost updates across workers. `atomic_write_extensions_config` uses temp-file replacement; only mount-point `EBUSY` permits a non-atomic in-place overwrite (crashes can truncate). Warn about this fallback once per target; propagate other errors. `get_extensions_config()` revalidates reads by file signature; see [config caching](). Tests: `tests/test_compose_extensions_config_writable.py`, `tests/test_extensions_config_atomic_write.py`, `tests/test_helm_extensions_config_writable.py`.

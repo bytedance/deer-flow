@@ -9,10 +9,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "check_agent_guidance.py"
 EXPECTED_GUIDANCE_PATHS = {
     "AGENTS.md",
+    "docker/AGENTS.md",
+    "skills/AGENTS.md",
     "skills/public/data-analysis/AGENTS.md",
     "skills/public/video-generation/AGENTS.md",
     "backend/AGENTS.md",
     "backend/tests/AGENTS.md",
+    "backend/scripts/benchmark/AGENTS.md",
     "frontend/AGENTS.md",
     "backend/app/gateway/AGENTS.md",
     "backend/app/gateway/routers/AGENTS.md",
