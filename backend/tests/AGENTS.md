@@ -3,6 +3,11 @@
 `test_null_tool_result_pairing.py` pins null/empty/sentinel ID equivalence, provider-wire
 pairing, and ambiguity rejection for incomplete parallel results.
 
+Native Gemini argument-elision coverage in `test_tool_call_args.py` uses the
+installed adapter's history builder without a client or network. Pin outbound
+arguments, parallel-call thought signatures, blocked-write error results and
+unchanged source messages; synthetic signature bytes do not prove live acceptance.
+
 `test_lark_broker_image.py` stages Python files from the broker Dockerfile's
 final-stage COPY instructions. Run shim installation and the health endpoint
 under `-I -S`, adding only the staged script directory to the import path;
