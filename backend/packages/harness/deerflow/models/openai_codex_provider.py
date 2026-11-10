@@ -465,6 +465,7 @@ class CodexChatModel(BaseChatModel):
         tool_calls = []
         invalid_tool_calls = []
         reasoning_content = ""
+        refusal = ""
 
         for output_item in response.get("output", []):
             if output_item.get("type") == "reasoning":
@@ -478,6 +479,13 @@ class CodexChatModel(BaseChatModel):
                 for part in output_item.get("content", []):
                     if part.get("type") == "output_text":
                         content += part.get("text", "")
+                    elif part.get("type") == "refusal":
+                        # A completed Responses message can carry a refusal
+                        # content part instead of output_text. Preserve the
+                        # explanation and a distinguishable signal so the
+                        # safety middleware can classify it instead of the
+                        # empty-response middleware silently retrying it away.
+                        refusal += part.get("refusal", "")
             elif output_item.get("type") == "function_call":
                 parsed_arguments, invalid_tool_call = self._parse_tool_call_arguments(output_item)
                 if invalid_tool_call:
@@ -498,6 +506,8 @@ class CodexChatModel(BaseChatModel):
         additional_kwargs = {}
         if reasoning_content:
             additional_kwargs["reasoning_content"] = reasoning_content
+        if refusal:
+            additional_kwargs["refusal"] = refusal
 
         message = AIMessage(
             content=content,

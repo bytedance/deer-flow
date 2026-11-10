@@ -4,6 +4,7 @@ from langchain_core.messages import AIMessage
 
 from deerflow.agents.middlewares.safety_termination_detectors import (
     AnthropicRefusalDetector,
+    CodexRefusalDetector,
     GeminiSafetyDetector,
     OpenAICompatibleContentFilterDetector,
     SafetyTermination,
@@ -97,6 +98,27 @@ class TestAnthropicRefusalDetector:
         assert AnthropicRefusalDetector().detect(_ai(response_metadata={"finish_reason": "content_filter"})) is None
 
 
+class TestCodexRefusalDetector:
+    def test_matches_refusal_signal(self):
+        hit = CodexRefusalDetector().detect(_ai(additional_kwargs={"refusal": "I cannot help with that request."}))
+        assert hit is not None
+        assert hit.detector == "codex_refusal"
+        assert hit.reason_field == "refusal"
+        assert hit.reason_value == "refusal"
+        assert hit.extras["refusal"] == "I cannot help with that request."
+
+    def test_missing_refusal_passes_through(self):
+        assert CodexRefusalDetector().detect(_ai()) is None
+
+    def test_codex_does_not_steal_other_refusal_fields(self):
+        # Anthropic's stop_reason=refusal must not trip the Codex detector,
+        # which only reads the dedicated refusal content signal.
+        assert CodexRefusalDetector().detect(_ai(response_metadata={"stop_reason": "refusal"})) is None
+
+    def test_blank_refusal_passes_through(self):
+        assert CodexRefusalDetector().detect(_ai(additional_kwargs={"refusal": ""})) is None
+
+
 class TestGeminiSafetyDetector:
     def test_default_set_covers_documented_reasons(self):
         d = GeminiSafetyDetector()
@@ -149,17 +171,17 @@ class TestGeminiSafetyDetector:
 
 
 class TestDefaultDetectorSet:
-    def test_default_set_returns_four_detectors(self):
+    def test_default_set_returns_five_detectors(self):
         dets = default_detectors()
         names = {d.name for d in dets}
-        assert names == {"openai_compatible_content_filter", "openai_responses_content_filter", "anthropic_refusal", "gemini_safety"}
+        assert names == {"openai_compatible_content_filter", "openai_responses_content_filter", "anthropic_refusal", "codex_refusal", "gemini_safety"}
 
     def test_default_set_returns_fresh_list(self):
         # Caller mutation must not affect later calls.
         first = default_detectors()
         first.clear()
         second = default_detectors()
-        assert len(second) == 4
+        assert len(second) == 5
 
 
 class TestProtocolConformance:
