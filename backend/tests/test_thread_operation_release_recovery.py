@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
 
 from app.gateway.services import reserve_checkpoint_write
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import RunManager, RunStatus, ThreadOperationKind
@@ -18,14 +19,18 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 
 @asynccontextmanager
-async def database(tmp_path):
+async def database(tmp_path, *, run_ownership_config=None):
     path = tmp_path / "runs.sqlite"
     engine = create_async_engine(f"sqlite+aiosqlite:///{path}", connect_args={"timeout": 0.01})
     try:
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: RunRow.metadata.create_all(c, tables=[RunRow.__table__, RunChangeClockRow.__table__, CompletedRunSnapshotRow.__table__]))
         repository = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
-        manager = RunManager(store=repository, persistence_retry_policy=PersistenceRetryPolicy(max_attempts=2, initial_delay=0))
+        manager = RunManager(
+            store=repository,
+            persistence_retry_policy=PersistenceRetryPolicy(max_attempts=2, initial_delay=0),
+            run_ownership_config=run_ownership_config,
+        )
         with sqlite3.connect(path) as blocker:
             yield manager, repository, blocker
     finally:
@@ -195,7 +200,6 @@ async def test_shutdown_is_bounded_with_failed_release_and_startup_can_reconcile
 async def test_new_lease_starts_after_slow_release_retry(tmp_path, monkeypatch):
     from datetime import UTC, datetime, timedelta
 
-    from deerflow.config.run_ownership_config import RunOwnershipConfig
     from deerflow.runtime.runs import manager as manager_module
 
     async with database(tmp_path) as (manager, repository, blocker):
@@ -326,3 +330,31 @@ async def test_uncertain_release_keeps_an_active_peer_reservation(tmp_path, monk
                 await manager.create_or_reject("thread", user_id="alice")
             assert [row["run_id"] for row in await repository.list_inflight()] == [active.run_id]
         assert await repository.list_inflight() == []
+
+
+@pytest.mark.asyncio
+async def test_release_retry_after_peer_takeover_preserves_its_new_reservation(tmp_path):
+    ownership = RunOwnershipConfig(heartbeat_enabled=True, grace_seconds=0)
+    async with database(tmp_path, run_ownership_config=ownership) as (manager, repository, blocker):
+        peer = RunManager(store=repository, run_ownership_config=ownership)
+        finished = await fail_release(manager, blocker)
+        blocker.rollback()
+
+        assert await peer.reconcile_orphaned_inflight_runs(error="peer takeover") == []
+        pending = await repository.get(finished.run_id, user_id="alice")
+        assert pending["status"] == "pending"
+        assert pending["lease_expires_at"] is not None
+
+        # Expire the durable lease without waiting for the heartbeat interval.
+        blocker.execute("UPDATE runs SET lease_expires_at = datetime('now', '-1 minute') WHERE run_id = ?", (finished.run_id,))
+        blocker.commit()
+        assert await peer.reconcile_orphaned_inflight_runs(error="peer takeover") == []
+        reclaimed = await repository.get(finished.run_id, user_id="alice")
+        assert reclaimed["status"] == "error"
+        assert reclaimed["error"] == "peer takeover"
+
+        async with peer.reserve_thread_operation("thread", kind=ThreadOperationKind.checkpoint_write, user_id="alice") as active:
+            with pytest.raises(ConflictError):
+                await manager.create_or_reject("thread", user_id="alice")
+            assert await repository.get(finished.run_id, user_id="alice") is None
+            assert [row["run_id"] for row in await repository.list_inflight()] == [active.run_id]

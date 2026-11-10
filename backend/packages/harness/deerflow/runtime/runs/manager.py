@@ -2751,6 +2751,9 @@ class RunManager:
             if self._store is not None:
                 # Register before the first cleanup await so cancellation also
                 # leaves a retryable release owned by this manager.
+                # The manager's event loop owns the ledger, and each ledger
+                # update is synchronous. The lock in the release path protects
+                # the run registry and its index.
                 self._pending_operation_releases.setdefault(thread_id, {})[record.run_id] = record.user_id
             try:
                 if self._store is not None:
