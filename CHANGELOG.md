@@ -47,6 +47,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **summarization:** vLLM compaction counts reasoning tokens replayed to the
+  model when checking the trigger and estimating how much history to keep.
+  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the
