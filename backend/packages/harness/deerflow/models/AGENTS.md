@@ -131,6 +131,11 @@ or history. Offline HTTP serialization and tool-followup coverage:
 
 ### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
 
+Preserve completed `refusal` explanations as visible text and
+`additional_kwargs.refusal`; nonblank refusals must not trigger empty-response
+retries. Keep content-part order and text/tool/usage behavior. Offline parser and
+sync/async agent coverage: `tests/test_codex_refusal.py`.
+
 Completed responses with null, omitted, or empty `usage` retain their text,
 reasoning, and tool calls. Normalize unavailable usage to the existing empty
 mapping fallback while keeping `AIMessage.usage_metadata` as `None`; populated

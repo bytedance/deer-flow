@@ -46,6 +46,9 @@ This section accumulates work toward the **2.3.0** milestone
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
 ### Fixed
+- **models:** Preserve completed Codex refusal explanations instead of retrying
+  them as empty responses. Keep the refusal signal available alongside visible
+  assistant text. ([#8082](https://github.com/bytedance/deer-flow/issues/8082))
 
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
