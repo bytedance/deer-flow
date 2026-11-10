@@ -21,8 +21,12 @@ export const documentationSchema = z.object({
   docs_url: z
     .url()
     .refine((value) => {
-      const url = new URL(value);
-      return url.protocol === "https:" && !url.username && !url.password;
+      try {
+        const url = new URL(value);
+        return url.protocol === "https:" && !url.username && !url.password;
+      } catch {
+        return false;
+      }
     })
     .optional(),
 });

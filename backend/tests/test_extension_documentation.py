@@ -3,6 +3,7 @@
 import copy
 import json
 import runpy
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,7 +49,7 @@ def test_new_documentation_requires_meaningful_copy(field):
         validate_documentation(value)
 
 
-@pytest.mark.parametrize("url", ["javascript:alert(1)", "http://example.org", "https://secret@example.org"])
+@pytest.mark.parametrize("url", ["javascript:alert(1)", "http://example.org", "https://secret@example.org", "https://example.org:bad/docs", "https://example.org:65536/docs", "https://["])
 def test_documentation_links_are_public_https(url):
     with pytest.raises(ValueError):
         validate_documentation({**PAGE, "docs_url": url})
@@ -121,6 +122,48 @@ def test_bad_documentation_does_not_disable_working_extension(package):
     assert loaded.has_middleware_contributors
     assert loaded.documentation == ()
     assert [(item.level, item.source, item.message) for item in diagnostics] == [("warning", SOURCE, "Extension documentation is invalid.")]
+
+
+@pytest.mark.parametrize("field", ["id", "locale", "title", "description", "usage_title", "usage_description", "requirements", "docs_url"])
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_unencodable_public_documentation_cannot_break_discovery(package, field, surrogate):
+    page = copy.deepcopy(PAGE)
+    localized = page["locales"]["en-US"]
+    if field == "id":
+        page["id"] = surrogate
+    elif field == "locale":
+        page["locales"] = {surrogate: localized}
+    elif field.startswith("usage_"):
+        localized["usage"][0][field.removeprefix("usage_")] = surrogate
+    elif field == "requirements":
+        localized["requirements"] = [surrogate]
+    elif field == "docs_url":
+        page["docs_url"] = "https://example.org/" + surrogate
+    else:
+        localized[field] = surrogate
+    package.write_text(json.dumps(page))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use=SOURCE)])
+    assert loaded.has_middleware_contributors
+    healthy = PluginContribution(namespace="community.bookmarks", title="Bookmarks", enabled=True)
+    app = FastAPI()
+    app.state.extensions = replace(loaded, plugins=(("healthy:install", healthy),))
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda request: ExtensionPrincipal("viewer"))
+    app.include_router(router)
+    with TestClient(app) as client:
+        response = client.get("/api/plugins")
+    assert response.status_code == 200
+    assert [entry["namespace"] for entry in response.json()] == [healthy.namespace]
+    assert loaded.documentation == ()
+    assert [(item.level, item.source, item.message) for item in diagnostics] == [("warning", SOURCE, "Extension documentation is invalid.")]
+
+
+def test_unicode_documentation_and_ignored_private_fields_remain_valid():
+    page = copy.deepcopy(PAGE)
+    page["locales"]["en-US"]["title"] = "指南 🦌"
+    page["docs_url"] = "https://example.org:8443/docs"
+    expected = copy.deepcopy(page)
+    page["private_config"] = {"ignored": "\ud800"}
+    assert validate_documentation(page) == expected
 
 
 def test_missing_documentation_keeps_legacy_behavior(package):

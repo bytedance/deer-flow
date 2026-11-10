@@ -49,7 +49,15 @@ def validate_documentation(value: object) -> dict:
         parsed = urlsplit(url) if isinstance(url, str) else None
         if not parsed or parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("docs_url must be a public HTTPS URL")
+        # urlsplit defers numeric/range validation until port is accessed.
+        _ = parsed.port
         result["docs_url"] = url
+    # Validate only the public projection; unknown/private package fields are
+    # deliberately excluded and must not affect discovery.
+    try:
+        json.dumps(result, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("documentation must contain valid UTF-8 text") from exc
     return result
 
 
