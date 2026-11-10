@@ -42,6 +42,11 @@ def _make_request(
     )
 
 
+def _imported_syntax_error(line: int, source: str, message: str) -> str:
+    """CPython 3.12 output when ``main.py`` imports a module that fails to parse."""
+    return f'Traceback (most recent call last):\n  File "/mnt/user-data/workspace/main.py", line 1, in <module>\n    import helpers\n  File "/mnt/user-data/workspace/helpers.py", line {line}\n    {source}\n    ^\nSyntaxError: {message}'
+
+
 class TestErrorClassification:
     def test_module_not_found(self):
         err = "ModuleNotFoundError: No module named 'scipy'"
@@ -90,6 +95,11 @@ class TestErrorClassification:
         assert sig is not None
         assert sig.category == "SYNTAX_ERROR"
         assert sig.entity == "42"
+
+    def test_syntax_error_in_imported_module_reports_its_line(self):
+        sig = classify_tool_error(_imported_syntax_error(8, "def broken(:", "invalid syntax"))
+        assert sig is not None
+        assert sig.signature == "SYNTAX_ERROR:line_8"
 
     def test_permission_denied(self):
         err = "PermissionError: [Errno 13] Permission denied: '/var/run/docker.sock'"
@@ -520,6 +530,25 @@ class TestHarnessGuardMiddleware:
         res2 = middleware.wrap_tool_call(req, error_handler)
         assert "CRITICAL REPETITION" in res2.content
         assert "has occurred 2 times consecutively" in res2.content
+
+    def test_different_syntax_errors_in_imported_module_are_not_a_repetition(self):
+        middleware = HarnessGuardMiddleware(HarnessGuardConfig(max_repeated_error_signatures=2))
+        req = _make_request("bash", {"command": "python main.py"})
+        outputs = iter(
+            [
+                _imported_syntax_error(8, "def broken(:", "invalid syntax"),
+                _imported_syntax_error(11, "2", "invalid syntax. Perhaps you forgot a comma?"),
+            ]
+        )
+
+        def error_handler(r):
+            return ToolMessage(content=next(outputs), tool_call_id=r.tool_call["id"], name="bash", status="error")
+
+        res1 = middleware.wrap_tool_call(req, error_handler)
+        res2 = middleware.wrap_tool_call(req, error_handler)
+        assert "SyntaxError detected at line 8" in res1.content
+        assert "SyntaxError detected at line 11" in res2.content
+        assert "CRITICAL REPETITION" not in res2.content
 
     def test_alternating_oscillation_detection(self):
         middleware = HarnessGuardMiddleware(HarnessGuardConfig(detect_alternating_loops=True))

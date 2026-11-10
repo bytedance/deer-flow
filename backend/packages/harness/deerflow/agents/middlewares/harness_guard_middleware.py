@@ -125,8 +125,11 @@ def classify_tool_error(content: str) -> ErrorSignature | None:
 
     # 4. SyntaxError in execution output
     if "SyntaxError:" in content:
+        # CPython prints the unparsable file's frame last, right above the
+        # SyntaxError; earlier frames belong to the modules importing it.
+        frames = re.findall(r'File "[^"\n]*", line (\d+)', content[: content.index("SyntaxError:")])
         line_match = re.search(r"line\s+(\d+)", content)
-        line = line_match.group(1) if line_match else "?"
+        line = frames[-1] if frames else (line_match.group(1) if line_match else "?")
         msg_match = re.search(r"SyntaxError:\s*([^\n\r]+)", content)
         msg = msg_match.group(1).strip() if msg_match else "invalid syntax"
         return ErrorSignature(
