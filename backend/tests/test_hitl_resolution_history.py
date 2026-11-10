@@ -24,12 +24,15 @@ from test_hitl_approval_api import (  # noqa: F401
     _resume,
     _run,
     _run_body,
+    _run_tool_result_call_ids,
     _wait_for_approval,
     _wait_run_status,
     _wait_run_terminal,
     isolated_app,
     isolated_deer_flow_home,
 )
+
+from deerflow.runtime.runs.worker import _hitl_action_calls, _hitl_action_tool_names
 
 pytestmark = pytest.mark.no_auto_user
 
@@ -81,9 +84,22 @@ def test_mixed_decision_keeps_both_results_in_the_history_feed(isolated_app):  #
         ]
         resumed = _run(client, csrf, tid, {"command": {"resume": {"responses": responses}}})
         assert resumed.status_code == 200, resumed.text
-        _wait_run_terminal(client, tid, resumed.json()["run_id"])
+        resume_run_id = resumed.json()["run_id"]
+        _wait_run_terminal(client, tid, resume_run_id)
 
         state_ids = sorted(message["id"] for message in _state_tool_messages(client, tid))
         feed_results = _feed_tool_results(client, tid)
         assert sorted(message["id"] for message in feed_results) == state_ids
         assert sorted(message["tool_call_id"] for message in feed_results) == ["call_hitl_1", "call_hitl_2"]
+        assert sorted(_run_tool_result_call_ids(client, tid, resume_run_id)) == ["call_hitl_1", "call_hitl_2"]
+
+
+def test_replay_gate_names_do_not_depend_on_an_adoptable_call_id():
+    actions = [
+        {"tool_call_id": "call_1", "tool_name": "write_file"},
+        {"tool_name": "bash"},
+        {"tool_call_id": "", "tool_name": "str_replace"},
+    ]
+
+    assert _hitl_action_tool_names(actions) == {"write_file", "bash", "str_replace"}
+    assert _hitl_action_calls(actions) == {"call_1": "write_file"}

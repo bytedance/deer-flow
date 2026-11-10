@@ -47,6 +47,11 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **runtime:** A HITL rejection, including the all-reject escape after approval is
+  disabled or the gated tools change during a pause, now reaches the thread's
+  message history under the resume run instead of existing only in checkpoint
+  state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
