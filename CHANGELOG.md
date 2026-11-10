@@ -45,6 +45,11 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+- **wizard:** Standard Compute joins the setup wizard's LLM providers. The entry
+  uses `langchain_openai:ChatOpenAI` against `https://api.stdcmpt.com/v1` with the
+  `STANDARDCOMPUTE_API_KEY` env var and the routed `StandardCompute` model id.
+  ([#8063](https://github.com/bytedance/deer-flow/pull/8063))
+
 ### Fixed
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the

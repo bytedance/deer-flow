@@ -537,6 +537,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="standardcompute",
+        display_name="Standard Compute",
+        description="OpenAI-compatible gateway; StandardCompute routes each request to the cheapest capable model",
+        use="langchain_openai:ChatOpenAI",
+        models=["StandardCompute"],
+        default_model="StandardCompute",
+        env_var="STANDARDCOMPUTE_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.stdcmpt.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
