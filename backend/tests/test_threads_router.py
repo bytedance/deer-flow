@@ -589,6 +589,102 @@ def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo)
     return app
 
 
+def test_delete_thread_evicts_this_workers_in_memory_run_registry(tmp_path):
+    """Deleting a thread must drop the runs this worker still holds in memory.
+
+    ``RunStore.delete_by_thread`` removes the durable rows, but ``RunManager``
+    keeps its own process-local copies and answers ``get()`` / ``list_by_thread()``
+    from them before consulting the store. Without an eviction the deleted
+    thread's runs — including ``kwargs`` with the user's prompt — stay readable
+    through ``GET /api/threads/{id}/runs`` until the Gateway restarts, while the
+    thread itself already answers 404.
+    """
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    paths = Paths(tmp_path)
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+
+    async def _seed() -> str:
+        record = await run_manager.create_or_reject("thread-runs-gone")
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        return record.run_id
+
+    run_id = asyncio.run(_seed())
+    assert asyncio.run(run_manager.get(run_id)) is not None
+
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=1)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = make_authed_test_app()
+    app.state.run_manager = run_manager
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-runs-gone")
+
+    assert response.status_code == 200, response.text
+    # The durable row is gone, so the in-memory copy is the only remaining
+    # answer — and it must be gone too.
+    assert asyncio.run(run_store.list_by_thread("thread-runs-gone", user_id=None)) == []
+    assert asyncio.run(run_manager.get(run_id)) is None
+    assert asyncio.run(run_manager.list_by_thread("thread-runs-gone", user_id=None)) == []
+    assert "thread-runs-gone" not in run_manager._runs_by_thread
+
+
+def test_deleted_thread_runs_are_no_longer_readable_over_http(tmp_path):
+    """The reported sequence: delete 200 → runs list ``[]`` → single run 404."""
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    paths = Paths(tmp_path)
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+
+    async def _seed() -> str:
+        record = await run_manager.create_or_reject("thread-http-gone", kwargs={"input": {"messages": [{"role": "user", "content": "probe-marker-1"}]}})
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        return record.run_id
+
+    run_id = asyncio.run(_seed())
+
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=1)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = make_authed_test_app()
+    app.state.run_manager = run_manager
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    app.include_router(thread_runs.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            before = client.get("/api/threads/thread-http-gone/runs")
+            assert before.status_code == 200, before.text
+            assert [row["run_id"] for row in before.json()] == [run_id]
+
+            deleted = client.delete("/api/threads/thread-http-gone")
+            assert deleted.status_code == 200, deleted.text
+
+            listing = client.get("/api/threads/thread-http-gone/runs")
+            single = client.get(f"/api/threads/thread-http-gone/runs/{run_id}")
+
+    assert listing.status_code == 200, listing.text
+    assert listing.json() == []
+    assert single.status_code == 404, single.text
+
+
 def test_delete_thread_route_cleans_persisted_records(tmp_path):
     """run_events, historical runs and feedback are cleaned under the reservation."""
     from deerflow.runtime.user_context import get_effective_user_id
@@ -1262,7 +1358,12 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> N
     assert winners == [final_record["user_id"]]
     assert final_record["user_id"] in owners
     assert len(failures) == 1
-    assert failures[0].status_code == 500
+    # The losing request now hits the unscoped duplicate-key recovery path and
+    # resolves the surviving (legacy, owner-less) row as a 404 ownership
+    # conflict rather than a 500, while the single-winner assertions above and
+    # the non-disclosing detail below are preserved.
+    assert failures[0].status_code == 404
+    assert failures[0].detail == "Thread not found"
     assert all(not table._entries_by_loop for table in worker_locks)
 
 
@@ -1300,6 +1401,42 @@ def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
 
     with TestClient(app) as client:
         response = client.post("/api/threads", json={"thread_id": "broken-thread", "metadata": {}})
+
+    assert response.status_code == 500, response.text
+
+
+def test_create_thread_keeps_real_integrity_failure_as_500() -> None:
+    """A duplicate-key ``IntegrityError`` with no surviving row stays a 500.
+
+    The recovery path rescues the idempotency race only when a row now exists;
+    an ``IntegrityError`` that coincides with no readable row — a genuine
+    constraint violation unrelated to the caller-chosen id — must still surface
+    as a 500 rather than being collapsed into the ownership-conflict 404. This
+    pins the fall-through branch that the unscoped duplicate-key read would
+    otherwise silently convert into a 404.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app, store, _checkpointer = _build_thread_app()
+
+    class _IntegrityFailureNoSurvivingRowStore(_PermissiveThreadMetaStore):
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+        async def get(self, thread_id, *, user_id=None):  # type: ignore[override]
+            # No row survives the failed insert, so the unscoped duplicate-key
+            # read returns nothing and the route must not treat this as a
+            # cross-owner conflict.
+            return None
+
+    app.state.thread_store = _IntegrityFailureNoSurvivingRowStore(store)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "integrity-no-row", "metadata": {}})
 
     assert response.status_code == 500, response.text
 

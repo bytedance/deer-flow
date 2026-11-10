@@ -53,6 +53,12 @@ AI message before applying any decision. If worker attachment fails after
 consumption, the Gateway conditionally restores that exact answered run to
 `waiting_for_input` so a valid response or all-reject can retry safely.
 
+The resume run's journal adopts the paused calls it answers, recovered from the
+durable interrupt payload. Approved calls reach the history feed through their
+tool callback; rejections have none, so the journal reconciles them under the
+resume run like other middleware-written results (#4666). Results from other
+earlier runs are not re-attributed.
+
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
 artifact delivery checks, and batch continuation cancellation must not treat a
 pending approval as a completed source run. Pending approvals do not expire and

@@ -111,6 +111,10 @@ the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
 
+If the local retrieval index is busy, read-only, or temporarily unavailable,
+DeerMem falls back to substring search without deleting it. Automatic index
+recreation is reserved for SQLite-confirmed corruption or a non-database file.
+
 LLM-powered persistent context retention across conversations:
 
 - **Automatic extraction**: Analyzes conversations for user context, facts, and preferences

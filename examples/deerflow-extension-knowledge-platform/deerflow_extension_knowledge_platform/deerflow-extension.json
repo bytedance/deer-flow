@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "knowledge-platform",
+  "locales": {
+    "zh-CN": {
+      "title": "知识空间与连接",
+      "description": "组织知识空间、连接与成员权限，让团队按授权范围使用资料。",
+      "usage": [
+        {
+          "title": "由管理员配置空间与资源",
+          "description": "通过平台管理接口配置连接、空间成员和可访问资源，明确操作权限。"
+        },
+        {
+          "title": "在授权范围内使用",
+          "description": "通过知识中心或平台接口选择可访问的空间和知识库，再进行导入与状态查询。"
+        }
+      ],
+      "requirements": [
+        "已安装知识入库与处理扩展，并配置连接、持久化存储和空间策略。"
+      ]
+    },
+    "en-US": {
+      "title": "Knowledge spaces and connections",
+      "description": "Organize knowledge spaces, connections and membership for authorized access.",
+      "usage": [
+        {
+          "title": "Configure spaces and resources",
+          "description": "An administrator configures connections, space membership, accessible resources and permitted operations through the platform API."
+        },
+        {
+          "title": "Work within an authorized space",
+          "description": "Use Knowledge center or platform APIs to select an accessible space and knowledge base, then ingest content or inspect processing."
+        }
+      ],
+      "requirements": [
+        "Install the knowledge management extension and configure connections, persistent storage and space policies."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-platform#readme"
+}

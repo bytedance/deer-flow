@@ -15,6 +15,16 @@ namespace/thread bounds, cursor iteration and outage/TTL fallback.
 
 ### Run Admission
 
+Finished thread operations retain their exact run ID and captured owner until
+their durable release succeeds. Retry these releases under the existing
+same-thread admission gate before admitting new work, using the bounded Store
+retry policy. Register completion before cleanup awaits so cancellation remains
+retryable. Live reservations stay exclusive; failed releases return a conflict.
+Replay local and stored idempotent results before cleanup. A conflicting new
+key retries admission once after release; start new leases after gate and cleanup waits.
+The retry ledger holds identities only and schedules no background tasks.
+Coverage: `tests/test_thread_operation_release_recovery.py`.
+
 Goal operation observation preserves producer artifacts when normalizing checkpoint results; page titles never establish failure.
 
 Interactive Queue/Steer inputs belong to the existing RunStore row. Accept only

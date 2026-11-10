@@ -25,7 +25,7 @@ path variables and compare storage defaults with the launcher's actual shell blo
 
 ## Dependency and Label Checks
 
-`check_extension.py`: Gateway wheel asset validator; example CI:
+`check_extension.py`: Wheel asset/documentation validator; example CI:
 `extension-package-check.yml`. Tests: `backend/tests/test_extension_check_script.py`.
 
 `check.py`: UTF-8 replacement decoding; pnpm uses
