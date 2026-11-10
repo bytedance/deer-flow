@@ -18,6 +18,7 @@ from starlette.requests import Request
 from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
+from app.gateway.artifact_archive import build_artifact_archive
 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 from deerflow.config.paths import Paths, make_safe_user_id
 from deerflow.sandbox.lease import get_sandbox_lease_manager
@@ -1039,6 +1040,134 @@ def test_replaced_artifact_rejects_previous_if_range_validator(tmp_path, monkeyp
     assert response.content == b"new report"
     assert "content-range" not in response.headers
     assert response.headers["etag"] == f'"{hashlib.sha256(b"new report").hexdigest()}"'
+
+
+@pytest.mark.parametrize("ranges", ["bytes=4-9", "bytes=0-1,4-5"], ids=["single", "multipart"])
+@pytest.mark.parametrize(
+    "copy_before_stream",
+    [pytest.param(False, marks=pytest.mark.skipif(os.name == "nt", reason="Windows requires a private response copy")), True],
+    ids=["descriptor", "private-copy"],
+)
+def test_if_range_stream_keeps_the_validated_artifact_generation(tmp_path, monkeypatch, ranges, copy_before_stream) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    artifact_path = outputs / "note.txt"
+    original = b"old lesson"
+    artifact_path.write_bytes(original)
+    artifacts_router._sha256_of_file_cached.cache_clear()
+    monkeypatch.setattr(artifacts_router, "_ARTIFACT_COPY_BEFORE_STREAM", copy_before_stream)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    url = "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+
+    replace_after_headers = False
+    replacement_confirmed = False
+
+    async def replace_between_headers_and_body(scope, receive, send):
+        async def send_and_replace(message):
+            nonlocal replacement_confirmed
+            await send(message)
+            if replace_after_headers and message["type"] == "http.response.start":
+                archive = await asyncio.to_thread(build_artifact_archive, outputs, ["mnt/user-data/outputs/note.txt"], user_data_dir=tmp_path)
+                with archive.file, zipfile.ZipFile(archive.file) as zipped:
+                    assert zipped.read("note.txt") == original
+                _replace_preserving_artifact_mtime(artifact_path, b"new slides")
+                replacement_confirmed = True
+
+        await app(scope, receive, send_and_replace)
+
+    with TestClient(replace_between_headers_and_body) as client:
+        first = client.get(url)
+        replace_after_headers = True
+        resumed = client.get(url, headers={"Range": ranges, "If-Range": first.headers["etag"]})
+
+    assert replacement_confirmed
+    assert artifact_path.read_bytes() == b"new slides"
+    assert resumed.status_code == 206
+    assert resumed.headers["etag"] == first.headers["etag"]
+    assert int(resumed.headers["content-length"]) == len(resumed.content)
+    if ranges == "bytes=4-9":
+        assert resumed.content == b"lesson"
+        assert resumed.headers["content-range"] == "bytes 4-9/10"
+    else:
+        media_type, _, boundary = resumed.headers["content-type"].partition("; boundary=")
+        assert media_type == "multipart/byteranges" and boundary
+        parts = []
+        for start, end in [(0, 2), (4, 6)]:
+            part_header = f"--{boundary}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Range: bytes {start}-{end - 1}/10\r\n\r\n"
+            parts.append(part_header.encode("ascii") + original[start:end] + b"\r\n")
+        assert resumed.content == b"".join(parts) + f"--{boundary}--".encode("ascii")
+    assert list(outputs.iterdir()) == [artifact_path]
+
+
+@pytest.mark.parametrize("stage", ["_prepare_artifact_stream", "_copy_artifact_ranges"])
+def test_cancelled_artifact_response_drains_file_ownership(tmp_path, monkeypatch, stage) -> None:
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(b"original")
+    monkeypatch.setattr(artifacts_router, "_ARTIFACT_COPY_BEFORE_STREAM", True)
+    worker = getattr(artifacts_router, stage)
+    release_worker = threading.Event()
+    handles = []
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        finished = asyncio.Event()
+
+        def gated_worker(*args):
+            result = worker(*args)
+            handles.append(result[0] if stage == "_prepare_artifact_stream" else result)
+            loop.call_soon_threadsafe(started.set)
+            try:
+                assert release_worker.wait(5)
+                return result
+            finally:
+                loop.call_soon_threadsafe(finished.set)
+
+        async def send(_message):
+            pytest.fail("Cancellation before preparation completes must send no headers or body")
+
+        monkeypatch.setattr(artifacts_router, stage, gated_worker)
+        response = artifacts_router._ArtifactFileResponse(artifact_path)
+        scope = {"type": "http", "method": "GET", "headers": [(b"range", b"bytes=1-2")]}
+        task = asyncio.create_task(response(scope, AsyncMock(), send))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release_worker.set()
+            if started.is_set():
+                await asyncio.wait_for(finished.wait(), timeout=5)
+            await asyncio.gather(task, return_exceptions=True)
+        assert task.cancelled()
+        assert len(handles) == 1 and handles[0].closed
+        assert artifact_path.stat().st_nlink == 1
+
+    asyncio.run(exercise())
+
+
+def test_pinned_digest_cannot_populate_another_artifacts_cache_key(tmp_path, monkeypatch) -> None:
+    first = tmp_path / "first.txt"
+    other = tmp_path / "other.txt"
+    first.write_bytes(b"first file")
+    other.write_bytes(b"other file")
+    cached = artifacts_router._sha256_of_file_cached
+    cached.cache_clear()
+
+    def nested_lookup(path, *metadata):
+        if path == str(first):
+            assert artifacts_router._sha256_of_file(other) == hashlib.sha256(b"other file").hexdigest()
+        return cached(path, *metadata)
+
+    monkeypatch.setattr(artifacts_router, "_sha256_of_file_cached", nested_lookup)
+    with first.open("rb") as handle:
+        handle.seek(2)
+        assert artifacts_router._artifact_etag_from_handle(first, handle, os.fstat(handle.fileno())) == f'"{hashlib.sha256(b"first file").hexdigest()}"'
+        assert handle.tell() == 2
+    assert artifacts_router._sha256_of_file(other) == hashlib.sha256(b"other file").hexdigest()
 
 
 @pytest.mark.parametrize("changed_field", ["st_dev", "st_ino", "st_ctime_ns"])

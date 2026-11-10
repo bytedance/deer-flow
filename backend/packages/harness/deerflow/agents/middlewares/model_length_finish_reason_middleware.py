@@ -42,6 +42,8 @@ from deerflow.agents.middlewares.model_response import append_visible_text, has_
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
+# Stamped on the AIMessage this guard rewrote; consumers import it, not the literal.
+MODEL_LENGTH_TERMINATION_MARKER = "model_length_termination"
 _MODEL_LENGTH_CAPPED_CONTENT = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
 logger = logging.getLogger(__name__)
 
@@ -158,7 +160,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         content_source = clone_ai_message_with_tool_calls(last.model_copy(update={"invalid_tool_calls": []}), [])
         contains_tool_call = has_tool_call_intent(last) or content_source.content is not last.content
         contains_visible_content = has_visible_content(content_source)
-        if not contains_tool_call and contains_visible_content and (last.additional_kwargs or {}).get("model_length_termination"):
+        if not contains_tool_call and contains_visible_content and (last.additional_kwargs or {}).get(MODEL_LENGTH_TERMINATION_MARKER):
             return None
 
         additional_kwargs = dict(last.additional_kwargs or {})
@@ -167,7 +169,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             # Tool arguments may be incomplete at a max-token boundary.
             additional_kwargs.pop("tool_calls", None)
             additional_kwargs.pop("function_call", None)
-        additional_kwargs["model_length_termination"] = {
+        additional_kwargs[MODEL_LENGTH_TERMINATION_MARKER] = {
             "detector": termination.detector,
             "reason_field": termination.reason_field,
             "reason_value": termination.reason_value,

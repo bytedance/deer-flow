@@ -145,6 +145,84 @@ def test_import_route_without_agent_name_persists_default_bucket_markdown(tmp_pa
     assert [path.stem for path in facts_root.glob("**/*.md")] == ["fact_gateway_import"]
 
 
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("backup_revision", [1, "omitted", None, True, "1", 1.0], ids=["older", "omitted", "null", "boolean", "string", "integral-float"])
+def test_import_route_restores_edited_fact_from_backup(tmp_path, agent_name: str | None, backup_revision: object) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Use PostgreSQL", "confidence": 0.9})
+            assert created.status_code == 200
+            fact_id = created.json()["facts"][0]["id"]
+            exported = client.get("/api/memory/export", params=params)
+            assert exported.status_code == 200
+            backup = exported.json()
+            if backup_revision == "omitted":
+                backup["facts"][0].pop("revision")
+            else:
+                backup["facts"][0]["revision"] = backup_revision
+            edited = client.patch(f"/api/memory/facts/{fact_id}", params=params, json={"content": "Use SQLite"})
+            assert edited.status_code == 200
+
+            restored = client.post("/api/memory/import", params=params, json=backup)
+
+            assert restored.status_code == 200, restored.text
+            assert restored.json()["facts"][0]["content"] == "Use PostgreSQL"
+            assert restored.json()["facts"][0]["id"] == fact_id
+            assert restored.json()["facts"][0]["revision"] == edited.json()["facts"][0]["revision"] + 1
+            reloaded = client.post("/api/memory/reload", params=params)
+            assert reloaded.status_code == 200
+            assert reloaded.json()["facts"] == restored.json()["facts"]
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("existing_id", [True, False], ids=["existing", "new"])
+@pytest.mark.parametrize("revision", [0, -1, False, "0"], ids=["zero", "negative", "false", "string-zero"])
+def test_import_route_rejects_invalid_revision_without_replacing_memory(tmp_path, agent_name: str | None, existing_id: bool, revision: object) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Use PostgreSQL"})
+            assert created.status_code == 200
+            fact_id = created.json()["facts"][0]["id"]
+            exported = client.get("/api/memory/export", params=params)
+            assert exported.status_code == 200
+            backup = exported.json()
+            backup["facts"][0]["revision"] = revision
+            if not existing_id:
+                backup["facts"][0]["id"] = "new_fact"
+            assert client.patch(f"/api/memory/facts/{fact_id}", params=params, json={"content": "Use SQLite"}).status_code == 200
+            assert client.post("/api/memory/facts", params=params, json={"content": "Keep the post-backup fact"}).status_code == 200
+            before = client.get("/api/memory/export", params=params)
+            assert before.status_code == 200
+
+            response = client.post("/api/memory/import", params=params, json=backup)
+
+            assert response.status_code == 400, response.text
+            assert response.json()["detail"] == "Invalid memory import: facts must be a list of objects with non-empty content."
+            reloaded = client.post("/api/memory/reload", params=params)
+            assert reloaded.status_code == 200
+            assert reloaded.json() == before.json()
+    finally:
+        manager.close()
+
+
 def test_import_memory_route_preserves_source_error() -> None:
     app = make_authed_test_app()
     app.include_router(memory.router)
@@ -971,3 +1049,96 @@ def test_import_blank_fact_returns_400_without_replacing_saved_memory(tmp_path):
         response = client.post("/api/memory/import", json=payload)
     assert response.status_code == 400
     assert manager.get_memory(user_id="alice") == before
+
+
+# ── Windows reserved agent names ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("agent_name", ["NUL", "nul", "Nul", "CON", "COM1", "LPT9"])
+def test_create_fact_rejects_windows_reserved_agent_name(tmp_path, agent_name):
+    """An agent scope is a directory under ``agents/``, so a device name cannot be written.
+
+    ``AGENT_NAME_PATTERN`` admits ``NUL``/``CON``/``COM1``. DeerMem resolves the
+    scope to ``{storage}/users/{uid}/agents/{name}/facts`` and creates it on the
+    first write; on Windows that path never appears and the write raises
+    ``FileNotFoundError``, which the endpoint's ``OSError`` branch turned into
+    ``500 Failed to create memory fact``. Reject the scope up front instead.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/facts", params={"agent_name": agent_name}, json={"content": "hello"})
+
+    assert response.status_code == 422
+    assert not (tmp_path / "users" / "alice" / "agents").exists()
+
+
+@pytest.mark.parametrize("agent_name", ["NUL", "CON"])
+def test_import_rejects_windows_reserved_agent_name(tmp_path, agent_name):
+    """The import path creates the same scope directory and needs the same guard."""
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    fact = {
+        "id": "fact-reserved",
+        "content": "Agent-scoped import",
+        "category": "context",
+        "confidence": 0.5,
+        "createdAt": "2026-07-21T00:00:00Z",
+        "source": "import",
+    }
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.post("/api/memory/import", params={"agent_name": agent_name}, json=_sample_memory(facts=[fact]))
+
+    assert response.status_code == 422
+    assert not (tmp_path / "users" / "alice" / "agents").exists()
+
+
+def test_read_routes_keep_working_for_windows_reserved_agent_name(tmp_path):
+    """Reads must stay permissive so an older release's scope can still be drained.
+
+    ``windows_incompatible_segment()`` applies when a name is created. Refusing a
+    stored scope on read would leave the owner unable to export or clear it.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.get("/api/memory/export", params={"agent_name": "NUL"})
+
+    assert response.status_code == 200
+
+
+def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
+    """Deletes must stay permissive so an older release's scope can still be cleared.
+
+    ``windows_incompatible_segment()`` applies when a name is created, not when an
+    existing scope is removed. A delete-only change set on a fresh scope writes
+    nothing under ``agents/``, so a legacy reserved-name scope stored by an older
+    Linux release remains clearable (200) rather than rejected with 422.
+    """
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+        TestClient(app) as client,
+    ):
+        response = client.delete("/api/memory", params={"agent_name": "NUL"})
+
+    assert response.status_code == 200
+    assert not (tmp_path / "users" / "alice" / "agents").exists()

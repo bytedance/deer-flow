@@ -1245,13 +1245,20 @@ def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
     return frozenset(selected)
 
 
-def _run_completion_hook(*, scheduled_task_service: Any | None):
+def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuations: Any | None = None):
     """Notify the scheduler after ordinary run finalization."""
 
     async def handle(record: Any) -> None:
-
-        if scheduled_task_service is not None:
-            await scheduled_task_service.handle_run_completion(record)
+        # Scheduler persistence is best-effort: a store outage must not skip the
+        # batch cancellation below, or claimed follow-ups of hard-stopped runs
+        # stay in `dispatching` forever (#7969).
+        try:
+            if scheduled_task_service is not None:
+                await scheduled_task_service.handle_run_completion(record)
+        except Exception:
+            logger.warning("Scheduled task completion hook failed for run %s (non-fatal)", record.run_id, exc_info=True)
+        if batch_continuations is not None:
+            await batch_continuations.source_finished(record)
 
     return handle
 
@@ -1286,6 +1293,7 @@ def get_run_context(request: Request) -> RunContext:
         on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
         on_run_completed=_run_completion_hook(
             scheduled_task_service=scheduled_task_service,
+            batch_continuations=getattr(request.app.state, "batch_continuations", None),
         ),
     )
 

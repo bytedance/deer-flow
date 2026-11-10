@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from app.channels.connection_identity import lookup_thread_id
 from app.channels.message_bus import InboundMessage, MessageBus
 from app.channels.wecom import WeComChannel
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -24,7 +23,7 @@ async def repo(tmp_path):
 
 
 def inbound(group="wr-group", bot="bot-1"):
-    return InboundMessage(channel_name="wecom", chat_id="alice", user_id="alice", text="group follow-up", topic_id="alice", metadata={"aibotid": bot, "chattype": "group", "chatid": group})
+    return InboundMessage(channel_name="wecom", chat_id=group, user_id="alice", text="group follow-up", topic_id="alice", metadata={"aibotid": bot, "chattype": "group", "chatid": group})
 
 
 @pytest.mark.asyncio
@@ -38,14 +37,14 @@ async def test_private_binding_does_not_authorize_an_unbound_group(repo, private
 
 
 @pytest.mark.asyncio
-async def test_legacy_group_binding_retains_owner_and_existing_thread(repo):
+async def test_legacy_group_binding_retains_owner(repo):
+    # The thread it had under the sender key is not continued; see
+    # test_wecom_conversation_keys.py.
     legacy = await repo.upsert_connection(owner_user_id="owner", provider="wecom", external_account_id="alice", workspace_id="bot-1", metadata={"aibotid": "bot-1", "chattype": "group"})
-    await repo.set_thread_id(connection_id=legacy["id"], owner_user_id="owner", provider="wecom", external_conversation_id="alice", external_topic_id="alice", thread_id="existing-thread")
     channel = WeComChannel(MessageBus(), {"connection_repo": repo})
     message = await channel._attach_connection_identity(inbound())
     assert message.connection_id == legacy["id"]
     assert message.owner_user_id == "owner"
-    assert await lookup_thread_id(message, repo=repo, store=None) == "existing-thread"
     other_bot = await channel._attach_connection_identity(inbound(bot="bot-2"))
     assert other_bot.connection_id is None
     await repo.disconnect_connection(connection_id=legacy["id"], owner_user_id="owner")
