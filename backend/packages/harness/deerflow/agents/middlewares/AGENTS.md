@@ -68,9 +68,9 @@ Status/code-less OpenAI `APIError` gets at most one retry; `APIConnectionError`
 Adapters and the legacy `langchain_openai:ChatOpenAI` factory must raise
 `EmptyModelResponseError` for HTTP-success empty choices before LangChain indexing.
 
-**Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
-`tool_calls` update: adapters resend stale `content` tool-call blocks, which
-strict providers reject.
+**Removing calls.** Use `clone_ai_message_with_tool_calls` to sync provider
+surfaces. Legacy HITL recovery drops colliding ID groups with a visible note;
+null IDs cannot carry results.
 
 Read marks bind to request `tool_call_id`, including `Command` results.
 No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.py`.

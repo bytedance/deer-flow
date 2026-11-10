@@ -19,6 +19,7 @@ from langgraph.types import interrupt
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.runtime.run_origin import origin_kind_of
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,11 @@ def _deny_message(tool_call: Mapping[str, Any], reason: str) -> ToolMessage:
     )
 
 
+def _unaddressable(calls: list[dict[str, Any]]) -> bool:
+    ids = [tc["id"] for tc in calls]
+    return any(not isinstance(call_id, str) for call_id in ids) or len(set(ids)) != len(ids)
+
+
 class HitlApprovalMiddleware(AgentMiddleware):
     """Pause high-risk tool calls for human approval.
 
@@ -104,6 +110,16 @@ class HitlApprovalMiddleware(AgentMiddleware):
 
     def _deny_all(self, calls: list[dict[str, Any]], reason: str) -> dict[str, Any]:
         return {"messages": [_deny_message(tc, reason) for tc in calls]}
+
+    def _reject_unaddressable(self, last: AIMessage, targets: list[dict[str, Any]]) -> dict[str, Any]:
+        # No result can address these IDs. Remove the entire colliding group,
+        # including invalid/ordinary siblings, from every serialized surface.
+        ids = [tc["id"] for tc in targets]
+        kept = [tc for tc in last.tool_calls if tc.get("id") not in ids]
+        last = last.model_copy(update={"invalid_tool_calls": [tc for tc in last.invalid_tool_calls if tc.get("id") not in ids]})
+        note = _invalid_response_reason()
+        content = [*last.content, {"type": "text", "text": note}] if isinstance(last.content, list) else f"{last.content}\n\n{note}"
+        return {"messages": [clone_ai_message_with_tool_calls(last, kept, content=content)]}
 
     def _is_subagent(self, runtime: Any) -> bool:
         context = getattr(runtime, "context", None) or {}
@@ -179,6 +195,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         if len(str(payload)) > MAX_PAYLOAD_BYTES:
             return self._deny_all(targets, _too_large_reason())
         responses = interrupt(payload)
+        if _unaddressable(targets):
+            return self._reject_unaddressable(last, targets)
         if any(tc["name"] in resume_tool_names and tc["name"] not in live_tool_names for tc in targets):
             return self._deny_all(targets, _invalid_response_reason())
         return self._process_responses(last, targets, responses)
@@ -195,8 +213,8 @@ class HitlApprovalMiddleware(AgentMiddleware):
         resume_value: Any,
     ) -> dict[str, Any]:
         target_ids = [tc["id"] for tc in targets]
-        if any(not isinstance(call_id, str) for call_id in target_ids) or len(set(target_ids)) != len(target_ids):
-            return self._deny_all(targets, _invalid_response_reason())
+        if _unaddressable(targets):
+            return self._reject_unaddressable(last, targets)
         ai_message_id = last.id or ""
         expected_request_ids = {call_id: f"hitl_approval:{ai_message_id}:{call_id}" for call_id in target_ids}
         responses = resume_value.get("responses") if isinstance(resume_value, Mapping) else None

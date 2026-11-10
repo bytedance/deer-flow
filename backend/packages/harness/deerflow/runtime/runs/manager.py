@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
+from deerflow.runtime.approval_identity import ApprovalIdentity, InvalidApprovalIdentity, invalid_approval_identity
 from deerflow.runtime.events.terminal import RecoveryTerminalPublisher
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
@@ -270,6 +271,12 @@ def _approval_request_id(metadata: Mapping[str, Any]) -> str | None:
         return None
     request_id = payload.get("request_id")
     return request_id if isinstance(request_id, str) else None
+
+
+def _matches_approval_identity(metadata: Mapping[str, Any], expected: ApprovalIdentity) -> bool:
+    if isinstance(expected, InvalidApprovalIdentity):
+        return invalid_approval_identity(metadata.get("hitl_approval")) == expected
+    return _approval_request_ids(metadata) == expected
 
 
 @dataclass
@@ -1611,13 +1618,13 @@ class RunManager:
             )
         return persisted
 
-    async def mark_approval_answered(self, thread_id: str, *, expected_request_ids: dict[str, str] | None = None) -> ApprovalAnswerHandle | None:
+    async def mark_approval_answered(self, thread_id: str, *, expected_request_ids: ApprovalIdentity | None = None) -> ApprovalAnswerHandle | None:
         """Atomically answer the validated pause; return ``None`` for a stale response or another winner."""
         records = await self.list_by_thread(thread_id, limit=5)
         record = next((item for item in records if item.status == RunStatus.waiting_for_input), None)
         if record is None:
             return None
-        if expected_request_ids is not None and _approval_request_ids(record.metadata) != expected_request_ids:
+        if expected_request_ids is not None and not _matches_approval_identity(record.metadata, expected_request_ids):
             return None
 
         previous_status = record.status
@@ -1638,7 +1645,7 @@ class RunManager:
                 current = self._runs.get(record.run_id)
                 if current is not record or current.status != RunStatus.waiting_for_input:
                     return None
-            if expected_request_ids is not None and (_approval_request_ids(record.metadata) != expected_request_ids or _approval_request_id(record.metadata) != expected_request_id):
+            if expected_request_ids is not None and (not _matches_approval_identity(record.metadata, expected_request_ids) or _approval_request_id(record.metadata) != expected_request_id):
                 return None
             metadata = dict(previous_metadata)
             metadata.pop("hitl_approval", None)

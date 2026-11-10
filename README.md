@@ -1784,7 +1784,11 @@ running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
 subagents and runtimes without resume support always fail closed.
 
 Pending approvals do not expire and block new runs on the same thread until
-resolved. Long argument values may be truncated in the display, but approval
+resolved. For legacy pauses with null or duplicate tool-call IDs, an SDK caller
+can submit all-reject with the original action IDs and request IDs; see the
+[recovery contract](backend/docs/RUN_INTERACTION_POLICY.md#hitl-tool-approval).
+This clears the pause without executing its ambiguous calls.
+Long argument values may be truncated in the display, but approval
 executes the original complete arguments. The feature is disabled by default.
 See [HITL Tool Approval](backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.

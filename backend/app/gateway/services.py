@@ -84,6 +84,7 @@ from deerflow.runtime import (
     build_state_mutation_graph,
     run_agent,
 )
+from deerflow.runtime.approval_identity import ApprovalIdentity
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     CheckpointModeMismatchError,
@@ -2303,7 +2304,7 @@ async def start_run(
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
-    validated_approval_request_ids: dict[str, str] | None = None
+    validated_approval_request_ids: ApprovalIdentity | None = None
 
     disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 

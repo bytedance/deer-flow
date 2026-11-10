@@ -47,6 +47,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **hitl:** Allow reject-only recovery of legacy pauses with null or duplicate
+  tool-call IDs, preserving stale-pause checks and removing ambiguous calls
+  without executing them. ([#8071](https://github.com/bytedance/deer-flow/issues/8071))
+
 - **gateway:** Posting feedback twice for the same run now returns a 409
   instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
   feedback row per user and run; a retry, or feedback on another message of the

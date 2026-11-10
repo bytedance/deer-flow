@@ -53,6 +53,17 @@ AI message before applying any decision. If worker attachment fails after
 consumption, the Gateway conditionally restores that exact answered run to
 `waiting_for_input` so a valid response or all-reject can retry safely.
 
+Legacy pauses containing null or duplicated tool-call IDs can be cleared only
+with **all-reject**, using one response per stored action in its original order,
+including its original `tool_call_id` (which may be null) and `request_id`.
+Approval or mixed decisions still return 422. The server binds this recovery to
+the exact stored payload and rechecks it during worker attachment; an old reject
+cannot clear a newer valid or invalid pause. If only the checkpoint remains,
+recovery must still target that same payload. Calls with ambiguous IDs are
+removed from the replayed model message, including colliding siblings, with a
+visible rejection note. They never execute. This does not repair other malformed
+approval data or prevent new malformed pauses (tracked separately in #8069).
+
 `waiting_for_input` is not a terminal success or failure. Goal checks, final
 artifact delivery checks, and batch continuation cancellation must not treat a
 pending approval as a completed source run. Pending approvals do not expire and

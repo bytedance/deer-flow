@@ -2,6 +2,9 @@
 
 Knowledge auth: [contract](../../docs/KNOWLEDGE.md).
 
+Legacy HITL all-reject carries a server-created payload digest through answer
+and checkpoint-only recovery; never replace its identity with unbound `None`.
+
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
 [Viewer fence](../../../docs/full-stack-plugins.md).
