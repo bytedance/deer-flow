@@ -19,14 +19,23 @@ awk '
         sub(/[[:space:]]+$/, "", value)
         return value == "" || value ~ /^#/ || value ~ /^(null|Null|NULL|~|""|\047\047)([[:space:]]+#.*)?$/
     }
-    /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-    in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-    in_sandbox && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
+    /^[[:space:]]*(#|$)/ || /^(---|\.\.\.)([[:space:]]|$)/ || /^%/ { next }
+    {
+        indent = match($0, /[^[:space:]]/)
+        if (!root_indent) root_indent = indent
+    }
+    indent == root_indent {
+        in_sandbox = $0 ~ /^[[:space:]]*sandbox:([[:blank:]]+#.*)?[[:space:]]*$/
+        child_indent = 0
+        next
+    }
+    in_sandbox && !child_indent { child_indent = indent }
+    in_sandbox && indent == child_indent && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
         sandbox_use=$0
         sub(/^[[:space:]]*use:[[:space:]]*/, "", sandbox_use)
         seen_use=1
     }
-    in_sandbox && !seen_url && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
+    in_sandbox && indent == child_indent && !seen_url && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
         provisioner_url=$0
         sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", provisioner_url)
         seen_url=1
