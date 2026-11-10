@@ -1670,6 +1670,63 @@ def test_factory_wiring_context_window_to_fraction_trigger_end_to_end() -> None:
     assert middleware.model.profile == {"max_input_tokens": 65_536}
 
 
+def test_factory_counter_charges_replayed_reasoning_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#8074: reasoning adapters replay the assistant's reasoning as request input.
+
+    ``count_tokens_approximately`` only counts content and tool calls, so the
+    reasoning text in ``additional_kwargs`` used to be invisible to the
+    summarization trigger. vLLM stores the same generation under both
+    ``reasoning`` and ``reasoning_content``; it must be charged once, not twice.
+    """
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+    middleware = create_summarization_middleware(app_config=_factory_app_config(("run-model",)), run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    reasoning = "x" * 40_000
+    both_fields = AIMessage(content="answer", additional_kwargs={"reasoning": reasoning, "reasoning_content": reasoning})
+    content_field = AIMessage(content="answer", additional_kwargs={"reasoning_content": reasoning})
+    raw_field = AIMessage(content="answer", additional_kwargs={"reasoning": reasoning})
+
+    counted = middleware.token_counter([both_fields])
+    assert 10_000 <= counted < 20_000  # 40k chars at 4 chars/token, charged once
+    assert middleware.token_counter([content_field]) == counted
+    assert middleware.token_counter([raw_field]) == counted
+
+    unreasoned = middleware.token_counter([AIMessage(content="answer")])
+    assert unreasoned < 100  # ordinary messages keep the parent's approximation
+
+
+def test_factory_trigger_fires_on_replayed_reasoning_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The trigger must see the input vLLM actually receives, not just content.
+
+    Reproduces the reported shape: a short-looking history whose real prompt is
+    over the token trigger because the assistant's reasoning is replayed. On
+    main this returns ``None`` (no ``middleware:summarize`` event) and the run
+    keeps growing until the provider rejects it.
+    """
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+    cfg = _factory_app_config(("run-model",), summarization_kwargs={"trigger": ContextSize(type="tokens", value=8_000)})
+    middleware = create_summarization_middleware(app_config=cfg, run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    reasoning = "x" * 48_000  # ~12k tokens, more than the 8k trigger on its own
+    state = {
+        "messages": [
+            HumanMessage(content="old request", id="old-user"),
+            AIMessage(content="old answer", id="old-ai", additional_kwargs={"reasoning": reasoning, "reasoning_content": reasoning}),
+            HumanMessage(content="current request", id="current-user"),
+        ]
+    }
+
+    result = middleware.before_model(state, _runtime())
+
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+    assert [message.id for message in result["messages"][1:]] == ["old-ai", "current-user"]
+
+
 class _RaisingTextResponse:
     """A provider response whose ``.text`` accessor fails — a realistic malformed result."""
 

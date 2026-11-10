@@ -280,6 +280,13 @@ The default LangChain prompt instructs the model to:
 ### Token Counting
 
 - Uses approximate token counting based on character count
+- Counts assistant reasoning that reasoning adapters replay on the next request:
+  vLLM's `additional_kwargs["reasoning"]` and the
+  DeepSeek/MiMo/StepFun `reasoning_content`. It is real provider input even
+  though it is not message content, and it is charged once per message when a
+  provider stores the same text under both keys (#8074). Adapters that keep
+  reasoning only for display (Codex, MiniMax) are therefore counted
+  conservatively: compaction can fire slightly earlier, never later.
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
 - Can be customized with a custom `token_counter` function

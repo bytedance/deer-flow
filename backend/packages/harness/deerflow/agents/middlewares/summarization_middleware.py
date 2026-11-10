@@ -8,15 +8,17 @@ import html
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic
 from typing import Any, Protocol, override, runtime_checkable
 
 from deerflow_extension_api import CompactionEvent, ExtensionData, canonical_hash, task_store_from_runtime
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
+from langchain_core.messages.utils import count_tokens_approximately
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -47,6 +49,78 @@ _SUMMARY_CHUNK_RETRY_MAX_ENTRIES = 128
 _SUMMARY_CHUNK_RETRY_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
 _SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
+
+
+def _replayed_reasoning_text(additional_kwargs: Mapping[str, Any] | None) -> str:
+    """Return the assistant reasoning a reasoning provider repeats as input.
+
+    Reasoning adapters keep this text on the assistant message: ``VllmChatModel``
+    stores both the raw ``reasoning`` payload and its normalized
+    ``reasoning_content`` text, while the DeepSeek/MiMo/StepFun adapters store
+    only ``reasoning_content``. Counting both would charge one generation twice,
+    so the normalized text wins and the raw payload is only the fallback.
+    """
+    if not additional_kwargs:
+        return ""
+    content = additional_kwargs.get("reasoning_content")
+    if isinstance(content, str) and content:
+        return content
+    reasoning = additional_kwargs.get("reasoning")
+    if isinstance(reasoning, str):
+        return reasoning
+    return "" if reasoning is None else str(reasoning)
+
+
+def _with_counted_reasoning(messages: Iterable[Any]) -> list[Any]:
+    """Return ``messages`` with replayed reasoning appended to assistant content.
+
+    Appending it to the content makes LangChain's approximate counter charge the
+    text with the same per-message rounding and usage-metadata scaling it already
+    applies to everything else the request carries.
+    """
+    counted: list[Any] = []
+    for message in messages:
+        reasoning = _replayed_reasoning_text(getattr(message, "additional_kwargs", None)) if isinstance(message, AIMessage) else ""
+        if not reasoning:
+            counted.append(message)
+            continue
+        content = message.content
+        if isinstance(content, str):
+            replacement: Any = f"{content}\n{reasoning}" if content else reasoning
+        elif isinstance(content, list):
+            replacement = [*content, {"type": "text", "text": reasoning}]
+        else:
+            replacement = f"{content}\n{reasoning}"
+        counted.append(message.model_copy(update={"content": replacement}))
+    return counted
+
+
+class _ReplayedReasoningTokenCounter:
+    """LangChain's approximate counter over the request a reasoning provider sends.
+
+    ``count_tokens_approximately`` counts message content and tool calls only, so
+    assistant reasoning replayed through ``additional_kwargs`` is invisible to
+    it. A long thinking run then undercounts its real input and compaction never
+    fires before the provider rejects the request (#8074).
+    """
+
+    def __init__(self, *, chars_per_token: float = 4.0) -> None:
+        self._chars_per_token = chars_per_token
+
+    def __call__(self, messages: Iterable[Any], *, use_usage_metadata_scaling: bool = True) -> int:
+        return count_tokens_approximately(
+            _with_counted_reasoning(messages),
+            chars_per_token=self._chars_per_token,
+            use_usage_metadata_scaling=use_usage_metadata_scaling,
+        )
+
+
+def _reasoning_aware_token_counter(model: Any) -> _ReplayedReasoningTokenCounter:
+    """Mirror LangChain's model-specific approximate counter, plus reasoning."""
+    # LangChain charges Anthropic content at 3.3 chars/token and everything else
+    # at the generic 4.0; keep that split so only the reasoning changes.
+    chars_per_token = 3.3 if str(getattr(model, "_llm_type", "")).startswith("anthropic-chat") else 4.0
+    return _ReplayedReasoningTokenCounter(chars_per_token=chars_per_token)
 
 
 def _document_summary_text(block: object) -> str | None:
@@ -177,6 +251,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        # The parent reuses a caller-provided counter for both the trigger total
+        # and the suffix trim. Our counter also implements the parent's
+        # no-scaling suffix mode, so restore that distinction instead of letting
+        # usage-metadata scaling leak into the cutoff search.
+        if isinstance(self.token_counter, _ReplayedReasoningTokenCounter):
+            self._partial_token_counter = partial(self.token_counter, use_usage_metadata_scaling=False)
         self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
@@ -1344,6 +1424,12 @@ def create_summarization_middleware(
         "trigger": trigger,
         "keep": keep_tuple,
         "trim_tokens_to_summarize": config.trim_tokens_to_summarize,
+        # The parent's approximate counter ignores the assistant reasoning that
+        # reasoning adapters replay on the next request (vLLM's
+        # additional_kwargs["reasoning"], DeepSeek/MiMo/StepFun's
+        # "reasoning_content"). Without it a long thinking run undercounts its
+        # real input and compaction never fires (#8074).
+        "token_counter": _reasoning_aware_token_counter(anchor_model),
     }
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
