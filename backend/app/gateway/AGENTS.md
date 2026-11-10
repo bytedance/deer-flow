@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+Knowledge auth: [contract](../../docs/KNOWLEDGE.md).
+
 Reject external `sandbox`, `thread_data`, `viewed_images`, `goal_outcome`. Non-null goals: valid text, int counters/limits >=0, no Overwrite; keep sparse data.
 
 [Viewer fence](../../../docs/full-stack-plugins.md).
@@ -11,19 +13,17 @@ HTTP and run metadata creation share `goal_thread_lock`. Lock in detached
 ownership. Its 5s budget covers admission and I/O: timeout fails strict starts;
 others omit incarnation (MCP fails closed). Tests: `test_thread_create_run_metadata_race.py`.
 
-Capability Center's `business` adapter validates bundled credentials and creates
-an MCP connection. The MCP API permits only its isolated launcher and credential
-environment keys; reject arbitrary commands and manifest-policy bypasses. Keep
-credentials out of tool schemas and preserve admin checks, masked atomic edits,
-and MCP cache reloads.
+Capability Center `business`: validate bundled credentials, create MCP connection.
+MCP API allows only its isolated launcher and credential env keys; reject arbitrary
+commands and manifest-policy bypasses. No credentials in tool schemas; retain
+admin checks, masked atomic edits and MCP cache reloads.
 
-Memory shutdown resolves hot-reloaded config/backend, flushes and closes in one
-`await_drained` operation. Resolve config off-loop inside the best-effort handler
-so malformed edits cannot abort teardown. Cancellation waits for owned workers.
-The host sets no close timeout: `close()` must be quick or internally bounded;
-budget it, flush timeout and other hooks within pod grace. Drain extension
-`stop_services()` across cancellation before later resources unwind; each
-service `stop()` has a 30-second `asyncio.timeout`.
+Memory shutdown: resolve hot-reloaded config/backend off-loop in the best-effort
+handler; malformed edits must not abort teardown. Flush/close in one
+`await_drained`; cancellation waits for owned workers. Host close has no timeout:
+`close()` must be quick or internally bounded. Fit close, flush timeout and other
+hooks within pod grace. Drain extension `stop_services()` across cancellation
+before later resources unwind; each `stop()` has a 30s `asyncio.timeout`.
 
 Routers with persistent writes drain through
 `app.gateway.persistent_writes.run_drained_write`.
@@ -149,7 +149,7 @@ owner-scoped assistant version selection remains enabled.
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
 | **Input Polish** (`/api/input-polish`) | `POST /` - rewrite a composer draft before it is sent. This is a short authenticated `runs:create` LLM request using `input_polish` config; it does not create a LangGraph run, persist a message, or modify thread state. Shares the non-graph one-shot LLM path (`deerflow.utils.oneshot_llm.run_oneshot_llm`) with the suggestions route so model build + Langfuse metadata + invoke stay in one place; validates the same stripped view of the draft it sends to the model, and preserves literal `<think>` substrings in the rewrite (`strip_think_blocks(truncate_unclosed=False)`) |
 | **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block. Before the first journaled run, seed an empty feed from a checkpoint so legacy checkpoint-only history keeps its order and visibility; skip absent checkpoints or populated feeds. `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest completed or interrupted assistant answer, treating a protocol-valid hidden `human_input_response` as confirmed replay input while rejecting other hidden/control humans, preserving that response's hidden/correlation metadata, and carrying the latest non-empty thread title in graph input so resuming an older checkpoint cannot roll back a later manual rename (#4457); `POST /edit-regenerate/prepare` - prepare a checkpoint replay from the latest editable human turn with a replacement user message and edit replay metadata; it carries the current thread title the same way, but only when the replay base already has one — an untitled base belongs to a thread the title middleware has not named yet, so pinning the current title there would keep a name generated from the prompt the edit just replaced; `GET /` - newest 100 runs as an array; `GET /page` - keyset history page `{data, has_more, next_before_created_at, next_before_run_id}`; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/stream` hides action/wait; GET action 405 pre-owner; POST needs `runs:cancel`; `GET /{rid}/messages` - paginated per-run messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /{rid}/workspace-changes` - workspace/output file change summary and optional diffs; `GET/POST /{rid}/artifacts/archive` - receipt manifest / bounded ZIP; `GET /../messages` - legacy thread message array; `GET /../messages/page` - backward thread-global `seq` history page with middleware/subagent-AI/successful-regenerate/edit-replay filtering and page-run-scoped feedback enrichment; subagent AI callbacks remain available through run events while parent `task` ToolMessages stay visible for card restoration; `GET /../token-usage` - aggregate tokens plus an optional `context_usage` percentage. Context usage approximately counts messages from the latest materialized thread state through `build_thread_checkpoint_state_accessor`, so full and delta checkpoint modes expose the same input. The percentage uses the latest run's model and its `context_window`. |
-| **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
+| **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback (409 if the user already rated this run; use `PUT` to change it); `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
 | **Runs** (`/api/runs`) | `POST /stream`, `/wait` - stateless runs requiring `runs:create`; optional body `thread_id` is owner-checked. Scheduled-task create/update/resume/trigger also require `threads:write` plus `runs:create`. `GET /{rid}/messages`, `/feedback` - run messages/feedback |
 | **GitHub Webhooks** (`/api/webhooks/github`) | `POST /` - receive GitHub App / repo webhook deliveries. Verifies `X-Hub-Signature-256` against `GITHUB_WEBHOOK_SECRET`; exempt from auth + CSRF because authenticity is enforced by HMAC. The route is fail-closed: mounted only when `GITHUB_WEBHOOK_SECRET` is set, or when explicit dev opt-in `DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1` is set. Recognized events include `ping`, `issues`, `issue_comment`, `pull_request`, `pull_request_review`, and `pull_request_review_comment`; unknown events return 200 with `handled=false`. Fan-out runtime failures return 503, keeping the delivery recorded as failed for manual/API/scripted redelivery (GitHub does not automatically retry any failed delivery, 5xx included); permanent/non-retryable conditions such as `channels.github.enabled: false`, unknown events, malformed payloads, or unavailable channel service return 200 with a skipped/handled response. |
 | **GitHub Event-Driven Agents** | Custom agents can declare a `github:` block in their `config.yaml` to bind to repos and event triggers. Webhook fan-out publishes one `InboundMessage` per matching binding to the channel bus; `GitHubChannel` routes those messages through `ChannelManager`. The response `dispatch` summarizes matched/fired/skipped agents. |

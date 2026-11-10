@@ -480,7 +480,17 @@ class ScheduledTaskService:
             limit=self._max_concurrent_runs,
         )
         for task in claimed:
-            await self.dispatch_task(task, now=now, trigger="scheduled")
+            try:
+                await self.dispatch_task(task, now=now, trigger="scheduled")
+            except Exception:
+                # A per-record failure inside one task's dispatch must not abort
+                # the rest of this poll's claimed batch: every claimed task
+                # already holds a lease, and the next tick would skip them the
+                # same way. Claim-level store failures stay loud above the loop.
+                logger.exception(
+                    "Scheduled task %s: dispatch failed; continuing with the claimed batch",
+                    task.get("id"),
+                )
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:

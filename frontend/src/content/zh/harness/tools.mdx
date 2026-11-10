@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -237,6 +237,16 @@ tools:
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.specstream.tools:web_search_tool
+    api_key: $SPECSTREAM_API_KEY
+```
+搜索结果包含摘要和来源 URL，来源一致时还会给出直接答案。需要 [SpecStream](https://specstream.ai) API Key。同时支持 `web_fetch`。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.youcom.tools:web_search_tool
     # api_key: $YDC_API_KEY # 可选；不填则使用免密钥的免费额度
 ```
@@ -251,7 +261,7 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -318,6 +328,16 @@ tools:
     api_key: $SOFYA_API_KEY
 ```
 以 Markdown 形式返回页面内容。需要 [Sofya](https://sofya.co) API Key。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.specstream.tools:web_fetch_tool
+    api_key: $SPECSTREAM_API_KEY
+```
+以 Markdown 形式返回页面内容，也支持 PDF、Word 和 Excel 文件。需要 [SpecStream](https://specstream.ai) API Key。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml
