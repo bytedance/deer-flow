@@ -128,7 +128,7 @@ def count_tokens_with_replayed_reasoning(
             if text:
                 content = message.content + text if isinstance(message.content, str) else [*message.content, text]
                 message = message.model_copy(update={"content": content})
-                # Count replayed text on a copy. / 在消息副本中计入回传的推理文本。
+                # Count replayed reasoning on a copy.
         counted.append(message)
     return token_counter(counted)
 
@@ -226,7 +226,7 @@ class VllmChatModel(GuardedChatOpenAI):
         return "vllm-openai-compatible"
 
     def replays_reasoning(self) -> bool:
-        return not self._use_responses_api(self._default_params)  # Only Chat Completions replays this field. / 仅 Chat Completions 回传此字段。
+        return not self._use_responses_api(self._default_params)  # Chat Completions only.
 
     def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
         """Convert a completion's cumulative usage snapshot into a delta."""

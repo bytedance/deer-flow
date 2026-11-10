@@ -12,6 +12,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableBinding
 from langgraph.constants import TAG_NOSTREAM
 from pydantic import ValidationError
 
@@ -1230,6 +1231,18 @@ def vllm_compaction(monkeypatch):
 
 
 _REPLAYED_REASONING = "Review the tool results. " * 100
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["single-binding", "double-binding"])
+def test_vllm_compaction_counts_reasoning_through_bindings(vllm_compaction, nested):
+    model = vllm_compaction.model
+    if nested:
+        model = RunnableBinding(bound=model)
+    middleware = DeerFlowSummarizationMiddleware(model=model)
+    message = AIMessage(content="Checked.", additional_kwargs={"reasoning": _REPLAYED_REASONING})
+    counted = AIMessage(content="Checked." + _REPLAYED_REASONING)
+
+    assert middleware.token_counter([message]) == count_tokens_approximately([counted])
 
 
 @pytest.mark.parametrize(

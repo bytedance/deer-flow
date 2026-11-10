@@ -180,12 +180,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
-        run_model = self.model.bound if isinstance(self.model, RunnableBinding) else self.model
-        # Unwrap the run model's tags. / 取出带标签包装中的运行模型。
+        run_model = self.model
+        seen_bindings: set[int] = set()
+        while isinstance(run_model, RunnableBinding) and id(run_model) not in seen_bindings:
+            seen_bindings.add(id(run_model))
+            run_model = run_model.bound
         if "token_counter" not in kwargs and isinstance(run_model, VllmChatModel) and run_model.replays_reasoning():
             self.token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self.token_counter)
             self._partial_token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self._partial_token_counter)
-            # Keep LangChain's suffix counter unscaled. / 保留 LangChain 对历史尾部的不缩放计数。
+            # Preserve LangChain's unscaled suffix estimate.
         self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
