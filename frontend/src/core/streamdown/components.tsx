@@ -18,6 +18,7 @@ import {
   useSafeStreamdownChildren,
   useSafeStreamdownMarkdown,
 } from "./safe-children";
+import { useStreamingContent } from "./use-streaming-content";
 
 export type StreamdownComponentOverrides = {
   [Key in keyof JSX.IntrinsicElements]?:
@@ -82,9 +83,11 @@ export function SafeMessageResponse({
 
 export function SafeReasoningContent({
   children,
+  isStreaming = false,
   ...props
-}: ReasoningContentProps) {
-  const safeChildren = useSafeStreamdownMarkdown(children);
+}: ReasoningContentProps & { isStreaming?: boolean }) {
+  const displayContent = useStreamingContent(children, isStreaming);
+  const safeChildren = useSafeStreamdownMarkdown(displayContent);
 
   return <ReasoningContent {...props}>{safeChildren}</ReasoningContent>;
 }
