@@ -15,6 +15,7 @@ state accessor are all real; only the external model service is faked.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,8 +29,9 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from app.gateway.auth.models import User
 from app.gateway.routers import threads
@@ -37,7 +39,7 @@ from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime import RunManager, context_compaction
 from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
-from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 
 THREAD_ID = "thread-compact-interrupted"
 TOOL_CALL_ID = "call_probe_1"
@@ -157,7 +159,7 @@ def test_compact_rejects_thread_paused_before_tools(mode: str, _summarization_ap
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
     assert response.status_code == 409, response.text
-    assert response.json()["detail"] == "Thread has pending execution. Resume the interrupted run before compacting."
+    assert response.json()["detail"] == "Thread has resumable pending execution. Resume the paused run before compacting."
 
     # The rejected compaction wrote nothing: head checkpoint, pending position
     # and pending task identity are exactly as before the attempt.
@@ -173,6 +175,130 @@ def test_compact_rejects_thread_paused_before_tools(mode: str, _summarization_ap
     final_messages = graph.get_state(config).values["messages"]
     assert any(isinstance(m, ToolMessage) and m.tool_call_id == TOOL_CALL_ID for m in final_messages)
     assert any(isinstance(m, AIMessage) and m.content == FINAL_ANSWER for m in final_messages)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_compact_rejects_dynamic_interrupt_through_mutation_accessor(mode, _summarization_app_config, _fake_summary_model):
+    """The node-restricted mutation graph cannot expose the agent's pending
+    task, so compaction must use the raw interrupt write as its pause signal."""
+    checkpointer = InMemorySaver()
+
+    def pause(state):
+        answer = interrupt({"question": "Continue?"})
+        return {"messages": [AIMessage(content=f"resumed:{answer}", id="resumed")]}
+
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("pause", pause)
+    builder.set_entry_point("pause")
+    builder.set_finish_point("pause")
+    graph = builder.compile(checkpointer=checkpointer)
+    config = _config(mode)
+    graph.invoke({"messages": [HumanMessage(content="hello", id="h1")]}, config)
+
+    paused = graph.get_state(config)
+    assert list(paused.next) == ["pause"]
+    paused_checkpoint_id = paused.config["configurable"]["checkpoint_id"]
+    raw_tuple = checkpointer.get_tuple(config)
+    assert raw_tuple is not None
+    assert any(write[1] == "__interrupt__" for write in raw_tuple.pending_writes or ())
+
+    mutation_graph = build_state_mutation_graph("manual_compaction", mode, get_thread_state_schema(mode))
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=mode, direct_namespace=True)
+    mutation_snapshot = mutation_accessor.get(config)
+    assert not mutation_snapshot.next
+    assert not mutation_snapshot.tasks
+
+    app = _make_compact_app(mode, checkpointer)
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Thread has resumable pending execution. Resume the paused run before compacting."
+    assert graph.get_state(config).config["configurable"]["checkpoint_id"] == paused_checkpoint_id
+
+    graph.invoke(Command(resume="yes"), config)
+    assert any(isinstance(message, AIMessage) and message.content == "resumed:yes" for message in graph.get_state(config).values["messages"])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_compact_rejects_off_head_dynamic_interrupt_after_state_update(mode, _summarization_app_config, _fake_summary_model):
+    checkpointer = InMemorySaver()
+
+    def pause(state):
+        answer = interrupt({"question": "Continue?"})
+        return {"messages": [AIMessage(content=f"resumed:{answer}", id="resumed")]}
+
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("pause", pause)
+    builder.set_entry_point("pause")
+    builder.set_finish_point("pause")
+    graph = builder.compile(checkpointer=checkpointer)
+    config = _config(mode)
+    graph.invoke({"messages": [HumanMessage(content="hello", id="h1")]}, config)
+
+    mutation_graph = build_state_mutation_graph("manual_compaction", mode, get_thread_state_schema(mode))
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=mode, direct_namespace=True)
+    mutation_accessor.update(config, {"messages": [AIMessage(content="head move", id="head-move")]}, as_node="manual_compaction")
+
+    moved = graph.get_state(config)
+    assert list(moved.next) == ["pause"]
+    moved_checkpoint_id = moved.config["configurable"]["checkpoint_id"]
+    raw_head = checkpointer.get_tuple(config)
+    assert raw_head is not None
+    assert not any(write[1] == "__interrupt__" for write in raw_head.pending_writes or ())
+
+    app = _make_compact_app(mode, checkpointer)
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Thread has resumable pending execution. Resume the paused run before compacting."
+    assert graph.get_state(config).config["configurable"]["checkpoint_id"] == moved_checkpoint_id
+
+    graph.invoke(Command(resume="yes"), config)
+    assert any(isinstance(message, AIMessage) and message.content == "resumed:yes" for message in graph.get_state(config).values["messages"])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_compact_allows_answered_off_head_interrupt_after_state_update(mode, _summarization_app_config, _fake_summary_model):
+    from app.gateway.hitl_approval import has_any_pending_interrupt
+
+    checkpointer = InMemorySaver()
+
+    def pause(state):
+        answer = interrupt({"question": "Continue?"})
+        return {"messages": [AIMessage(content=f"resumed:{answer}", id="resumed")]}
+
+    builder = StateGraph(get_thread_state_schema(mode))
+    builder.add_node("pause", pause)
+    builder.set_entry_point("pause")
+    builder.set_finish_point("pause")
+    graph = builder.compile(checkpointer=checkpointer)
+    config = _config(mode)
+    graph.invoke({"messages": [HumanMessage(content="hello", id="h1")]}, config)
+
+    mutation_graph = build_state_mutation_graph("manual_compaction", mode, get_thread_state_schema(mode))
+    mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=mode, direct_namespace=True)
+    assert asyncio.run(has_any_pending_interrupt(mutation_accessor, config)) is True
+
+    graph.invoke(Command(resume="yes"), config)
+    mutation_accessor.update(config, {"messages": [AIMessage(content="head move", id="head-move")]}, as_node="manual_compaction")
+
+    moved = graph.get_state(config)
+    assert not moved.next
+    raw_head = checkpointer.get_tuple(config)
+    assert raw_head is not None
+    assert not any(write[1] in {"__interrupt__", "__resume__"} for write in raw_head.pending_writes or ())
+    # The current HITL middleware makes one interrupt() call per after_model
+    # task, so [__interrupt__, __resume__, __interrupt__] cannot occur in one
+    # saver checkpoint; the newest checkpoint carrying either marker is decisive.
+    assert asyncio.run(has_any_pending_interrupt(mutation_accessor, config)) is False
+
+    app = _make_compact_app(mode, checkpointer)
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{THREAD_ID}/compact", json={"force": True, "keep": {"type": "messages", "value": 1}})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["compacted"] is True
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])

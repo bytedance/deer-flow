@@ -8,6 +8,10 @@ error taxonomy, UTF-8 wire-size counting, and the request skeleton. Clients live
 for one evaluation: no cache, no connection pool, and `transport_factory` is
 always a factory because httpx closes the transport it was handed.
 
+`aask` builds its HTTPX client off-loop. Cancellation during setup drains
+construction and closes the late client and its transport on the event loop
+before propagating. An expired deadline still maps to `TypeSafeError`.
+
 **It must not gain, and no consumer may move into it:** state content, the
 questions/criteria/thresholds and which way they decide, the failure policy (the
 gate denies on error, the memory paths carry on), cache semantics, or business

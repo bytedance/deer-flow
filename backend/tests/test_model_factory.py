@@ -13,6 +13,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.models import factory as factory_module
 from deerflow.models import openai_codex_provider as codex_provider_module
+from deerflow.models.openai_response import GuardedChatOpenAI
 from deerflow.models.reasoning import resolve_reasoning_contract
 from deerflow.reflection import resolve_class
 
@@ -117,6 +118,19 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
 
     # resolve_class is called — if we reach here without ValueError, the correct model was used
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
+
+
+def test_legacy_chatopenai_config_uses_empty_choice_guard():
+    config = _make_app_config([_make_model("alpha")])
+
+    model = factory_module.create_chat_model(
+        name="alpha",
+        app_config=config,
+        attach_tracing=False,
+        api_key="sk-test",
+    )
+
+    assert isinstance(model, GuardedChatOpenAI)
 
 
 def test_raises_when_model_not_found(monkeypatch):

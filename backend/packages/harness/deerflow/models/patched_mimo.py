@@ -15,9 +15,9 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_openai import ChatOpenAI
 
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
+from deerflow.models.openai_response import GuardedChatOpenAI
 from deerflow.models.reasoning_capture import typed_choice_message, with_reasoning_content
 
 _MISSING = object()
@@ -41,7 +41,7 @@ def _extract_reasoning_content(value: Any) -> str | object:
     return _MISSING
 
 
-class PatchedChatMiMo(ChatOpenAI):
+class PatchedChatMiMo(GuardedChatOpenAI):
     """ChatOpenAI with ``reasoning_content`` preservation for MiMo thinking mode."""
 
     @classmethod

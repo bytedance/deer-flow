@@ -303,6 +303,28 @@ def _middleware_fingerprint(middleware):
     ).fingerprint
 
 
+def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
+    from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+
+    current = TodoMiddleware()
+    previous = TodoMiddleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params["completion_reminder_hard_stop_reasons"] == ["loop_capped", "token_capped", "safety_capped", "model_length_capped"]
+    previous_params["completion_reminder_hard_stop_reasons"] = ["loop_capped", "token_capped"]
+    assert previous_params.pop("skip_completion_reminder_on_safety_cap") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
+def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
+    current = _make_safety_finish_reason_middleware()
+    previous = _make_safety_finish_reason_middleware()
+    previous_params = previous.release_policy_parameters()
+    assert previous_params.pop("mark_text_only_termination") is True
+    monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
+    assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
 def _continuity_summarizer(config):
     from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 

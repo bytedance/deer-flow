@@ -10,6 +10,7 @@ import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic
 from typing import Any, Protocol, override, runtime_checkable
 
@@ -17,6 +18,7 @@ from deerflow_extension_api import CompactionEvent, ExtensionData, canonical_has
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
+from langchain_core.runnables import RunnableBinding
 from langgraph.config import get_config
 from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -32,7 +34,9 @@ from deerflow.config.task_continuity_config import TaskContinuityConfig
 from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract
+from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 from deerflow.runtime.events.catalog import MIDDLEWARE_SUMMARIZE_TAG
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
@@ -46,6 +50,46 @@ _SUMMARY_CHUNK_RETRY_MAX_ENTRIES = 128
 _SUMMARY_CHUNK_RETRY_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
 _SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
+
+
+def _document_summary_text(block: object) -> str | None:
+    """Expose document metadata and direct plaintext, without fetching media."""
+    if not isinstance(block, dict) or block.get("type") != "document":
+        return None
+    parts = []
+    for key in ("title", "context"):
+        value = block.get(key)
+        if isinstance(value, str) and value:
+            parts.append(f"{key}: {value}")
+    source = block.get("source")
+    body = None
+    if isinstance(source, dict):
+        if source.get("type") == "text":
+            body = source.get("data")
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                body = content
+            elif isinstance(content, (list, tuple)):
+                body = "\n".join(part if isinstance(part, str) else part["text"] for part in content if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)))
+    if isinstance(body, str) and body:
+        parts.append(body)
+    if not parts:
+        return None
+    return "\n" + "\n".join(["Document:", *parts]) + "\n"
+
+
+def _summary_message(message: AnyMessage) -> AnyMessage:
+    """Use request-local text blocks; keep checkpoint content and call metadata."""
+    if not isinstance(message.content, list):
+        return message
+    content = []
+    changed = False
+    for block in message.content:
+        text = _document_summary_text(block)
+        content.append({"type": "text", "text": text} if text is not None else block)
+        changed = changed or text is not None
+    return message.model_copy(update={"content": content}) if changed else message
 
 
 class _ReusedSummary(str):
@@ -136,6 +180,15 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        run_model = self.model
+        seen_bindings: set[int] = set()
+        while isinstance(run_model, RunnableBinding) and id(run_model) not in seen_bindings:
+            seen_bindings.add(id(run_model))
+            run_model = run_model.bound
+        if "token_counter" not in kwargs and isinstance(run_model, VllmChatModel) and run_model.replays_reasoning():
+            self.token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self.token_counter)
+            self._partial_token_counter = partial(count_tokens_with_replayed_reasoning, token_counter=self._partial_token_counter)
+            # Preserve LangChain's unscaled suffix estimate.
         self._task_continuity_config = task_continuity_config if task_continuity_config is not None and task_continuity_config.enabled is True else None
         self._before_summarization_hooks = before_summarization or []
         # Model-ownership state. The model that actually executes the run is selected
@@ -258,18 +311,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             deduped.append(name)
         return deduped
 
-    def _model_for(self, name: str | None) -> Any | None:
-        """The nostream summary model for ``name``, built lazily and guarded.
+    def _build_model(self, name: str | None) -> Any | None:
+        """Construct and tag the nostream summary model; ``None`` on failure.
 
-        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
-        constructs and caches. A construction failure is caught and cached as ``None``
-        so a broken candidate config never escapes the fail-open boundary, is never
-        retried this turn, and still lets the next candidate run.
+        A construction failure must not escape the fail-open boundary: the
+        caller caches the failure for this turn so the next candidate can run.
         """
-        if name == self._anchor_model_name:
-            return self._summary_model
-        if name in self._model_cache:
-            return self._model_cache[name]
         try:
             model = create_chat_model(
                 name=name,
@@ -277,10 +324,40 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 app_config=self._app_config,
                 attach_tracing=False,
             )
-            built = self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
+            return self._tag_nostream(model.with_config(tags=["middleware:summarize"]))
         except Exception:
             logger.exception("Failed to build summary model %r; trying the next candidate", name)
-            built = None
+            return None
+
+    def _model_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name`` on the synchronous path.
+
+        Returns the pre-built anchor when ``name`` matches it (no rebuild), otherwise
+        constructs and caches. A construction failure is cached as ``None`` so a
+        broken candidate config never escapes the fail-open boundary, is never
+        retried this turn, and still lets the next candidate run.
+        """
+        if name == self._anchor_model_name:
+            return self._summary_model
+        if name in self._model_cache:
+            return self._model_cache[name]
+        built = self._build_model(name)
+        self._model_cache[name] = built
+        return built
+
+    async def _amodel_for(self, name: str | None) -> Any | None:
+        """The nostream summary model for ``name``, built off the event loop.
+
+        ``abefore_model``/``aafter_model`` run on the Gateway loop, and provider
+        construction can read local CLI credentials (Codex auth.json, Claude Code
+        credential files), so the build runs on the assembly pool. Anchor and
+        cache semantics stay identical to :meth:`_model_for`.
+        """
+        if name == self._anchor_model_name:
+            return self._summary_model
+        if name in self._model_cache:
+            return self._model_cache[name]
+        built = await run_assembly(self._build_model, name)
         self._model_cache[name] = built
         return built
 
@@ -302,7 +379,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # Redact the complete source before splitting: an identifier spanning a
         # chunk boundary must not bypass PII screening. Input remains plain text,
         # so the chat-message human-anchor filter is neither needed nor safe.
-        return redact_text(get_buffer_string(messages), getattr(self._app_config, "pii_redaction", None))
+        return redact_text(get_buffer_string([_summary_message(message) for message in messages]), getattr(self._app_config, "pii_redaction", None))
 
     def _summarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None, *, runtime: Runtime | None = None) -> str | None:
         """Fold every selected source fragment before committing any removal.
@@ -392,7 +469,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return reused
         for index, name in enumerate(names):
             text = await self._ainvoke_summary(
-                self._model_for(name),
+                await self._amodel_for(name),
                 prompt,
                 last=index == len(names) - 1,
                 model_name=name,
@@ -1285,8 +1362,6 @@ def create_summarization_middleware(
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled and not skip_memory_flush:
-        from functools import partial
-
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
         hooks.append(partial(memory_flush_hook, pii_redaction_config=getattr(resolved_app_config, "pii_redaction", None)))
