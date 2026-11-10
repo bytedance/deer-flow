@@ -25,24 +25,23 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend** | `3000` | Next.js web interface |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
-`/api/langgraph/*` onto the Gateway's native routes, and serves the frontend — see
-[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail. It compresses
-HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
-video uncompressed at the proxy layer.
+Nginx serves the frontend and proxies `/api/*` to Gateway, rewriting
+`/api/langgraph/*` to native routes. See [backend/AGENTS.md](backend/AGENTS.md).
+It compresses HTML and configured text assets. SSE, fonts, images, audio, and
+video stay uncompressed.
 
-Keep the dedicated `/api/threads/{thread_id}/browser/stream` WebSocket regex before
-the generic threads regex in Docker, local and Helm nginx configs. Upgrade headers
-and the 600s read timeout are pinned by `backend/tests/test_nginx_browser_websocket.py`.
-Helm uses nginx's default connect/send timeouts for the in-cluster Gateway.
+Put the `/api/threads/{thread_id}/browser/stream` WebSocket regex before the
+generic threads regex in Docker, local, and Helm configs.
+`backend/tests/test_nginx_browser_websocket.py` pins upgrade headers and the
+600s read timeout. Helm uses nginx defaults for Gateway connect/send timeouts.
+Keep local temp paths checkout-relative and aligned with `serve.sh` and `nginx.sh`.
 
-Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
-(README's **loopback default**); bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT`
-controls Docker ingress only; local Next.js stays on `3000` so `.env` cannot
-redirect `make dev`'s port wait. Nginx's IPv4+IPv6 `default_server` and Gateway's
-`0.0.0.0:8001` bind are container-internal; only published nginx is external.
-Require explicit bind addresses for new published ports;
-`backend/tests/test_compose_default_bind_host.py` pins every service in both files.
+Both Compose files publish nginx at `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`.
+Bare `"${PORT}:2026"` binds `0.0.0.0`. Require explicit bind addresses for new
+published ports. `backend/tests/test_compose_default_bind_host.py` pins both files.
+Root `PORT` controls Docker ingress only. Local Next.js stays on `3000` so
+`.env` cannot redirect the dev port wait. Nginx's IPv4/IPv6 `default_server`
+and Gateway's `0.0.0.0:8001` stay container-internal. Only published nginx is external.
 
 Provisioner PVC mode declares `USERDATA_PVC_NAME` once as `user-data`; extra and
 Lark broker credential mounts reuse it with their existing subPaths and read-only
