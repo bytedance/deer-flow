@@ -184,6 +184,25 @@ type PendingSend = {
   reject: (error: unknown) => void;
 };
 
+/**
+ * A send whose caller was released because the view switched or unmounted
+ * before acceptance arrived. The caller no longer waits, but `onSent` still
+ * belongs to the run: if the Gateway accepted it afterwards, its one-time
+ * composer state must be retired exactly once.
+ */
+type ReleasedSend = Pick<PendingSend, "threadId" | "options">;
+
+/**
+ * Stop pressed after `thread.submit` resolved but before the Gateway accepted
+ * the run. Shaped like an abort so the composer treats it as "no turn was
+ * created" and keeps its text, and a first send can restore the welcome layout.
+ */
+function createStoppedSendError(): Error {
+  const error = new Error("The run was stopped before it was accepted.");
+  error.name = "AbortError";
+  return error;
+}
+
 export function deriveHitlApprovalState({
   liveInterrupt,
   restInterrupts,
@@ -246,14 +265,6 @@ export function buildHitlApprovalSubmitOptions({
 type ThreadDeleteClient = {
   threads: {
     delete: (threadId: string) => Promise<unknown>;
-    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
-  };
-};
-
-type ThreadDiscardClient = {
-  threads: {
-    delete: (threadId: string) => Promise<unknown>;
-    getState: (threadId: string) => Promise<unknown>;
     search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
   };
 };
@@ -2152,6 +2163,9 @@ export function useThreadStream({
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
   const pendingSendRef = useRef<PendingSend | null>(null);
+  // A released send can still be accepted later; keep its one-time state
+  // until then so a late acceptance does not strand a stored draft.
+  const releasedSendRef = useRef<ReleasedSend | null>(null);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2261,14 +2275,29 @@ export function useThreadStream({
     }
   }, [restInterrupts, restInterruptsError, restInterruptsLoading]);
 
-  /**
-   * A stream frame (or the run's Content-Location metadata) proves the run was
-   * created: retire the send's one-time composer state and let `sendMessage`
-   * resolve.
-   */
   const queryClient = useQueryClient();
 
+  /**
+   * A stream frame, the run's `Content-Location` metadata, or a finished
+   * stream proves the run was created: retire the send's one-time composer
+   * state and let `sendMessage` resolve. A send whose caller was already
+   * released still gets its `onSent` here when the acceptance names its thread.
+   */
   const acceptPendingSend = useCallback((threadId?: string) => {
+    const released = releasedSendRef.current;
+    if (released && threadId === released.threadId) {
+      releasedSendRef.current = null;
+      try {
+        released.options?.onSent?.();
+      } catch (error) {
+        // A caller's one-time cleanup must not break the stream callback that
+        // observed acceptance; surface it instead of swallowing it.
+        console.error(
+          "Failed to retire one-time composer state for an accepted send.",
+          error,
+        );
+      }
+    }
     const pending = pendingSendRef.current;
     if (!pending || pending.settled) {
       return;
@@ -2278,32 +2307,33 @@ export function useThreadStream({
     }
     pending.settled = true;
     pendingSendRef.current = null;
-    pending.options?.onSent?.();
-    pending.resolve();
+    try {
+      pending.options?.onSent?.();
+    } catch (error) {
+      console.error(
+        "Failed to retire one-time composer state for an accepted send.",
+        error,
+      );
+    } finally {
+      // Acceptance always resolves the caller, even if its cleanup threw.
+      pending.resolve();
+    }
   }, []);
 
-  const rejectPendingSend = useCallback(
-    (error: unknown) => {
-      const pending = pendingSendRef.current;
-      if (!pending || pending.settled) {
-        return;
-      }
-      pending.settled = true;
-      pendingSendRef.current = null;
-      // A rejected run request can still have passed Gateway admission, which
-      // creates the zero-message thread row. Roll back only a row without a
-      // checkpoint; `discardUnwrittenThread` owns that decision. Detached so a
-      // slow read/delete never delays the send failure the user must see.
-      void discardUnwrittenThread(queryClient, pending.threadId);
-      pending.reject(error);
-    },
-    [queryClient],
-  );
+  const rejectPendingSend = useCallback((error: unknown) => {
+    const pending = pendingSendRef.current;
+    if (!pending || pending.settled) {
+      return;
+    }
+    pending.settled = true;
+    pendingSendRef.current = null;
+    pending.reject(error);
+  }, []);
 
   /**
    * The view moved on before acceptance arrived. Let the caller finish without
-   * retiring its one-time composer state: the abandoned conversation may still
-   * need its draft if the run turns out to have failed.
+   * retiring its one-time composer state yet: if the run is accepted later,
+   * `onSent` still runs from that acceptance.
    */
   const releasePendingSend = useCallback(() => {
     const pending = pendingSendRef.current;
@@ -2312,6 +2342,10 @@ export function useThreadStream({
     }
     pending.settled = true;
     pendingSendRef.current = null;
+    releasedSendRef.current = {
+      threadId: pending.threadId,
+      options: pending.options,
+    };
     pending.resolve();
   }, []);
 
@@ -2345,7 +2379,7 @@ export function useThreadStream({
         startedRef.current = true;
       }
       setOnStreamThreadId(_threadId);
-      acceptPendingSend();
+      acceptPendingSend(_threadId);
     },
     [acceptPendingSend],
   );
@@ -2909,6 +2943,11 @@ export function useThreadStream({
 
   const stopThread = useCallback(async () => {
     settlePendingApproval(false);
+    // Stop can land after `thread.submit` resolved but before the Gateway
+    // acknowledged the run. No acceptance frame will arrive for a turn this
+    // client abandoned, so settle the send here: the composer keeps its text
+    // and a first send restores the welcome layout instead of staying blocked.
+    rejectPendingSend(createStoppedSendError());
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
     const pendingReplay = pendingPreparedReplayRef.current;
@@ -2932,6 +2971,7 @@ export function useThreadStream({
     knownActiveRunId,
     isMock,
     queryClient,
+    rejectPendingSend,
     settlePendingApproval,
     thread,
     threadId,
@@ -3125,6 +3165,11 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      // A new send on this conversation supersedes a released attempt whose
+      // acceptance never arrived: its one-time state is already stale.
+      if (releasedSendRef.current?.threadId === threadId) {
+        releasedSendRef.current = null;
+      }
 
       const text = message.text.trim();
       let pendingSend: PendingSend | null = null;
@@ -4600,58 +4645,6 @@ async function deleteThreadEverywhere(
     if (getHttpStatus(error) !== 404) throw error;
   }
   await deleteLocalThreadData(threadId);
-}
-
-/**
- * Roll back the side effect of a first send whose run was never created.
- *
- * A rejected run request still passes Gateway admission, whose detached
- * metadata task can create the thread row: that is the zero-message
- * `Untitled` session left in the sidebar (upstream #8039). Delete it only when
- * the thread has no checkpoint (`GET .../state` 404). A checkpoint means the
- * row was created deliberately by something else — a project pre-create, a
- * saved goal or a conversation-default model — or a run already wrote state;
- * neither may be rolled back here. Any read/delete failure keeps the row.
- */
-export async function discardUnwrittenThread(
-  queryClient: QueryClient,
-  threadId: string,
-): Promise<boolean> {
-  const apiClient = getAPIClient() as unknown as ThreadDiscardClient;
-  try {
-    await apiClient.threads.getState(threadId);
-    return false;
-  } catch (error) {
-    if (getHttpStatus(error) !== 404) {
-      return false;
-    }
-  }
-
-  try {
-    await deleteThreadEverywhere(apiClient, threadId);
-  } catch (error) {
-    console.warn(`Failed to discard the unwritten thread ${threadId}`, error);
-    return false;
-  }
-
-  queryClient.setQueriesData(
-    { queryKey: ["threads", "search"], exact: false },
-    (oldData: Array<AgentThread> | undefined) =>
-      oldData?.filter((thread) => thread.thread_id !== threadId),
-  );
-  queryClient.setQueriesData(
-    { queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX, exact: false },
-    (oldData: InfiniteThreadsData | undefined) =>
-      filterInfiniteThreadsCache(
-        oldData,
-        (thread) => thread.thread_id !== threadId,
-      ),
-  );
-  void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
-  void queryClient.invalidateQueries({
-    queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-  });
-  return true;
 }
 
 export async function findSidecarThreadIdsForParent(

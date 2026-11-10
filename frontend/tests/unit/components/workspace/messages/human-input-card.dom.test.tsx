@@ -34,6 +34,15 @@ const formRequest: HumanInputRequest = {
   ],
 };
 
+const textRequest: HumanInputRequest = {
+  version: 1,
+  kind: "human_input_request",
+  source: "ask_clarification",
+  request_id: "clarification:call-text",
+  question: "Which report should I summarize?",
+  input_mode: "free_text",
+};
+
 const approvalRequest: HitlApprovalRequest = {
   version: 1,
   kind: "hitl_approval",
@@ -192,6 +201,35 @@ describe("HumanInputCard form validation (DOM)", () => {
         String(message).includes("uncontrolled to controlled"),
       ),
     ).toBe(false);
+  });
+});
+
+describe("HumanInputCard submission failures (DOM)", () => {
+  it("surfaces a localized retryable error when the answer send rejects", async () => {
+    const onSubmit = rs.fn(async () => {
+      throw new Error("HTTP 502");
+    });
+    render(
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <HumanInputCard request={textRequest} onSubmit={onSubmit} />
+      </I18nContext.Provider>,
+    );
+
+    const answer = screen.getByRole<HTMLTextAreaElement>("textbox");
+    fireEvent.change(answer, { target: { value: "The Q3 report" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit" }));
+
+    await waitFor(() =>
+      expect(screen.getByText(enUS.humanInput.submitFailed)).not.toBeNull(),
+    );
+    // The textarea points at the retry message for assistive technology.
+    expect(answer.getAttribute("aria-invalid")).toBe("true");
+    expect(answer.getAttribute("aria-describedby")).not.toBeNull();
+    // The answer stays editable for the retry and the rejection was handled.
+    expect(answer.value).toBe("The Q3 report");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -280,9 +280,21 @@ export function HumanInputCard({
       return;
     }
     setError("");
-    const result = await onSubmit(response);
-    if (result !== false && response.response_kind === "text") {
-      setText("");
+    try {
+      const result = await onSubmit(response);
+      if (result === false) {
+        // The answer never became a turn; keep the input for a retry instead
+        // of reporting it as answered.
+        setError(t.humanInput.submitFailed);
+        return;
+      }
+      if (response.response_kind === "text") {
+        setText("");
+      }
+    } catch {
+      // A rejected send (e.g. a refused run request) must stay retryable: the
+      // card owns the error surface so the rejection never goes unhandled.
+      setError(t.humanInput.submitFailed);
     }
   };
 

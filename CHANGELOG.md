@@ -48,12 +48,13 @@ This section accumulates work toward the **2.3.0** milestone
 ### Fixed
 
 - **chat:** A first message whose run request is rejected no longer loses the
-  draft or leaves a zero-message session behind. The composer keeps the text
-  (and its stored draft survives a reload), the new-chat welcome layout comes
-  back, and the thread created only for that rejected send is deleted when it
-  holds no checkpoint. `thread.submit` alone no longer counts as delivered:
-  the send resolves only once the Gateway accepted the run, so one-time
-  composer state is retired at acceptance instead of at dispatch. ([#8092](https://github.com/bytedance/deer-flow/pull/8092))
+  draft. The composer keeps the text (and its stored draft survives a reload)
+  and the new-chat welcome layout comes back. `thread.submit` alone no longer
+  counts as delivered: the send resolves only once the Gateway accepted the
+  run, so one-time composer state is retired at acceptance instead of at
+  dispatch. The empty session Gateway admission may have created for that
+  rejected send is left in place; identifying it safely needs a backend
+  conditional delete. ([#8092](https://github.com/bytedance/deer-flow/pull/8092))
 
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's

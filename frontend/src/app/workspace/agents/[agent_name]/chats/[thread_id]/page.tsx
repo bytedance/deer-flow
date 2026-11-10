@@ -387,7 +387,9 @@ export default function AgentChatPage() {
       } catch (error) {
         // A first send whose run request was rejected never became a turn
         // (upstream #8039): put the welcome layout back. The hook keeps the
-        // composer's text and draft and discards the zero-message thread.
+        // composer's text and draft. A session that Gateway admission may have
+        // created for that rejected send is left alone; removing it needs a
+        // server-side conditional delete.
         if (submissionEpochRef.current === submissionEpoch && isNewThread) {
           setIsWelcomeMode(true);
         }

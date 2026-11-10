@@ -1548,9 +1548,10 @@ export function InputBox({
         ...(referenceIds.length
           ? { conversationReferences: referenceIds }
           : {}),
-        // Clear one-time state only once the send is genuinely dispatched.
-        // `onSent` never fires for a dropped send or a failed attachment
-        // upload, so a retry keeps its quotes, references and staged files.
+        // Clear one-time state only once the Gateway accepted the run.
+        // `onSent` never fires for a dropped send, a failed attachment upload,
+        // or a rejected run request, so a retry keeps its quotes, references
+        // and staged files.
         onSent: () => {
           if (composerLifetimeRef.current !== sendingLifetime) {
             // The upload finished after the composer moved to another

@@ -112,16 +112,17 @@ async function flushFrames() {
   }
 }
 
-async function renderThreadStream() {
+async function renderThreadStream(initialThreadId = "thread-1") {
   const { useThreadStream } = await import("@/core/threads/hooks");
   const rendered = renderHook(
-    () =>
+    ({ threadId }: { threadId: string }) =>
       useThreadStream({
         context: DEFAULT_LOCAL_SETTINGS.context,
         isMock: false,
-        threadId: "thread-1",
+        threadId,
       }),
     {
+      initialProps: { threadId: initialThreadId },
       wrapper: createWrapper(
         new QueryClient({ defaultOptions: { queries: { retry: false } } }),
       ),
@@ -142,6 +143,7 @@ beforeEach(() => {
 
 afterEach(() => {
   rs.unstubAllGlobals();
+  rs.restoreAllMocks();
 });
 
 async function acceptRun() {
@@ -315,4 +317,87 @@ test("does not retire a second time when an accepted send fails later", async ()
 
   expect(onSent).toHaveBeenCalledTimes(1);
   expect(mocks.events).toEqual(["submit", "onSent"]);
+});
+
+test("retires a released send when the run is accepted after the view moved on", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream();
+  const onSent = rs.fn(() => {
+    mocks.events.push("onSent");
+  });
+
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current.sendMessage(
+      "thread-1",
+      { text: "Hello", files: [] },
+      undefined,
+      { onSent },
+    );
+  });
+  await flushFrames();
+  expect(mocks.events).toEqual(["submit"]);
+
+  // The view switches before acceptance: the caller is released, but the
+  // one-time state is not retired yet because no run was acknowledged.
+  rerender({ threadId: "thread-2" });
+  await flushFrames();
+  await act(async () => {
+    await sendPromise;
+  });
+  expect(onSent).not.toHaveBeenCalled();
+
+  // Acceptance arrives for the abandoned conversation afterwards; its stored
+  // draft and staged files must still be retired, exactly once.
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
+  });
+  expect(onSent).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
+  });
+  expect(onSent).toHaveBeenCalledTimes(1);
+});
+
+test("resolves an accepted send whose onSent throws and reports the failure", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+  const failure = new Error("draft cleanup failed");
+  const onSent = rs.fn(() => {
+    throw failure;
+  });
+  const { result } = await renderThreadStream();
+
+  let settled = false;
+  let sendPromise: Promise<unknown> | undefined;
+  act(() => {
+    sendPromise = result.current
+      .sendMessage("thread-1", { text: "Hello", files: [] }, undefined, {
+        onSent,
+      })
+      .then(() => {
+        settled = true;
+      });
+  });
+  await flushFrames();
+  await acceptRun();
+  await act(async () => {
+    await sendPromise;
+  });
+
+  // The caller must not wait forever on a throwing cleanup, and the failure
+  // must stay visible instead of being swallowed.
+  expect(settled).toBe(true);
+  expect(onSent).toHaveBeenCalledTimes(1);
+  expect(consoleError).toHaveBeenCalledWith(
+    "Failed to retire one-time composer state for an accepted send.",
+    failure,
+  );
 });
