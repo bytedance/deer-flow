@@ -16,6 +16,7 @@ from langgraph.func import task
 from langgraph.types import interrupt
 
 from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.approvals.policy import action_fingerprint, canonical_json, digest, effective_outcome, is_routine_tool, permits_thread_grant, resolve_mode, tool_descriptor
 from deerflow.approvals.reviewer import REVIEW_POLICY_VERSION, review_operation
 from deerflow.runtime.run_origin import origin_kind_of
@@ -73,6 +74,23 @@ class ToolApprovalMiddleware(AgentMiddleware):
 
     async def abefore_model(self, state, runtime):
         self.before_model(state, runtime)
+
+    def after_model(self, state, runtime):
+        last = next((message for message in reversed(state.get("messages", [])) if isinstance(message, AIMessage)), None)
+        if last is None or not last.tool_calls:
+            return None
+        ids = [call.get("id") for call in last.tool_calls]
+        if all(isinstance(call_id, str) and call_id for call_id in ids) and len(set(ids)) == len(ids):
+            return None
+        # Neither an interrupt nor a ToolMessage can safely address these calls.
+        # Drop the whole group, including ordinary calls sharing an approval id,
+        # and synchronize every provider surface before any tool can execute.
+        note = "Approval could not be requested because this tool call has no usable id (missing, empty, or duplicated). The tool was not executed. Do not retry unless the user explicitly asks."
+        content = [*last.content, {"type": "text", "text": note}] if isinstance(last.content, list) else f"{last.content}\n\n{note}" if last.content else note
+        return {"messages": [clone_ai_message_with_tool_calls(last, [], content=content)]}
+
+    async def aafter_model(self, state, runtime):
+        return self.after_model(state, runtime)
 
     async def _prepare(self, request) -> dict:
         context = _context(request)
