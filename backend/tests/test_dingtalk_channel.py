@@ -1231,6 +1231,20 @@ class TestAdaptMarkdownForDingtalk:
         assert "```" not in result
         assert "> plain code" in result
 
+    @pytest.mark.parametrize("lang", ["c#", "c++", "objective-c"])
+    def test_fenced_code_block_language_with_symbols(self, lang):
+        text = f"Before\n```{lang}\nint x = 1;\n```\nMiddle\n```python\nprint(1)\n```\nAfter"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert f"> **{lang}**\n> int x = 1;\n" in result
+        assert "\nMiddle\n" in result
+        assert "> **python**\n> print(1)\n" in result
+
+    def test_inline_triple_backticks_leave_next_block_intact(self):
+        text = "Use ```x``` here\n```python\nprint(1)\n```"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "> **python**\n> print(1)\n" in result
+
     def test_inline_code_to_bold(self):
         text = "Use `pip install` to install"
         result = _adapt_markdown_for_dingtalk(text)
