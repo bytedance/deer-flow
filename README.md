@@ -941,6 +941,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    make dev
    ```
 
+   Local nginx writes temporary files under the checkout's `temp/` directory.
+
 5. **Access**: http://localhost:2026
 
 6. **(Optional) Load sample memory data for local review**: open `Settings > Memory`, click **Import memory**, and select `backend/docs/memory-settings-sample.json`. The browser imports into the signed-in user's memory.
