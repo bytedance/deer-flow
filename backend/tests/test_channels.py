@@ -699,6 +699,23 @@ def _make_async_iterator(items):
 
 
 class TestChannelManager:
+    def test_public_base_url_is_normalized_once(self, tmp_path):
+        from app.channels.manager import ChannelManager
+
+        manager = ChannelManager(
+            bus=MessageBus(),
+            store=JsonChannelStore(path=tmp_path / "store.json"),
+            public_base_url="https://example.com/my%20base/",
+        )
+        assert manager._public_base_url == "https://example.com/my%20base"
+
+        invalid = ChannelManager(
+            bus=MessageBus(),
+            store=JsonChannelStore(path=tmp_path / "invalid-store.json"),
+            public_base_url="https://example.com/?token=secret",
+        )
+        assert invalid._public_base_url is None
+
     def test_get_client_includes_csrf_header_and_cookie(self):
         from app.channels.manager import ChannelManager
 
