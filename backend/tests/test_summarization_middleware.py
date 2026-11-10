@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextvars
+import logging
 import threading
 from types import SimpleNamespace
 from unittest import mock
@@ -1798,6 +1799,24 @@ def test_suffix_trim_counter_does_not_scale_usage_metadata(monkeypatch: pytest.M
     assert unscaled == count_tokens_approximately(messages, chars_per_token=4.0, use_usage_metadata_scaling=False)
 
 
+def test_probe_failure_falls_back_and_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    """A serializer that raises must fall back loudly, not silently (#8090 review).
+
+    Falling back to the parent counter can undercount replayed reasoning, which is
+    the failure #8074 fixed, so an unprobable adapter has to show up in the log.
+    """
+    from deerflow.agents.middlewares.summarization_middleware import _replays_reasoning
+
+    class Broken:
+        def _get_request_payload(self, *_args, **_kwargs):
+            raise RuntimeError("unsupported message shape")
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.agents.middlewares.summarization_middleware"):
+        assert _replays_reasoning(Broken()) is False
+
+    assert any("could not probe" in record.getMessage() for record in caplog.records)
+
+
 def test_reasoning_replay_is_detected_from_the_adapter() -> None:
     """The counter is gated on the adapter's own serializer (#8090 review).
 
@@ -1829,9 +1848,21 @@ def test_display_only_adapter_keeps_history_uncompacted(monkeypatch: pytest.Monk
     from deerflow.models.patched_minimax import PatchedChatMiniMax
 
     minimax = PatchedChatMiniMax(model="MiniMax-M2", api_key="test", base_url="http://127.0.0.1:1")
-    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **_: minimax)
+    summary = MagicMock()
+    summary.with_config.return_value = summary
+    summary.invoke.return_value = SimpleNamespace(text="summary")
+    summary.ainvoke = AsyncMock(return_value=SimpleNamespace(text="summary"))
+
+    def factory(*, name=None, **_kwargs):
+        # The summary model must be a mock: with the real adapter here, a wrong
+        # (compacting) result would fail its summary call, fail open and still
+        # return None — making this test pass without the fix.
+        return summary if name == "summary-model" else minimax
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", factory)
     config = _factory_app_config(
-        ("run-model",),
+        ("run-model", "summary-model"),
+        summary_model_name="summary-model",
         summarization_kwargs={
             "trigger": ContextSize(type="tokens", value=8_000),
             "keep": ContextSize(type="tokens", value=4_000),
@@ -1850,8 +1881,60 @@ def test_display_only_adapter_keeps_history_uncompacted(monkeypatch: pytest.Monk
         messages.append(AIMessage(content=f"answer {index}", id=f"a{index}", additional_kwargs={"reasoning_content": reasoning}))
     messages.append(HumanMessage(content="next question", id="u-next"))
 
+    # The counter reports the provider's real request size, not the reasoning:
+    # 68 tokens here, against 12,068 if the reasoning were charged.
+    counted = middleware.token_counter(messages)
+    assert counted == count_tokens_approximately(messages, use_usage_metadata_scaling=False)
+    assert counted < 1_000
+
     # The serialized request is far under the 8k trigger, so no compaction and no trim.
+    # The summary call is what makes this behavioural: a wrong count would compact and
+    # invoke the summary model instead of returning None.
     assert middleware.before_model({"messages": messages}, _runtime()) is None
+    summary.invoke.assert_not_called()
+    summary.ainvoke.assert_not_called()
+
+
+def test_replaying_adapter_compacts_on_the_same_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirror of the display-only case: a replaying adapter still compacts (#8074).
+
+    The same history that MiniMax leaves intact must exceed the trigger for vLLM,
+    which sends the reasoning back and is therefore charged for it.
+    """
+    from deerflow.models.vllm_provider import VllmChatModel
+
+    vllm = VllmChatModel(model="qwen", api_key="test", base_url="http://127.0.0.1:1")
+    summary = MagicMock()
+    summary.with_config.return_value = summary
+    summary.invoke.return_value = SimpleNamespace(text="summary")
+    summary.ainvoke = AsyncMock(return_value=SimpleNamespace(text="summary"))
+
+    def factory(*, name=None, **_kwargs):
+        return summary if name == "summary-model" else vllm
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", factory)
+    config = _factory_app_config(
+        ("run-model", "summary-model"),
+        summary_model_name="summary-model",
+        summarization_kwargs={
+            "trigger": ContextSize(type="tokens", value=8_000),
+            "keep": ContextSize(type="tokens", value=4_000),
+        },
+    )
+    middleware = create_summarization_middleware(app_config=config, run_model_name="run-model", keep=("messages", 2))
+
+    assert middleware is not None
+    reasoning = "w" * 12_000
+    messages: list = []
+    for index in range(4):
+        messages.append(HumanMessage(content=f"question {index}", id=f"u{index}"))
+        messages.append(AIMessage(content=f"answer {index}", id=f"a{index}", additional_kwargs={"reasoning_content": reasoning}))
+    messages.append(HumanMessage(content="next question", id="u-next"))
+
+    assert middleware.token_counter(messages) > 10_000  # the reasoning is charged once
+    compacted = middleware.before_model({"messages": messages}, _runtime())
+    assert compacted is not None
+    assert len(compacted["messages"]) < len(messages)
 
 
 class _RaisingTextResponse:

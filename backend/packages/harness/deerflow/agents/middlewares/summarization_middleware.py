@@ -130,17 +130,27 @@ def _replays_reasoning(model: Any) -> bool:
     """
     build = getattr(model, "_get_request_payload", None)
     if not callable(build):
+        # Class name only: a model's repr can carry configuration, and this runs on every build.
+        logger.debug("Summarization skips reasoning accounting: %s exposes no _get_request_payload to probe", type(model).__name__)
         return False
     probe = AIMessage(content="probe", additional_kwargs={"reasoning": _REASONING_PROBE, "reasoning_content": _REASONING_PROBE})
     try:
         payload = build([probe])
         return _REASONING_PROBE in repr(payload)
-    except Exception:
+    except Exception as error:
+        # The adapter refused to serialize the probe, so this middleware cannot tell whether it
+        # replays reasoning. Falling back to the parent counter keeps the request valid but may
+        # undercount — the exact failure #8074 fixed — so say it out loud instead of hiding it.
+        logger.warning(
+            "Summarization could not probe %s for replayed reasoning, so that text is not counted and the request may exceed the trigger: %s",
+            type(model).__name__,
+            error,
+        )
         return False
 
 
 def _reasoning_aware_token_counter(model: Any) -> _ReplayedReasoningTokenCounter | None:
-    """Mirror LangChain's model-specific counter plus replayed reasoning, or None.
+    """Add replayed reasoning to the approximate counter, or None when none is replayed.
 
     Returns ``None`` when the model does not replay reasoning, which leaves the
     parent's counter in place and preserves the existing trigger and retention
@@ -148,10 +158,8 @@ def _reasoning_aware_token_counter(model: Any) -> _ReplayedReasoningTokenCounter
     """
     if not _replays_reasoning(model):
         return None
-    # LangChain charges Anthropic content at 3.3 chars/token and everything else
-    # at the generic 4.0; keep that split so only the reasoning changes.
-    chars_per_token = 3.3 if str(getattr(model, "_llm_type", "")).startswith("anthropic-chat") else 4.0
-    return _ReplayedReasoningTokenCounter(chars_per_token=chars_per_token)
+    # The parent charges 4.0 characters per token; keep that so only the reasoning changes.
+    return _ReplayedReasoningTokenCounter()
 
 
 def _document_summary_text(block: object) -> str | None:
