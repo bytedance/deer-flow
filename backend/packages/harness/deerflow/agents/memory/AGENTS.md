@@ -48,6 +48,10 @@ client or the real storage, because the payload shape is the contract.
 - **Emergency snapshots and normal updates stay separate.** Normal updates for one
   conversation coalesce. Snapshots taken before compaction do not, because
   successive compactions remove different messages.
+- **A failed emergency snapshot is retried, a failed normal update is not.**
+  Compaction already removed the snapshot's messages, so no later turn re-feeds
+  them. The queue retries it after 5 s and 30 s and holds that conversation's
+  later snapshots behind it. A scope cancelled mid-flight is not re-queued.
 
 ## DeerMem storage
 
