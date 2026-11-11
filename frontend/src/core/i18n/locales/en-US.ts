@@ -1910,6 +1910,25 @@ export const enUS: Translations = {
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
     approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
       title: "Tool approval required",
       description:
         "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
