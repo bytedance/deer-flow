@@ -32,6 +32,11 @@
   而不是在派发时清理。仅为这次被拒发送而由 Gateway 准入创建的 0 消息会话会保留下来；
   要安全识别并删除它，需要后端提供条件删除。([#8092])
 
+- **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
+  `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
+  （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
+  ([#8126])
+
 - **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
   接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
   行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
@@ -12869,3 +12874,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8092]: https://github.com/bytedance/deer-flow/pull/8092
+
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
