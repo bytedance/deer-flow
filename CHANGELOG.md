@@ -51,6 +51,11 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **setup:** A fresh `make config` / `make setup` no longer copies live
+  provider placeholders such as `JINA_API_KEY=your-jina-api-key` into `.env`.
+  The default keyless Jina Reader sent that placeholder as a bearer token and
+  answered 401 for every `web_fetch`; the template now comments out the nine
+  example keys, with the same behaviour for the other providers. ([#8094])
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -2034,6 +2039,11 @@ This release closes that milestone with **1068 merged pull requests**.
   existing secret and user isolation boundaries are retained. ([#6935])
 ### Fixed
 
+- **setup:** A fresh `make config` / `make setup` no longer copies live
+  provider placeholders such as `JINA_API_KEY=your-jina-api-key` into `.env`.
+  The default keyless Jina Reader sent that placeholder as a bearer token and
+  answered 401 for every `web_fetch`; the template now comments out the nine
+  example keys, with the same behaviour for the other providers. ([#8094])
 - **projects:** Drain the staging discard in `_convert_and_publish` through
   `await_drained`, so repeated cancellation of the reader no longer abandons
   the unlink worker while it still holds single-flight ownership, and route
@@ -11728,6 +11738,11 @@ This release closes that milestone with **772 merged pull requests**.
 
 ### Fixed
 
+- **setup:** A fresh `make config` / `make setup` no longer copies live
+  provider placeholders such as `JINA_API_KEY=your-jina-api-key` into `.env`.
+  The default keyless Jina Reader sent that placeholder as a bearer token and
+  answered 401 for every `web_fetch`; the template now comments out the nine
+  example keys, with the same behaviour for the other providers. ([#8094])
 - **frontend:** Keep the `…` (kebab) menu on project chat rows inside the
   sidebar. In the sidebar's grouped Projects mode the indented nested menus
   kept `SidebarMenu`'s `w-full` while carrying an extra `ml-4`, so they were
@@ -13957,6 +13972,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 
 ### Fixed
 
+- **setup:** A fresh `make config` / `make setup` no longer copies live
+  provider placeholders such as `JINA_API_KEY=your-jina-api-key` into `.env`.
+  The default keyless Jina Reader sent that placeholder as a bearer token and
+  answered 401 for every `web_fetch`; the template now comments out the nine
+  example keys, with the same behaviour for the other providers. ([#8094])
 #### Runtime, gateway & persistence
 - **runtime:** Rollback restore checkpoint now supersedes newer checkpoints.
   ([#2582])
