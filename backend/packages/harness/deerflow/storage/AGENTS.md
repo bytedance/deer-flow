@@ -1,109 +1,62 @@
-### Blob Store (`packages/harness/deerflow/storage/`)
+# Blob store (`deerflow/storage/`)
 
-**What it owns**: a content-addressed store for bytes that must resolve on every
-instance, not just the one that wrote them (issue #4189, item 2). The address is
-the SHA-256 of the content, so writes are idempotent, deduplication is free, and
-a reader can verify what it got back. Contract: `storage/contract.py`
-(`BlobRef`, `BlobStore`, the `BlobStoreError` family, `validate_blob_kind`).
-Operator-facing behaviour and the producer migration plan: `docs/blob-storage.md`.
-Factory: `storage/manager.py`.
+A content-addressed store for bytes that every instance must be able to read, not
+only the instance that wrote them. The address is the SHA-256 of the content.
+Operator behavior, the producer migration plan and the garbage-collection rule:
+[blob storage](../../../../docs/blob-storage.md).
 
-**Disabled by default**: `blob_storage.enabled` is `false`, so an untouched
-deployment behaves exactly as before. Migrated producers call
-`get_blob_store_if_enabled()` and keep their existing local-path code for the
-`None` case; only a caller that genuinely requires the store uses
-`get_blob_store()`, which raises `BlobNotConfiguredError` when it is disabled.
-Both accessors are exported from this package — prefer
-`from deerflow.storage import ...` over reaching into submodules.
-The factory compares the effective backend and backend config before reusing its
-cached store, so hot-reloaded `blob_storage` edits take effect on new accesses.
-Replaced stores stay open for callers that already hold them and are closed by
-`reset_blob_store()`; changing a root requires preserving existing blob refs
-and coordinating deployment instances.
+## Verify
 
-`view_image_tool` is the first migrated producer: it persists validated image
-bytes as `kind="viewed-image"`, checkpoints the JSON-safe ref beside
-`actual_path`, and treats any store initialization or write failure as a failed
-tool call rather than claiming cross-instance durability. `ViewImageMiddleware` accepts a
-ref only when its kind, digest, size and content type agree with the separately
-recorded image metadata; reads are blob-first and retain the existing
-sandbox/host compatibility path as fallback after any store failure. The
-thread artifact GET route also resolves the checkpoint-bound image ref when the
-reader Gateway cannot find the local file; it confines this fallback to the
-authorized thread and exact virtual path and verifies the bytes before serving.
-The blob fallback reuses `require_permission` with `require_existing=True`
-before the off-loop store probe, including trusted internal owners. A disabled
-store skips accessor construction/checkpoint reads; reuse the returned store
-for the blob read. Unexpected failures warn with only the exception type and
-still fall back to 404. Local-file reads keep legacy missing-row access.
-MIME detection runs off-loop even on a cold
-reader. Regression coverage uses the decorated artifact route with a real
-thread store and the strict blocking-I/O suite with an uninitialized MIME DB.
-Other artifact and IM-channel reads still use their existing local-path flow.
+```bash
+cd backend
+python -m pytest tests/test_blob_store.py -q
+make test-blocking-io
+```
 
-`ToolOutputBudgetMiddleware` is a migrated producer for host-externalized
-results. It persists exact UTF-8 bytes as `kind="tool-output"`, checkpoints a
-versioned ref beside the virtual path, and restores the file atomically under
-the current thread outputs before a model can follow that path. The ref's kind,
-content type, digest, size, storage subdirectory, and confined virtual path are
-validated before a store read or host write. A configured-store write failure
-or output above the 64 MiB producer cap falls back inline, capped at 30,000
-characters or a lower configured fallback; non-mounted sandbox externalization
-remains outside this host-blob flow.
+A new backend adds its tests to `tests/test_blob_store.py`, which runs the
+backend-independent scenarios against a temporary root.
 
-**Layout** (local_fs, the default)::
+## Using the store
 
-    <root>/<kind>/<sha256[:2]>/<sha256>          the bytes
-    <root>/<kind>/<sha256[:2]>/<sha256>.json     sidecar metadata
+- **The store is disabled by default.** A producer calls
+  `get_blob_store_if_enabled()` and keeps its local-path code for `None`. Only a
+  caller that cannot work without the store calls `get_blob_store()`.
+- **A store failure is a failed operation, not a silent downgrade.** A producer
+  that could not write does not claim that the content is readable on another
+  instance. A reader tries the blob first and keeps the local path as a
+  fallback.
+- **Validate a checkpointed ref before you read or write with it.** Its kind,
+  digest, size and content type must agree with the metadata that was recorded
+  separately.
+- **A fallback read through an HTTP route stays inside the authorized thread and
+  the exact virtual path**, and verifies the bytes before it serves them.
+- **Changing the root needs a plan.** Existing refs must stay readable, and every
+  instance must change together.
 
-The sidecar holds what the bytes cannot say (`content_type`,
-`writer_thread_id`, `created_at`). It is **not** a reference count and reads must
-not depend on it: losing it cannot make content unreadable.
+## Backends
 
-**Adding a backend** — the memory backends' drop-in contract, folder name ==
-backend name == `blob_storage.backend` value:
+- **The folder name, the backend name and the `blob_storage.backend` value are
+  the same string.** The factory finds a backend by scanning
+  `storage/backends/`, through `STORE_CLASS` in its `__init__.py`.
+- **A backend imports one thing from `deerflow`: the `BlobStore` contract.** It
+  talks to the host through method arguments and its `backend_config` only, so a
+  third-party backend can live outside this tree.
+- **Verify the digest on read.** A store that returns wrong bytes cannot be told
+  from a corrupt checkpoint.
+- **Reject an unusable config, and fail on an unresolvable backend.** A store that
+  starts on a different root or a default backend strands the content that was
+  already written.
+- **Validate `kind` through `validate_blob_kind`.** The kind is a path segment in
+  `local_fs`, so the traversal check lives in one place.
+- **Publish atomically, and accept a concurrent writer.** Two Gateways can put the
+  same content at the same time.
+- **The size limit belongs to the backend, not to the contract.** A producer of
+  large payloads streams or splits them before `put_bytes`.
 
-1. Create `storage/backends/<name>/` with an `__init__.py` that exposes
-   `STORE_CLASS = <YourStore>`; the factory discovers backends by scanning that
-   folder, so no registry edit is needed.
-2. Subclass `BlobStore` and implement `from_config`, `put_bytes`, `get_bytes`;
-   `exists` / `delete` / `close` have working defaults (`delete` raises so a
-   backend that cannot delete says so). Verify the digest on read — a store that
-   silently returns wrong bytes is indistinguishable from a corrupt checkpoint.
-3. Keep the portability rule: a backend talks to the host through the method
-   arguments and its `backend_config` dict only. The single `deerflow` import a
-   backend folder needs is the contract line importing `BlobStore`, so a
-   third-party backend can live outside this tree and be selected with an import
-   path (`module.Class` or `module:Class`, including single-file modules).
-4. Reject an unusable config by raising; a store that silently starts on a
-   different root or backend strands previously written content.
-5. Add the backend's semantics tests to `backend/tests/test_blob_store.py`; the
-   suite runs every backend-agnostic scenario against a temporary root.
+## Sidecar and garbage collection
 
-**Durability rules that reviewers have enforced**, worth keeping intact:
-
-- Validate the `kind` through `validate_blob_kind` instead of re-implementing the
-  grammar; it is also a path segment in `local_fs`, so traversal and separator
-  surprises are ruled out once, at the contract level.
-- Publish atomically and tolerate a concurrent writer: two gateway instances may
-  put the same content at the same time (see `LocalFsBlobStore._publish`, which
-  handles the Windows `os.replace`/`WinError 5` case by recognising that the
-  destination already holds this content).
-- Fail fast on an unresolvable backend: `_resolve_store_class` raises rather than
-  substituting a default, because blobs are persistent state.
-- Reject oversized puts early: `local_fs` enforces `_MAX_BLOB_BYTES` (64 MiB) per
-  put as a backend-level defense-in-depth limit — not part of the `BlobStore`
-  contract, so a different backend sets its own policy, and the
-  externalized-tool-results follow-up must stream or split payloads before
-  `put_bytes`.
-
-**Garbage collection is not this module's job.** A blob row may be referenced by
-several threads once identical content dedupes, so a sweep must establish
-liveness from the durable references (the checkpoint rows that name the blob) and
-never from the sidecar's `writer_thread_id`. The exact rule, and how it composes
-with the checkpoint retention contract (#5255), is stated in
-`docs/blob-storage.md`.
-
-**Entry points**: `packages/harness/deerflow/storage/contract.py`,
-`storage/manager.py`, `storage/backends/local_fs/local_fs_store.py`,
-`config/blob_storage_config.py`; tests in `backend/tests/test_blob_store.py`.
+- **The sidecar is metadata only.** It is not a reference count, and a read must
+  not depend on it.
+- **This module does not collect garbage.** Identical content is shared by several
+  threads, so liveness comes from the checkpoint rows that name the blob, never
+  from the sidecar's `writer_thread_id`.
