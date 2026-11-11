@@ -20,7 +20,7 @@ from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
@@ -245,6 +245,44 @@ def _current_run_messages(messages: list[AnyMessage], run_id: str | None, pre_ex
     return _messages_after_pre_existing_boundary(messages, pre_existing_message_ids)
 
 
+def _delegations_answered_after_resume(messages: list[AnyMessage], window: list[AnyMessage], existing: list[dict]) -> list[dict]:
+    """Settle the earlier run's delegations whose results arrived in this resumed window.
+
+    A resumed run (an approval resume, for example) executes calls an earlier
+    run issued, so the dispatching AIMessage predates the capture window. A
+    result answers only the most recent preceding AIMessage, so only the last
+    pre-window AIMessage can be answered here. Its entries keep the identity
+    the issuing run recorded: they are updated, never re-tagged as this run's
+    delegations, and calls with no recorded entry are left alone.
+    """
+    start = len(messages) - len(window)
+    if not window or start <= 0:
+        return []
+    dispatch_index = next((index for index in range(start - 1, -1, -1) if isinstance(messages[index], AIMessage)), None)
+    if dispatch_index is None:
+        return []
+    # The dispatch's results all precede the next AIMessage.
+    end = next((index for index in range(start, len(messages)) if isinstance(messages[index], AIMessage)), len(messages))
+    turn = messages[dispatch_index:end]
+    window_results = {id(message) for message in window if isinstance(message, ToolMessage)}
+    answered = {occurrence.call_id for occurrence in pair_tool_call_results(turn) if id(occurrence.result) in window_results}
+    if not answered:
+        return []
+    dispatch_id = messages[dispatch_index].id
+    keys = [_delegation_identity(entry) for entry in existing if isinstance(entry, dict)]
+    settled = []
+    for entry in extract_delegations(turn):
+        if entry["id"] not in answered:
+            continue
+        # Find the issuing run's entry: same dispatch, or the same call id of
+        # an entry written before dispatch ids existed.
+        target = next((key for key in reversed(keys) if key[1] == entry["id"] and key[2] in (dispatch_id, None)), None)
+        if target is None or target[0] is None:
+            continue
+        settled.append({**entry, "run_id": target[0]})
+    return settled
+
+
 def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing: list[dict], run_id: str, opening_index: int) -> list[dict]:
     """Mark delegations that an earlier run left in_progress without a result as cancelled.
 
@@ -397,6 +435,8 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         )
         if run_id is not None and opening_index is not None:
             delegations = [*delegations, *_close_delegations_left_by_earlier_runs(state["messages"], existing, run_id, opening_index)]
+        elif run_id is not None:
+            delegations = [*delegations, *_filter_changed_delegations(_delegations_answered_after_resume(state["messages"], messages, existing), existing)]
         if delegations:
             return {"delegations": delegations}
         return None

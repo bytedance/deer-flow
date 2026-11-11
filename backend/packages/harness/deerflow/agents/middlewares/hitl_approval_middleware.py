@@ -97,11 +97,20 @@ def _unambiguous_ids(last: AIMessage, calls: list[dict[str, Any]]) -> bool:
 
 
 def _deny_message(tool_call: Mapping[str, Any], reason: str) -> ToolMessage:
+    additional_kwargs: dict[str, Any] = {}
+    if tool_call["name"] == "task":
+        # A denied delegation never ran. Stamp the subagent status contract so
+        # the delegation ledger settles it as cancelled instead of leaving it
+        # in_progress; the ledger never infers status from result text.
+        from deerflow.subagents.status_contract import make_subagent_additional_kwargs
+
+        additional_kwargs = make_subagent_additional_kwargs("cancelled", error=reason)
     return ToolMessage(
         content=reason,
         tool_call_id=tool_call["id"],
         name=tool_call["name"],
         status="error",
+        additional_kwargs=additional_kwargs,
     )
 
 

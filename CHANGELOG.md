@@ -47,6 +47,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** The delegation ledger now settles a `task` call that
+  `hitl_approval` gates. Before, an approved call ran in the resume run but its
+  result never reached the ledger entry the paused run recorded, so the ledger
+  showed the delegation as running forever and lost its result once compaction
+  dropped the reply. A rejected or denied call stayed `in_progress` the same way
+  and now settles as `cancelled`. The per-run delegation cap and the ledger
+  also count each dispatch once when a provider reuses tool-call ids across
+  responses (`call_0` in every response).
+
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
