@@ -1,75 +1,66 @@
-### Shared TypeSafe client
+# TypeSafe client (`deerflow/typesafe/`)
 
-`typesafe/` is the transport layer for every TypeSafe (Jev) call site: the
-guardrail risk gate (`guardrails/typesafe.py`), and — once enabled — memory
-pre-screening and signal classification. It owns exactly transport and lifecycle,
-authentication, retry and backoff, the deadline budget, response parsing and the
-error taxonomy, UTF-8 wire-size counting, and the request skeleton. Clients live
-for one evaluation: no cache, no connection pool, and `transport_factory` is
-always a factory because httpx closes the transport it was handed.
+The transport layer for every TypeSafe call: the guardrail risk gate, memory
+pre-screening and signal classification. It owns transport, authentication,
+retry, the deadline, response parsing and the error taxonomy.
+`deerflow/openai_decisions/` reaches a second endpoint through this same client.
 
-`aask` builds its HTTPX client off-loop. Cancellation during setup drains
-construction and closes the late client and its transport on the event loop
-before propagating. An expired deadline still maps to `TypeSafeError`.
+## Verify
 
-**It must not gain, and no consumer may move into it:** state content, the
-questions/criteria/thresholds and which way they decide, the failure policy (the
-gate denies on error, the memory paths carry on), cache semantics, or business
-audit. Two consumers with different thresholds are expected to share one request,
-so policy parameters can never reach this layer — they belong to each consumer's
-`release_policy_parameters()`, while `sharing_key()` carries only the credential
-fingerprint, the connection settings, the consumer's input limit and the transport
-identity. Keeping that split is the whole point: contaminating either identity
-either merges requests that must stay apart or breaks assembly fingerprinting.
+```bash
+cd backend
+python -m pytest tests -q -k "typesafe or openai_decisions"
+make test-blocking-io
+```
 
-Two-layer responses are load-bearing. A request-level failure (transport,
-deadline, non-200, missing envelope, unparsable-or-unbounded body) raises
-`TypeSafeError` with a `cause`, and the consumer decides deny / fall back. A
-question-level failure is **data** (`AnswerSet.errors_by_question`), never an
-exception, so one bad answer cannot discard the other valid answers in the same
-response; the tool gate maps its own question's error back to
-`TypeSafeGuardrailError` because it has no verdict without it. The reply is never
-read unbounded and never decoded: the client asks for an identity encoding, refuses
-a body that carries a non-identity `Content-Encoding`, and stops past
-`MAX_RESPONSE_BYTES` (64 KiB, a few hundred bytes is the expected envelope), so an
-endpoint that answers with something other than an answer set cannot be expanded
-into memory or accepted as a verdict. Deep nesting is mapped too — `json.loads`
-raises `RecursionError`, not `ValueError`, and it must not escape this taxonomy.
-The deadline covers the read, not only the headers: the sync path, which cannot
-preempt the read it is blocked in, re-checks the budget before each transport read,
-so a body that drips just under the read timeout cannot hold the caller for the
-whole of `MAX_RESPONSE_BYTES` past `deadline_seconds`.
+## What stays out of this layer
 
-Limits and secrets must not move. `max_state_chars` stays a character count in
-every consumer — `wire_size` reports bytes and replaces no limit, and one CJK
-character is three of them. A credential never reaches a log, an error message, a
-policy identity, a reason message or `repr()` (`TypeSafeConnection` hides both the
-key and its environment-variable name); only `sha256` fingerprints are compared.
-Two rules keep that promise true at the edges: a credential that could not travel
-as a header value (surrounding whitespace, a non-printable character) is refused
-when the connection resolves, and a transport failure is raised without chaining
-the original exception, whose message can contain the request it refused.
-Credential resolution is per *layer* too — the first layer that sets `api_key` or
-`api_key_env` decides it, and inside one layer the literal key wins — so a
-consumer naming an environment variable is never silently switched to another
-layer's key. Likewise `base_url` must be an `http(s)` URL with no query, fragment
-or embedded credentials, checked at construction rather than on every request.
+- **Policy belongs to each consumer**: the questions, criteria and thresholds, the
+  failure policy, caching and audit. Two consumers with different thresholds
+  share one request, so a policy parameter that reaches this layer either merges
+  requests that must stay apart or breaks assembly fingerprinting.
+- **`sharing_key()` carries the credential fingerprint, the connection settings,
+  the input limit and the transport identity.** Policy parameters go in the
+  consumer's `release_policy_parameters()`.
+- **A client lives for one evaluation.** It has no cache and no pool, and
+  `transport_factory` is a factory because httpx closes the transport it was
+  given.
 
-**Dialects.** `deerflow/openai_decisions/` (issue #7005) speaks a second endpoint over this same
-client rather than copying it, because the rules above are security properties and a second copy
-of them can drift unnoticed. Two seams carry a dialect, and they are the only two:
-``TypeSafeClient.provider_label``, which names the service in every request-level message (a
-failure must not tell an operator about a service they did not configure), and
-``TypeSafeConnection.endpoint_path``, which the connection composes into ``url`` so an endpoint
-path belongs to the backend that resolves the connection rather than to the base URL it happens
-to share. The endpoint path is included in ``public_parameters()`` and therefore in both the
-sharing key and public policy identity: different dialects behind one gateway cannot share a
-combined memory request. Matching endpoints may still combine when the other settings match.
-``resolve_connection(provider_label=...)`` also names the configured service in credential
-and model construction errors. ``openai_decisions.client.resolve_decisions_connection`` pairs
-the endpoint and service label, so a
-"Decisions" connection cannot be built pointing at System One. A dialect adds no threshold, no
-rubric and no failure policy: the three adapters override their connection resolution, their
-client and the value the endpoint judges (``input`` text instead of a ``state`` object), and
-inherit the rest.
+## Responses
 
+- **A request-level failure raises `TypeSafeError`, and the consumer decides
+  whether to deny or to continue.** A question-level failure is data in
+  `AnswerSet.errors_by_question`, so one bad answer does not discard the others.
+- **The reply is read with a byte bound and without decoding.** A body with a
+  non-identity `Content-Encoding` is refused. An endpoint that returns something
+  else cannot be expanded into memory or accepted as a verdict.
+- **Deep nesting raises `RecursionError`, not `ValueError`.** Map it into the
+  taxonomy.
+- **The deadline covers the body read**, not only the headers. The sync path
+  checks the budget before each transport read.
+- **Build the HTTPX client off the event loop.** On cancellation during setup,
+  close the late client on the loop before the cancellation propagates.
+
+## Limits and secrets
+
+- **`max_state_chars` counts characters in every consumer.** `wire_size` reports
+  bytes and replaces no limit.
+- **A credential never reaches a log, an error message, a policy identity or
+  `repr()`.** Only SHA-256 fingerprints are compared.
+- **A transport failure is raised without chaining the original exception**, whose
+  message can contain the request.
+- **A credential that cannot travel as a header value is refused** when the
+  connection resolves.
+- **The first config layer that sets `api_key` or `api_key_env` decides the
+  credential.** A consumer that names an environment variable is not switched to
+  another layer's key.
+
+## Dialects
+
+- **A dialect changes two things only**: `TypeSafeClient.provider_label` and
+  `TypeSafeConnection.endpoint_path`. An error message then names the service
+  that the operator configured.
+- **The endpoint path is part of the sharing key and the policy identity**, so two
+  dialects behind one gateway never share a request.
+- **A dialect adds no threshold, no rubric and no failure policy.** A second copy
+  of this client would let the security rules above drift.
