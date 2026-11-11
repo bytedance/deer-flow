@@ -57,6 +57,7 @@ class LoadedExtensions:
     routers: tuple[tuple[str, Any], ...] = ()
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
     knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
+    documentation: tuple[tuple[str, dict], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.

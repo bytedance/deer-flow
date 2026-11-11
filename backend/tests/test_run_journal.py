@@ -1658,6 +1658,29 @@ class TestFinalToolMessageReconciliation:
         assert tool_results[0]["content"]["name"] == "write_file"
 
     @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_a_rejection_for_a_call_adopted_from_the_paused_run(self, journal_setup):
+        """A HITL resume answers calls an earlier Run dispatched.
+
+        The rejection is written in ``after_model`` with no tool callback, so the
+        resume journal only persists it for the calls the paused Run handed over;
+        an earlier result outside that handover stays with its own Run.
+        """
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        j, store = journal_setup
+        earlier_ai = AIMessage(content="", tool_calls=[{"id": "call_old", "name": "bash", "args": {}}])
+        earlier = ToolMessage(content="ran earlier", tool_call_id="call_old", name="bash")
+        paused_ai = AIMessage(content="", tool_calls=[{"id": "call_write", "name": "write_file", "args": {}}])
+        rejected = ToolMessage(content="The tool was not executed.", tool_call_id="call_write", name="write_file", status="error")
+
+        j.adopt_resumed_tool_calls({"call_write": "write_file"})
+        j.on_chain_end({"messages": [earlier_ai, earlier, paused_ai, rejected]}, run_id=uuid4())
+        await j.flush()
+
+        tool_results = [m for m in await store.list_messages("t1") if m["event_type"] == "llm.tool.result"]
+        assert [result["content"]["tool_call_id"] for result in tool_results] == ["call_write"]
+
+    @pytest.mark.anyio
     async def test_root_chain_end_does_not_reconcile_old_result_when_tool_call_id_is_reused(self, journal_setup):
         from langchain_core.messages import AIMessage, ToolMessage
 
