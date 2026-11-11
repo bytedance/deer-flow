@@ -110,7 +110,7 @@ from deerflow.runtime.user_context import get_current_user, reset_current_user, 
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.scheduler.runtime import scheduler_tools_enabled
 from deerflow.scheduler.schedules import validate_timezone
-from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_STATUS_VALUES, SUBAGENT_STOP_REASON_VALUES, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.file_io import await_drained
@@ -738,6 +738,11 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
     can never be matched by the runtime's write-back and would linger until the
     ledger cap evicts it), and the status must be one the runtime produces so a
     caller cannot inject its own steering line into the model-visible ledger.
+    The optional fields the reducer and renderer read as text are validated when
+    present: an unhashable ``run_id`` breaks the reducer's identity key, a
+    non-string ``result_brief`` breaks the renderer's length bound, and an
+    unknown ``stop_reason`` renders guardrail-cap guidance the runtime never
+    stamped.
     """
     if value is None:
         return None
@@ -755,6 +760,13 @@ def _normalize_external_delegations(value: Any, *, location: str) -> list[dict[s
         status = entry.get("status")
         if not isinstance(status, str) or status not in _DELEGATION_STATUSES:
             raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be one of {', '.join(sorted(_DELEGATION_STATUSES))}")
+        for field in ("run_id", "result_brief"):
+            optional_text = entry.get(field)
+            if optional_text is not None and not isinstance(optional_text, str):
+                raise HTTPException(status_code=400, detail=f"{location}[{index}].{field} must be a string or null")
+        stop_reason = entry.get("stop_reason")
+        if stop_reason is not None and (not isinstance(stop_reason, str) or stop_reason not in SUBAGENT_STOP_REASON_VALUES):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].stop_reason must be one of {', '.join(SUBAGENT_STOP_REASON_VALUES)}")
         normalized.append(dict(entry))
     return normalized
 

@@ -739,6 +739,9 @@ def test_normalize_input_strips_delegation_verdict_without_messages():
         [{"id": "", "description": "write report", "subagent_type": "general", "status": "completed"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "steering"}],
         [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": ["completed"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["run-1"]}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "result_brief": 42}],
+        [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "stop_reason": "x"}],
     ],
     ids=[
         "string-channel",
@@ -750,6 +753,9 @@ def test_normalize_input_strips_delegation_verdict_without_messages():
         "empty-id",
         "unknown-status",
         "unhashable-status",
+        "unhashable-run-id",
+        "non-string-result-brief",
+        "unknown-stop-reason",
     ],
 )
 def test_normalize_input_rejects_unusable_delegations_with_400(delegations):
@@ -787,13 +793,34 @@ def test_normalize_input_keeps_usable_delegation_entries():
     assert result["delegations"] == [entry]
 
 
+def test_normalize_input_accepts_valid_optional_delegation_fields():
+    """The runtime-stamped optional text fields stay valid when well-formed."""
+    from app.gateway.services import normalize_input
+
+    entry = {
+        "id": "call-1",
+        "description": "read docs",
+        "subagent_type": "general",
+        "status": "completed",
+        "run_id": "run-1",
+        "result_brief": "read the deployment guide",
+        "stop_reason": "token_capped",
+    }
+
+    assert normalize_input({"delegations": [entry]})["delegations"] == [entry]
+
+
 @pytest.mark.parametrize(
     ("delegations", "detail"),
     [
         ("oops", "values.delegations must be a list of delegation objects"),
         ([{"id": "call-1", "description": "write report", "subagent_type": "general"}], "values.delegations[0].status must be one of"),
+        (
+            [{"id": "call-1", "description": "write report", "subagent_type": "general", "status": "completed", "run_id": ["run-1"]}],
+            "values.delegations[0].run_id must be a string or null",
+        ),
     ],
-    ids=["non-list", "missing-status"],
+    ids=["non-list", "missing-status", "unhashable-run-id"],
 )
 def test_state_values_reject_unusable_delegations_with_400(delegations, detail):
     """The thread-state update path shares the ledger shape boundary."""
