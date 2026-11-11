@@ -55,6 +55,13 @@ This section accumulates work toward the **2.3.0** milestone
   allowing JSON fact bodies to survive save/load and reload.
   ([#7891](https://github.com/bytedance/deer-flow/pull/7891))
 
+- **frontend:** **Share** in a sidebar chat's menu now copies a link to the
+  deployment you are using. On `localhost` and `127.0.0.1`, the default
+  `make dev` and Docker addresses, it copied a link to the hosted demo
+  (`deer-flow-v2.vercel.app`) instead. That link never opened the
+  conversation, and opening it sent the thread id to an outside host.
+  ([#8126])
+
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
@@ -235,6 +242,10 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** Importing a backup without a `facts` array now returns HTTP 422
+  and preserves saved memory. An explicit empty array still clears the selected
+  fact bucket. ([#8131])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
@@ -16295,3 +16306,5 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8131]: https://github.com/bytedance/deer-flow/pull/8131
