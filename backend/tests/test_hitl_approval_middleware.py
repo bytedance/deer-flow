@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -433,3 +434,188 @@ def test_summarize_args_preserves_high_semantic_fields():
     assert "chars omitted" in summary["content"]
     assert summary["content"].startswith("xxxx")
     assert summary["content"].endswith("xxxx")
+
+
+def _visible_text(content):
+    if isinstance(content, str):
+        return content
+    return chr(10).join(block.get("text", "") for block in content if isinstance(block, dict))
+
+
+def _assert_stripped_without_pausing(out):
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    # No result can be paired with an unaddressable call, so the call is removed
+    # instead of answered: nothing may execute and nothing may pause.
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert not any("OK" in _visible_text(message.content) for message in messages)
+    answers = [message for message in messages if isinstance(message, AIMessage)]
+    assert all(not message.tool_calls for message in answers)
+    assert any("no usable id" in _visible_text(message.content) for message in answers)
+
+
+def test_null_tool_call_id_is_denied_instead_of_pausing():
+    """A provider can emit a tool call without an id; pausing would wedge the thread.
+
+    The Gateway resume validator rejects a payload whose ``pending_tool_call_ids``
+    contains a non-string with 422, while a pending pause blocks new runs with
+    409, so an interrupt created here could never be cleared.
+    """
+    calls = [{"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": None}]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)
+
+
+def test_duplicate_tool_call_ids_are_denied_instead_of_pausing():
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_dup"},
+        {"name": "write_file", "args": {"path": "/tmp/b.txt", "content": "b"}, "id": "call_dup"},
+    ]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)
+
+
+def test_empty_tool_call_id_is_denied_instead_of_pausing():
+    calls = [{"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": ""}]
+
+    _, _, out = run_pause(HitlApprovalMiddleware(tool_names={"write_file"}), tool_calls=calls)
+
+    _assert_stripped_without_pausing(out)
+
+
+class _RawPayloadApprovalModel(FakeMessagesListChatModel):
+    """Emit structured tool calls plus the raw OpenAI-style provider payload."""
+
+    calls: list[dict[str, Any]]
+
+    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
+        return self
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+        if any(isinstance(message, ToolMessage) for message in messages):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="final answer"))])
+        raw = [{"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call.get("args", {}))}} for call in self.calls]
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=self.calls, additional_kwargs={"tool_calls": raw}))])
+
+
+def test_stripping_a_shared_id_clears_the_raw_provider_payload_too():
+    """A non-target call sharing the removed id must not keep the removed call serialized.
+
+    ``clone_ai_message_with_tool_calls`` filters ``additional_kwargs["tool_calls"]``
+    and content blocks by id, so a surviving ordinary call with the same id would
+    keep the denied approval calls in the raw provider payload; the next request
+    would advertise calls that have no result.
+    """
+    executed: list[str] = []
+
+    @tool
+    def echo(text: str = "") -> str:
+        """Echo text."""
+        executed.append("echo")
+        return "echoed"
+
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_shared"},
+        {"name": "write_file", "args": {"path": "/tmp/b.txt", "content": "b"}, "id": "call_shared"},
+        {"name": "echo", "args": {"text": "hi"}, "id": "call_shared"},
+    ]
+    model = _RawPayloadApprovalModel(responses=[], calls=calls)
+    agent = create_agent(
+        model,
+        tools=[write_file, echo],
+        middleware=[HitlApprovalMiddleware(tool_names={"write_file"})],
+        checkpointer=InMemorySaver(),
+    )
+
+    out = agent.invoke({"messages": [{"role": "user", "content": "go"}]}, {"configurable": {"thread_id": "shared-raw"}})
+
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert executed == []
+    answer = messages[-1]
+    assert answer.tool_calls == []
+    assert "tool_calls" not in answer.additional_kwargs
+    assert "no usable id" in _visible_text(answer.content)
+
+
+def test_shared_id_with_an_ordinary_call_is_denied_instead_of_pausing():
+    """An id shared with a non-target call makes the approval ambiguous.
+
+    Approving or rejecting the targeted call would also answer the ordinary one
+    by id, so the colliding group is rejected before any pause is created.
+    """
+    executed: list[str] = []
+
+    @tool
+    def echo(text: str = "") -> str:
+        """Echo text."""
+        executed.append("echo")
+        return "echoed"
+
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_shared"},
+        {"name": "echo", "args": {"text": "hi"}, "id": "call_shared"},
+    ]
+    model = _RawPayloadApprovalModel(responses=[], calls=calls)
+    agent = create_agent(
+        model,
+        tools=[write_file, echo],
+        middleware=[HitlApprovalMiddleware(tool_names={"write_file"})],
+        checkpointer=InMemorySaver(),
+    )
+
+    out = agent.invoke({"messages": [{"role": "user", "content": "go"}]}, {"configurable": {"thread_id": "shared-mixed"}})
+
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert executed == []
+    answer = messages[-1]
+    assert answer.tool_calls == []
+    assert "tool_calls" not in answer.additional_kwargs
+    assert "no usable id" in _visible_text(answer.content)
+
+
+def test_deny_path_strips_a_target_sharing_an_id_with_an_ordinary_call():
+    """Denying by result answers a call by id, so a shared id must be stripped.
+
+    ``_deny_all`` routed on ``_addressable`` (uniqueness within the targets), so
+    a target whose id an ordinary call also carried got a deny ``ToolMessage``
+    while the ordinary call stayed serialized. The next request then advertised
+    the id twice with two results, which strict providers reject.
+    """
+    executed: list[str] = []
+
+    @tool
+    def echo(text: str = "") -> str:
+        """Echo text."""
+        executed.append("echo")
+        return "echoed"
+
+    calls = [
+        {"name": "write_file", "args": {"path": "/tmp/a.txt", "content": "a"}, "id": "call_shared"},
+        {"name": "echo", "args": {"text": "hi"}, "id": "call_shared"},
+    ]
+    model = _RawPayloadApprovalModel(responses=[], calls=calls)
+    agent = create_agent(
+        model,
+        tools=[write_file, echo],
+        middleware=[HitlApprovalMiddleware(tool_names={"write_file"}, supports_resume=False)],
+        checkpointer=InMemorySaver(),
+    )
+
+    out = agent.invoke({"messages": [{"role": "user", "content": "go"}]}, {"configurable": {"thread_id": "shared-deny"}})
+
+    assert "__interrupt__" not in out
+    messages = messages_of(out)
+    assert not any(isinstance(message, ToolMessage) for message in messages)
+    assert executed == []
+    answer = messages[-1]
+    assert answer.tool_calls == []
+    assert "tool_calls" not in answer.additional_kwargs
+    assert "cannot collect approval" in _visible_text(answer.content)

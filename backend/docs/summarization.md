@@ -282,6 +282,11 @@ The default LangChain prompt instructs the model to:
 - Uses approximate token counting based on character count
 - For Anthropic models: ~3.3 characters per token
 - For other models: Uses LangChain's default estimation
+- For `VllmChatModel` using Chat Completions: History and token-based retention
+  estimates include the assistant reasoning replayed to vLLM. A non-null `reasoning` field takes
+  precedence over `reasoning_content`, including when it is empty. This applies
+  to both automatic and manual compaction. The estimate is approximate and
+  leaves the summary prompt and its trimming budget unchanged.
 - Can be customized with a custom `token_counter` function
 
 ### Message Preservation

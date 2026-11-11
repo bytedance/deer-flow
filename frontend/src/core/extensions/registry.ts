@@ -5,6 +5,7 @@ import {
   FileJsonIcon,
   FileTextIcon,
   PuzzleIcon,
+  UsersIcon,
   type LucideIcon,
 } from "lucide-react";
 
@@ -17,6 +18,7 @@ import type { FrontendContribution, FrontendExtension } from "./contracts";
 export function extensionIcon(name?: string): LucideIcon {
   const icons: Record<string, LucideIcon> = {
     bell: BellIcon,
+    users: UsersIcon,
     bookmark: BookmarkIcon,
     download: DownloadIcon,
     "file-json": FileJsonIcon,

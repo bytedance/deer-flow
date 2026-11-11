@@ -26,6 +26,23 @@
 
 ### 修复
 
+- **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
+  `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
+  （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
+  ([#8126])
+
+- **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
+  接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
+  行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
+  现在仅当该 Worker 仍持有活跃运行的有效租约时，才将证据合并到行元数据
+  （`RunStore.merge_owned_metadata()`），否则在执行前停止该运行。启用心跳的自定义
+  `RunStore` 实现必须实现该方法。([#8046])
+  
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
+
 - **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
   `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
@@ -52,6 +69,12 @@
   的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
   把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
   `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
   
 - **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
   此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
@@ -91,6 +114,10 @@
   `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
   `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
   id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
+
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
 
 - **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
   不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
@@ -12837,3 +12864,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
