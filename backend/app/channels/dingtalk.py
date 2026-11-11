@@ -115,7 +115,7 @@ def _extract_text_from_rich_text(rich_text_list: list) -> str:
 _FENCED_CODE_BLOCK_RE = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 _HORIZONTAL_RULE_RE = re.compile(r"^-{3,}$", re.MULTILINE)
-_TABLE_SEPARATOR_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)
+_TABLE_SEPARATOR_RE = re.compile(r"^\|[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|$", re.MULTILINE)
 
 
 def _split_markdown_table_row(row: str) -> list[str]:
