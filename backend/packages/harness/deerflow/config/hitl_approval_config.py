@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator
+
+from deerflow.config._boolean_guards import reject_boolean
 
 
 class HitlApprovalConfig(BaseModel):
@@ -29,6 +31,17 @@ class HitlApprovalConfig(BaseModel):
         ge=0,
         description="Maximum matching tool calls included in one approval batch; 0 disables the count limit",
     )
+
+    @field_validator("max_actions", mode="before")
+    @classmethod
+    def _reject_boolean_max_actions(cls, value: object, info: ValidationInfo) -> object:
+        """A boolean here is a typo, not a count: ``false`` would coerce to 0.
+
+        ``max_actions: false`` silently disables the per-batch count limit, and
+        ``true`` silently caps a batch at one action — both pass ``ge=0``, so
+        nothing else catches the coercion.
+        """
+        return reject_boolean(value, info, kind="an integer")
 
     @field_validator("tools")
     @classmethod
