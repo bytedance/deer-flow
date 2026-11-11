@@ -84,6 +84,187 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
     assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+        "Use a causal model to analyze these sales figures",
+        "Use an econometric model to forecast next month's revenue",
+        "Use a linear model to analyze these sales figures",
+        "Use the transformer model to encode the text",
+        "Use a version v2 regression model to analyze these sales figures",
+        "Use a model trained by Claude to analyze these sales figures",
+        "Use data to design the database schema",
+    ],
+)
+@pytest.mark.parametrize("models", [[DS, OPUS], [model("data-chat", "Data Chat"), model("claude", "Claude")], []])
+def test_descriptions_of_a_model_are_task_text(text, models):
+    result = resolve_model_control(text, models)
+    assert result["status"] == "none"
+    assert result["query"] == ""
+    assert result["task_offset"] == 0
+
+
+@pytest.mark.parametrize(
+    "text,scope",
+    [
+        ("Use the Claude Opus model for this turn: summarize this report", "turn"),
+        ("Use my Claude Opus model for this task: summarize this report", "turn"),
+        ("From now on use the Claude Opus model", "conversation"),
+    ],
+)
+def test_explicit_names_behind_a_determiner_keep_the_selection_flow(text, scope):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "unavailable"
+    assert result["scope"] == scope
+
+
+WRAPPERS = (
+    "Use the {s} model for this turn: summarize this report",
+    "Use my {s} model for this task: summarize this report",
+    "Use the latest {s} model for this turn: summarize this report",
+    "From now on use the {s} model",
+    "Use the {s} model to summarize this report",
+)
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["ds-flash-1017", "DeepSeek v4.1 Flash 1017", "ds v4.1 f", "ds flash", "opus", "Claude Opus"],
+)
+@pytest.mark.parametrize("wrapper", WRAPPERS)
+def test_a_configured_name_is_never_dismissed_as_task_text(spelling, wrapper):
+    """Every configured spelling, in every wrapper, must still reach the selector."""
+    result = resolve_model_control(wrapper.format(s=spelling), [DS, OPUS])
+    assert result["status"] != "none"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the Claude model for this turn: summarize this report",
+        "Use the Qwen model for this turn: summarize this report",
+    ],
+)
+def test_explicit_scoped_model_requests_still_ask_when_unavailable(text):
+    assert resolve_model_control(text, [DS])["status"] == "unavailable"
+
+
+def test_names_from_any_catalog_are_recognised():
+    """The list is whatever the host configures, not a fixed set of vendors."""
+    other = [model("qwen-max", "通义千问 Max", ["qwen"]), model("kimi-k2", "Kimi K2")]
+    assert resolve_model_control("From now on use the Qwen model", other)["status"] == "unavailable"
+    assert resolve_model_control("Use my Kimi K2 model for this task: x", other)["scope"] == "turn"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use Gemini model for this turn: analyze these sales figures",
+        "Use model chat-default for this turn: analyze these sales figures",
+        "Use gpt-5 v2 model for this turn: analyze these sales figures",
+    ],
+)
+def test_unmatched_model_names_still_ask_for_a_configured_name(text):
+    assert resolve_model_control(text, [DS, OPUS])["status"] == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use Gemini model to analyze these sales figures",
+        "Use model chat-default to analyze these sales figures",
+        "Use gpt-5 v2 model to analyze these sales figures",
+        "Use the DeepSeek model to summarize this report",
+    ],
+)
+def test_unscoped_use_does_not_guess_unconfigured_names_or_brand_fragments(text):
+    assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
+
+
+@pytest.mark.parametrize("field", ["name", "model", "display_name", "aliases"])
+def test_generic_use_matches_a_complete_catalog_spelling(field):
+    configured = model("host-config", "Host Display")
+    setattr(configured, field, ["Research Model"] if field == "aliases" else "Research Model")
+    text = "Please use the Research Model model to summarize this report"
+    initial = resolve_model_control(text, [configured])
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    assert initial["candidates"] == [{"name": configured.name, "label": configured.display_name}]
+    chosen = resolve_model_control(text, [configured], scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == configured.name
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+@pytest.mark.parametrize("field", ["name", "model", "display_name", "aliases"])
+def test_generic_use_matches_a_catalog_spelling_after_a_determiner(field):
+    configured = model("host-config", "Host Display")
+    setattr(configured, field, ["Research Model"] if field == "aliases" else "Research Model")
+    text = "Use the Research Model to summarize this report"
+    initial = resolve_model_control(text, [configured])
+    assert initial["status"] == "ambiguous"
+    assert initial["scope"] is None
+    assert initial["candidates"] == [{"name": configured.name, "label": configured.display_name}]
+    chosen = resolve_model_control(text, [configured], scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == configured.name
+    assert text[chosen["task_offset"] :] == "summarize this report"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use the data model to analyze these sales figures",
+        "Use my forecasting model to analyze these sales figures",
+    ],
+)
+def test_determiner_does_not_turn_a_generic_phrase_into_a_selection(text):
+    configured = model("data-chat", "Data Chat", ["research model"])
+    assert resolve_model_control(text, [configured])["status"] == "none"
+
+
+@pytest.mark.parametrize("name", ["the-model", "a model", "my model", "latest model", "model"])
+def test_generic_use_preserves_literal_catalog_names_before_unwrapping(name):
+    configured = model(name, name)
+    result = resolve_model_control(f"Use {name} to summarize this report", [configured])
+    assert result["status"] == "ambiguous"
+    assert result["candidates"][0]["name"] == name
+    wrapped = resolve_model_control(f"Use the {name} model to summarize this report", [configured])
+    assert wrapped["status"] == "ambiguous"
+    assert wrapped["candidates"][0]["name"] == name
+
+
+def test_generic_use_allows_case_and_whitespace_but_not_version_or_token_prefixes():
+    configured = model("host-config", "Research 4.10", ["Research 4.1"])
+    result = resolve_model_control("  USE THE Research   4.1 MODEL TO summarize this report", [configured], scope="turn")
+    assert result["status"] == "resolved"
+    assert result["model_name"] == configured.name
+    assert resolve_model_control("Use Research 4 to summarize this report", [configured])["status"] == "none"
+    assert resolve_model_control("Use Research 4.1 to summarize this report", [model("host-config", "Research 4.10")])["status"] == "none"
+
+
+def test_generic_use_does_not_merge_punctuation_distinct_config_names():
+    configured = model("data-chat", "Data Chat")
+    assert resolve_model_control("Use data/chat to analyze this report", [configured])["status"] == "none"
+
+
+def test_generic_use_preserves_alias_collisions_and_revalidates_a_scope_choice():
+    models = [model("first", "First", ["research"]), model("second", "Second", ["research"])]
+    text = "Use research to summarize this report"
+    initial = resolve_model_control(text, models, scope="turn")
+    assert initial["status"] == "ambiguous"
+    assert {candidate["name"] for candidate in initial["candidates"]} == {"first", "second"}
+    assert resolve_model_control(text, [], scope="turn")["status"] == "unavailable"
+    assert resolve_model_control(text, [], model_name="first", scope="turn")["status"] == "unavailable"
+    chosen = resolve_model_control(text, models, model_name="second", scope="turn")
+    assert chosen["status"] == "resolved"
+    assert chosen["model_name"] == "second"
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"
