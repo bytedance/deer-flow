@@ -9,6 +9,8 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
@@ -93,82 +95,61 @@ export const enUS: Translations = {
     catalogHint:
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
+    detail: {
+      guide: "Read the guide",
+      gettingStarted: "Get started",
+      requirements: "Before you start",
+      loaded: "Loaded",
+      loadedHint:
+        "This extension is loaded. Follow the usage instructions to get started.",
+      tools: "Registered tools",
+      pages: "Workspace pages",
+      management: "Usage & management",
+      readyHint:
+        "Your administrator has enabled this extension. It is ready to use.",
+      disabledHint:
+        "This extension is disabled. Ask your administrator to enable it.",
+      failedHint:
+        "The extension page could not load. Refresh extensions to try again.",
+      noPageHint:
+        "This extension has no standalone page. Check the guide for how to use it in conversations or tasks.",
+      guideHint:
+        "Read the guide to explore what this extension adds to DeerFlow and how to use it.",
+      technicalDetails: "Technical details",
+      package: "Package",
+      namespace: "Extension ID",
+      refresh: "Refresh extensions",
+      refreshHint:
+        "Refresh the page after your administrator updates an extension.",
+    },
     catalog: {
-      workflows: {
-        title: "Script workflows",
-        description:
-          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
-      },
-      reportSections: {
-        title: "Sectioned long-form writing",
-        description:
-          "Write long reports section by section and assemble them into a downloadable Markdown document.",
-      },
-      agentTeams: {
-        title: "Agent teams",
-        description:
-          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
-      },
-      bookmarks: {
-        title: "Bookmarks",
-        description:
-          "Save useful answers and find and organize your own bookmarks on a dedicated page.",
-      },
-      context: {
-        title: "Context pruning",
-        description:
-          "Shorten older read-only tool results while preserving recent messages and native summaries.",
-      },
-      classify: {
-        title: "Text classification",
-        description:
-          "Label a list of texts with supplied categories using the deployment-configured classification service.",
-      },
-      screening: {
-        title: "Content risk warnings",
-        description:
-          "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
-      },
-      example: {
-        title: "Extension development example",
-        description:
-          "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
-      },
-      retrieval: {
-        title: "Local retrieval example",
-        description:
-          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
-      },
-      lightrag: {
-        title: "LightRAG",
-        description:
-          "Retrieve documents and entity relations from LightRAG with shared source citations.",
-      },
-      knowledgePlatform: {
-        title: "Knowledge spaces and connections",
-        description:
-          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
-      },
-      knowledgeCenter: {
-        title: "Knowledge center",
-        description:
-          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
-      },
-      knowledgeManagement: {
-        title: "Knowledge ingestion and processing",
-        description:
-          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
-      },
-      weknora: {
-        title: "WeKnora knowledge retrieval",
-        description:
-          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
-      },
-      knowledge: {
-        title: "Knowledge scope example",
-        description:
-          "Search sample documents within selected knowledge bases or files and inspect source citations.",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      context: bundledCopy("deerflow-extension-jev-context", "en-US"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
+      workflows: bundledCopy("deerflow-extension-workflows", "en-US"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "en-US",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "en-US"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "en-US"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "en-US",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "en-US",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
+      example: bundledCopy("deerflow-extension-example", "en-US"),
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
