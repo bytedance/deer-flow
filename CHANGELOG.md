@@ -47,6 +47,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **subagents:** Concurrent creates for the same managed-subagent name in shared
+  file storage now preserve the winning definition and return HTTP 409 to the
+  losing request instead of reporting two successes and overwriting one definition.
+
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
