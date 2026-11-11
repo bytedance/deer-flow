@@ -19,6 +19,8 @@ to the constructed backend and require backend recreation to change.
 
 This directory owns memory capture, storage, retrieval, prompt injection, and model-driven memory tools.
 
+DeerMem retains short context-dependent replies for extraction. This may increase batch size and LLM use; do not restore regex-based acknowledgement filtering.
+
 Honcho search rejects non-object, non-null `metadata` at the HTTP boundary:
 apply the read policy to the whole result, with value-free diagnostics.
 
@@ -248,6 +250,10 @@ to `--user-id` (default `default`); `threads/` go to their `threads_meta` owner.
 DeerMem selects persistent SQLite FTS5 by default.
 An empty value selects the substring fallback.
 
+FTS5 scores all SQL-filtered matches before selecting composite `top_k`.
+Do not pre-limit by BM25 alone. A streaming heap bounds retained Python
+rows, not SQLite ranking work.
+
 The SQLite index is rebuildable derived data below `retrieval_index_path`
 (empty = `{storage_path}/.retrieval`; relative resolves against `storage_path`;
 `paths.retrieval_index_directory` is the one resolver). Instances sharing
@@ -258,6 +264,8 @@ multi-instance deployment leaves it inside `storage_path`.
 Chinese tokenization uses `jieba` only with the `memory-zh` extra.
 Malformed facts are logged and skipped during rebuild.
 A fatal rebuild failure keeps lazy retry active.
+Index startup recreates files only for SQLite CORRUPT/NOTADB codes; operational
+failures select substring fallback without deleting the existing index.
 
 Storage sends adapter updates after it releases durable locks.
 Adapter failures mark the scope dirty.
@@ -320,10 +328,10 @@ All automatic, manual, tool, and import paths use `deermem/core/eviction.py`.
 `hybrid-v1` is opt-in and uses confidence, confirmation freshness, and access heat.
 Shadow mode records disagreement while enforcing confidence-only selection.
 
-Only deterministic message processing can confirm a fact.
-The updater's `factsToReinforce` output supplies only the fact binding.
-The deterministic gate matches a human message in the last six filtered batch messages.
-It does not require a separate signal-to-fact match.
+Extraction never increments confirmation counters or updates `lastConfirmedAt` from lexical/model hints; require fact-bound human evidence. Preserve existing/manual values. When `lastConfirmedAt` is absent, hybrid confirmation freshness and staleness review fall back to `createdAt`; repeated conversational mentions do not refresh either timestamp.
+The extraction prompt keeps the legacy factsToReinforce field empty and assigns
+no confidence floor to correction phrases. Context determines category,
+confidence and the number of supported focus themes.
 Search increments access heat only for facts it returns.
 Prompt injection and `get_context()` do not increment access heat.
 
@@ -621,12 +629,7 @@ off must load rather than fail the reload and leave the previous judge running.
   skip that batch's maintenance review). Note the shipped default
   `staleness_review_enabled: true` therefore makes the pre-screen inert until an
   operator turns it off; that is the intended conservative Phase 1 policy.
-- Model hints are **additive**: the hint text takes the union of deterministic
-  signals and model labels, but the reinforcement evidence gate reads the
-  **deterministic set only**, so a model verdict can never write a confirmation.
-  A model hint may veto a pre-screen skip (only `prescreen enforce` ×
-  `classifier hints`); it can never cause one. Weakening hints only add text —
-  they never drive deletion or demotion.
+- Model and lexical signal hints never establish intent or authorize a confirmation. They only add a generic reminder to inspect full context; a hint may veto a pre-screen skip but cannot cause one. Weakening hints never drive deletion or demotion.
 - **Online `hints` is a separate gate from the pre-screen evaluation below.** The
   signal-classification design §6 requires its own independently human-reviewed
   dataset, a pre-registered δ with per-stratum sample sizes for
@@ -635,18 +638,14 @@ off must load rather than fail the reload and leave the previous judge running.
   dataset, so passing its gates approves `enforce` only; `hints` stays off or
   `shadow` until the §6 evidence exists.
 - `mutations_accepted` is counted at the real apply sites (accepted new facts,
-  accepted removals, accepted confirmations, accepted consolidations) and is the
+  accepted removals and accepted consolidations) and is the
   definition of "worth remembering": a batch whose only effect was a summary
   rewrite counts zero, so a skip that dropped it is not a missed memory. A new
   fact counts only if it survives capacity enforcement (and any consolidation
   that consumes it as a source); a near-duplicate merge counts only when it
   actually raised the target's confidence (a no-op restatement changes nothing)
   and the target survives (matched by id, or by identity for legacy id-less
-  facts); a removal or reinforcement counts only for an
-  id that actually existed — a proposal that passes its gate but changes no
-  persistent fact must not register as a lost memory. Scoring runs against the
-  scrubbed fact set (upload-event facts are dropped on the way to persistence), so
-  a proposal the scrub removes is not counted either. The counter is published
+  facts); a removal counts only for an id that actually existed. Extraction distinguishes transient thread uploads from durable user preferences by context, not by deleting sentences containing upload words. The counter is published
   only after persistence succeeds: a failed apply (rejected commit, storage
   error) omits it, so the evaluation censors that record as a missing sample
   rather than reading it as a lost memory.

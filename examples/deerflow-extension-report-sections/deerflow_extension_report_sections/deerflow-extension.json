@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "community.report-sections",
+  "locales": {
+    "zh-CN": {
+      "title": "分段长文写作",
+      "description": "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+      "usage": [
+        {
+          "title": "在对话里提出写作任务",
+          "description": "告诉 Agent 报告主题、目标读者和章节要求，并要求使用分段长文写作工具。"
+        },
+        {
+          "title": "先定大纲，再逐章完成",
+          "description": "让 Agent 先保存大纲，再逐章撰写和保存。需要修改时，在同一对话中指出要修改的章节。"
+        },
+        {
+          "title": "汇总并下载",
+          "description": "全部章节完成后，让 Agent 合并报告；在对话的文件成果中下载 Markdown 文档。"
+        }
+      ]
+    },
+    "en-US": {
+      "title": "Sectioned long-form writing",
+      "description": "Write long reports section by section and assemble them into a downloadable Markdown document.",
+      "usage": [
+        {
+          "title": "Describe the report in chat",
+          "description": "Tell the Agent the topic, audience and chapter requirements, and ask it to use the sectioned writing tool."
+        },
+        {
+          "title": "Outline, then write each chapter",
+          "description": "Ask the Agent to save an outline, then write and save chapters one at a time. Request chapter revisions in the same conversation."
+        },
+        {
+          "title": "Assemble and download",
+          "description": "Ask the Agent to assemble the finished chapters, then download the Markdown document from the conversation artifacts."
+        }
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-report-sections#readme"
+}

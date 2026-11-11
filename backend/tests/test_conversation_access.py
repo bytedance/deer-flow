@@ -215,7 +215,7 @@ def test_missing_transcript_is_reported_without_checkpoint_reconstruction():
 
 
 def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
-    from test_gateway_services import _make_start_run_persistence_context
+    from test_gateway_services import _make_start_run_persistence_context, _seed_generic_resume_checkpoint
 
     from app.gateway import services
     from deerflow.config.app_config import reset_app_config, set_app_config
@@ -245,6 +245,7 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         second = await services.start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": 'Quoted text: "read source"'}]}), "later", request)
         await second.task
         assert captured[1]["ctx"].conversation_reader is None
+        await _seed_generic_resume_checkpoint(request.app.state.checkpointer, "resume")
         resumed = await services.start_run(RunCreateRequest(command={"resume": "source"}), "resume", request)
         await resumed.task
         assert captured[2]["ctx"].conversation_reader is None

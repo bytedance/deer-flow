@@ -1304,8 +1304,8 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -2077,6 +2077,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
@@ -2252,6 +2253,52 @@ Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
 Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
+
+
+## HITL Tool Approval
+
+`hitl_approval` pauses high-risk tool calls for human approval before execution.
+It is disabled by default; enabling it without a tool list changes nothing.
+
+```yaml
+hitl_approval:
+  enabled: true
+  tools: [write_file, str_replace, bash]
+  non_interactive: deny  # deny | allow
+  max_actions: 32  # 0 disables the approval-batch count limit
+```
+
+- `enabled`: master switch. `false` leaves all behavior unchanged.
+- `tools`: host-owned high-risk list edited by the operator. Unknown names log
+  a warning at assembly (a typo would otherwise silently disable approval).
+- `non_interactive`: behavior for IM channels, GitHub runs, scheduled tasks,
+  and other non-interactive entry points. `deny` rejects the call with an
+  error ToolMessage; `allow` executes it directly. Subagents and runtimes
+  assembled without resume support always reject matching calls regardless of
+  this setting.
+- `max_actions`: maximum matching tool calls in one approval batch. Batches
+  above the limit are rejected without executing any call; `0` disables this
+  count limit. The approval payload size limit still applies.
+
+Approval is **not** authorization. `read_before_write`, guardrails, and sandbox
+authorization still apply after approval — "approve to try executing", not
+"approve to guarantee execution". Approval requires a resume-capable entry:
+the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
+follow `non_interactive`; subagents and runtimes without resume support always
+fail closed.
+
+Argument summaries are display-only. Fields other than `path`, `command`, `url`,
+`old_str`, and `new_str` are truncated when they exceed the display budget; the
+summary includes a `chars omitted` marker. Approving executes the original,
+complete arguments, including content hidden by that marker. The payload-size
+limit bounds the approval summary, not the tool arguments.
+
+Pending approvals do not expire. While the thread remains paused at the current
+checkpoint, its approval stays resumable and blocks new runs on that thread,
+including scheduled runs, until every action is approved or rejected. Operators
+must resolve stale approvals explicitly. Disabling HITL while paused still
+allows the all-reject response as a safe escape hatch; other configuration
+changes fail closed.
 
 
 ## Best Practices
