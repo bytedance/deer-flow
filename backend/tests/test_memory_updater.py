@@ -2078,3 +2078,20 @@ def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path) 
 
         with pytest.raises(ValueError, match="Duplicate fact id"):
             updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
+
+
+def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) -> None:
+    """Capacity selection runs before the storage guard and can drop one of two
+    same-id entries, hiding the duplicate - validation must happen first
+    (Copilot review on #8153)."""
+    config = DeerMemConfig(storage_path=str(tmp_path / "over-capacity"), retrieval_adapter="", max_facts=10)
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage)
+
+    facts = [_fact(f"distinct {i}", f"fact_{i}") for i in range(9)]
+    facts.append(_fact("first copy", "fact_dup", revision=1))
+    facts.append(_fact("second copy", "fact_dup", revision=1))
+    assert len(facts) > 10  # over capacity
+
+    with pytest.raises(ValueError, match="Duplicate fact id"):
+        updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")

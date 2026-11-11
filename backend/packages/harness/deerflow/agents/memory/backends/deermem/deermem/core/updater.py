@@ -1008,6 +1008,15 @@ class MemoryUpdater:
             for fact in incoming_facts:
                 fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
                 fact["confidence"] = _coerce_source_confidence(fact)
+            # Duplicate detection must happen before capacity selection: the
+            # policy can drop one of two same-id entries, hiding the duplicate
+            # from the storage-level guard and making the import outcome depend
+            # on entry order (Copilot review on #8153).
+            incoming_ids_seen: set[str] = set()
+            for fact in incoming_facts:
+                if fact["id"] in incoming_ids_seen:
+                    raise ValueError(f"Duplicate fact id {fact['id']!r} in import")
+                incoming_ids_seen.add(fact["id"])
             incoming_facts, capacity_decision, shadow_decision = self._select_for_capacity(
                 incoming_facts,
                 agent_name=agent_name,
