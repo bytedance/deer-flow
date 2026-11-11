@@ -1,12 +1,14 @@
 import { createUniqueIdAllocator } from "./identifiers.js";
 
 /** Literal matches across styled runs, with no HTML insertion. */
-export function highlightText(root, query) {
+export const MAX_SEARCH_MATCHES = 2000;
+
+export function highlightText(root, query, limit = MAX_SEARCH_MATCHES) {
   root
     .querySelectorAll("mark[data-office-match]")
     .forEach((mark) => mark.replaceWith(...mark.childNodes));
   root.normalize();
-  if (!query.trim()) return [];
+  if (!query.trim() || limit <= 0) return [];
   const groups = [];
   const blocks = [
     ...root.querySelectorAll("p,td,th,li,h1,h2,h3,h4,h5,h6"),
@@ -14,6 +16,7 @@ export function highlightText(root, query) {
   if (!blocks.length) blocks.push(root);
   const pattern = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   for (const block of blocks) {
+    if (groups.length >= limit) break;
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
       acceptNode: (node) =>
         node.parentElement.closest("style,script")
@@ -27,7 +30,11 @@ export function highlightText(root, query) {
       nodes.push({ node, start: text.length });
       text += node.textContent;
     }
-    const matches = [...text.matchAll(new RegExp(pattern, "giu"))];
+    const matches = [];
+    for (const match of text.matchAll(new RegExp(pattern, "giu"))) {
+      matches.push(match);
+      if (matches.length >= limit - groups.length) break;
+    }
     const local = matches.map(() => []);
     for (const { node: textNode, start } of nodes) {
       const content = textNode.textContent,
@@ -125,7 +132,7 @@ export async function prepareWordOutline(zip) {
     );
     const end = xml.createElementNS(paragraph.namespaceURI, "w:bookmarkEnd");
     end.setAttributeNS(paragraph.namespaceURI, "w:id", bookmarkId);
-    paragraph.append(end);
+    paragraph.appendChild(end);
     outline.push({ id, title, level });
   }
   zip.file("word/document.xml", new XMLSerializer().serializeToString(xml));

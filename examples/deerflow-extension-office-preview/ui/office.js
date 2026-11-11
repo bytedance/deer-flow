@@ -1,4 +1,7 @@
-import { highlightText, prepareWordOutline } from "./search.js";
+import { highlightText, MAX_SEARCH_MATCHES } from "./search.js";
+import { prepareOffice } from "./worker-client.js";
+import { workbookViews } from "./workbook-view.js";
+import { wordView } from "./word-view.js";
 
 const styles = `
 :host{display:block;height:100%;min-width:0}*{box-sizing:border-box}.office{height:100%;display:flex;flex-direction:column;font:13px system-ui,sans-serif;color:var(--foreground);background:var(--background)}
@@ -36,25 +39,18 @@ export async function mountOffice(root, context) {
     element("div", "empty", tr("Preparing preview…", "正在准备预览…")),
   );
   root.replaceChildren(style, shell);
-  const bytes = await context.readFile();
+  const kind = context.filename.split(".").pop().toLowerCase();
+  const prepared = await prepareOffice(
+    await context.readFile(),
+    kind,
+    context.signal,
+  );
+  context.signal.throwIfAborted();
   const saved = context.getReadingState?.();
   const reading = saved?.version === 1 ? saved : {};
   context.signal.throwIfAborted();
-  // Bound inflated OOXML payloads before any renderer allocates page/cell DOM.
-  const { default: JSZip } = await import("jszip");
-  const zip = await JSZip.loadAsync(bytes);
-  let inflated = 0;
-  const entries = Object.values(zip.files);
-  if (entries.length > 4000) throw new Error("Too many archive members");
-  for (const entry of entries) {
-    inflated += entry._data?.uncompressedSize ?? 0;
-    if (inflated > 100 * 1024 * 1024)
-      throw new Error("Expanded document too large");
-  }
-  context.signal.throwIfAborted();
   shell.replaceChildren();
   const bar = element("div", "bar");
-  const kind = context.filename.split(".").pop().toLowerCase();
   bar.append(
     element(
       "strong",
@@ -137,6 +133,7 @@ export async function mountOffice(root, context) {
   const find = element("div", "find");
   const query = element("input");
   query.type = "search";
+  query.disabled = true;
   query.setAttribute("aria-label", tr("Find in file", "在文件中查找"));
   query.placeholder = tr("Find in file…", "在文件中查找…");
   const matchCount = element("span", "muted");
@@ -159,6 +156,10 @@ export async function mountOffice(root, context) {
             "Search slide text; text inside images, charts and embedded objects is excluded.",
             "搜索幻灯片文字，不含图片、图表和嵌入对象内的文字。",
           ),
+  );
+  scope.textContent += tr(
+    " Shows up to 2,000 matches.",
+    " 最多显示 2,000 处匹配。",
   );
   let matches = [],
     current = -1;
@@ -188,7 +189,9 @@ export async function mountOffice(root, context) {
           ? matches.length - 1
           : 0
         : (current + delta + matches.length) % matches.length;
-    matches[current]();
+    Promise.resolve(matches[current]()).catch(() => {
+      if (!context.signal.aborted) context.onError();
+    });
     matchCount.textContent = `${current + 1} / ${matches.length}`;
     save();
   };
@@ -247,25 +250,7 @@ export async function mountOffice(root, context) {
   );
 
   if (kind === "xlsx") {
-    const { default: ExcelJS } = await import("exceljs");
-    const workbook = new ExcelJS.Workbook();
-    // ExcelJS reconciles drawing parts even when worksheet drawing nodes are
-    // ignored, and chart-only drawings (e.g. openpyxl output) can crash it.
-    // This reader displays cells, so omit drawings from a temporary ZIP copy.
-    // Keep worksheet relationships for tables/hyperlinks and original downloads.
-    const hasDrawings = entries.some((entry) =>
-      entry.name.startsWith("xl/drawings/"),
-    );
-    if (hasDrawings) zip.remove("xl/drawings");
-    await workbook.xlsx.load(
-      hasDrawings ? await zip.generateAsync({ type: "arraybuffer" }) : bytes,
-      {
-        // Table data is already in sheetData; table metadata can also contain
-        // absolute relationship targets ExcelJS does not resolve correctly.
-        ignoreNodes: ["drawing", "picture", "extLst", "tableParts"],
-      },
-    );
-    context.signal.throwIfAborted();
+    const sheets = workbookViews(prepared.sheets);
     const tools = element("div", "cell-tools");
     const jump = element("form");
     const address = element("input");
@@ -312,9 +297,6 @@ export async function mountOffice(root, context) {
     jump.append(address, jumpButton);
     tools.append(jump, formula, copy, status);
     shell.insertBefore(tools, body);
-    const sheets = workbook.worksheets.filter(
-      (sheet) => sheet.state === "visible",
-    );
     const tablist = element("div", "slides-nav");
     tablist.setAttribute("role", "tablist");
     tablist.setAttribute("aria-label", tr("Worksheets", "工作表"));
@@ -323,17 +305,27 @@ export async function mountOffice(root, context) {
     let active;
     const paintSearch = () => {
       const groups = new Map();
+      let remaining = MAX_SEARCH_MATCHES;
       const value = query.value.trim();
       const pattern = value
         ? new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu")
         : null;
       for (const td of paper.querySelectorAll("td")) {
-        if (td.querySelector("mark[data-office-match]") || pattern?.test(td.textContent))
-          groups.set(td.dataset.address, highlightText(td, value));
+        if (
+          td.querySelector("mark[data-office-match]") ||
+          pattern?.test(td.textContent)
+        ) {
+          const highlights = highlightText(td, value, remaining);
+          remaining -= highlights.length;
+          groups.set(td.dataset.address, highlights);
+        }
       }
       return groups;
     };
-    const renderSheet = (sheet) => {
+    let sheetRevision = 0;
+    const renderSheet = async (sheet) => {
+      const revision = ++sheetRevision;
+      context.signal.throwIfAborted();
       if (active)
         state.set(active.id, {
           scroll: [canvas.scrollLeft, canvas.scrollTop],
@@ -375,7 +367,14 @@ export async function mountOffice(root, context) {
       head.append(headers);
       table.append(head);
       const tableBody = element("tbody");
+      table.append(tableBody);
+      if (rows && cols) paper.append(table);
       for (let r = 1; r <= rows; r++) {
+        if (r % 16 === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          context.signal.throwIfAborted();
+          if (revision !== sheetRevision) return;
+        }
         const row = sheet.getRow(r);
         if (row.hidden) continue;
         const trNode = element("tr");
@@ -387,7 +386,8 @@ export async function mountOffice(root, context) {
           const td = element("td", "", cell.text);
           let rowEnd = r,
             colEnd = c;
-          for (const merge of Object.values(sheet._merges ?? {})) {
+          const merge = sheet._merges[`${r}:${c}`];
+          if (merge) {
             const m = merge.model;
             if (m.top === r && m.left === c) {
               rowEnd = Math.min(m.bottom, rows);
@@ -442,9 +442,7 @@ export async function mountOffice(root, context) {
         }
         tableBody.append(trNode);
       }
-      table.append(tableBody);
-      if (rows && cols) paper.append(table);
-      else
+      if (!rows || !cols)
         paper.append(
           element(
             "div",
@@ -478,13 +476,18 @@ export async function mountOffice(root, context) {
       save();
     };
     for (const sheet of sheets) {
-      const tab = button(sheet.name, sheet.name, () => renderSheet(sheet));
+      const tab = button(sheet.name, sheet.name, () => {
+        renderSheet(sheet).catch((error) => {
+          if (!context.signal.aborted && error.name !== "AbortError")
+            context.onError();
+        });
+      });
       tab.setAttribute("role", "tab");
       tab.dataset.sheet = String(sheet.id);
       tablist.append(tab);
     }
     if (sheets.length)
-      renderSheet(
+      await renderSheet(
         sheets.find((sheet) => sheet.id === reading.sheet) ?? sheets[0],
       );
     else
@@ -520,7 +523,7 @@ export async function mountOffice(root, context) {
           value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
           "giu",
         );
-        for (const sheet of sheets) {
+        searchCells: for (const sheet of sheets) {
           for (let row = 1; row <= Math.min(sheet.rowCount, 500); row++) {
             if (sheet.getRow(row).hidden) continue;
             for (let col = 1; col <= Math.min(sheet.columnCount, 50); col++) {
@@ -528,17 +531,21 @@ export async function mountOffice(root, context) {
               const cell = sheet.getCell(row, col);
               if (cell.isMerged && cell.master.address !== cell.address)
                 continue;
-              const count = [...cell.text.matchAll(pattern)].length;
-              for (let index = 0; index < count; index++)
-                items.push(() => {
-                  if (active !== sheet) renderSheet(sheet);
+              let index = 0;
+              for (const _match of cell.text.matchAll(pattern)) {
+                if (items.length >= MAX_SEARCH_MATCHES) break searchCells;
+                const occurrence = index++;
+                items.push(async () => {
+                  if (active !== sheet) await renderSheet(sheet);
+                  if (context.signal.aborted || active !== sheet) return;
                   const groups = paintSearch().get(cell.address);
                   const td = paper.querySelector(
                     `td[data-address="${cell.address}"]`,
                   );
                   td?.selectCell();
-                  reveal(groups ?? [], index);
+                  reveal(groups ?? [], occurrence);
                 });
+              }
             }
           }
         }
@@ -631,21 +638,29 @@ export async function mountOffice(root, context) {
       }
     });
   } else if (kind === "docx") {
-    const { renderAsync } = await import("docx-preview");
-    const headings = await prepareWordOutline(zip);
-    await renderAsync(
-      await zip.generateAsync({ type: "arraybuffer" }),
-      paper,
-      paper,
-      {
+    const { renderDocument } = await import("docx-preview");
+    const headings = prepared.headings;
+    const view = wordView(prepared);
+    disposals.push(() => view.dispose());
+    const release = () => view.dispose();
+    context.signal.addEventListener("abort", release, { once: true });
+    disposals.push(() => context.signal.removeEventListener("abort", release));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    context.signal.throwIfAborted();
+    try {
+      await renderDocument(view.document, paper, paper, {
         inWrapper: true,
         breakPages: true,
         ignoreWidth: false,
         ignoreHeight: false,
         renderAltChunks: false,
-        useBase64URL: true,
-      },
-    );
+        useBase64URL: false,
+        ignoreFonts: true,
+      });
+    } catch (error) {
+      view.dispose();
+      throw error;
+    }
     context.signal.throwIfAborted();
     paper
       .querySelectorAll("a")
@@ -739,56 +754,7 @@ export async function mountOffice(root, context) {
     });
     fitWidth();
   } else {
-    const { pptxToHtml } = await import("@jvmr/pptx-to-html");
-    // The converter reads run properties but omits paragraph defaults. Materialize
-    // only missing run properties in the preview copy (never the downloaded file).
-    let normalized = false;
-    for (const entry of entries.filter((entry) =>
-      /^ppt\/slides\/slide\d+\.xml$/.test(entry.name),
-    )) {
-      context.signal.throwIfAborted();
-      const xml = new DOMParser().parseFromString(
-        await entry.async("string"),
-        "application/xml",
-      );
-      let changed = false;
-      for (const paragraph of xml.getElementsByTagNameNS("*", "p")) {
-        const defaults = [...paragraph.children]
-          .find((node) => node.localName === "pPr")
-          ?.getElementsByTagNameNS("*", "defRPr")[0];
-        if (!defaults) continue;
-        for (const run of [...paragraph.children].filter(
-          (node) => node.localName === "r",
-        )) {
-          let properties = [...run.children].find(
-            (node) => node.localName === "rPr",
-          );
-          if (!properties) {
-            properties = xml.createElementNS(defaults.namespaceURI, "a:rPr");
-            run.prepend(properties);
-          }
-          for (const attr of defaults.attributes)
-            if (!properties.hasAttribute(attr.name))
-              properties.setAttribute(attr.name, attr.value);
-          for (const child of defaults.children)
-            if (
-              ![...properties.children].some(
-                (node) => node.localName === child.localName,
-              )
-            )
-              properties.append(child.cloneNode(true));
-          changed = true;
-        }
-      }
-      if (changed) {
-        zip.file(entry.name, new XMLSerializer().serializeToString(xml));
-        normalized = true;
-      }
-    }
-    const slides = await pptxToHtml(
-      normalized ? await zip.generateAsync({ type: "arraybuffer" }) : bytes,
-      { width: 960, height: 540, scaleToFit: true },
-    );
+    const slides = prepared.slides;
     context.signal.throwIfAborted();
     const frame = element("iframe", "slide");
     frame.width = "960";
@@ -919,11 +885,16 @@ export async function mountOffice(root, context) {
     search = () => {
       const items = [];
       slides.forEach((slide, index) => {
+        if (items.length >= MAX_SEARCH_MATCHES) return;
         const doc = new DOMParser().parseFromString(
           stripActive(slide),
           "text/html",
         );
-        const groups = highlightText(doc.body, query.value.trim());
+        const groups = highlightText(
+          doc.body,
+          query.value.trim(),
+          MAX_SEARCH_MATCHES - items.length,
+        );
         groups.forEach((_, match) => items.push(() => go(index, match)));
       });
       updateMatches(items);
@@ -970,6 +941,7 @@ export async function mountOffice(root, context) {
   if (Array.isArray(reading.scroll) && reading.scroll.every(Number.isFinite))
     canvas.scrollTo(reading.scroll[0], reading.scroll[1]);
   ready = true;
+  query.disabled = false;
   save();
   const observer = new ResizeObserver(() => {
     if (fitting && !context.signal.aborted) fitWidth();

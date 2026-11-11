@@ -451,4 +451,4 @@ and attachment buttons share the picker.
 Settings → Models obtains provider form metadata from the admin-only backend `/api/managed-models/providers`; do not copy endpoints, protocols or adapter maps into the UI. New models need only provider, API key and arbitrary model ID, with server-generated stable names. Custom endpoint fields and legacy edits stay supported. Provider/endpoint changes clear test results and saved-key reuse; omitted keys retain only the same connection. Capability overrides belong in Advanced settings. Successful saves/toggles invalidate both managed-model queries and MODELS_QUERY_KEY so existing chat/Agent selectors refresh. Keep locale text and administrator/static-mode restrictions aligned.
 
 File attachments use typed session errors, preserving per-file causes independently
-of display text. Preview and upload ownership: [file preview ownership](docs/file-preview-ownership.md).
+of display text. Preview and upload ownership, Office worker budgets and resource regressions: [file preview ownership](docs/file-preview-ownership.md).

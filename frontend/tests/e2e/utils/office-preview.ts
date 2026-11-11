@@ -30,15 +30,21 @@ export async function mockOfficePreview(page: Page | BrowserContext) {
       ],
     }),
   );
-  await page.route("**/api/plugins/office-preview/assets/**", async (route) => {
-    const filename = new URL(route.request().url()).pathname.slice(
-      prefix.length,
-    );
-    if (!manifest.files.includes(filename))
-      return route.fulfill({ status: 404 });
-    return route.fulfill({
-      contentType: "text/javascript",
-      body: await readFile(path.join(officePackage, filename)),
-    });
-  });
+  // Worker requests are owned by the context, rather than a Page route.
+  const assets = "context" in page ? page.context() : page;
+  await assets.route(
+    "**/api/plugins/office-preview/assets/**",
+    async (route) => {
+      const filename = new URL(route.request().url()).pathname.slice(
+        prefix.length,
+      );
+      if (!manifest.files.includes(filename))
+        return route.fulfill({ status: 404 });
+      return route.fulfill({
+        contentType: "text/javascript",
+        headers: { "Content-Security-Policy": "sandbox" },
+        body: await readFile(path.join(officePackage, filename)),
+      });
+    },
+  );
 }

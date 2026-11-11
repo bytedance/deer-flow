@@ -1752,6 +1752,11 @@ by a catalog entry alone. Legacy binary Office files retain the download fallbac
 Previews also work over LAN HTTP. Reading preferences use the file's ETag when
 available, with an optional content hash on secure origins; without either, files
 still open but reading preferences are not restored.
+Office preview validates ZIP metadata before loading, prepares files in a cancellable
+Worker with a deadline, and limits XML/layout and image sizes before DOM rendering.
+Word XML/model preparation and PPT conversion run in that Worker; the UI receives
+bounded models with images and document relationships preserved.
+Files exceeding preview budgets retain the original-file download fallback.
 
 ### Token usage dashboard
 

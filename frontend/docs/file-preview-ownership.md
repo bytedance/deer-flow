@@ -22,3 +22,26 @@ state restoration. Account changes clear it; obsolete mounts cannot write. Built
 text and media readers retain precedence. The standalone page always owns auth/query
 providers, including public Showcase targets; public access is unknown auth, not a
 confirmed logout. Office preview works on HTTP LAN origins without Web Crypto.
+
+The Office extension owns a worker per mount. Disposal and the host abort signal
+terminate it; a 15-second deadline also terminates stalled preparation. ZIP central
+and local records are checked before JSZip, followed by sequential inflation with
+actual byte limits, streaming XML complexity checks and raster dimension checks.
+ExcelJS, Word XML/model preparation and PPT conversion stay in the worker; the UI
+never reopens an Office archive or parses its XML. Word uses docx-preview's public
+parseAsync/renderDocument split; a package-local resource facade resolves headers,
+footers and validated images, deduplicates Blob URLs and revokes them on abort/dispose.
+The pinned XML adapter implements only the namespace/tag selectors the converter
+uses and fails explicitly on unsupported selector syntax. Parser output is checked
+before structured clone (32 MiB / 100,000 model objects, 512 KiB per PPT slide).
+Table rows yield between batches; revision checks fence overlapping sheet changes.
+Word's remaining native DOM construction has bounded complexity and no hard timeout;
+embedded fonts and alt chunks stay disabled. Worker conversion phases are metadata
+only and must never settle a pending request; tests freeze each conversion phase
+and verify actual termination on cancellation/deadline.
+Build the worker as a self-contained module: Gateway asset CSP sandbox creates an
+opaque worker origin, so further authenticated module fetches are unavailable.
+`office-preview-resources.spec.ts` exercises real packaged assets with that CSP,
+samples process-tree RSS/UI heap, records long tasks/heartbeat gaps, and tests
+adversarial XML, stalled conversion phases, cancellation, no main-thread XML parsing,
+successful rendering and image/header/footer preservation with Blob URL cleanup.
