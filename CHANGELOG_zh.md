@@ -26,6 +26,10 @@
 
 ### 修复
 
+- **记忆：** 压缩前保存的记忆快照在抽取失败后现在会重试：5 秒后一次，30 秒后再一次。此前第一次
+  失败就被丢弃，而压缩已经把这些消息从对话中移除，其中的事实因此无法进入记忆。同一对话后续的
+  快照会排在重试之后，清空记忆会取消重试。([#8156])
+
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
   `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
   （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
@@ -12868,3 +12872,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8156]: https://github.com/bytedance/deer-flow/pull/8156

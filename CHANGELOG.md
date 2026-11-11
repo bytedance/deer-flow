@@ -56,6 +56,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **memory:** A memory snapshot taken before compaction is now retried when
+  its extraction fails, after 5 s and again after 30 s. It used to be dropped
+  on the first failure. Compaction had already removed those messages from the
+  conversation, so their facts never reached memory. Later snapshots of the
+  same conversation wait behind the retry, and clearing memory cancels it.
+  ([#8156])
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -16309,3 +16316,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8156]: https://github.com/bytedance/deer-flow/pull/8156
