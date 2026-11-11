@@ -2022,6 +2022,11 @@ This release closes that milestone with **1068 merged pull requests**.
   because a run is still going keeps the draft and says so. ([#6556])
 ### Changed
 
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0 and the SQLite saver 3.1.2, excluding versions that could reorder
+  parallel writes during replay. The ordering and Postgres pagination contracts
+  now fail on regression instead of skipping.
+
 - **tool output:** Superseded `write_file` payload elision is now opt-in. The
   optimization remains available, but the default keeps model-bound history
   append-only so later file actions do not invalidate provider prompt-cache

@@ -1477,6 +1477,10 @@
   原因。([#6556])
 ### 变更
 
+- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0 和
+  SQLite saver 3.1.2，排除会在重放时重排并行写入的版本。顺序和 Postgres
+  分页契约在回归时现在会直接失败，不再跳过。
+
 - **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
   使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
   前缀失效。([#7319](https://github.com/bytedance/deer-flow/issues/7319))
