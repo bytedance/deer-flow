@@ -92,6 +92,7 @@ export interface AgentThreadContext extends Record<string, unknown> {
   is_plan_mode: boolean;
   subagent_enabled: boolean;
   reasoning_effort?: ReasoningEffortValue;
+  tool_approval_mode?: "ask" | "auto" | "full";
   agent_name?: string;
   client?: AgentClientContext;
 }

@@ -54,6 +54,8 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_INVALID_END_LINE,
     READ_FILE_INVALID_RANGE,
     READ_FILE_INVALID_START_LINE,
+    READ_FILE_NO_CONTENT_RESULTS,
+    READ_FILE_NUMBERED_MAX_LINES,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
 )
@@ -3402,6 +3404,9 @@ def read_file_tool(
 ) -> str | ToolMessage:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
 
+    Ranges returning 1-40 lines from uploads or workspace files show source line labels when the labeled output fits the budget.
+    For edits or writes, copy only the text after the first ' | ' on each labeled line.
+
     Args:
         path: The **absolute** path to the file to read.
         description: Optional short explanation of this read shown in the UI.
@@ -3446,6 +3451,26 @@ def read_file_tool(
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
         output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        call_id = getattr(runtime, "tool_call_id", None)
+        # Leave in-band provider failures and range markers recognizable to consumers.
+        if (
+            use_line_range
+            and isinstance(call_id, str)
+            and call_id
+            and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
+            and output == content
+            and not content.startswith("Error:")
+            and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
+        ):
+            # A provider's ranged result joins source lines, including a trailing empty line.
+            lines = content.split("\n")
+            if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
+                rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
+                # Write tools accept literal 'N | ' text. A verbatim write-back of
+                # this display can therefore persist the labels as file content.
+                numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
+                if max_chars == 0 or len(numbered) <= max_chars:
+                    output = numbered
         return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
     except SandboxError as e:
         return _read_file_failure(runtime, f"Error: {e}", e)
