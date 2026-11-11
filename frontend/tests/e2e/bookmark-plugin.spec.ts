@@ -4,11 +4,27 @@ import { mkdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { extensionCatalog } from "../../src/core/extensions/catalog";
 
 import { mockLangGraphAPI, MOCK_THREAD_ID } from "./utils/mock-api";
+
+// Found by computed style, so renaming the scroller's classes cannot break it.
+function capabilityCenterScroller(page: Page) {
+  return page
+    .getByRole("heading", { name: "Capability Center" })
+    .evaluateHandle((node) => {
+      let scroller = node.parentElement;
+      while (scroller && getComputedStyle(scroller).overflowY !== "auto") {
+        scroller = scroller.parentElement;
+      }
+      if (!scroller) {
+        throw new Error("Capability Center has no scrolling ancestor");
+      }
+      return scroller;
+    });
+}
 
 let gateway: ChildProcess;
 let gatewayURL: string;
@@ -214,10 +230,14 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
     await expect(
       page.getByRole("searchbox", { name: "Search bookmarks" }),
     ).toHaveCount(0);
+    await expect(page.getByText("Enabled", { exact: true })).toBeVisible();
     await expect(
-      page.getByText("Enabled · Managed by your administrator", {
-        exact: true,
-      }),
+      page.getByText(
+        "Your administrator has enabled this extension. It is ready to use.",
+        {
+          exact: true,
+        },
+      ),
     ).toBeVisible();
     await libraryLink.click();
     await expect(page).toHaveURL(new RegExp(`${libraryURL}$`));
@@ -459,8 +479,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(management).toHaveCount(1);
     await expect(management).toContainText(
       zh
-        ? "需要安装和配置，不包含管理页面。"
-        : "Requires installation and configuration; no management page is included.",
+        ? "导入文件、网址和文本，并查询、管理文档处理任务。"
+        : "Import files, URLs and text, then inspect and manage document processing.",
     );
     const lightrag = page.getByRole("article").filter({ hasText: "LightRAG" });
     await expect(lightrag).toHaveCount(1);
@@ -476,8 +496,8 @@ for (const locale of ["en-US", "zh-CN"]) {
     await expect(weknora).toHaveCount(1);
     await expect(weknora).toContainText(
       zh
-        ? "需要管理员安装并配置访问权限。"
-        : "Requires administrator installation and access configuration.",
+        ? "检索 WeKnora 知识库和所选文档，并展示来源引用。"
+        : "Search WeKnora knowledge bases and selected documents with source citations.",
     );
     await weknora
       .getByRole("button", {
@@ -487,9 +507,17 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-weknora#readme$/);
+    await expect(
+      page.getByRole("heading", {
+        name: zh ? "使用前准备" : "Before you start",
+      }),
+    ).toBeVisible();
+    await expect(page.getByRole("article")).toContainText(
+      zh ? "管理员已配置连接" : "administrator-configured connection",
+    );
     await page
       .getByRole("button", {
         name: zh ? "全部扩展" : "All extensions",
@@ -517,7 +545,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
     await page
@@ -531,9 +559,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     });
     await expect(workflow).toHaveCount(1);
     await expect(workflow).toContainText(
-      zh
-        ? "不支持重启回放或硬金额预算"
-        : "No restart replay or hard monetary budget",
+      zh ? "按保留版本确认成果" : "review retained output versions",
     );
     await workflow
       .getByRole("button", {
@@ -543,7 +569,7 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-workflows#readme$/);
     await page
@@ -579,8 +605,23 @@ for (const locale of ["en-US", "zh-CN"]) {
       ),
     ).toBeVisible();
     await expect(
+      page.getByText("deerflow-extension-agent-teams", { exact: true }),
+    ).not.toBeVisible();
+    await page
+      .getByText(zh ? "技术信息" : "Technical details", { exact: true })
+      .click();
+    await expect(
+      page.getByText("deerflow-extension-agent-teams", { exact: true }),
+    ).toBeVisible();
+    // The search only filters the directory, so the detail view drops it.
+    await expect(
+      page.getByPlaceholder(
+        zh ? "按名称或用途搜索扩展" : "Search extensions by name or purpose",
+      ),
+    ).toHaveCount(0);
+    await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-agent-teams#readme$/);
     await page
@@ -609,7 +650,7 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-retrieval#readme$/);
     await page
@@ -632,7 +673,7 @@ for (const locale of ["en-US", "zh-CN"]) {
       .click();
     await expect(
       page.getByRole("link", {
-        name: zh ? "查看安装说明" : "Installation guide",
+        name: zh ? "阅读使用说明" : "Read the guide",
       }),
     ).toHaveAttribute("href", /deerflow-extension-jev-screening#readme$/);
     await page
@@ -662,6 +703,108 @@ for (const locale of ["en-US", "zh-CN"]) {
     ).toBeVisible();
   });
 }
+
+test("extension detail fits a narrow viewport with its tab in view", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.goto(
+    "/workspace/capabilities?tab=extensions&extension=community.agent-teams",
+  );
+  await expect(
+    page.getByRole("heading", { name: "Agent teams", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("tab", { name: "Extensions", exact: true }),
+  ).toBeInViewport({ ratio: 1 });
+  await page.getByText("Technical details", { exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh extensions", exact: true }),
+  ).toBeVisible();
+  const scroller = await capabilityCenterScroller(page);
+  expect(
+    await scroller.evaluate((node) => node.scrollWidth - node.clientWidth),
+  ).toBe(0);
+  const note = page
+    .getByRole("complementary")
+    .filter({ hasText: "Usage & management" });
+  const noteBox = await note.boundingBox();
+  const textBox = await note
+    .getByText(
+      "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
+      { exact: true },
+    )
+    .boundingBox();
+  expect(textBox!.x + textBox!.width).toBeLessThanOrEqual(
+    noteBox!.x + noteBox!.width,
+  );
+});
+
+test("capability tabs realign on resize without moving the page", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.setViewportSize({ width: 375, height: 480 });
+  await page.goto("/workspace/capabilities?tab=extensions");
+  const extensions = page.getByRole("tab", {
+    name: "Extensions",
+    exact: true,
+  });
+  const strip = page
+    .getByRole("tablist")
+    .filter({ has: extensions })
+    .locator("..");
+  const clippedBy = async (tab: Locator) => {
+    const [tabBox, stripBox] = await Promise.all([
+      tab.boundingBox(),
+      strip.boundingBox(),
+    ]);
+    return Math.max(
+      stripBox!.x - tabBox!.x,
+      tabBox!.x + tabBox!.width - stripBox!.x - stripBox!.width,
+    );
+  };
+  await expect(extensions).toBeInViewport({ ratio: 1 });
+
+  // A manual swipe stays where the user left it.
+  await strip.evaluate((node) => {
+    node.scrollLeft = 0;
+  });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  expect(await strip.evaluate((node) => node.scrollLeft)).toBe(0);
+  expect(await clippedBy(extensions)).toBeGreaterThan(0);
+
+  // Scrolled past the strip, a resize realigns it and leaves the page alone.
+  const scroller = await capabilityCenterScroller(page);
+  await scroller.evaluate((node) => {
+    node.scrollTop = node.scrollHeight;
+  });
+  await expect(strip).not.toBeInViewport();
+  await page.setViewportSize({ width: 320, height: 480 });
+  await expect.poll(() => clippedBy(extensions)).toBeLessThan(1);
+  await expect(strip).not.toBeInViewport();
+
+  // The same holds for a tab clipped on the other side.
+  await page.setViewportSize({ width: 375, height: 480 });
+  await page.goto("/workspace/capabilities?tab=plugins");
+  const tools = page.getByRole("tab", {
+    name: "Tools & integrations",
+    exact: true,
+  });
+  await expect(tools).toBeInViewport({ ratio: 1 });
+  await strip.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth;
+  });
+  expect(await clippedBy(tools)).toBeGreaterThan(0);
+  await page.setViewportSize({ width: 320, height: 480 });
+  await expect.poll(() => clippedBy(tools)).toBeLessThan(1);
+});
 
 test("unregistered plugin pages stay unavailable", async ({ page }) => {
   mockLangGraphAPI(page);
@@ -706,6 +849,6 @@ test("catalog remains discoverable when runtime discovery fails", async ({
     page.getByRole("heading", { name: "Knowledge scope example", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("link", { name: "Installation guide" }),
+    page.getByRole("link", { name: "Read the guide", exact: true }),
   ).toHaveAttribute("href", /deerflow-extension-knowledge#readme$/);
 });

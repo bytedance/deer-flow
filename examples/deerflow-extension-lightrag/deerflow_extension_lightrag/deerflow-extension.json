@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "catalog/lightrag",
+  "locales": {
+    "zh-CN": {
+      "title": "LightRAG",
+      "description": "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+      "usage": [
+        {
+          "title": "在对话中提出检索问题",
+          "description": "让 Agent 查询已连接知识库中的文档、实体或实体间关系。"
+        },
+        {
+          "title": "查看来源依据",
+          "description": "检查结果的文档引用；实体关系只展示服务返回的边，有文档片段支持时才提供对应引用。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置 LightRAG 连接、凭据、用户绑定和相关检索工具。"
+      ]
+    },
+    "en-US": {
+      "title": "LightRAG",
+      "description": "Retrieve documents and entity relations from LightRAG with shared source citations.",
+      "usage": [
+        {
+          "title": "Ask a retrieval question",
+          "description": "Ask the Agent to search the connected knowledge base for documents, entities or relationships."
+        },
+        {
+          "title": "Inspect supporting sources",
+          "description": "Check document citations. Relations reflect returned edges and receive document citations only when supporting excerpts are available."
+        }
+      ],
+      "requirements": [
+        "The administrator must configure the LightRAG connection, credentials, user bindings and retrieval tools."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-lightrag#readme"
+}

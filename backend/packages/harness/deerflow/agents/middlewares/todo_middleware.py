@@ -15,6 +15,10 @@ of being persisted into graph state as a normal user-visible message.
 The completion guard defers to ``model_length_termination``: when a length-capped
 turn has already been terminalized by ``ModelLengthFinishReasonMiddleware``,
 re-engaging would only re-emit the same oversized tool call into the same cap.
+Run-level loop and token stops, and a provider safety or length stop of the
+current response, also suppress completion reminders, leaving unfinished todos
+available for a later user run. An earlier response's provider stop does not
+suppress reminders in later Goal continuation turns of the same run.
 """
 
 from __future__ import annotations
@@ -28,9 +32,21 @@ from langchain.agents.middleware.types import ModelCallResult, ModelRequest, Mod
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+# Source-inventory and graph tests pin these values to the actual guard stamps;
+# the provider-stop vocabulary is imported from the guards that write it.
+# Loop and token stops cap the whole run: their budgets stay exhausted and a
+# Goal stands down on them, so runtime.context["stop_reason"] is authoritative.
+_COMPLETION_REMINDER_RUN_STOP_REASONS = ("loop_capped", "token_capped")
+# Provider safety and length stops end one response, which carries the marker.
+# runtime.context keeps the first cap across hidden Goal turns, and a Goal
+# continues after these, so the context alone does not mean the current
+# response was capped.
+_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS = {SAFETY_CAPPED_STOP_REASON: SAFETY_TERMINATION_MARKER, MODEL_LENGTH_CAPPED_STOP_REASON: MODEL_LENGTH_TERMINATION_MARKER}
 
 
 def _todos_in_messages(messages: list[Any]) -> bool:
@@ -154,6 +170,12 @@ class TodoMiddleware(TodoListMiddleware):
             "tool_description_hash": canonical_hash(self.tool_description),
             "state_channel": "todos",
             "skip_completion_reminder_on_length_cap": True,
+            "skip_completion_reminder_on_safety_cap": True,
+            # Every stop_reason that suppresses reminders, for the stop-reason
+            # inventory test. Only the run-level reasons are read from
+            # runtime.context; provider stops are matched by response marker.
+            "completion_reminder_hard_stop_reasons": [*_COMPLETION_REMINDER_RUN_STOP_REASONS, *_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS],
+            "completion_reminder_response_stop_markers": dict(_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS),
         }
 
     @override
@@ -347,6 +369,18 @@ class TodoMiddleware(TodoListMiddleware):
             # no jump_to — the model cannot update todos through an unbound tool.
             return None
 
+        # Guards run before this reversed after_model hook. They strip tool
+        # calls and stamp loop/token/safety/model-length stops. Check before
+        # the parent hook so its parallel-write retry cannot override a stop.
+        context = getattr(runtime, "context", None)
+        if isinstance(context, dict) and context.get("stop_reason") in _COMPLETION_REMINDER_RUN_STOP_REASONS:
+            return None
+        messages = state.get("messages") or []
+        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
+        termination_metadata = (last_ai.additional_kwargs or {}) if last_ai else {}
+        if any(termination_metadata.get(marker) for marker in _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS.values()):
+            return None
+
         # 1. Preserve base class logic (parallel write_todos detection).
         base_result = super().after_model(state, runtime)
         if base_result is not None:
@@ -355,19 +389,10 @@ class TodoMiddleware(TodoListMiddleware):
         # 2. Only intervene when the agent wants to exit cleanly. Tool-call
         # intent or tool-call parse errors should be handled by the tool path
         # instead of being masked by todo reminders.
-        messages = state.get("messages") or []
-        last_ai = next((m for m in reversed(messages) if isinstance(m, AIMessage)), None)
         if not last_ai or _has_tool_call_intent_or_error(last_ai):
             return None
 
-        if (last_ai.additional_kwargs or {}).get("deerflow_error_fallback"):
-            return None
-
-        # A length-capped turn was already terminalized by
-        # ModelLengthFinishReasonMiddleware (tool calls suppressed, notice
-        # appended); re-engaging would only re-emit the same oversized tool
-        # call into the same cap.
-        if (last_ai.additional_kwargs or {}).get("model_length_termination"):
+        if termination_metadata.get("deerflow_error_fallback"):
             return None
 
         # 3. Allow exit when all todos are completed or there are no todos.

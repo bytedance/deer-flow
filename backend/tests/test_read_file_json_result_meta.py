@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from langchain.agents import create_agent
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -33,7 +36,7 @@ def test_read_file_json_error_field_is_document_data(error):
         "error_type": None,
         "recoverable_by_model": True,
         "recommended_next_action": "continue",
-        "source": "content_analysis",
+        "source": "tool_return",
     }
 
 
@@ -44,9 +47,9 @@ def test_actual_tool_json_errors_are_still_classified(name, status):
     meta = normalize_tool_message(message).additional_kwargs[TOOL_META_KEY]
 
     assert meta["status"] == "error"
-    assert meta["error_type"] == "auth"
-    assert meta["recoverable_by_model"] is False
-    assert meta["recommended_next_action"] == "stop"
+    assert meta["error_type"] == "unknown"
+    assert meta["recoverable_by_model"] is True
+    assert meta["recommended_next_action"] == "try_alternative"
 
 
 @pytest.mark.parametrize("source", ["exception", "tool_return", "custom"])
@@ -62,9 +65,17 @@ class _ScriptedModel(GenericFakeChatModel):
         return self
 
 
+class _ModelRequests(BaseCallbackHandler):
+    def __init__(self):
+        self.messages = []
+
+    def on_chat_model_start(self, serialized, messages, **kwargs):
+        self.messages.append(messages[0])
+
+
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("progress_enabled", [False, True])
-@pytest.mark.parametrize("first_kind", ["json_error", "success", "missing", "truncated"])
+@pytest.mark.parametrize("first_kind", ["json_error", "error_prose", "marker_prose", "success", "missing", "truncated"])
 @pytest.mark.asyncio
 async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeypatch, mode, progress_enabled, first_kind):
     from deerflow.sandbox import tools as sandbox_tools
@@ -75,6 +86,10 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
     first_content = '{"error": {"code": 401, "message": "Unauthorized"}}\n'
     if first_kind == "success":
         first_content = '{"result": "OK"}\n'
+    elif first_kind == "error_prose":
+        first_content = "Error: Permission denied is the example message in this manual.\n"
+    elif first_kind == "marker_prose":
+        first_content = "A truncation example: ... [truncated: showing 1 of 10 chars] ...\n"
     elif first_kind == "truncated":
         first_content = json.dumps({"error": "Unauthorized", "details": "sample line\n" * 10000})
     if first_kind != "missing":
@@ -107,10 +122,23 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
         "thread_directories_created": True,
     }
     context = {"thread_id": "json-result-test", "user_id": "default"}
-    result = graph.invoke(state, context=context) if mode == "sync" else await graph.ainvoke(state, context=context)
+    captured = _ModelRequests()
+    config = {"callbacks": [captured]}
+    result = graph.invoke(state, context=context, config=config) if mode == "sync" else await graph.ainvoke(state, context=context, config=config)
     first, second = [message for message in result["messages"] if isinstance(message, ToolMessage)]
 
-    assert second.content == notes
+    visible = [message for message in captured.messages[-1] if isinstance(message, ToolMessage)]
+    assert len(visible) == 2
+    for stored, projected in zip((first, second), visible, strict=True):
+        assert json.loads(projected.content) == {
+            TOOL_META_KEY: {key: stored.additional_kwargs[TOOL_META_KEY][key] for key in ("status", "source")},
+            "content": stored.content,
+        }
+        assert projected is not stored
+        assert projected.tool_call_id == stored.tool_call_id
+        assert projected.additional_kwargs[TOOL_RECEIPT_KEY] == stored.additional_kwargs[TOOL_RECEIPT_KEY]
+
+    assert second.content.replace("\r\n", "\n") == notes
     assert str(outputs / "notes.txt") in reads
     assert second.additional_kwargs[TOOL_RECEIPT_KEY]["status"] == "success"
     expected_status = {"missing": "error", "truncated": "partial_success"}.get(first_kind, "success")
@@ -123,4 +151,24 @@ async def test_native_read_file_keeps_followup_reads_available(tmp_path, monkeyp
         assert len(first.content) < len(first_content)
         assert "truncated" in first.content.lower()
     else:
-        assert first.content == first_content
+        assert first.content.replace("\r\n", "\n") == first_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exc,category", [(FileNotFoundError("missing provider"), "not_found"), (PermissionError("denied"), "permission"), (TimeoutError("slow"), "transient"), (RuntimeError("403 forbidden"), "unknown")])
+async def test_read_file_async_initialization_failure_has_producer_state(monkeypatch, exc, category):
+    from deerflow.sandbox import tools as sandbox_tools
+
+    @asynccontextmanager
+    async def authorized(_runtime):
+        yield
+
+    monkeypatch.setattr(sandbox_tools, "sandbox_authorization_scope_async", authorized)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized_async", AsyncMock(side_effect=exc))
+    runtime = SimpleNamespace(tool_call_id="read-init", context={}, state={})
+    message = await sandbox_tools._read_file_tool_async(runtime, "/mnt/user-data/outputs/notes.txt")
+    assert isinstance(message, ToolMessage)
+    assert message.status == "error"
+    assert message.additional_kwargs[TOOL_META_KEY]["status"] == "error"
+    assert message.additional_kwargs[TOOL_META_KEY]["error_type"] == category
+    assert message.additional_kwargs[TOOL_META_KEY]["source"] == "tool_return"

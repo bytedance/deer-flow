@@ -409,7 +409,7 @@ For each sub-chapter, follow the **"Visual Anchor → Data Contrast → Integrat
 3. **Integrated Narrative Analysis**: Write analytical text following "What → Why → So What"
    > **Narrative Rule**: Narrative must explain the *provided* data. Do not make claims unsupported by the inputs.
 
-Each sub-chapter must end with a robust analytical paragraph (min. 200 words) that:
+Each sub-chapter must end with a analytical paragraph proportionate to the evidence and requested depth that:
 - Synthesizes conflicting or reinforcing data points
 - Reveals the underlying user tension or opportunity
 - Optionally ends with a punchy "One-Liner Truth" in a blockquote (`>`)
@@ -444,7 +444,7 @@ The report **MUST NOT** stop after the Conclusion — it **MUST** include Refere
 - **Forbidden Words**: "Decoding", "DNA", "Secrets", "Mindscape", "Solar System", "Unlocking"
 
 ### Sub-Chapter Conclusions
-- **Requirement**: End each sub-chapter with a robust analytical paragraph (min. 200 words).
+- **Requirement**: End each sub-chapter with a analytical paragraph proportionate to the evidence and requested depth.
 - **Narrative Flow**: This paragraph must look like a natural continuation of the text. It must synthesize the section's findings into a strategic judgment.
 - **Content Logic**:
     1.  Synthesize the conflicting or reinforcing data points above.
@@ -453,17 +453,7 @@ The report **MUST NOT** stop after the Conclusion — it **MUST** include Refere
 
 ### Insight Depth (The "So What" Chain)
 
-Every insight must connect **Data → User Psychology → Strategy Implication**:
-
-```
-❌ Bad: "Females are 60%. Strategy: Target females."
-
-✅ Good: "Females constitute 60% with a high TGI of 180. **This suggests**
-   the purchase decision is driven by aesthetic and social validation
-   rather than pure utility. **Consequently**, media spend should pivot
-   towards visual-heavy platforms (e.g., RED/Instagram) to maximize CTR,
-   treating male audiences only as a secondary gift-giving segment."
-```
+Connect observed data to a supported interpretation and a decision implication when the evidence permits. Demographic proportions alone do not establish psychology, motives, channel preferences or causation. Label hypotheses and test competing explanations; omit unsupported causal stories. Recommendations must remain conditional on the relevant commercial and behavioral evidence.
 
 ### References
 - **Inline**: Use markdown links for sources (e.g. `[Source Title](URL)`) when using External Search Findings
@@ -492,7 +482,7 @@ Every insight must connect **Data → User Psychology → Strategy Implication**
 |--------|---------|--------|
 | ... | ... | ... |
 
-[Integrated narrative analysis: What → Why → So What, min. 200 words]
+[Integrated narrative analysis: observations, supported interpretations and conditional implications]
 
 > [Optional: One-liner strategic truth]
 
@@ -510,7 +500,9 @@ Every insight must connect **Data → User Psychology → Strategy Implication**
 [2] ...
 ```
 
-## Complete Example
+## Illustrative Structure Example
+
+This fictional example demonstrates organization only. Its hypotheses, causal explanations and recommendations are not findings and must not be copied into a real report without supporting evidence.
 
 ### Phase 1 Example: Framework Generation
 
@@ -535,7 +527,7 @@ User provides: Research subject "Gen-Z Skincare Market Analysis"
 ### 1. Market Size & Growth Trends
 - **Analysis Objective**: Quantify Gen-Z skincare market size and identify growth drivers
 - **Analysis Logic**: Total market → Segmentation → Growth rate → Driver decomposition
-- **Core Hypothesis**: Gen-Z is becoming the core engine of skincare consumption growth
+- **Competing Hypotheses**: This segment may grow faster, at the same rate, or slower than the overall market; compare spending, population and price effects before choosing an explanation.
 
 #### Data Requirements
 | # | Data Metric | Data Type | Suggested Sources | Search Keywords | Priority | Time Range |
@@ -547,8 +539,8 @@ User provides: Research subject "Gen-Z Skincare Market Analysis"
 **Chart 1**: Line chart — China Skincare Market Size Trend 2020-2025
 **Argument Structure**:
 1. What: Quantified status of market size and Gen-Z share
-2. Why: Consumption upgrade, ingredient-conscious consumers, social media driven
-3. So What: Brands should prioritize building youth-oriented product lines
+2. Why: Test possible drivers against evidence and alternative explanations; distinguish association from causation.
+3. So What: Recommend segment investment only if demand, margins and acquisition evidence support it; otherwise state the limitation or recommend further validation.
 
 ### 2. Consumer Profiling & Behavioral Insights
 ...
@@ -593,8 +585,8 @@ After data collection, user provides: Analysis Framework + Data Summary with bra
 - [ ] All planned charts generated before report writing (Step 2.3 completed first)
 - [ ] All sections present in correct order (Abstract → Introduction → Body → Conclusion → References)
 - [ ] Every sub-chapter follows "Visual Anchor → Data Contrast → Integrated Analysis"
-- [ ] Every sub-chapter ends with a min. 200-word analytical paragraph
-- [ ] All insights follow the "Data → User Psychology → Strategy Implication" chain
+- [ ] Every sub-chapter ends with a supported analytical paragraph of appropriate length
+- [ ] Interpretations and recommendations trace to evidence; causal or psychological claims are supported or clearly labeled as hypotheses
 - [ ] All headings use proper numbering (no "Chapter/Part/Section" prefixes)
 - [ ] Charts are embedded with `![Description](path)` syntax
 - [ ] Numbers use English commas for thousands separators

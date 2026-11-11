@@ -381,6 +381,54 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+def test_canonical_run_record_input_mirrors_normalized_goal_and_todos():
+    from app.gateway.services import _canonical_run_record_input, normalize_input
+
+    raw = {
+        "goal": {
+            "objective": "audit objective",
+            "additional_kwargs": {
+                "original_user_content": "forged",
+                "untrusted_input": False,
+                "title": "kept",
+            },
+            "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+        },
+        "todos": [
+            {
+                "content": "audit todo",
+                "status": "pending",
+                "additional_kwargs": {
+                    "original_user_content": "forged",
+                    "untrusted_input": False,
+                    "title": "kept",
+                },
+                "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+            }
+        ],
+        "other": "kept",
+    }
+    admitted = normalize_input(raw, trusted_internal=False)
+
+    stored = _canonical_run_record_input(raw, admitted)
+    assert stored is not None
+    assert stored["other"] == "kept"
+    assert stored["goal"] == {
+        "objective": "audit objective",
+        "additional_kwargs": {"title": "kept"},
+        "artifact": {"label": "kept"},
+    }
+    assert stored["goal_outcome"] is None
+    assert stored["todos"] == [
+        {
+            "content": "audit todo",
+            "status": "pending",
+            "additional_kwargs": {"title": "kept"},
+            "artifact": {"label": "kept"},
+        }
+    ]
+
+
 @pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
 @pytest.mark.asyncio
 async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
@@ -811,6 +859,56 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "skill_context",
+    [
+        "oops",
+        ["oops"],
+        [{"name": "pdf"}],
+        [{"path": 3}],
+        [{"path": ""}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-path", "non-string-path", "empty-path"],
+)
+def test_normalize_input_rejects_unusable_skill_context_with_400(skill_context):
+    """A skill reference the durable-context reducer cannot read must be a 400,
+    not an ``AttributeError``/``KeyError`` while the state update merges.
+
+    ``merge_skill_context`` normalizes entries with ``entry.get(...)`` and
+    ``str(entry["path"])``; both crash on the shapes below.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"skill_context": skill_context})
+
+    assert excinfo.value.status_code == 400
+    assert "input.skill_context" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_skill_context_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"name": "pdf", "path": "/mnt/skills/pdf/SKILL.md", "description": "PDF tooling", "loaded_at": 3}
+
+    assert normalize_input({"skill_context": [entry]})["skill_context"] == [entry]
+
+
+def test_state_values_reject_unusable_skill_context_with_400():
+    """The thread-state update path shares the skill-reference boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"skill_context": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.skill_context" in excinfo.value.detail
 
 
 @pytest.mark.parametrize(
@@ -2923,6 +3021,26 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+    from langchain_core.messages import HumanMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def answer(_state):
+        interrupt({"question": "Continue?"})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.set_entry_point("answer")
+    builder.set_finish_point("answer")
+    graph = builder.compile(checkpointer=checkpointer)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="start")]},
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+
 async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2950,6 +3068,8 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
+    if getattr(body, "command", None) and body.command.get("resume") is not None:
+        await _seed_generic_resume_checkpoint(state.checkpointer, "thread-command-test")
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*args, **kwargs):

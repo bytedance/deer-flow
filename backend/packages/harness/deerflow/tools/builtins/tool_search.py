@@ -6,7 +6,7 @@ Contains:
   catalog; it records promotions into graph state via ``Command``.
 - build_deferred_tool_setup: assembles the catalog + tool from the tools
   configured for this agent build.
-- build_mcp_routing_middleware: builds the PR2 auto-promote middleware from
+- build_mcp_routing_middleware: builds the compatibility middleware from
   serialized routing metadata on deferred tools available to the caller.
 
 The agent sees deferred tool names in <available-deferred-tools> but cannot
@@ -344,7 +344,7 @@ def build_mcp_routing_middleware(
     *,
     top_k: int,
 ) -> "AgentMiddleware | None":
-    """Build PR2 auto-promotion middleware from the caller's deferred tools.
+    """Build advisory routing compatibility middleware from the caller's deferred tools.
 
     The builder may inspect ``BaseTool.metadata`` at construction time, but the
     returned middleware receives only a flat serializable routing index.
@@ -364,7 +364,7 @@ def build_mcp_routing_middleware(
         if not keywords:
             continue
         if routing.get("auto_promote_top_k") is not None:
-            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s in PR2", tool_name)
+            logger.debug("Ignoring per-tool MCP routing auto_promote_top_k for %s (legacy configuration)", tool_name)
         routing_index[str(tool_name)] = {
             "priority": _routing_priority(routing.get("priority", 0)),
             "keywords": keywords,
@@ -429,15 +429,15 @@ def get_mcp_routing_hints_prompt_section(tools: Iterable[BaseTool], *, deferred_
     if not hints:
         return ""
 
-    lines = ["<mcp_routing_hints>"]
+    lines = ["<mcp_routing_hints>", "These are advisory capability descriptions. Keywords do not establish user intent or require a tool. Select tools from the full request and available evidence."]
     for priority, tool_name, keywords in sorted(hints, key=lambda item: (-item[0], item[1])):
         # tool_name comes verbatim from the external MCP server; escape at render
         # (keep the raw name for the deferred_names membership check above).
         esc_name = html.escape(tool_name, quote=False)
-        lines.append(f"When the user's request involves {_format_keyword_list(keywords)}:")
+        lines.append(f"Capability hints for {_format_keyword_list(keywords)}:")
         if tool_name in deferred_names:
-            lines.append(f"  use `tool_search` to fetch `{esc_name}`, then prefer that MCP tool.")
+            lines.append(f"  use `tool_search` to fetch `{esc_name}`, when its capability fits the task.")
         else:
-            lines.append(f"  prefer the `{esc_name}` tool.")
+            lines.append(f"  consider the `{esc_name}` tool when its capability fits the task.")
     lines.append("</mcp_routing_hints>")
     return "\n".join(lines)
