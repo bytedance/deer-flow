@@ -4,8 +4,11 @@ The reducer is the testable heart of the TUI: a pure function mapping
 (state, action) -> state, with no Textual / rendering dependency.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
+from deerflow.tui.runtime import stream_actions
 from deerflow.tui.view_state import (
     AssistantDelta,
     AssistantError,
@@ -167,6 +170,65 @@ def test_tool_started_fills_name_on_a_later_chunk():
     assert len(tools) == 1
     assert tools[0].tool_name == "web_search"
     assert tools[0].title == "Search"
+
+
+@pytest.mark.parametrize("include_start", [True, False], ids=["started", "result-only"])
+def test_streamed_tool_id_reuse_does_not_rewrite_a_previous_run(include_start):
+    class Client:
+        def stream(self, message, **kwargs):
+            if message == "first" or include_start:
+                data = {"type": "ai", "id": f"ai-{message}", "tool_calls": [{"id": "call_0", "name": "read_file", "args": {"path": f"{message}.txt"}}]}
+                # A repeated start is one card within this run.
+                yield SimpleNamespace(type="messages-tuple", data=data)
+                yield SimpleNamespace(type="messages-tuple", data=data)
+            yield SimpleNamespace(type="messages-tuple", data={"type": "tool", "tool_call_id": "call_0", "name": "read_file", "content": f"{message} result", "status": "error" if message == "second" else "success"})
+            yield SimpleNamespace(type="end", data={})
+
+    state = initial_state()
+    state = reduce(state, UserSubmitted("first"))
+    for action in stream_actions(Client(), "first"):
+        state = reduce(state, action)
+    original_tool = state.rows[1]
+
+    state = reduce(state, UserSubmitted("second"))
+    for action in stream_actions(Client(), "second"):
+        state = reduce(state, action)
+
+    assert [row.kind for row in state.rows] == ["user", "tool", "user", "tool"]
+    assert state.rows[1] == original_tool
+    assert state.rows[1].result == "first result"
+    assert state.rows[1].status == "ok"
+    assert state.rows[3].result == "second result"
+    assert state.rows[3].status == "error"
+    if include_start:
+        assert state.rows[3].detail == "second.txt"
+
+
+def test_reused_tool_id_starts_a_running_card_for_the_new_run():
+    state = reduce(initial_state(), RunStarted())
+    state = reduce(state, ToolStarted("call_0", "read_file", {"path": "first.txt"}))
+    state = reduce(state, ToolResult("call_0", "first result"))
+    state = reduce(state, RunEnded())
+    state = reduce(state, RunStarted())
+    state = reduce(state, ToolStarted("call_0", "bash", {"command": "pwd"}))
+
+    assert [row.tool_name for row in state.rows] == ["read_file", "bash"]
+    assert state.rows[0].result == "first result"
+    assert state.rows[1].status == "running"
+    assert state.rows[1].result == ""
+
+
+def test_clear_rows_resets_the_tool_lookup_boundary():
+    state = reduce(initial_state(), UserSubmitted("first"))
+    state = reduce(state, RunStarted())
+    state = reduce(state, ToolStarted("call_0", "read_file"))
+    state = reduce(state, ClearRows())
+    state = reduce(state, ToolStarted("call_0", "bash"))
+    state = reduce(state, ToolResult("call_0", "new result"))
+
+    assert len(state.rows) == 1
+    assert state.rows[0].tool_name == "bash"
+    assert state.rows[0].result == "new result"
 
 
 def test_assistant_error_appends_error_row():
