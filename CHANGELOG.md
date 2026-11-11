@@ -30,6 +30,7 @@ This section accumulates work toward the **2.3.0** milestone
 - **community:** New Autom `web_search` provider. It returns live Google
   results through the Autom SERP API (`AUTOM_API_KEY`); `vertical: news` switches
   to Google News with the same key, and `time_range` maps to Google's `tbs`.
+  ([#8124](https://github.com/bytedance/deer-flow/pull/8124))
 
 - **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
   ranked results with a direct answer when the sources agree on one, and fetch

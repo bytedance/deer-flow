@@ -960,6 +960,7 @@ tools:
   #   # gl: us                       # Optional country code for the results
   #   # hl: en                       # Optional interface language
   #   # tbs: qdr:w                   # Optional Google time filter (qdr:d, qdr:w, qdr:m, qdr:y)
+  #   # location: Paris, France      # Optional place the search is run from
   #   # api_key: $AUTOM_API_KEY      # Optional if the env var is set
 
   # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
