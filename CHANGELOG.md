@@ -31,6 +31,7 @@ This section accumulates work toward the **2.3.0** milestone
   fetches the page on its side, with a plain crawler, a headless browser
   (`engine: rendering`) or its web unlocker, and the HTML goes through the same
   readability extraction as the Jina reader.
+  ([#8149](https://github.com/bytedance/deer-flow/pull/8149))
 
 - **community:** New SpecStream `web_search` and `web_fetch` provider. Search returns
   ranked results with a direct answer when the sources agree on one, and fetch
