@@ -572,7 +572,10 @@ async def export_memory(request: Request, agent_name: str | None = None) -> Memo
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Import Memory Data",
-    description="Import the default memory document, or replace only one selected agent's facts while preserving shared summaries.",
+    description=(
+        "Import the default memory document, or replace only one selected agent's facts while preserving shared summaries. "
+        "The request requires an explicit `facts` array. Omitting it returns HTTP 422, and an empty array clears the selected fact bucket."
+    ),
 )
 @require_permission("memory", "write")
 async def import_memory(body: MemoryImportRequest, request: Request, agent_name: str | None = None) -> MemoryResponse:

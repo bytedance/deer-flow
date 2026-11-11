@@ -227,6 +227,10 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** Importing a backup without a `facts` array now returns HTTP 422
+  and preserves saved memory. An explicit empty array still clears the selected
+  fact bucket. ([#8131])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
