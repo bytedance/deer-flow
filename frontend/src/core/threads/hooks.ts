@@ -198,6 +198,34 @@ type ReleasedSend = Pick<PendingSend, "threadId" | "newThread" | "options">;
 const MAX_RELEASED_SENDS = 8;
 
 /**
+ * Whether an acceptance that names `frameThreadId` may settle the pending send.
+ *
+ * A send on an existing conversation accepts only a frame naming that thread.
+ * A new-chat send carries a page placeholder, so its own frame names a
+ * different thread; it may adopt it only when no other unnamed send (another
+ * new-chat send, released or not) could own the same frame. That keeps one
+ * stream's late acceptance from retiring a later send's draft.
+ */
+export function shouldAcceptPendingSend(input: {
+  frameThreadId: string;
+  pendingThreadId: string;
+  pendingNewThread: boolean;
+  retiredReleased: boolean;
+  otherUnnamedReleased: boolean;
+}): boolean {
+  if (!input.frameThreadId) {
+    return false;
+  }
+  if (!input.pendingThreadId || input.frameThreadId === input.pendingThreadId) {
+    return true;
+  }
+  if (!input.pendingNewThread) {
+    return false;
+  }
+  return !input.retiredReleased && !input.otherUnnamedReleased;
+}
+
+/**
  * Stop pressed after `thread.submit` resolved but before the Gateway accepted
  * the run. Shaped like an abort so the composer treats it as "no turn was
  * created" and keeps its text, and a first send can restore the welcome layout.
@@ -2294,15 +2322,18 @@ export function useThreadStream({
    * released still gets its `onSent` here when the acceptance names its thread.
    */
   const acceptPendingSend = useCallback((threadId?: string) => {
+    const pending = pendingSendRef.current;
     // A released send is retired only by an acceptance that names its thread:
     // an id-less frame from an older stream must never consume a newer send's
-    // cleanup, and vice versa. A send started from the new-chat page may not
-    // know the server's thread id yet, so it is matched when it is the only
-    // such released send.
+    // cleanup, and vice versa. A new-chat send carries a page placeholder
+    // instead of the server id, so it is matched as the only unnamed entry —
+    // but never while another new-chat send is still pending, which is exactly
+    // the way one send's late frame could retire the other.
+    let retiredReleased = false;
     if (threadId) {
       const released = releasedSendsRef.current;
       let match = released.findIndex((send) => send.threadId === threadId);
-      if (match < 0) {
+      if (match < 0 && (!pending || !pending.newThread)) {
         const unnamed = released.filter(
           (send) => send.newThread || !send.threadId,
         );
@@ -2313,6 +2344,7 @@ export function useThreadStream({
       }
       if (match >= 0) {
         const [accepted] = released.splice(match, 1);
+        retiredReleased = true;
         try {
           accepted?.options?.onSent?.();
         } catch (error) {
@@ -2325,23 +2357,25 @@ export function useThreadStream({
         }
       }
     }
-    const pending = pendingSendRef.current;
     if (!pending || pending.settled) {
       return;
     }
     // A new-chat send may carry only the page's placeholder id: the run's frame
-    // names the server's real thread, which the send adopts. A send on an
-    // existing conversation still rejects a frame from another thread.
+    // names the server's real thread. It accepts that frame only when no other
+    // unnamed send could own it; a send on an existing conversation still
+    // rejects a frame from another thread.
     if (
-      threadId &&
-      pending.threadId &&
-      threadId !== pending.threadId &&
-      !pending.newThread
+      !shouldAcceptPendingSend({
+        frameThreadId: threadId ?? "",
+        pendingThreadId: pending.threadId,
+        pendingNewThread: pending.newThread,
+        retiredReleased,
+        otherUnnamedReleased: releasedSendsRef.current.some(
+          (send) => send.newThread || !send.threadId,
+        ),
+      })
     ) {
       return;
-    }
-    if (threadId) {
-      pending.threadId = threadId;
     }
     pending.settled = true;
     pendingSendRef.current = null;
@@ -3223,6 +3257,9 @@ export function useThreadStream({
         return;
       }
       sendInFlightRef.current = true;
+      // Capture the conversation's state before the upload await: a navigation
+      // during a slow upload would otherwise flip the flag under the send.
+      const startedNewThread = sdkThreadIdRef.current === undefined;
       // A new send on this conversation supersedes released attempts for the
       // same conversation whose acceptance never arrived: their one-time state
       // is already stale, while other conversations' attempts stay tracked.
@@ -3400,7 +3437,7 @@ export function useThreadStream({
         void accepted.catch(() => undefined);
         const pending: PendingSend = {
           threadId,
-          newThread: sdkThreadIdRef.current === undefined,
+          newThread: startedNewThread,
           options,
           settled: false,
           promise: accepted,
