@@ -107,7 +107,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
-| Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
+| Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) · [Responses API compaction](backend/docs/summarization.md#responses-api-continuation) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |
 | Agentic browser control | [Agentic Browser Control](docs/guide/browser-control.md) |
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |

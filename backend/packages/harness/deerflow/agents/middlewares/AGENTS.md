@@ -84,6 +84,10 @@ make test-blocking-io
   through the dynamic-context channel. Summaries do not carry either.
 - Fraction-based triggers follow the model that runs the turn. A separate summary
   model only generates the summary.
+- Successful compaction clears all retained `resp_` continuation IDs on message
+  copies, so Responses API requests replay the summary and retained tail. Preserve
+  message IDs, content and other metadata; skipped or failed compaction keeps the
+  original continuation IDs.
 - Superseded-write elision is opt-in, because it rewrites earlier request prefixes.
 
 ## Concurrency

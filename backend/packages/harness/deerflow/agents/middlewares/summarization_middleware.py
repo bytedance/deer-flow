@@ -27,6 +27,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.agents.middlewares.response_chain import without_response_chain_id
 from deerflow.agents.middlewares.todo_middleware import TODO_REMINDER_MESSAGE_NAME
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import DEFAULT_KEEP
@@ -979,10 +980,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             from deerflow.agents.task_continuity.archive import capture
 
             task_history = capture(state, runtime, messages_to_summarize, self._task_continuity_config)
+        # Old response IDs still refer to the uncompressed server history and
+        # would make the adapter skip the newly injected summary on the next call.
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
+            preserved_messages=tuple(without_response_chain_id(message) for message in preserved_messages),
             total_tokens=total_tokens,
             task_history=task_history,
         )
@@ -1032,7 +1035,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
-            preserved_messages=tuple(preserved_messages),
+            preserved_messages=tuple(without_response_chain_id(message) for message in preserved_messages),
             total_tokens=total_tokens,
             task_history=task_history,
         )
