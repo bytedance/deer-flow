@@ -206,6 +206,7 @@ import {
   ModelPickerTrigger,
 } from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+import { ToolApprovalMode } from "./tool-approval-mode";
 import { Tooltip } from "./tooltip";
 import {
   normalizeGoalStatusRead,
@@ -350,6 +351,7 @@ export function InputBox({
   onStop,
   canStopStreaming = true,
   canCreateRuns = true,
+  inputLocked = false,
   agentSkillNames,
   agentSkillsLoading = false,
   ...props
@@ -357,11 +359,14 @@ export function InputBox({
   assistantId?: string | null;
   status?: ChatStatus;
   disabled?: boolean;
+  /** Prevent new input while retaining cancellation of a live run. */
+  inputLocked?: boolean;
   context: Omit<
     AgentThreadContext,
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    tool_approval_mode?: "ask" | "auto" | "full";
     reasoning_effort?: ReasoningEffortValue;
   };
   extraHeader?: React.ReactNode;
@@ -1881,7 +1886,11 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked =
-    isComposerDisabled || polishingInput || mentionBusy || runInputSending;
+    isComposerDisabled ||
+    inputLocked ||
+    polishingInput ||
+    mentionBusy ||
+    runInputSending;
   const showMentions =
     !disabled &&
     !polishingInput &&
@@ -3324,6 +3333,14 @@ export function InputBox({
                 )}
               </PromptInputButton>
             </Tooltip>
+            <ToolApprovalMode
+              value={context.tool_approval_mode}
+              onChange={(mode) =>
+                onContextChange?.({ tool_approval_mode: mode })
+              }
+              threadId={isWelcomeMode ? undefined : threadId}
+              disabled={composerLocked}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -3656,7 +3673,12 @@ export function InputBox({
             <PromptInputSubmit
               className="rounded-full"
               disabled={
-                composerLocked ||
+                (status === "streaming"
+                  ? isComposerDisabled ||
+                    polishingInput ||
+                    mentionBusy ||
+                    runInputSending
+                  : composerLocked) ||
                 stopDenied ||
                 sendDenied ||
                 (status !== "streaming" && conversationReferencesUnavailable)
