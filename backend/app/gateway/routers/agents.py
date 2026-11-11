@@ -372,7 +372,10 @@ async def check_agent_name(name: str, request: Request) -> dict:
         HTTPException: 422 if the name is invalid.
     """
     _require_agents_api_enabled()
-    _validate_agent_name(name)
+    # This is the availability pre-check the creation UI and the docs point at,
+    # so it must answer with the same rule create() applies: a reserved device
+    # name is not "available" just because nothing is on disk yet.
+    _validate_agent_name(name, for_creation=True)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
 

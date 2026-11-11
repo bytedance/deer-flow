@@ -84,7 +84,9 @@ This section accumulates work toward the **2.3.0** milestone
   rejects Windows reserved device names (`NUL`, `CON`, `COM1` …) on every
   platform. A device name creates no directory: `mkdir` appeared to succeed and
   the first write inside it raised `FileNotFoundError`, which the create route
-  reported as a 500 instead of rejecting the name. Reads, updates and deletes of
+  reported as a 500 instead of rejecting the name. The `/api/agents/check`
+  availability pre-check applies the same rule, so it cannot report an unusable
+  name as available. Reads, updates and deletes of
   an existing name stay permissive so an agent created before this check remains
   manageable. ([#7938])
 

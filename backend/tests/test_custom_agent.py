@@ -862,6 +862,20 @@ class TestAgentsAPI:
         assert "reserved Windows device name" in response.json()["detail"]
         assert agent_client.get("/api/agents").json()["agents"] == []
 
+    @pytest.mark.parametrize("name", ["NUL", "con", "COM1", "lpt9"])
+    def test_check_rejects_windows_reserved_device_names(self, agent_client, name):
+        """The creation pre-check must agree with create, not call the name available."""
+        response = agent_client.get("/api/agents/check", params={"name": name})
+
+        assert response.status_code == 422
+        assert "reserved Windows device name" in response.json()["detail"]
+
+    def test_check_still_reports_an_ordinary_name_available(self, agent_client):
+        response = agent_client.get("/api/agents/check", params={"name": "reviewer"})
+
+        assert response.status_code == 200
+        assert response.json() == {"available": True, "name": "reviewer"}
+
     def test_list_agents_empty(self, agent_client):
         response = agent_client.get("/api/agents")
         assert response.status_code == 200
