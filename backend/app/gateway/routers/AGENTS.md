@@ -137,3 +137,5 @@ The scope is a host directory (`agents/{name}/facts`), so the character class
 alone let the first write fail with `FileNotFoundError` and answer 500. Keep
 reads and deletes permissive: a scope an older release stored under a reserved
 name must stay exportable and clearable. Tests: `test_memory_router.py`.
+Memory import requires an explicit `facts` array before replacement. Missing
+`facts` returns 422, while an explicit empty array can clear the fact bucket.

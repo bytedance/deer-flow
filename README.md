@@ -3736,6 +3736,8 @@ DeerMem backup imports restore saved fact contents even after those facts have
 been edited, using the current stored revisions to protect the restore. Older
 backups may omit fact revisions. Backup revisions are validated before the
 importer substitutes current revisions. Rejected imports preserve stored memory.
+The import endpoint requires an explicit `facts` array. Omitting it returns
+HTTP 422, while `facts: []` explicitly clears the selected fact bucket.
 A concurrent write during import still returns HTTP 409 so the caller can reload
 and retry.
 
