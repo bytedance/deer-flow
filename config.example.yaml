@@ -2326,7 +2326,7 @@ summarization:
   # Set to null to skip trimming (not recommended for very long conversations)
   trim_tokens_to_summarize: 15564
 
-  # Custom summary prompt template (null = use default LangChain prompt)
+  # Custom summary prompt template (null = use DeerFlow's built-in prompt)
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
