@@ -678,6 +678,14 @@ def main():
         parser.error("--sql is required for 'query' action")
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
+    if args.action == "query" and args.output_file and os.path.exists(args.output_file):
+        for file_path in args.files:
+            if os.path.exists(file_path) and os.path.samefile(
+                args.output_file, file_path
+            ):
+                parser.error(
+                    f"--output-file {args.output_file} refers to input file {file_path}"
+                )
 
     try:
         with open_analysis_cache(args.files) as (con, table_map):
