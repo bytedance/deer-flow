@@ -11,6 +11,10 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
+  display source line numbers when the result contains 1–40 lines and the
+  labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+
 - **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
   `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
   `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
@@ -50,6 +54,13 @@ This section accumulates work toward the **2.3.0** milestone
 - **sandbox:** AIO sandboxes are recycled when a Bash command may still be
   running and its session cannot be closed, preventing late writes after warm
   reuse. Commands confirmed to have terminated remain reusable.
+
+- **frontend:** **Share** in a sidebar chat's menu now copies a link to the
+  deployment you are using. On `localhost` and `127.0.0.1`, the default
+  `make dev` and Docker addresses, it copied a link to the hosted demo
+  (`deer-flow-v2.vercel.app`) instead. That link never opened the
+  conversation, and opening it sent the thread id to an outside host.
+  ([#8126])
 
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
@@ -16291,3 +16302,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
