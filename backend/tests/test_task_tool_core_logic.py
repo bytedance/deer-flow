@@ -3719,15 +3719,31 @@ def _preflight(**overrides):
         "subagent_type": "general-purpose",
         "context_mode": "isolated",
         "runtime_app_config": None,
-        "available_subagent_names": ["general-purpose"],
         "allowed_subagents": None,
     }
     kwargs.update(overrides)
     return task_tool_module._preflight_delegation_checks(**kwargs)
 
 
+def test_preflight_resolves_catalog_after_guards(monkeypatch):
+    """Illegal context_mode must short-circuit before the catalog store lookup.
+
+    This guards against the regression where catalog discovery was hoisted out
+    of the helper and ran before any guard, so a typo in context_mode could
+    hit the managed-subagent store instead of returning failed."""
+    get_names = MagicMock(return_value=["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", get_names)
+
+    config, error = _preflight(context_mode="thread")
+
+    assert config is None
+    assert error == "Unknown context_mode 'thread'. Use isolated or snapshot."
+    get_names.assert_not_called()
+
+
 def test_preflight_returns_the_resolved_config_on_success(monkeypatch):
     resolved = _make_subagent_config()
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: resolved)
 
     config, error = _preflight()
@@ -3760,27 +3776,30 @@ def test_preflight_rejects_bash_when_host_bash_is_disabled(monkeypatch):
 def test_preflight_allows_bash_when_host_bash_is_enabled(monkeypatch):
     resolved = _make_subagent_config(name="bash")
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: True)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["bash"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: resolved)
 
-    config, error = _preflight(subagent_type="bash", available_subagent_names=["bash"])
+    config, error = _preflight(subagent_type="bash")
 
     assert error is None
     assert config is resolved
 
 
 def test_preflight_rejects_a_subagent_outside_the_caller_policy(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["planner"])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
 
-    config, error = _preflight(available_subagent_names=["planner"], allowed_subagents=["planner"])
+    config, error = _preflight(allowed_subagents=["planner"])
 
     assert config is None
     assert error == "Unknown subagent type 'general-purpose'. Available: planner"
 
 
 def test_preflight_rejects_when_no_subagent_is_permitted(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: [])
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
 
-    config, error = _preflight(available_subagent_names=[], allowed_subagents=[])
+    config, error = _preflight(allowed_subagents=[])
 
     assert config is None
     assert error == "Unknown subagent type 'general-purpose'. Available: none permitted by caller policy"

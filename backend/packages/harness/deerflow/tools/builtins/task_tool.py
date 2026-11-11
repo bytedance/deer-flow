@@ -99,7 +99,6 @@ def _preflight_delegation_checks(
     subagent_type: str,
     context_mode: str,
     runtime_app_config: Any | None,
-    available_subagent_names: Any,
     allowed_subagents: Any | None,
 ) -> tuple[Any | None, str | None]:
     """只读预检（Preflight / Validate-then-Mutate）。
@@ -133,6 +132,13 @@ def _preflight_delegation_checks(
         host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
         if not host_bash_allowed:
             return None, LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+
+    # Catalog discovery only after the cheapest guards pass: an invalid
+    # context_mode must not reach the managed-subagent store lookup.
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    else:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
     config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None or subagent_type not in available_subagent_names:
@@ -936,19 +942,16 @@ async def task_tool(
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
     # Preflight: 只读预检，零副作用。在触发任何有副作用的委派操作
     # （工具装配、执行器创建、后台任务注册）之前一次性完成前置条件校验。
-    # 失败即返回，helper 内部状态不变，调用方可安全重试。
+    # 失败即返回，helper 内部状态不变，调用方可安全重试。context_mode guard
+    # 是 helper 内最先执行的分支，catalog discovery 被移到 guard 之后，
+    # 保证非法模式不会触发 managed-subagent store 访问。
     preflight_config, preflight_error = _preflight_delegation_checks(
         subagent_type=subagent_type,
         context_mode=context_mode,
         runtime_app_config=runtime_app_config,
-        available_subagent_names=available_subagent_names,
         allowed_subagents=allowed_subagents,
     )
     if preflight_error is not None:
