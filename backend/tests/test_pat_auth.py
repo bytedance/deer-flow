@@ -544,6 +544,7 @@ def test_pat_runs_policy_admits_exactly_the_mounted_routes():
                 "/api/threads/{thread_id}/runs/{run_id}/inputs",
                 "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}",
                 "/api/threads/{thread_id}/runs/{run_id}/inputs/{input_id}/retry",
+                "/api/threads/{thread_id}/runs/{run_id}/tool-approvals/{request_id}",
             }:
                 # Interactive controls remain session-only, without widening
                 # existing PAT scopes or their explicit route allowlist.

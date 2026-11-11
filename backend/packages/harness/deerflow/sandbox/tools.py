@@ -14,6 +14,7 @@ from functools import lru_cache, partial
 from pathlib import Path
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.authz.sandbox_authz import (
@@ -30,8 +31,11 @@ from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.command_scope import command_owner
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.sandbox.exceptions import (
+    SandboxAuthorizationError,
     SandboxError,
+    SandboxFileNotFoundError,
     SandboxNotFoundError,
+    SandboxPermissionError,
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
@@ -50,6 +54,8 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_INVALID_END_LINE,
     READ_FILE_INVALID_RANGE,
     READ_FILE_INVALID_START_LINE,
+    READ_FILE_NO_CONTENT_RESULTS,
+    READ_FILE_NUMBERED_MAX_LINES,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
 )
@@ -2414,17 +2420,19 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
 
 async def _run_sync_tool_after_async_sandbox_init(
-    func: Callable[..., str] | None,
+    func: Callable[..., str | ToolMessage] | None,
     runtime: Runtime,
     *args: object,
-) -> str:
+    _error_result: Callable[[str, BaseException | None], str | ToolMessage] | None = None,
+) -> str | ToolMessage:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
         async with sandbox_authorization_scope_async(runtime):
             sandbox = await ensure_sandbox_initialized_async(runtime)
 
             if func is None:
-                return "Error: Tool implementation not available"
+                text = "Error: Tool implementation not available"
+                return _error_result(text, None) if _error_result else text
 
             owner = sandbox_lease_owner(runtime.context)
             signal_cancel = None
@@ -2432,9 +2440,11 @@ async def _run_sync_tool_after_async_sandbox_init(
                 signal_cancel = partial(sandbox.request_command_cancel, owner)
             return await run_sync_lifecycle_operation(func, runtime, *args, _on_cancel=signal_cancel)
     except SandboxError as e:
-        return f"Error: {e}"
+        text = f"Error: {e}"
+        return _error_result(text, e) if _error_result else text
     except Exception as e:
-        return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        text = f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+        return _error_result(text, e) if _error_result else text
 
 
 def _execute_bash_command(
@@ -3350,6 +3360,40 @@ def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> b
     return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
 
 
+def _read_file_result(runtime: Runtime, content: str, *, status: str = "success", error_type: str | None = None) -> str | ToolMessage:
+    """Stamp execution state at the producer; file text is never a status signal."""
+    call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(call_id, str) or not call_id:
+        # Keep direct Python callers that have no LangChain tool call compatible.
+        return content
+    return ToolMessage(
+        content=content,
+        name="read_file",
+        tool_call_id=call_id,
+        status="error" if status == "error" else "success",
+        additional_kwargs={
+            "deerflow_tool_meta": {
+                "status": status,
+                "error_type": error_type,
+                "recoverable_by_model": True,
+                "recommended_next_action": "try_alternative" if status == "error" else "continue",
+                "source": "tool_return",
+            }
+        },
+    )
+
+
+def _read_file_failure(runtime: Runtime, content: str, exc: BaseException | None = None) -> str | ToolMessage:
+    category = "unknown"
+    if isinstance(exc, (FileNotFoundError, SandboxFileNotFoundError)):
+        category = "not_found"
+    elif isinstance(exc, (PermissionError, SandboxPermissionError, SandboxAuthorizationError)):
+        category = "permission"
+    elif isinstance(exc, (TimeoutError, ConnectionError)):
+        category = "transient"
+    return _read_file_result(runtime, content, status="error", error_type=category)
+
+
 @tool("read_file", parse_docstring=True)
 def read_file_tool(
     runtime: Runtime,
@@ -3357,8 +3401,11 @@ def read_file_tool(
     description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
+) -> str | ToolMessage:
     """Read the contents of a text file. Use this to examine source code, configuration files, logs, or any text-based file.
+
+    Ranges returning 1-40 lines from uploads or workspace files show source line labels when the labeled output fits the budget.
+    For edits or writes, copy only the text after the first ' | ' on each labeled line.
 
     Args:
         path: The **absolute** path to the file to read.
@@ -3366,18 +3413,19 @@ def read_file_tool(
         start_line: Optional starting line number (1-indexed, inclusive). Omit to start at the first line.
         end_line: Optional ending line number (1-indexed, inclusive). Omit to read through the last line.
     """
+    requested_path = path
     try:
         # Block access to disabled skill files
         if _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
             skill_name = _extract_skill_name_from_skills_path(path) or "unknown"
-            return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
+            return _read_file_result(runtime, f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it.", status="error", error_type="permission")
         if start_line is not None and start_line < 1:
-            return READ_FILE_INVALID_START_LINE
+            return _read_file_failure(runtime, READ_FILE_INVALID_START_LINE)
         effective_start = start_line or 1
         if end_line is not None and end_line < 1:
-            return READ_FILE_INVALID_END_LINE
+            return _read_file_failure(runtime, READ_FILE_INVALID_END_LINE)
         if end_line is not None and effective_start > end_line:
-            return READ_FILE_INVALID_RANGE
+            return _read_file_failure(runtime, READ_FILE_INVALID_RANGE)
 
         requested_path = path
         use_line_range = start_line is not None or end_line is not None
@@ -3391,9 +3439,9 @@ def read_file_tool(
                 # tell them apart so a continuation named by a truncation
                 # marker is not reported as beyond the file.
                 if _ranged_read_hits_a_line(runtime, path, start_line):
-                    return READ_FILE_EMPTY
-                return READ_FILE_START_LINE_EXCEEDS
-            return READ_FILE_EMPTY
+                    return _read_file_result(runtime, READ_FILE_EMPTY)
+                return _read_file_failure(runtime, READ_FILE_START_LINE_EXCEEDS)
+            return _read_file_result(runtime, READ_FILE_EMPTY)
         try:
             from deerflow.config.app_config import get_app_config
 
@@ -3402,23 +3450,45 @@ def read_file_tool(
         except Exception:
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
-        return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+        call_id = getattr(runtime, "tool_call_id", None)
+        # Leave in-band provider failures and range markers recognizable to consumers.
+        if (
+            use_line_range
+            and isinstance(call_id, str)
+            and call_id
+            and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
+            and output == content
+            and not content.startswith("Error:")
+            and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
+        ):
+            # A provider's ranged result joins source lines, including a trailing empty line.
+            lines = content.split("\n")
+            if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
+                rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
+                # Write tools accept literal 'N | ' text. A verbatim write-back of
+                # this display can therefore persist the labels as file content.
+                numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
+                if max_chars == 0 or len(numbered) <= max_chars:
+                    output = numbered
+        return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
     except SandboxError as e:
-        return f"Error: {e}"
-    except FileNotFoundError:
-        return f"Error: File not found: {requested_path}"
-    except PermissionError:
-        return f"Error: Permission denied reading file: {requested_path}"
-    except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {requested_path}"
-    except UnicodeDecodeError:
-        return (
+        return _read_file_failure(runtime, f"Error: {e}", e)
+    except FileNotFoundError as e:
+        return _read_file_failure(runtime, f"Error: File not found: {requested_path}", e)
+    except PermissionError as e:
+        return _read_file_failure(runtime, f"Error: Permission denied reading file: {requested_path}", e)
+    except IsADirectoryError as e:
+        return _read_file_failure(runtime, f"Error: Path is a directory, not a file: {requested_path}", e)
+    except UnicodeDecodeError as e:
+        text = (
             f"Error: cannot read '{requested_path}' as text — it appears to be a binary file "
             "(e.g. .xlsx, .pdf, or an image). read_file only supports UTF-8 text. Use bash with a "
             "suitable library instead (pandas/openpyxl for spreadsheets), or view_image for images."
         )
+        return _read_file_failure(runtime, text, e)
     except Exception as e:
-        return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
+        return _read_file_failure(runtime, f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}", e)
 
 
 async def _read_file_tool_async(
@@ -3427,8 +3497,8 @@ async def _read_file_tool_async(
     description: str = "",
     start_line: int | None = None,
     end_line: int | None = None,
-) -> str:
-    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line)
+) -> str | ToolMessage:
+    return await _run_sync_tool_after_async_sandbox_init(read_file_tool.func, runtime, path, description, start_line, end_line, _error_result=partial(_read_file_failure, runtime))
 
 
 read_file_tool.coroutine = _read_file_tool_async

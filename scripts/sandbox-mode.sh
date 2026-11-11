@@ -19,22 +19,33 @@ awk '
         sub(/[[:space:]]+$/, "", value)
         return value == "" || value ~ /^#/ || value ~ /^(null|Null|NULL|~|""|\047\047)([[:space:]]+#.*)?$/
     }
-    /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
-    in_sandbox && /^[^[:space:]#]/ { in_sandbox=0 }
-    in_sandbox && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
+    /^[[:space:]]*(#|$)/ || /^(---|\.\.\.)([[:space:]]|$)/ || /^%/ { next }
+    {
+        indent = match($0, /[^[:space:]]/)
+        if (!root_indent) root_indent = indent
+    }
+    indent == root_indent {
+        in_sandbox = $0 ~ /^[[:space:]]*sandbox:([[:blank:]]+#.*)?[[:space:]]*$/
+        child_indent = 0
+        next
+    }
+    in_sandbox && !child_indent { child_indent = indent }
+    in_sandbox && indent == child_indent && !seen_use && /^[[:space:]]*use:[[:space:]]*/ {
         sandbox_use=$0
         sub(/^[[:space:]]*use:[[:space:]]*/, "", sandbox_use)
+        # Keep the exact match below so truncated quoted values fall back to local.
+        sub(/[[:blank:]]+#.*$/, "", sandbox_use)
+        sub(/[[:space:]]+$/, "", sandbox_use)
         seen_use=1
     }
-    in_sandbox && !seen_url && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
+    in_sandbox && indent == child_indent && !seen_url && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
         provisioner_url=$0
         sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", provisioner_url)
         seen_url=1
     }
     END {
-        if (index(sandbox_use, "deerflow.sandbox.local:LocalSandboxProvider")) {
-            print "local"
-        } else if (index(sandbox_use, "deerflow.community.aio_sandbox:AioSandboxProvider")) {
+        aio_provider = "deerflow.community.aio_sandbox:AioSandboxProvider"
+        if (sandbox_use == aio_provider || sandbox_use == "\"" aio_provider "\"" || sandbox_use == "\047" aio_provider "\047") {
             print empty_scalar(provisioner_url) ? "aio" : "provisioner"
         } else {
             print "local"
