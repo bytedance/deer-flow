@@ -53,9 +53,13 @@ shallow copy shares, so that shape is refused *before any write* and the
 build fails with the caller's instance fully intact.
 
 When ``authorization.enabled`` is not true the ordinary pass returns
-``provider=None`` and every step here is skipped: nothing is collected,
+``provider=None`` and the authorization steps above are skipped: nothing is collected,
 nothing is narrowed, and the stack handed to ``create_agent`` is the original
 list object (:func:`narrow_declared_tools` returns it unchanged).
+
+Subagent name restrictions are independent: :func:`apply_declared_tool_policy`
+also narrows declarations when provider authorization is disabled. It preserves
+allowed callable declarations and leaves unrestricted stacks untouched.
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.tools import BaseTool
+from langchain_core.tools import tool as create_tool
 
 from deerflow.authz.provider import AuthorizationProvider
 from deerflow.authz.tool_filter import apply_tool_authorization
@@ -116,16 +121,22 @@ def _middleware_name(middleware: object) -> str:
     return getattr(middleware, "name", None) or type(middleware).__name__
 
 
-def _iter_declared(middleware: object) -> tuple[Any, ...]:
+def _iter_declared(middleware: object, *, allow_sequences: bool = False) -> tuple[Any, ...]:
     tools = getattr(middleware, "tools", None)
     if tools is None:
         return ()
-    if not isinstance(tools, (list, tuple)):
+    if allow_sequences:
+        # Match AgentMiddleware.tools' Sequence contract without consuming a
+        # shared one-shot iterator. Provider authorization keeps its stricter
+        # list/tuple contract below.
+        if not isinstance(tools, Sequence) or isinstance(tools, (str, bytes, bytearray)):
+            raise DeclaredToolViewError(f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__}) must declare tools as a Sequence of tools (for example, a list or tuple), not {type(tools).__name__}.")
+    elif not isinstance(tools, (list, tuple)):
         # Fail loudly, not a warning-and-skip: LangChain's factory iterates
         # the attribute as-is, so a non-sequence container (set, generator,
-        # dict_values, ...) would still bind with no Layer-1 decision. Only
-        # reachable on the authorization-enabled paths — when authorization
-        # is disabled this module never inspects the stack.
+        # dict_values, ...) would still bind with no name-based decision.
+        # Provider authorization requires list/tuple declarations. Subagent
+        # name policies opt into the Sequence contract above.
         raise DeclaredToolViewError(
             f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__}) declares 'tools' as {type(tools).__name__}, not a list/tuple; LangChain would iterate and bind it unchecked. Declare tools as a list or tuple."
         )
@@ -271,6 +282,52 @@ def apply_declared_tool_view(
         clone = _independent_copy(middleware)
         _assign_narrowed_tools(clone, middleware, kept)
         view[index] = clone
+    return view
+
+
+def apply_declared_tool_policy(
+    middlewares: Sequence[object],
+    *,
+    allowed: Sequence[str] | None,
+    disallowed: Sequence[str] | None,
+) -> list[object]:
+    """Apply subagent name restrictions without changing allowed declarations.
+
+    Unlike provider authorization, name policies also support plain callables:
+    resolve their names exactly as ToolNode does, while retaining the original
+    entries. Only a middleware losing a tool needs an independent copy. This
+    pass handles declarations only; generated discovery helpers in the explicit
+    tool list already carry a policy-filtered catalog. Declaration containers
+    follow AgentMiddleware's Sequence contract; one-shot iterators are rejected
+    before consumption so a shared extension does not silently lose tools.
+    """
+    if allowed is None and not disallowed:
+        return middlewares if isinstance(middlewares, list) else list(middlewares)
+
+    allowed_names = frozenset(allowed) if allowed is not None else None
+    denied_names = frozenset(disallowed or ())
+
+    def permits(declaration: Any) -> bool:
+        name = declaration.name if isinstance(declaration, BaseTool) else create_tool(declaration).name
+        return (allowed_names is None or name in allowed_names) and name not in denied_names
+
+    view = middlewares if isinstance(middlewares, list) else list(middlewares)
+    for index, middleware in enumerate(view):
+        tools = _iter_declared(middleware, allow_sequences=True)
+        kept = tuple(tool for tool in tools if permits(tool))
+        if len(kept) == len(tools):
+            continue
+        clone = _independent_copy(middleware)
+        _assign_narrowed_tools(clone, middleware, kept)
+        if view is middlewares:
+            view = list(middlewares)
+        view[index] = clone
+
+    # Re-read the exact stack handed to create_agent, including copied wrappers.
+    for middleware in view:
+        for declaration in _iter_declared(middleware, allow_sequences=True):
+            if not permits(declaration):
+                raise DeclaredToolViewError(f"Middleware {_middleware_name(middleware)} still declares a tool denied by the subagent configuration after build-local narrowing.")
     return view
 
 

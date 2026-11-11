@@ -105,7 +105,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
-| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md) |
+| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |

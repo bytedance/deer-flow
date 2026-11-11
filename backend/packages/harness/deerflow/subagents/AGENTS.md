@@ -54,6 +54,12 @@ set, against an isolated PostgreSQL schema. They need no paid model.
 
 ## Isolation from the parent
 
+- **Tool name policies cover middleware declarations after assembly**, even
+  without global authorization, because extensions can add tools after the
+  inherited list was filtered. Preserve shared middleware and allowed callable
+  declarations; name filtering accepts the Sequence contract and rejects
+  one-shot iterators without consuming them. Generated discovery helpers retain
+  their already-filtered catalogs; global authorization keeps its own validation.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.

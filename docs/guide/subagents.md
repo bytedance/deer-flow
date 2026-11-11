@@ -261,3 +261,9 @@ Administrators can add, edit, disable, and delete reusable worker definitions fr
 Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
+
+## Tool restrictions
+
+Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations. Generated discovery helpers retain catalogs scoped to the admitted tools.
+
+Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.

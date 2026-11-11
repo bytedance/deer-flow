@@ -1266,6 +1266,13 @@ class SubagentExecutor:
         from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 
         _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import apply_declared_tool_policy
+
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
