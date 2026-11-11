@@ -485,7 +485,8 @@ triggers a rolling restart.
 **Resource defaults.** Every workload ships with modest requests+limits in
 `values.yaml`; override per workload (`gateway.resources`, `frontend.resources`,
 `nginx.resources`, `provisioner.resources`, `postgresql.primary.resources`,
-`redis.primary.resources`).
+`redis.primary.resources`). The gateway's init containers have their own
+`gateway.initContainers.resources` and `gateway.initContainers.image`.
 
 ### Not yet enforced (deferred hardening)
 
