@@ -2078,11 +2078,14 @@ def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path, 
         edited = _fact("Use SQLite instead", "fact_dup")
         facts = [unchanged, edited] if order == "unchanged-first" else [edited, unchanged]
 
+        snapshot_after_seed = updater.get_memory_data(agent_name=agent_name)
+
         with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
             updater.import_memory_data(_make_memory(facts=facts), agent_name=agent_name)
 
-        # The rejection must not have touched the seeded snapshot.
-        snapshot_after_seed = updater.get_memory_data(agent_name=agent_name)
+        # The rejection must not have touched the seeded snapshot: compare
+        # against the pre-import read, not a post-rejection one (which could
+        # hide a partially applied duplicate).
         assert storage.load(agent_name=agent_name) == snapshot_after_seed
 
 
@@ -2101,3 +2104,25 @@ def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) 
 
     with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
         updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
+
+
+def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path) -> None:
+    """Pin the storage-level guard directly: _commit_changes_locked must reject
+    a duplicate whose first entry matches the stored fact (normalized equal, so
+    it is skipped from the prepared writes) - the updater gate alone does not
+    exercise this path."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig, FileMemoryStorage
+
+    config = DeerMemConfig(storage_path=str(tmp_path / "storage-guard"), retrieval_adapter="")
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage)
+    updater.import_memory_data(_make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")]), agent_name="researcher")
+
+    unchanged = _fact("Keep PostgreSQL", "fact_dup", revision=1)
+    edited = _fact("Use SQLite instead", "fact_dup", revision=1)
+    with pytest.raises(ValueError, match="Duplicate fact id"):
+        storage.apply_changes(
+            {"upserts": [unchanged, edited]},
+            user_id=None,
+            agent_name="researcher",
+        )
