@@ -60,6 +60,12 @@ set, against an isolated PostgreSQL schema. They need no paid model.
   declarations; name filtering accepts the Sequence contract and rejects
   one-shot iterators without consuming them. Generated discovery helpers retain
   their already-filtered catalogs; global authorization keeps its own validation.
+- **Audit the final tool set immediately before `create_agent`.** Check both
+  explicit tools and the final middleware declarations against the subagent's
+  name policy. Exempt generated discovery helpers by their actual build-local
+  identity in the explicit list, never by name; middleware declarations remain
+  subject to the policy. Unexpected tools fail the build rather than being
+  silently re-filtered.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.

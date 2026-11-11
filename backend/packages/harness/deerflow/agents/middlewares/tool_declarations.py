@@ -285,6 +285,15 @@ def apply_declared_tool_view(
     return view
 
 
+def _tool_policy_name(declaration: Any, *, owner: str) -> str:
+    if isinstance(declaration, BaseTool):
+        return declaration.name
+    try:
+        return create_tool(declaration).name
+    except Exception as exc:
+        raise DeclaredToolViewError(f"{owner} declares a {type(declaration).__name__} tool entry that LangChain cannot convert. Declare tools as BaseTool instances or callables with a valid name, signature and docstring.") from exc
+
+
 def apply_declared_tool_policy(
     middlewares: Sequence[object],
     *,
@@ -307,14 +316,14 @@ def apply_declared_tool_policy(
     allowed_names = frozenset(allowed) if allowed is not None else None
     denied_names = frozenset(disallowed or ())
 
-    def permits(declaration: Any) -> bool:
-        name = declaration.name if isinstance(declaration, BaseTool) else create_tool(declaration).name
+    def permits(middleware: object, declaration: Any) -> bool:
+        name = _tool_policy_name(declaration, owner=f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__})")
         return (allowed_names is None or name in allowed_names) and name not in denied_names
 
     view = middlewares if isinstance(middlewares, list) else list(middlewares)
     for index, middleware in enumerate(view):
         tools = _iter_declared(middleware, allow_sequences=True)
-        kept = tuple(tool for tool in tools if permits(tool))
+        kept = tuple(tool for tool in tools if permits(middleware, tool))
         if len(kept) == len(tools):
             continue
         clone = _independent_copy(middleware)
@@ -326,9 +335,42 @@ def apply_declared_tool_policy(
     # Re-read the exact stack handed to create_agent, including copied wrappers.
     for middleware in view:
         for declaration in _iter_declared(middleware, allow_sequences=True):
-            if not permits(declaration):
+            if not permits(middleware, declaration):
                 raise DeclaredToolViewError(f"Middleware {_middleware_name(middleware)} still declares a tool denied by the subagent configuration after build-local narrowing.")
     return view
+
+
+def verify_subagent_tool_policy(
+    tools: Sequence[Any],
+    middlewares: Sequence[object],
+    *,
+    allowed: Sequence[str] | None,
+    disallowed: Sequence[str] | None,
+    discovery_tools: Sequence[BaseTool] = (),
+) -> None:
+    """Audit the final explicit and middleware tools immediately before graph creation.
+
+    Never refilter or mutate the build. Exempt only the exact discovery helpers
+    generated from admitted tools/skills for this assembly, and only in the
+    explicit list; matching a helper's name does not grant an exemption.
+    """
+    if allowed is None and not disallowed:
+        return
+    allowed_names = frozenset(allowed) if allowed is not None else None
+    denied_names = frozenset(disallowed or ())
+
+    def verify(declaration: Any, *, owner: str) -> None:
+        name = _tool_policy_name(declaration, owner=owner)
+        if (allowed_names is not None and name not in allowed_names) or name in denied_names:
+            raise DeclaredToolViewError(f"{owner} exposes tool {name!r}, denied by the subagent configuration, in the final tool set. Apply the subagent name policy to every tool source before graph creation.")
+
+    for tool in tools:
+        if any(tool is helper for helper in discovery_tools):
+            continue
+        verify(tool, owner="Subagent explicit tool list")
+    for middleware in middlewares:
+        for declaration in _iter_declared(middleware, allow_sequences=True):
+            verify(declaration, owner=f"Middleware {_middleware_name(middleware)} ({type(middleware).__name__})")
 
 
 def verify_declared_tool_view(

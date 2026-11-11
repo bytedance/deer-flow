@@ -264,6 +264,17 @@ For example, independent read-only research can run concurrently when the wall-c
 
 ## Tool restrictions
 
-Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations. Generated discovery helpers retain catalogs scoped to the admitted tools.
+Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations.
+
+Framework-generated discovery helpers (`tool_search` and `describe_skill`) are
+an exception to these name-level allowlists and denylists. Adding either name to
+`disallowed_tools` does not remove the generated helper. Each helper's catalog
+remains limited to admitted tools or skills.
+
+Before creating the agent graph, a final check verifies the explicit tool list
+and middleware declarations against the subagent's name policy. A tool added
+after the earlier filtering passes stops the build if it violates that policy.
+Discovery exemptions apply only to the actual framework-generated helper
+instances; an ordinary tool with the same name still follows the name policy.
 
 Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.

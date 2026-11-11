@@ -18,6 +18,37 @@ from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.subagents.config import SubagentConfig
 
 
+def _callable_without_description() -> str:
+    # Missing documentation is intentional: LangChain must reject this callable.
+    return "report"
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        pytest.param("read_report", id="string"),
+        pytest.param(None, id="none"),
+        pytest.param(object(), id="non-callable"),
+        pytest.param(_callable_without_description, id="invalid-callable"),
+    ],
+)
+def test_invalid_declaration_reports_middleware_context(declaration):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError, apply_declared_tool_policy
+
+    middleware = _middleware([declaration])
+    declarations = middleware.tools
+
+    with pytest.raises(DeclaredToolViewError) as raised:
+        apply_declared_tool_policy([middleware], allowed=None, disallowed=["task"])
+
+    assert middleware.name in str(raised.value)
+    assert "BaseTool" in str(raised.value)
+    assert "callable" in str(raised.value)
+    assert raised.value.__cause__ is not None
+    assert middleware.tools is declarations
+    assert middleware.tools[0] is declaration
+
+
 @pytest.fixture
 def executor_module(monkeypatch, tmp_path):
     # Use the real module despite conftest's circular-import stub.
@@ -306,3 +337,119 @@ def test_restricted_policy_rejects_iterator_without_consuming_shared_declaration
 
     assert original.tools is declarations
     assert next(declarations) is tool
+
+
+def _audit_executor(executor_module, monkeypatch, config, *, tools=(), extensions=None, app_config=None):
+    model = RecordingModel(messages=iter([AIMessage(content="Reviewed")]))
+    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: model)
+    executor = executor_module.SubagentExecutor(config=config, tools=list(tools), extensions=extensions, app_config=app_config or _app_config(), parent_model="offline", thread_id="audit-thread", user_id="audit-user")
+    builds = []
+    real_create_agent = executor_module.create_agent
+
+    def record_build(**kwargs):
+        builds.append(kwargs)
+        return real_create_agent(**kwargs)
+
+    monkeypatch.setattr(executor_module, "create_agent", record_build)
+    return executor, builds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allowed, disallowed, denied_name",
+    [(["read_report"], ["task"], "publish_report"), (None, ["publish_report"], "publish_report"), (None, ["task"], "task")],
+    ids=["allowlist", "denylist", "default-task-denial"],
+)
+async def test_final_audit_rejects_explicit_tool_injection(executor_module, monkeypatch, allowed, disallowed, denied_name):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError
+
+    config = SubagentConfig(name="reviewer", description="Audit tools", skills=[], tools=allowed, disallowed_tools=disallowed)
+    read = _report_tool("read_report", [])
+    executor, builds = _audit_executor(executor_module, monkeypatch, config, tools=[read])
+
+    # An assembly caller supplies a new explicit list after constructor filtering.
+    with pytest.raises(DeclaredToolViewError, match=denied_name):
+        await executor._create_agent(tools=[read, _report_tool(denied_name, [])])
+
+    assert builds == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("denied_name", ["publish_report", "tool_search"])
+async def test_final_audit_rejects_late_middleware_declarations(executor_module, monkeypatch, denied_name):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError
+
+    config = SubagentConfig(name="reviewer", description="Audit tools", skills=[], tools=["read_report"], disallowed_tools=["task", "tool_search"])
+    executor, builds = _audit_executor(executor_module, monkeypatch, config)
+    real_resolve = executor._resolve_recursion_limit
+    injections = []
+
+    def introduce_late_declaration(middlewares):
+        # Fault injection: simulate a later assembly pass adding a new tool
+        # channel after the existing declaration filter has already run.
+        middleware = _middleware([_report_tool(denied_name, [])])
+        middlewares.append(middleware)
+        injections.append(middleware)
+        return real_resolve(middlewares)
+
+    monkeypatch.setattr(executor, "_resolve_recursion_limit", introduce_late_declaration)
+
+    with pytest.raises(DeclaredToolViewError, match=denied_name):
+        await executor._create_agent()
+
+    assert len(injections) == 1
+    assert builds == []
+
+
+@pytest.mark.asyncio
+async def test_final_audit_does_not_exempt_a_tool_search_lookalike(executor_module, monkeypatch):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError
+    from deerflow.tools.mcp_metadata import tag_mcp_tool
+
+    config = SubagentConfig(name="reviewer", description="Audit discovery", skills=[], tools=["mcp_report"], disallowed_tools=["task", "tool_search"])
+    app_config = _app_config()
+    app_config.tool_search.enabled = True
+    executor, builds = _audit_executor(executor_module, monkeypatch, config, tools=[tag_mcp_tool(_report_tool("mcp_report", []))], app_config=app_config)
+    _, _, setup = await executor._build_initial_state("Review reports")
+    lookalike = _report_tool("tool_search", [])
+    assert setup.tool_search_tool is not None and setup.tool_search_tool is not lookalike
+
+    with pytest.raises(DeclaredToolViewError, match="tool_search"):
+        await executor._create_agent(tools=[lookalike], deferred_setup=setup)
+
+    assert builds == []
+
+
+@pytest.mark.asyncio
+async def test_generated_skill_discovery_survives_final_audit(executor_module, monkeypatch, tmp_path):
+    from deerflow.skills.types import Skill, SkillCategory
+
+    skill = Skill(name="demo", description="Demo skill", license=None, skill_dir=tmp_path, skill_file=tmp_path / "SKILL.md", relative_path=Path("demo"), category=SkillCategory.PUBLIC, enabled=True)
+
+    class StaticSkillStorage:
+        def load_skills(self, **kwargs):
+            return [skill]
+
+    monkeypatch.setattr("deerflow.skills.storage.get_or_new_user_skill_storage", lambda *args, **kwargs: StaticSkillStorage())
+    config = SubagentConfig(name="reviewer", description="Audit discovery", skills=["demo"], tools=[], disallowed_tools=["task", "describe_skill"])
+    app_config = _app_config()
+    app_config.skills.deferred_discovery = True
+    executor, builds = _audit_executor(executor_module, monkeypatch, config, app_config=app_config)
+    _, tools, setup = await executor._build_initial_state("Review skills")
+    assert [tool.name for tool in tools] == ["describe_skill"]
+
+    await executor._create_agent(tools=tools, deferred_setup=setup)
+
+    assert len(builds) == 1
+    assert builds[0]["tools"][0] is tools[0]
+
+
+def test_final_audit_is_a_noop_for_an_unrestricted_policy():
+    from deerflow.agents.middlewares.tool_declarations import verify_subagent_tool_policy
+
+    class UninspectedMiddleware:
+        @property
+        def tools(self):
+            raise AssertionError("Unrestricted builds must not inspect declarations")
+
+    verify_subagent_tool_policy([None], [UninspectedMiddleware()], allowed=None, disallowed=[])
