@@ -2255,7 +2255,10 @@ launch and uses the existing Python fallback for later fetches instead of
 repeatedly starting a missing toolchain. A non-zero extraction exit falls back
 only for that document, because malformed or oversized input can fail while
 the toolchain remains healthy. The fallback keeps resolved article links in
-the returned Markdown.
+the returned Markdown. On Windows, the Gateway resolves `npm` through PATHEXT
+and performs the one-time install of Readability.js's Node dependencies that
+readabilipy's own probe cannot run there; the same Python fallback applies if
+npm is missing or the install fails.
 Chat tool-step titles accept leading blank lines and up to three spaces before
 a page's first H1 heading. Indented code, including mixed spaces and tabs, is
 not used as a title; the tool step falls back to the URL.

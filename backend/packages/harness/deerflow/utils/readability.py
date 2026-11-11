@@ -1,8 +1,11 @@
 import logging
+import os
 import re
+import shutil
 import subprocess
 from html import escape, unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from threading import Lock
 from urllib.parse import urljoin, urlparse, uses_relative
 
@@ -24,6 +27,102 @@ except ImportError:  # pragma: no cover - compatibility with future readabilipy 
 _readability_js_launch_failed = False
 _readability_js_available_cached: bool | None = None
 _readability_js_probe_lock = Lock()
+_readability_bootstrap_attempted = False
+
+
+def _readabilipy_js_dir() -> Path:
+    import readabilipy
+
+    return Path(readabilipy.__file__).parent / "javascript"
+
+
+_NPM_INSTALL_TIMEOUT_SECONDS = 120
+_NPM_KILL_DRAIN_TIMEOUT_SECONDS = 5
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """Kill the npm install's wrapper and descendants, then reap it.
+
+    TerminateProcess on the npm.cmd wrapper can leave a surviving node.exe
+    holding the stderr pipe open; the tree kill plus bounded reap mirror
+    LocalSandbox's Windows command cleanup.
+    """
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        logger.debug("Failed to taskkill the npm install process tree", exc_info=True)
+    if process.poll() is None:
+        try:
+            process.kill()
+        except OSError:
+            logger.debug("npm install process %s exited before the fallback kill", process.pid)
+    try:
+        process.wait(timeout=10)
+    except subprocess.SubprocessError:
+        logger.warning("npm install process tree for pid %s did not exit after taskkill", process.pid)
+
+
+def _bootstrap_readability_js() -> None:
+    """Install readabilipy's node_modules on Windows when its own probe cannot.
+
+    readabilipy invokes npm as ``["npm", ...]``, which raises FileNotFoundError
+    on Windows because npm ships as ``npm.cmd`` and CreateProcess ignores
+    PATHEXT. Its node probe therefore always fails there and every extraction
+    silently degrades to the pure-Python path. Resolve npm through
+    ``shutil.which`` (PATHEXT-aware) and run ``npm install`` once, mirroring
+    ``readabilipy.utils.run_npm_install``. Any failure keeps that fallback.
+
+    Like readabilipy's own POSIX path, the installed dependency versions are
+    unpinned: readabilipy's wheel ships only a ``package.json`` with loose
+    ranges and no lockfile, so the tree is resolved from latest-matching
+    releases at install time and is not reproducible across hosts.
+    """
+    global _readability_bootstrap_attempted
+
+    if _readability_bootstrap_attempted or os.name != "nt":
+        return
+    _readability_bootstrap_attempted = True
+
+    jsdir = _readabilipy_js_dir()
+    if not (jsdir / "package.json").is_file() or (jsdir / "node_modules").is_dir():
+        return
+    npm = shutil.which("npm")
+    if npm is None:
+        logger.warning("npm is not on PATH; Readability.js stays unavailable on this Windows host")
+        return
+    logger.info("Installing Readability.js node dependencies via %s (one-time, may take a while)...", npm)
+    try:
+        with subprocess.Popen([npm, "install"], cwd=jsdir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as process:
+            try:
+                _, stderr = process.communicate(timeout=_NPM_INSTALL_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                # Killing the npm.cmd wrapper leaves any surviving node.exe
+                # grandchild holding the stderr pipe open, so the post-kill
+                # drain needs its own deadline too.
+                _terminate_process_tree(process)
+                try:
+                    _, stderr = process.communicate(timeout=_NPM_KILL_DRAIN_TIMEOUT_SECONDS)
+                except subprocess.SubprocessError:
+                    logger.warning("npm install output could not be collected after the timeout")
+                    stderr = b""
+                logger.warning(
+                    "npm install for Readability.js timed out after %ss; using the Python fallback",
+                    _NPM_INSTALL_TIMEOUT_SECONDS,
+                )
+                return
+    except (subprocess.SubprocessError, OSError):
+        logger.warning("npm install for Readability.js failed; using the Python fallback", exc_info=True)
+        return
+    if process.returncode != 0:
+        stderr = stderr.decode(errors="replace").strip() if stderr else ""
+        logger.warning("npm install for Readability.js exited with %s%s; using the Python fallback", process.returncode, f": {stderr}" if stderr else "")
 
 
 def _readability_js_available() -> bool:
@@ -42,6 +141,7 @@ def _readability_js_available() -> bool:
         if _readability_js_available_cached is not None:
             return _readability_js_available_cached
         try:
+            _bootstrap_readability_js()
             _readability_js_available_cached = bool(_readabilipy_have_node())
         except (subprocess.SubprocessError, OSError, ValueError):
             logger.warning("Readability.js availability probe failed; using the Python fallback", exc_info=True)

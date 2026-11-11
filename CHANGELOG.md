@@ -51,6 +51,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **web_fetch:** On native Windows hosts, Readability.js never activated:
+  readabilipy probes npm as a bare `npm` command, which raises
+  `FileNotFoundError` because npm ships as `npm.cmd` and CreateProcess ignores
+  PATHEXT. Every extraction silently degraded to the pure-Python fallback.
+  The Gateway now resolves npm through `shutil.which` and performs the one-time
+  `npm install` readabilipy's own probe cannot, keeping the Python fallback on
+  any failure. ([#8133](https://github.com/bytedance/deer-flow/pull/8133))
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
