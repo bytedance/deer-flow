@@ -49,19 +49,12 @@ def _get_tool_config(tool_name: str) -> dict | None:
 
 
 def _coerce_timeout(value: object, default: float) -> float:
-    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+    """Parse Browserless timeout seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``crawl4ai._coerce_timeout``: booleans and non-numeric strings fall
-    back to the default, so ``timeout_s: off`` (YAML ``False``) does not become
-    ``0.0`` and time out every request against a healthy server, and a typo'd
-    value does not raise out of tool construction.
-
-    A number ``httpx`` cannot use as a deadline falls back too, because the result
-    goes straight to ``httpx.AsyncClient(timeout=...)``: ``0`` and negatives fail
-    every fetch and capture with ``ConnectTimeout`` against a healthy backend,
-    ``nan`` raises ``ValueError: deadline must not be NaN``, and ``inf`` leaves the
-    request without a deadline so it never completes. Falling back to the documented
-    default is better than silently disabling the provider.
+    Reject booleans before conversion so YAML ``timeout_s: off`` does not
+    become an immediate timeout. HTTPX treats non-positive deadlines as expired,
+    raises for NaN and treats positive infinity as an unlimited deadline.
+    Preserve positive finite values without imposing an upper limit.
     """
     if isinstance(value, bool):
         return default

@@ -472,9 +472,9 @@ class TestBrowserlessTools:
         """
         assert self._client_with_config({"timeout_s": value}).timeout_s == 30.0
 
-    @pytest.mark.parametrize("value", [1, 0.001, 45, 12.5, "1", "45", "12.5"])
+    @pytest.mark.parametrize("value", [1, 0.001, 45, 12.5, "1", "45", "12.5", pytest.param(1e308, id="large-finite")])
     async def test_usable_timeout_is_kept(self, value):
-        """Rejecting unusable deadlines must not narrow the values that work."""
+        """Preserve positive finite timeout values without an upper limit."""
         assert self._client_with_config({"timeout_s": value}).timeout_s == float(value)
 
     async def test_unusable_timeout_warns(self, caplog):
@@ -482,7 +482,7 @@ class TestBrowserlessTools:
         with caplog.at_level("WARNING", logger="deerflow.community.browserless.tools"):
             assert self._client_with_config({"timeout_s": 0}).timeout_s == 30.0
         assert "invalid timeout 0" in caplog.text
-        
+
     async def test_env_token_is_stripped(self):
         """A token read from a file keeps its trailing newline.
 
