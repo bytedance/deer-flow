@@ -422,7 +422,10 @@ def _manifest_path(scope_root: Path) -> Path:
 def _read_manifest(scope_root: Path) -> dict | None:
     try:
         value = json.loads(_manifest_path(scope_root).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Discarding the manifest forces a full rebuild on the next ensure; log
+        # once so "why did my projection rebuild" has an answer.
+        logger.debug("Ignoring unreadable projection manifest %s: %s", _manifest_path(scope_root), exc)
         return None
     return value if isinstance(value, dict) else None
 

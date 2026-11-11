@@ -16,6 +16,8 @@ class _BlockingFakeClient:
 
     def __init__(self, probe_dir: Path):
         self._probe = probe_dir / "probe.txt"
+        self.looked_up = False
+        self.written = False
 
     def _block(self) -> None:
         self._probe.write_text("blocked io")
@@ -31,6 +33,12 @@ class _BlockingFakeClient:
 
     def add_messages(self, ws: str, sid: str, msgs: list[Any]) -> None:
         self._block()
+        self.written = True
+
+    def existing_source_ids(self, ws: str, sid: str, source_ids: list[str]) -> set[str]:
+        self._block()
+        self.looked_up = True
+        return set()
 
     def working_representation(self, ws: str, pid: str, *, max_conclusions: int = 25) -> str:
         self._block()
@@ -65,6 +73,8 @@ async def test_async_honcho_operations_do_not_block_event_loop(
         messages,
         user_id="alice",
     )
+    assert manager._client.looked_up
+    assert manager._client.written
     assert await manager.aget_context("alice") is not None
     assert (
         await manager.asearch(

@@ -29,7 +29,7 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import bind_authenticated_user, reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +207,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Browser extension pages are bound to the account that loaded their
+        # descriptor. Cookies can change in another tab before React observes it.
+        # This is a stale-view fence, not an authorization grant; CLI callers may
+        # omit it and all existing route/resource checks still apply.
+        expected_viewer = request.headers.get("x-deerflow-plugin-viewer")
+        if get_request_route_path(request).startswith("/api/extensions/") and expected_viewer is not None and expected_viewer != str(user.id):
+            return JSONResponse(status_code=409, content={"detail": "Account changed; reload this extension view."})
+
         # Stamp both request.state.user (for the contextvar pattern)
         # and request.state.auth (so @require_permission's "auth is
         # None" branch short-circuits instead of running the entire
@@ -226,6 +234,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:
-            return await call_next(request)
+            verified_user_id = str(user.id) if auth_source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_PAT} else None
+            with bind_authenticated_user(verified_user_id):
+                return await call_next(request)
         finally:
             reset_current_user(token)

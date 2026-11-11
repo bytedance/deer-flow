@@ -197,6 +197,38 @@ describe("ThreadSubagentBatches capability gating", () => {
     expect(batchState.fetchNextPage).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["running", true],
+    ["completed", true],
+    ["cancelled", false],
+  ])(
+    "offers retry for a failed item of a %s batch: %s",
+    async (status, offered) => {
+      featureState.workerRunning = true;
+      batchState.batches = [{ ...HISTORICAL_BATCH, status }];
+      batchState.itemPages = [
+        [
+          {
+            id: "item-1",
+            item_key: "record-1",
+            position: 0,
+            status: "failed",
+            error: "permanent",
+          },
+        ],
+      ];
+      render(<ThreadSubagentBatches threadId="thread-1" />);
+
+      fireEvent.click(screen.getByRole("button", { name: "Batches" }));
+      fireEvent.click(screen.getByRole("button", { name: "View items" }));
+
+      expect(await screen.findByText("permanent")).toBeDefined();
+      expect(screen.queryByRole("button", { name: "Retry" }) !== null).toBe(
+        offered,
+      );
+    },
+  );
+
   it("reviews a stored report and captured evidence", async () => {
     batchState.batches = [HISTORICAL_BATCH];
     batchState.itemPages = [

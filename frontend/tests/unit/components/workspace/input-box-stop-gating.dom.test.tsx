@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
@@ -40,9 +46,13 @@ function getSubmitButton(container: HTMLElement): HTMLButtonElement {
 function renderComposer({
   canStopStreaming,
   onStop,
+  onBusySubmit,
+  canCreateRuns,
 }: {
   canStopStreaming?: boolean;
   onStop: () => void;
+  onBusySubmit?: (text: string, mode: "queue" | "steer") => Promise<unknown>;
+  canCreateRuns?: boolean;
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -69,6 +79,8 @@ function renderComposer({
                 context={{ mode: "flash" } as never}
                 onStop={onStopProp}
                 canStopStreaming={canStopStreaming}
+                canCreateRuns={canCreateRuns}
+                onBusySubmit={onBusySubmit}
               />
             </PromptInputProvider>
           </ThreadContext.Provider>
@@ -85,6 +97,45 @@ afterEach(() => {
 });
 
 describe("InputBox stop gating (runs:cancel)", () => {
+  it("keeps update sending separate from Stop and preserves a rejected draft", async () => {
+    const onStop = rs.fn();
+    const onBusySubmit = rs
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({});
+    renderComposer({ onStop, onBusySubmit });
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "Include 2025" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send update" }));
+    await waitFor(() =>
+      expect(onBusySubmit).toHaveBeenCalledWith("Include 2025", "queue"),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("button", { name: "Send update" })
+          .hasAttribute("disabled"),
+      ).toBe(false),
+    );
+    expect((input as HTMLTextAreaElement).value).toBe("Include 2025");
+    expect(onStop).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Send update" }));
+    await waitFor(() => expect((input as HTMLTextAreaElement).value).toBe(""));
+    fireEvent.click(screen.getByRole("button", { name: "Stop current task" }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not expose input controls when creating Runs is denied", () => {
+    renderComposer({
+      onStop: rs.fn(),
+      onBusySubmit: rs.fn(),
+      canCreateRuns: false,
+    });
+    expect(
+      screen.queryByRole("button", { name: "Send while working" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send update" })).toBeNull();
+  });
   it("disables the stop affordance for a denied role and never fires onStop", () => {
     const onStop = rs.fn();
     const { container } = renderComposer({ canStopStreaming: false, onStop });

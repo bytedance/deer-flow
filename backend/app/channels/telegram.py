@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import threading
 import time
@@ -34,6 +35,9 @@ TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
 # Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
 TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS = 4.0
 TELEGRAM_BRIDGE_DRAIN_TIMEOUT_SECONDS = 1.0
+# Outbound listeners await sends inline. Bound each flood wait while still
+# allowing a full group rate-limit window.
+TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS = 60.0
 STREAM_EDIT_MIN_INTERVAL_SECONDS = 1.0
 # Groups (negative chat_id) are capped at 20 messages/minute by Telegram,
 # so stream edits there must pace well below the private-chat 1 msg/s guideline.
@@ -323,14 +327,20 @@ class TelegramChannel(Channel):
 
         if not msg.is_final:
             await self._send_stream_update(chat_id, key, msg.text, reply_to=self._parse_message_id(msg.thread_ts))
+            state = self._stream_messages.get(key)
+            if state is not None:
+                binding = (msg.thread_id, msg.connection_id, msg.owner_user_id, msg.thread_ts, state["message_id"])
+                if state.get("thread_binding") != binding and await self._remember_reply_thread(msg, state["message_id"], stream_state=state):
+                    state["thread_binding"] = binding
             return
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
+            await self._remember_reply_thread(msg, state["message_id"], stream_state=state)
             if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
                 self._last_bot_message[msg.chat_id] = state["message_id"]
                 return
-            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
+            await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text, msg)
             return
 
         if self._can_send_rich(msg.text):
@@ -340,10 +350,51 @@ class TelegramChannel(Channel):
                 logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
                 message_id = None
             if message_id is not None:
+                await self._remember_reply_thread(msg, message_id)
                 return
 
         for chunk in self._split_message(msg.text):
-            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            message_id = await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
+            await self._remember_reply_thread(msg, message_id)
+
+    async def _remember_reply_thread(self, msg: OutboundMessage, message_id: int | None, *, stream_state: dict[str, Any] | None = None) -> bool:
+        """Keep group replies on their source thread, without undoing a later /new."""
+        if not msg.thread_id or message_id is None or int(msg.chat_id) >= 0:
+            return True
+        store = self.config.get("channel_store")
+        if msg.connection_id:
+            # Bound conversations must never fall back to the shared legacy store.
+            if self._connection_repo is None or not msg.owner_user_id:
+                return False
+        elif store is None:
+            return False
+        topic_ids = {str(message_id)}
+        if msg.thread_ts:
+            topic_ids.add(msg.thread_ts)
+        try:
+            for topic_id in topic_ids:
+                if msg.connection_id:
+                    await self._connection_repo.claim_thread_id(
+                        connection_id=msg.connection_id,
+                        owner_user_id=msg.owner_user_id,
+                        provider=self.name,
+                        external_conversation_id=msg.chat_id,
+                        external_topic_id=topic_id,
+                        thread_id=msg.thread_id,
+                    )
+                else:
+                    await store.claim_thread_id(self.name, msg.chat_id, msg.thread_id, topic_id=topic_id)
+        except Exception:
+            # Delivery has already succeeded. Retry the binding on the next update,
+            # not the Telegram send, which could duplicate a visible reply.
+            if stream_state is not None and stream_state.get("thread_binding_error_logged"):
+                logger.debug("[Telegram] reply thread mapping retry failed in chat=%s", msg.chat_id)
+            else:
+                logger.exception("[Telegram] failed to remember reply thread mapping in chat=%s", msg.chat_id)
+                if stream_state is not None:
+                    stream_state["thread_binding_error_logged"] = True
+            return False
+        return True
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -409,7 +460,7 @@ class TelegramChannel(Channel):
         state["last_edit_at"] = _monotonic()
         state["last_text"] = display
 
-    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str) -> None:
+    async def _finalize_stream_message(self, chat_id: int, chat_key: str, state: dict[str, Any], text: str, msg: OutboundMessage) -> None:
         """Apply the final text: edit the streamed message, splitting overflow into follow-ups."""
         bot = self._application.bot
         chunks = self._split_message(text or "")
@@ -423,10 +474,12 @@ class TelegramChannel(Channel):
         else:
             # Edit could not be applied (e.g. message deleted) — deliver the
             # first chunk as a fresh message with the standard retry policy.
-            await self._send_new_message(chat_id, chat_key, chunks[0])
+            message_id = await self._send_new_message(chat_id, chat_key, chunks[0])
+            await self._remember_reply_thread(msg, message_id, stream_state=state)
 
         for chunk in chunks[1:]:
-            await self._send_new_message(chat_id, chat_key, chunk)
+            message_id = await self._send_new_message(chat_id, chat_key, chunk)
+            await self._remember_reply_thread(msg, message_id, stream_state=state)
 
     async def _edit_final_chunk(self, bot, chat_id: int, message_id: int, text: str) -> bool:
         """Edit with one rate-limit retry. Returns False if the edit could not be applied."""
@@ -545,13 +598,24 @@ class TelegramChannel(Channel):
 
         try:
             input_file = await asyncio.to_thread(_load_telegram_input_file, attachment.actual_path, attachment.filename)
+            from telegram.error import BadRequest
+
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
                 kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
                     if chat_id > 0:
                         kwargs["allow_sending_without_reply"] = True
-                sent = await bot.send_photo(**kwargs)
+                try:
+                    sent = await bot.send_photo(**kwargs)
+                except BadRequest as exc:
+                    if str(exc).casefold() not in {"photo_invalid_dimensions", "image_process_failed"}:
+                        raise
+                    logger.info("[Telegram] photo rejected (%s); delivering as document: %s", exc, attachment.filename)
+                    # A rejected photo can still be delivered unchanged as a file.
+                    # Keep the reply target and reuse the already loaded bytes.
+                    kwargs["document"] = kwargs.pop("photo")
+                    sent = await bot.send_document(**kwargs)
             else:
                 kwargs = {"chat_id": chat_id, "document": input_file}
                 if reply_to:
@@ -561,6 +625,7 @@ class TelegramChannel(Channel):
                 sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
+            await self._remember_reply_thread(msg, sent.message_id)
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
             return True
         except Exception:
@@ -917,6 +982,24 @@ class TelegramChannel(Channel):
             "last_text": last_text,
         }
 
+    def _outbound_retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Extend the shared backoff for new plain or Rich final-reply sends.
+
+        Only sends through ``_send_with_retry`` use this policy. The running
+        acknowledgment and intermediate stream updates are best effort.
+        Final edits have their own retry path.
+        """
+        delay = super()._outbound_retry_delay(attempt, exc)
+        if not self._is_retry_after(exc):
+            return delay
+        try:
+            hint = self._retry_after_seconds(exc)
+        except (TypeError, ValueError, OverflowError):
+            return delay
+        if not math.isfinite(hint):
+            return delay
+        return max(delay, min(hint, TELEGRAM_MAX_OUTBOUND_RETRY_DELAY_SECONDS))
+
     @staticmethod
     def _is_retry_after(exc: Exception) -> bool:
         return getattr(exc, "retry_after", None) is not None
@@ -958,7 +1041,7 @@ class TelegramChannel(Channel):
         return chunks
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
-        """Send a 'Working on it...' reply and register it as the stream target."""
+        """Send a best-effort acknowledgment before dispatching inbound work."""
         if not self._application:
             return
         try:

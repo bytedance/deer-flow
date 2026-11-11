@@ -526,6 +526,42 @@ class TestRetentionSweep:
         assert not ghost_ns.parent.exists()
         assert documents_dir.is_dir()
 
+    @pytest.mark.parametrize("sweep_user", [_USER, None], ids=["lazy", "startup"])
+    @pytest.mark.parametrize("linked", [".deer-flow", "users", f"users/{_USER}", f"users/{_USER}/projects"])
+    async def test_symlinked_storage_ancestor_keeps_referenced_originals(self, env, monkeypatch, tmp_path, linked, sweep_user):
+        """§8.3: a row protects its namespace even when the data root, the
+        users tree or a user's projects tree is a symlink. Protected
+        namespaces are resolved, so the walk must be too; an unreferenced
+        file past the guard is still collected through the link."""
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        if linked == ".deer-flow":
+            # Without DEER_FLOW_HOME the data root is the unresolved
+            # ``<project root>/.deer-flow``.
+            checkout = tmp_path / "checkout"
+            checkout.mkdir()
+            monkeypatch.delenv("DEER_FLOW_HOME")
+            monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(checkout))
+            link = checkout / ".deer-flow"
+        else:
+            link = env.paths.base_dir / linked
+            link.parent.mkdir(parents=True, exist_ok=True)
+        symlink_or_skip(link, target, target_is_directory=True)
+        project = await env.projects.create(name="P", user_id=_USER)
+        row = await _add(env, project["id"], name="keep.txt", data=b"keep")
+        kept = original_file_path(env.paths, user_id=_USER, row=row)
+        _age(kept, hours=25)
+        orphan = env.paths.project_documents_dir(_USER, project["id"]) / "ab" / ("ab" * 32) / "ghost" / "original" / "old.bin"
+        orphan.parent.mkdir(parents=True)
+        orphan.write_bytes(b"x")
+        _age(orphan, hours=25)
+
+        report = await run_trash_retention_sweep(env.docs, env.paths, retention_days=30, user_id=sweep_user)
+
+        assert kept.read_bytes() == b"keep"
+        assert report.orphans_removed == 1
+        assert not orphan.exists()
+
     async def test_row_reconciliation_detects_logs_and_never_deletes(self, env, caplog):
         """§8.3/§15.17: a row whose content vanished past the 24h guard is
         surfaced as content_missing (log + report) but the row is retained —

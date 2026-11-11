@@ -69,6 +69,7 @@ from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
 from deerflow.uploads.manager import apply_upload_sandbox_permits
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.http_policy import control_plane_trust_env
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -299,6 +300,59 @@ _WECOM_MEDIA_COS_APPIDS = frozenset({"1258476243"})
 _WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-(?P<appid>\d+)\.cos\.[a-z0-9-]+\.myqcloud\.com$")
 
 _METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
+
+
+def _make_gateway_client(gateway_url: str) -> httpx.AsyncClient:
+    """Build the short-lived client for Gateway control-plane calls.
+
+    A loopback Gateway must bypass ``HTTP_PROXY``, while an external one keeps
+    the environment proxy. The policy itself lives in
+    :mod:`deerflow.utils.http_policy` so this module never imports the sandbox
+    provider stack.
+    """
+    return httpx.AsyncClient(trust_env=control_plane_trust_env(gateway_url))
+
+
+# Mirrors the client ``langgraph_sdk.get_client()`` builds, so the loopback path
+# below differs from it only in ``trust_env``.
+_LANGGRAPH_SDK_RETRIES = 5
+_LANGGRAPH_SDK_TIMEOUT = httpx.Timeout(connect=5, read=300, write=300, pool=5)
+
+
+def _make_langgraph_client(base_url: str, headers: Mapping[str, str]) -> Any:
+    """Build the ``langgraph_sdk`` async client used for channel run submission.
+
+    ``get_client()`` always builds ``httpx.AsyncHTTPTransport(retries=5)`` on an
+    ``httpx.AsyncClient`` that keeps ``trust_env`` at its default ``True`` and
+    exposes neither ``transport`` nor ``trust_env``, so a loopback Gateway would
+    still be sent through ``HTTP_PROXY``: control-plane calls are fixed but
+    ``runs.wait`` keeps hitting the proxy-generated error of #7876. Loopback and
+    private Gateways therefore get an explicit ``trust_env=False`` client handed
+    to the SDK; external Gateways keep the stock ``get_client()`` path.
+    """
+    from langgraph_sdk import __version__ as sdk_version
+    from langgraph_sdk import get_client
+
+    if control_plane_trust_env(base_url):
+        return get_client(url=base_url, headers=dict(headers))
+
+    try:  # langgraph-sdk keeps the async client in a private package since 0.3
+        from langgraph_sdk._async import LangGraphClient
+    except ImportError:  # older releases expose it directly on ``langgraph_sdk.client``
+        from langgraph_sdk.client import LangGraphClient
+
+    # ``get_client`` also folds an ``LANGGRAPH_API_KEY`` env var into the SDK
+    # headers; a control-plane Gateway authenticates with the internal auth
+    # headers above, so only those are forwarded here.
+    return LangGraphClient(
+        httpx.AsyncClient(
+            base_url=base_url,
+            transport=httpx.AsyncHTTPTransport(retries=_LANGGRAPH_SDK_RETRIES),
+            timeout=_LANGGRAPH_SDK_TIMEOUT,
+            headers={"User-Agent": f"langgraph-sdk-py/{sdk_version}", **headers},
+            trust_env=False,
+        )
+    )
 
 
 def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -599,7 +653,7 @@ def _is_run_status_result(result: Any) -> bool:
     return isinstance(result, dict) and "messages" not in result and isinstance(result.get("status"), str)
 
 
-def _turn_of_message(values: Any, message_id: str) -> dict[str, Any] | None:
+def _turn_of_message(values: Any, message_id: str, *, thread_id: str | None = None) -> dict[str, Any] | None:
     """Thread *values* cut after the turn that answered human message *message_id*.
 
     The cut ends before the next visible human message, so the response, artifact
@@ -611,7 +665,7 @@ def _turn_of_message(values: Any, message_id: str) -> dict[str, Any] | None:
     for index, message in enumerate(messages):
         if isinstance(message, dict) and message.get("type") == "human" and message.get("id") == message_id:
             end = next(
-                (later for later in range(index + 1, len(messages)) if isinstance(messages[later], dict) and messages[later].get("type") == "human" and not _is_hidden_human_control_message(messages[later])),
+                (later for later in range(index + 1, len(messages)) if isinstance(messages[later], dict) and messages[later].get("type") == "human" and not _is_hidden_human_control_message(messages[later], thread_id=thread_id)),
                 len(messages),
             )
             return {**values, "messages": messages[:end]}
@@ -810,7 +864,7 @@ def _apply_explicit_model_choice(
         carrier["model_name"] = model_name
 
 
-def _extract_response_text(result: dict | list) -> str:
+def _extract_response_text(result: dict | list, *, thread_id: str | None = None) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
     ``runs.wait`` returns the final state dict which contains a ``messages``
@@ -837,7 +891,7 @@ def _extract_response_text(result: dict | list) -> str:
 
         # Stop at the last human message — anything before it is a previous turn
         if msg_type == "human":
-            if _is_hidden_human_control_message(msg):
+            if _is_hidden_human_control_message(msg, thread_id=thread_id):
                 continue
             break
 
@@ -1146,7 +1200,7 @@ def _accumulate_stream_text(
     return buffers[message_id], message_id
 
 
-def _extract_artifacts(result: dict | list) -> list[str]:
+def _extract_artifacts(result: dict | list, *, thread_id: str | None = None) -> list[str]:
     """Extract artifact paths from the last AI response cycle only.
 
     Instead of reading the full accumulated ``artifacts`` state (which contains
@@ -1167,7 +1221,7 @@ def _extract_artifacts(result: dict | list) -> list[str]:
             continue
         # Stop at the last human message — anything before it is a previous turn
         if msg.get("type") == "human":
-            if _is_hidden_human_control_message(msg):
+            if _is_hidden_human_control_message(msg, thread_id=thread_id):
                 continue
             break
         # Look for AI messages with present_files tool calls
@@ -1181,13 +1235,20 @@ def _extract_artifacts(result: dict | list) -> list[str]:
     return artifacts
 
 
-def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
+def _is_hidden_human_control_message(msg: Mapping[str, Any], *, thread_id: str | None = None) -> bool:
     """Distinguish internal control messages from real hidden user answers."""
     if msg.get("type") != "human":
         return False
 
     additional_kwargs = msg.get("additional_kwargs")
     if not isinstance(additional_kwargs, Mapping):
+        if additional_kwargs is not None:
+            logger.warning(
+                "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+                thread_id or msg.get("thread_id", "<unknown>"),
+                msg.get("seq", "<unknown>"),
+                type(additional_kwargs).__name__,
+            )
         return False
 
     return additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None
@@ -2311,11 +2372,9 @@ class ChannelManager:
     def _get_client(self):
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
-            from langgraph_sdk import get_client
-
-            self._client = get_client(
-                url=self._langgraph_url,
-                headers={**create_internal_auth_headers(), **self._csrf_headers()},
+            self._client = _make_langgraph_client(
+                self._langgraph_url,
+                {**create_internal_auth_headers(), **self._csrf_headers()},
             )
         return self._client
 
@@ -3462,9 +3521,9 @@ class ChannelManager:
                 return
             result = await self._admitted_turn(client, msg, thread_id) or result
 
-        response_text = _extract_response_text(result)
+        response_text = _extract_response_text(result, thread_id=thread_id)
         pending_clarification = _has_current_turn_clarification(result)
-        artifacts = _extract_artifacts(result)
+        artifacts = _extract_artifacts(result, thread_id=thread_id)
 
         logger.info(
             "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
@@ -3517,7 +3576,7 @@ class ChannelManager:
         except Exception:
             logger.warning("[Manager] failed to read thread state for an admitted run: thread_id=%s", thread_id, exc_info=True)
             return None
-        return _turn_of_message(state.get("values") if isinstance(state, dict) else None, message_id)
+        return _turn_of_message(state.get("values") if isinstance(state, dict) else None, message_id, thread_id=thread_id)
 
     async def _handle_streaming_chat(
         self,
@@ -3594,7 +3653,7 @@ class ChannelManager:
                     # Clarification text is only in the values snapshot;
                     # publish it so the user sees the question mid-stream.
                     if _has_current_turn_clarification(data):
-                        clarification_text = _extract_response_text(data)
+                        clarification_text = _extract_response_text(data, thread_id=thread_id)
                         if clarification_text and clarification_text != latest_text:
                             latest_text = clarification_text
 
@@ -3644,9 +3703,9 @@ class ChannelManager:
             if replay_gap and last_values is None and not latest_text and stream_error is None:
                 last_values = await self._admitted_turn(client, msg, thread_id)
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
-            response_text = _extract_response_text(result)
+            response_text = _extract_response_text(result, thread_id=thread_id)
             pending_clarification = _has_current_turn_clarification(result)
-            artifacts = _extract_artifacts(result)
+            artifacts = _extract_artifacts(result, thread_id=thread_id)
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
@@ -4024,6 +4083,23 @@ class ChannelManager:
             self._remember_thread_model(thread_id, name)
         return f"Model '{name}' selected. It applies to this conversation from the next message."
 
+    @staticmethod
+    def _is_goal_in_flight_error(error: Exception) -> bool:
+        """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
+        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
+            return False
+        detail = {
+            "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
+            "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
+        }.get(error.request.method)
+        if detail is None:
+            return False
+        try:
+            body = error.response.json()
+        except ValueError:
+            return False
+        return isinstance(body, Mapping) and body.get("detail") == detail
+
     async def _goal_request(
         self,
         method: str,
@@ -4032,7 +4108,7 @@ class ChannelManager:
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
+        async with _make_gateway_client(self._gateway_url) as http:
             request = getattr(http, method.lower())
             kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
@@ -4097,7 +4173,9 @@ class ChannelManager:
                 return await self._goal_reply(msg, "cleared")
             try:
                 await self._goal_request("delete", thread_id, headers=headers)
-            except Exception:
+            except Exception as exc:
+                if self._is_goal_in_flight_error(exc):
+                    return await self._goal_reply(msg, "busy")
                 logger.exception("Failed to clear goal through gateway")
                 return await self._goal_reply(msg, "clear_failed")
             return await self._goal_reply(msg, "cleared")
@@ -4107,7 +4185,9 @@ class ChannelManager:
 
         try:
             await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
-        except Exception:
+        except Exception as exc:
+            if self._is_goal_in_flight_error(exc):
+                return await self._goal_reply(msg, "busy")
             logger.exception("Failed to set goal through gateway")
             return await self._goal_reply(msg, "set_failed")
 
@@ -4124,7 +4204,7 @@ class ChannelManager:
         replies should catch and degrade (see ``_fetch_gateway``).
         """
         headers = _owner_headers(msg) if msg is not None else None
-        async with httpx.AsyncClient() as http:
+        async with _make_gateway_client(self._gateway_url) as http:
             resp = await http.get(
                 f"{self._gateway_url}{path}",
                 timeout=10,

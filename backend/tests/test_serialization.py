@@ -162,6 +162,149 @@ def test_serialize_dispatcher_default_mode():
     assert result == {"key": "v1"}
 
 
+# ── non-finite float normalization ───────────────────────────────────────────
+
+
+class _FakePydanticWithNonFinite:
+    """Object whose model_dump output carries a nested non-finite float.
+
+    Mirrors a live LangChain message whose ``response_metadata`` holds a
+    provider logprob of ``-inf`` for a zero-probability token.
+    """
+
+    def model_dump(self):
+        return {"response_metadata": {"logprobs": {"token": float("-inf")}}}
+
+
+def test_serialize_finite_floats_unchanged():
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    assert serialize_lc_object(3.14) == 3.14
+    assert serialize_lc_object([1.5, {"x": -2.0}]) == [1.5, {"x": -2.0}]
+
+
+def test_serialize_non_finite_floats_normalized_to_none():
+    import math
+
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    assert serialize_lc_object(float("nan")) is None
+    assert serialize_lc_object(float("inf")) is None
+    assert serialize_lc_object(float("-inf")) is None
+    result = serialize_lc_object({"a": float("inf"), "b": [float("nan"), 1.0]})
+    assert result == {"a": None, "b": [None, 1.0]}
+    assert all(not isinstance(v, float) or math.isfinite(v) for v in _iter_floats(result))
+
+
+def test_serialize_recurses_into_model_dump_output():
+    """A non-finite float inside a model_dump result must also be normalized."""
+    from deerflow.runtime.serialization import serialize_lc_object
+
+    result = serialize_lc_object(_FakePydanticWithNonFinite())
+    assert result == {"response_metadata": {"logprobs": {"token": None}}}
+
+
+def test_serialize_channel_values_json_safe_for_both_wires():
+    """Serialized channel values must survive a strict (allow_nan=False) encoder."""
+    import json
+
+    from deerflow.runtime.serialization import serialize_channel_values_for_api
+
+    raw = {
+        "messages": [{"type": "ai", "content": "hi", "response_metadata": {"logprobs": {"t": float("-inf")}}}],
+        "some_metric": float("nan"),
+    }
+    result = serialize_channel_values_for_api(raw)
+    # Strict encoding mirrors Starlette's JSONResponse.render (REST path).
+    json.dumps(result, allow_nan=False)
+    # Strict decoding mirrors the JS useStream / langgraph-sdk SSE parser.
+    encoded = json.dumps(result)
+    json.loads(encoded, parse_constant=_reject_constant)
+
+
+def test_serialize_messages_mode_json_safe():
+    import json
+
+    from deerflow.runtime.serialization import serialize
+
+    # Both halves of the tuple must be JSON-safe: the chunk carries the
+    # non-finite in model_dump output, the metadata in caller-supplied run
+    # metadata (merged into messages-mode frames by LangGraph).
+    payload = serialize(
+        (_FakePydanticWithNonFinite(), {"node": "model", "metric": float("-inf")}),
+        mode="messages",
+    )
+    assert payload[1]["metric"] is None
+    json.dumps(payload, allow_nan=False)
+    json.loads(json.dumps(payload), parse_constant=_reject_constant)
+
+
+def test_serialize_messages_tuple_metadata_non_finite_floats_normalized():
+    """The metadata half of a messages-mode tuple rides the same wire as the
+    chunk: non-finite floats nested there must be normalized too (#7669), not
+    emitted as bare ``NaN`` / ``Infinity`` tokens."""
+    import json
+
+    from deerflow.runtime.serialization import serialize_messages_tuple
+
+    metadata = {
+        "langgraph_node": "agent",
+        "langgraph_step": 1,
+        "stats": {"score": float("inf"), "delta": float("nan")},
+    }
+    result = serialize_messages_tuple(({"content": "hi"}, metadata))
+    assert result[1] == {
+        "langgraph_node": "agent",
+        "langgraph_step": 1,
+        "stats": {"score": None, "delta": None},
+    }
+    # Strict encoding mirrors Starlette's JSONResponse; strict decoding
+    # mirrors the JS useStream / langgraph-sdk SSE parser.
+    json.dumps(result, allow_nan=False)
+    json.loads(json.dumps(result), parse_constant=_reject_constant)
+
+
+def test_serialize_messages_mode_json_safe_metadata():
+    """At the dispatcher level metadata gets the same canonical treatment as
+    the chunk: tuples become lists (their JSON shape anyway) and nested
+    objects are recursively serialized."""
+    import json
+
+    from deerflow.runtime.serialization import serialize
+
+    payload = serialize(
+        (
+            {"content": "hi"},
+            {
+                "langgraph_node": "agent",
+                "langgraph_triggers": ("branch:to:agent",),
+                "nested": {"obj": _FakePydanticV2(), "floor": float("-inf")},
+            },
+        ),
+        mode="messages",
+    )
+    assert payload[1]["langgraph_node"] == "agent"
+    assert payload[1]["langgraph_triggers"] == ["branch:to:agent"]
+    assert payload[1]["nested"] == {"obj": {"key": "v2"}, "floor": None}
+    json.dumps(payload, allow_nan=False)
+    json.loads(json.dumps(payload), parse_constant=_reject_constant)
+
+
+def _reject_constant(token):
+    raise ValueError(f"non-finite JSON token: {token}")
+
+
+def _iter_floats(obj):
+    if isinstance(obj, float):
+        yield obj
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            yield from _iter_floats(v)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            yield from _iter_floats(v)
+
+
 # ── strip_data_url_image_blocks ──────────────────────────────────────────────
 
 

@@ -1,6 +1,57 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  usage: {
+    title: string;
+    description: string;
+    reportingNote: string;
+    period: string;
+    last7Days: string;
+    last30Days: string;
+    refresh: string;
+    tokens: string;
+    runs: string;
+    inputTokens: string;
+    outputTokens: string;
+    cachedTokens: string;
+    daily: string;
+    dailyDetails: string;
+    models: string;
+    noUsage: string;
+    unknown: string;
+    timezoneNote: string;
+    date: string;
+    model: string;
+    noModels: string;
+    noRuns: string;
+    recentRuns: string;
+    recentRunsHint: string;
+    status: string;
+    allStatuses: string;
+    pending: string;
+    running: string;
+    success: string;
+    error: string;
+    timeout: string;
+    interrupted: string;
+    cancelled: string;
+    unknownStatus: string;
+    previous: string;
+    next: string;
+    page: (page: number) => string;
+    started: string;
+    duration: string;
+    conversation: string;
+    untitled: string;
+    details: string;
+    loadFailed: string;
+    retry: string;
+    forbidden: string;
+    unavailable: string;
+    databaseRequired: string;
+    staticUnavailable: string;
+    loading: string;
+  };
   // Locale meta
   locale: {
     localName: string;
@@ -26,6 +77,26 @@ export interface Translations {
     catalogEntry: string;
     catalogHint: string;
     installationGuide: string;
+    detail: {
+      guide: string;
+      gettingStarted: string;
+      requirements: string;
+      loaded: string;
+      loadedHint: string;
+      tools: string;
+      pages: string;
+      management: string;
+      readyHint: string;
+      disabledHint: string;
+      failedHint: string;
+      noPageHint: string;
+      guideHint: string;
+      technicalDetails: string;
+      package: string;
+      namespace: string;
+      refresh: string;
+      refreshHint: string;
+    };
     catalog: Record<
       | "workflows"
       | "reportSections"
@@ -38,10 +109,16 @@ export interface Translations {
       | "knowledge"
       | "knowledgeManagement"
       | "knowledgePlatform"
+      | "knowledgeCenter"
       | "weknora"
       | "lightrag"
       | "example",
-      { title: string; description: string }
+      {
+        title: string;
+        description: string;
+        gettingStarted?: { title: string; description: string }[];
+        requirements?: string[];
+      }
     >;
     pageUnavailable: string;
     pageUnavailableHint: string;
@@ -290,6 +367,12 @@ export interface Translations {
   };
 
   modelPicker: {
+    search: string;
+    provider: string;
+    allProviders: string;
+    noResults: string;
+    recent: string;
+
     title: string;
     favorites: string;
     otherModels: string;
@@ -433,6 +516,7 @@ export interface Translations {
       waitingForYou: string;
       waiting: string;
       paused: string;
+      waitingApproval: string;
       autoContinuedOnce: string;
       autoContinuedMany: string;
       details: string;
@@ -454,6 +538,8 @@ export interface Translations {
         runFailed: string;
         needsInputCard: string;
         needsInputReply: string;
+        needsApproval: string;
+        needsApprovalReload: string;
         external: string;
         unchecked: string;
         unknown: string;
@@ -485,6 +571,22 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    runInputMode: string;
+    queueMode: string;
+    steerMode: string;
+    queueModeHelp: string;
+    steerModeHelp: string;
+    runInputSend: string;
+    runInputTextOnly: string;
+    runInputUnavailable: string;
+    stopRun: string;
+    runInputQueued: string;
+    runInputSteering: string;
+    runInputUnapplied: string;
+    runInputRetry: string;
+    runInputCancel: string;
+    runInputDispatching: string;
+    runInputReplayUnavailable: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
   };
@@ -679,6 +781,8 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    followUpPending: string;
+    followUpStopped: string;
     workerUnavailable: string;
     empty: string;
     emptyHint: string;
@@ -1250,6 +1354,7 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    streamServerError: (status: number) => string;
     outlineLabel: string;
     outlineAttachmentFallback: string;
   };
@@ -1515,6 +1620,40 @@ export interface Translations {
     requiredA11yLabel: string;
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
+    approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
+      title: string;
+      description: string;
+      waiting: string;
+      loading: string;
+      loadFailed: string;
+      reload: string;
+      approve: string;
+      reject: string;
+      approveAll: string;
+      rejectAll: string;
+      submitDecisions: string;
+      reasonLabel: string;
+      reasonPlaceholder: string;
+      submitFailed: string;
+      submitTimeout: string;
+      featureDisabled: string;
+      noPending: string;
+    };
   };
 
   // Uploads
@@ -1596,6 +1735,30 @@ export interface Translations {
     title: string;
     description: string;
     models: {
+      connectionSettings: string;
+      importTitle: string;
+      importDescription: string;
+      savedConnection: string;
+      newConnection: string;
+      fetchModels: string;
+      searchModels: string;
+      selectVisible: string;
+      clearSelection: string;
+      alreadyConfigured: string;
+      noCatalogResults: string;
+      catalogTruncated: string;
+      discovery_unsupported: string;
+      discovery_failed: string;
+      importUncertain: string;
+      importStopped: string;
+      stopImport: string;
+      closeCatalog: string;
+      catalogCount: (
+        visible: number,
+        total: number,
+        selected: number,
+      ) => string;
+      testAndAdd: (count: number) => string;
       title: string;
       description: string;
       adminOnly: string;
