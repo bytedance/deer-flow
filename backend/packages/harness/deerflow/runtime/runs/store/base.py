@@ -439,6 +439,23 @@ class RunStore(abc.ABC):
         """
         raise NotImplementedError
 
+    async def merge_owned_metadata(
+        self,
+        run_id: str,
+        metadata: dict[str, Any],
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Merge top-level keys into an active run's metadata under a live owner lease.
+
+        Atomically require ``owner_worker_id``, an unexpired lease and a
+        ``pending``/``running`` row; change no other field. Return True only
+        after the write commits. False means a peer took over, the lease
+        expired or the run is no longer active. Legacy stores cannot enforce
+        these conditions and fail closed instead of writing a full snapshot.
+        """
+        raise NotImplementedError("Store must implement owner/lease-fenced metadata merge")
+
     async def finalize_if_not_cancelled(
         self,
         run_id: str,
