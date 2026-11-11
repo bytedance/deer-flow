@@ -513,16 +513,83 @@ describe("artifact URL helpers", () => {
       ]);
     });
 
-    test("skips handoffs with duplicate success receipts", async () => {
+    test("restores a handoff once with identical success receipts", async () => {
+      const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+      const delivered = `${outputs}/report.md`;
+      const success = result("duplicate", {
+        id: "receipt-1",
+        name: "present_shared_artifact",
+        status: "success",
+        additional_kwargs: { deerflow_tool_meta: { status: "success" } },
+      });
+      const messages: Message[] = [
+        {
+          type: "ai",
+          content: "",
+          tool_calls: [handoff("duplicate", delivered)],
+        },
+        success,
+        { ...success, id: "receipt-2" },
+      ];
+
+      expect(collectThreadArtifactPaths([], messages)).toEqual([delivered]);
+    });
+
+    test.each([
+      ["an explicit error", { status: "error" }],
+      [
+        "different receipt text",
+        { content: receipt.replace(origin, "other-thread") },
+      ],
+      ["a different tool name", { name: "present_files" }],
+      [
+        "an unknown status",
+        { status: "pending" } as unknown as Partial<ToolMessage>,
+      ],
+      [
+        "error metadata",
+        { additional_kwargs: { deerflow_tool_meta: { status: "error" } } },
+      ],
+      [
+        "partial success metadata",
+        {
+          additional_kwargs: {
+            deerflow_tool_meta: { status: "partial_success" },
+          },
+        },
+      ],
+      ["malformed metadata", { additional_kwargs: { deerflow_tool_meta: {} } }],
+    ] satisfies [string, Partial<ToolMessage>][])(
+      "skips a handoff when a matching receipt has %s",
+      async (_reason, fields) => {
+        const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
+        const messages: Message[] = [
+          {
+            type: "ai",
+            content: "",
+            tool_calls: [handoff("conflicting", `${outputs}/report.md`)],
+          },
+          result("conflicting", { id: "receipt-1", status: "success" }),
+          result("conflicting", {
+            id: "receipt-2",
+            status: "success",
+            ...fields,
+          }),
+        ];
+
+        expect(collectThreadArtifactPaths([], messages)).toEqual([]);
+      },
+    );
+
+    test("skips a handoff without a matching receipt", async () => {
       const { collectThreadArtifactPaths } = await loadFreshArtifactUtils();
       const messages: Message[] = [
         {
           type: "ai",
           content: "",
-          tool_calls: [handoff("duplicate", `${outputs}/report.md`)],
+          tool_calls: [handoff("pending", `${outputs}/pending.md`)],
         },
-        result("duplicate", { id: "receipt-1", status: "success" }),
-        result("duplicate", { id: "receipt-2", status: "success" }),
+        result("unrelated"),
       ];
 
       expect(collectThreadArtifactPaths([], messages)).toEqual([]);
@@ -543,7 +610,8 @@ describe("artifact URL helpers", () => {
       };
       const messages = [
         first,
-        result("reused"),
+        result("reused", { id: "first-receipt" }),
+        result("reused", { id: "retried-receipt" }),
         second,
         result("reused", { content: "Error: Destination already exists" }),
       ];

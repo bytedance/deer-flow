@@ -89,6 +89,9 @@ This section accumulates work toward the **2.3.0** milestone
   database error. The 409 points callers at `PUT` on the same route, which
   updates the existing feedback. ([#8064])
   
+- **frontend:** Reopening a conversation restores successfully handed-off shared
+  artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.

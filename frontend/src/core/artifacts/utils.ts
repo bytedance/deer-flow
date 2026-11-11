@@ -1,7 +1,6 @@
 import type { AIMessage, Message, ToolMessage } from "@langchain/langgraph-sdk";
 
 import { getBackendBaseURL } from "../config";
-import { isErrorToolMessage } from "../messages/tool-error";
 import { indexToolResults } from "../messages/tool-result";
 import { extractPresentFilesFromMessage } from "../messages/utils";
 import { isStaticWebsiteOnly } from "../static-mode";
@@ -158,17 +157,26 @@ function extractSharedArtifactPaths(
       continue;
     }
 
+    // Match backend/packages/harness/deerflow/tools/artifact_handoff.py and
+    // backend/tests/test_shared_artifact_handoff.py exactly.
     // Failures can also have a success status. / 失败回执也可能标为 success。
     const receipt = `Successfully presented shared artifact; origin_thread_id=${origin_thread_id}; sha256=${sha256}`;
     const matching = results.filter((result) => result.tool_call_id === id);
     if (
-      matching.length !== 1 ||
-      matching.some(
-        (result) =>
-          isErrorToolMessage(result) ||
+      matching.length === 0 ||
+      matching.some((result) => {
+        const metadata = result.additional_kwargs?.deerflow_tool_meta;
+        return (
+          (result.status !== undefined && result.status !== "success") ||
+          (metadata !== undefined &&
+            (typeof metadata !== "object" ||
+              metadata === null ||
+              !("status" in metadata) ||
+              metadata.status !== "success")) ||
           (result.name != null && result.name !== SHARED_ARTIFACT_TOOL) ||
-          result.content !== receipt,
-      )
+          result.content !== receipt
+        );
+      })
     ) {
       continue;
     }
