@@ -14,6 +14,47 @@ Additional examples cover [text-list classification](deerflow-extension-jev-clas
 [advisory screening of fetched content](deerflow-extension-jev-screening/README.md), and
 [sectioned long-form report writing](deerflow-extension-report-sections/README.md).
 
+## Describe the extension
+
+Package `deerflow-extension.json` beside the entrypoint's Python module (beside
+`__init__.py` for a package). Capability Center renders this public description
+without requiring a browser module. Use the full-stack plugin namespace as `id`,
+or a unique stable ID for a backend-only extension. A v1 document requires an ID,
+at least one locale, and a nonempty **title**, **description** (purpose) and
+**usage** list in every supplied locale. `requirements` and `docs_url` are optional;
+omit requirements when none apply. Keep secrets and deployment configuration out
+of this file. Names, purposes and instructions are authored by the package;
+loaded/enabled state and registered tools come from the host.
+
+```json
+{
+  "schema_version": 1,
+  "id": "company.helper",
+  "locales": {
+    "en-US": {
+      "title": "Task statistics",
+      "description": "Collect tool-call statistics during tasks.",
+      "usage": [
+        {"title": "Run a task", "description": "Statistics are collected automatically after activation."}
+      ]
+    }
+  }
+}
+```
+
+The packaging checker validates this file when present and detects omitted wheel
+resources. Older packages without it remain compatible. Invalid optional copy
+produces a startup diagnostic while the working extension remains available.
+Gateway reads copy at startup only, after successful registration. Disabled and
+failed packages are not imported for documentation; a catalog entry alone does
+not prove activation. A documented backend extension with actual registrations
+appears in discovery even if it supplies no full-stack plugin.
+
+For bundled examples, update their package files and run
+`python scripts/sync_extension_documentation.py` from the repository root. The
+generated frontend snapshot supplies descriptions before installation; installed
+package copy takes precedence. Backend tests check that the snapshot is current.
+
 ## Edit, test, check, then install
 
 1. Copy the selected example outside the DeerFlow checkout. Rename its Python
