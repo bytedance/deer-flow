@@ -49,6 +49,14 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
+  could reorder parallel writes during replay or lose paged ancestor history.
+  The ordering and Postgres pagination contracts now fail on regression instead
+  of skipping. ([#8139])
+
 ### Fixed
 
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
@@ -2021,11 +2029,6 @@ This release closes that milestone with **1068 merged pull requests**.
   and the message toolbar also appears on keyboard focus. A `/goal` refused
   because a run is still going keeps the draft and says so. ([#6556])
 ### Changed
-
-- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
-  4.3.0 and the SQLite saver 3.1.2, excluding versions that could reorder
-  parallel writes during replay. The ordering and Postgres pagination contracts
-  now fail on regression instead of skipping.
 
 - **tool output:** Superseded `write_file` payload elision is now opt-in. The
   optimization remains available, but the default keeps model-bound history
@@ -16304,3 +16307,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139

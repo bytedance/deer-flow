@@ -24,6 +24,13 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### 变更
+
+- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0、
+  SQLite saver 3.1.2 和 Postgres saver 3.1.3，排除会在重放时重排并行写入或
+  丢失分页祖先历史的版本。顺序和 Postgres 分页契约在回归时现在会直接失败，
+  不再跳过。([#8139])
+
 ### 修复
 
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
@@ -1476,10 +1483,6 @@
   工具栏在键盘聚焦时也会显示。因还有运行未结束而被拒绝的 `/goal` 会保留草稿并说明
   原因。([#6556])
 ### 变更
-
-- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0 和
-  SQLite saver 3.1.2，排除会在重放时重排并行写入的版本。顺序和 Postgres
-  分页契约在回归时现在会直接失败，不再跳过。
 
 - **工具输出：** 被后续操作取代的 `write_file` 载荷省略现在改为显式启用。该优化仍可
   使用，但默认会保持发送给模型的历史只追加，避免后续文件操作使 provider 的提示词缓存
@@ -12872,3 +12875,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
