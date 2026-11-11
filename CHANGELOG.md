@@ -55,6 +55,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
