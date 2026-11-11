@@ -1372,6 +1372,14 @@ shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 
+Each Browserless tool entry reads its request timeout from `timeout_s`, with
+`timeout` as an alias when `timeout_s` is absent. The default is 30 seconds.
+Zero, negative, and non-finite values fall back to the default with a warning.
+Strings that cannot be parsed as numbers also trigger this fallback. HTTPX can
+time out immediately for non-positive values. It raises an error for NaN and
+applies no deadline for positive infinity. Browserless preserves positive finite
+values in seconds, including very large values.
+
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
 (set `BROWSERLESS_TOKEN`) or run one locally with Docker:
@@ -1973,7 +1981,7 @@ while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
 use `/home/alice/...`. Native Windows paths can use forward slashes as above,
 or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
 backslashes literal; only double-quoted scalars interpret backslash escapes.
-These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+These are path examples; the [local development prerequisites](../../docs/guide/deployment.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
