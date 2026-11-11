@@ -39,6 +39,8 @@ A task finishing after Steer charges usage to its dispatch `AIMessage` when its
 receipt is delivered (newest `AIMessage` if compacted); budgets read only those.
 On restart retain unapplied text for explicit retry; never replay side effects
 automatically. Regressions: `test_run_inputs.py`, `test_run_input_graph.py`.
+An approval pause holds the queue for its resume Run (`continues_run_id` chain);
+see `docs/RUN_INTERACTION_POLICY.md` and `test_queued_input_approval_pause.py`.
 
 Queue dispatch skips only `InputCancelled` raised by the store's atomic claim
 before Run admission. Do not infer cancellation from a stale read or exception
