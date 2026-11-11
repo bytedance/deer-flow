@@ -101,31 +101,33 @@ def _preflight_delegation_checks(
     runtime_app_config: Any | None,
     available_subagent_names: Any,
     allowed_subagents: Any | None,
-    resume_task_id: str | None = None,
-) -> str | None:
+) -> tuple[Any | None, str | None]:
     """只读预检（Preflight / Validate-then-Mutate）。
 
     在触发任何有副作用的委派操作（工具装配、SubagentExecutor 创建、
     后台任务注册）之前，一次性完成所有前置条件校验。
 
-    零副作用原则：
+    本 helper 自身零副作用：
     - 不创建 SubagentExecutor
     - 不注册后台任务
     - 不装配 MCP/业务工具
     - 不快照父上下文
     - 不抢占或取消任何源任务
 
-    返回 None 表示全部通过；返回错误字符串表示拒绝，调用方直接
-    返回失败，状态不变，调用方可安全重试。
+    返回 (config, None) 表示全部通过；返回 (None, error_str) 表示拒绝，
+    调用方应直接返回失败。helper 内部状态不变，调用方可安全重试。
+    注意：helper 运行前调用方已在 RunInputControl 上注册了子网关条目，
+    该条目为良性重试可复用，不属于 helper 自身的副作用。
 
-    resume_task_id 为未来子代理恢复特性预留的校验位。当前未接入
-    recovery 模块时传入 None 直接通过。未来接入后，应在此处做“只读”
-    的源任务可恢复性检查（类型兼容、历史可提取、非空），仅当全部
-    通过后，再由调用方执行 supersede_and_claim_resumable_task，避免被
-    拒绝的恢复请求消耗源任务（见 issue #7633）。
+    未来若合入 recovery 特性，应在本 helper 内补充只读的源任务可恢复性
+    检查（类型兼容、历史可提取、非空），仅当全部通过后再由调用方执行
+    supersede_and_claim_resumable_task，避免被拒绝的恢复请求消耗源任务
+    （见 issue #7633）。
     """
+    config: Any | None = None
+
     if context_mode not in {"isolated", "snapshot"}:
-        return f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
+        return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
 
     if subagent_type == "bash":
         host_bash_allowed = (
@@ -134,7 +136,7 @@ def _preflight_delegation_checks(
             else is_host_bash_allowed()
         )
         if not host_bash_allowed:
-            return LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+            return None, LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 
     config = (
         get_subagent_config(subagent_type, app_config=runtime_app_config)
@@ -148,17 +150,9 @@ def _preflight_delegation_checks(
             available = "none permitted by caller policy"
         else:
             available = "none"
-        return f"Unknown subagent type '{subagent_type}'. Available: {available}"
+        return None, f"Unknown subagent type '{subagent_type}'. Available: {available}"
 
-    # 预留：子代理恢复接入点。当前 resume_task_id 为 None 时不做任何限制。
-    # 未来若合入 recovery 特性，此处应补充只读的源任务可恢复性检查。
-    if resume_task_id is not None:
-        return (
-            f"Cannot resume subagent: task '{resume_task_id}' "
-            f"has no recoverable message history."
-        )
-
-    return None
+    return config, None
 
 
 def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> None:
@@ -957,8 +951,8 @@ async def task_tool(
 
     # Preflight: 只读预检，零副作用。在触发任何有副作用的委派操作
     #（工具装配、执行器创建、后台任务注册）之前一次性完成前置条件校验。
-    # 失败即返回，状态完全不变，调用方可安全重试。
-    preflight_error = _preflight_delegation_checks(
+    # 失败即返回，helper 内部状态不变，调用方可安全重试。
+    preflight_config, preflight_error = _preflight_delegation_checks(
         subagent_type=subagent_type,
         context_mode=context_mode,
         runtime_app_config=runtime_app_config,
@@ -971,6 +965,7 @@ async def task_tool(
             status="failed",
             error=preflight_error,
         )
+    config = preflight_config
     # Rejected delegations must not serialize the retained history. Capture
     # after delegation validation, before child setup (including tool loading).
     context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
