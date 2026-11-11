@@ -2851,7 +2851,7 @@ run_events:
   #         database trigger after an offline cutover.
   # Restart-required; strict requires database.backend: postgres and backend: db.
   # Stop every Gateway, activate the database policy, then restart all with the
-  # matching cutover ID. See README.md#configuration for the offline cutover.
+  # matching cutover ID. See docs/guide/configuration.md for the offline cutover.
   producer_fencing: "off"
   # producer_cutover_id: deployment-2026-10-27
 

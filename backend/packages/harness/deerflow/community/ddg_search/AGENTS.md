@@ -1,21 +1,15 @@
-# DuckDuckGo Search
+# DuckDuckGo search (`deerflow/community/ddg_search/`)
 
-`web_search` distinguishes a search that matched nothing from one that never
-ran. `_search_text` returns `[]` only for a genuinely empty result set, which
-`ddgs` reports as `DDGSException("No results found.")`, and raises
-`DDGSearchError` for every execution failure: rate limits, timeouts, blocked
-HTML (vqd extraction), SDK errors, and the missing `ddgs` dependency. Building
-the client is part of the boundary too: keep `DDGS(timeout=30)` inside the
-`try` so proxy or client-setup failures surface as the same structured error
-instead of escaping raw.
-`web_search_tool` answers a failure with
-`{"error": "DuckDuckGo search failed: <exception type>: <message>", "query": ...}`
-and keeps `{"error": "No results found", "query": ...}` for the empty result.
-Keep the exception type and message in the error text: `tool_result_meta`
-classifies on it, and an outage downgraded to "No results found" reads as
-`no_results` (rewrite the query) instead of transient or config recovery.
+Shared provider rules are in the [community guide](../AGENTS.md).
 
-`tests/test_ddg_search_tools.py` exercises the real tool by patching
-`sys.modules["ddgs"]` with a fake `DDGS` whose `__init__` or `text()` raises -
-never the normalizer or the tool's final output. Keep the SDK's "No results
-found." sentinel mapped back to the empty-search response.
+- **A search that matched nothing differs from a search that never ran.** Only
+  the SDK's "No results found." exception maps to the empty response. A rate
+  limit, a timeout, blocked HTML, an SDK error and a missing `ddgs` package each
+  return a structured error.
+- **Keep the exception type and message in the error text.** The tool-result
+  classifier reads them. An outage reported as "No results found" tells the model
+  to rewrite the query, when the right recovery is a retry or a config fix.
+- **Client construction stays inside the same `try`**, so a proxy or setup
+  failure returns the same structured error.
+- **Tests replace `sys.modules["ddgs"]` with a fake SDK** whose constructor or
+  `text()` raises. They do not patch the normalizer or the tool output.
