@@ -1390,6 +1390,17 @@ class DeerFlowClient:
             ]
         }
 
+    def _memory_scope_kwargs(self) -> dict[str, str]:
+        """Scope a memory management call to this client's named agent.
+
+        A named client's graph stores and reads its memory in that agent's
+        bucket: ``MemoryMiddleware`` and the memory tools both pass
+        ``agent_name``. A management call that omits it targets the user's
+        default bucket instead, so a fact written through the client is never
+        injected back into the same client's conversations.
+        """
+        return {"agent_name": self._agent_name} if self._agent_name is not None else {}
+
     def get_memory(self) -> dict:
         """Get current memory data.
 
@@ -1398,19 +1409,22 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().get_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.get_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs())
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().get_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.get_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs())
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().import_memory(memory_data, user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.import_memory(memory_data, user_id=get_effective_user_id(), **self._memory_scope_kwargs())
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1667,12 +1681,13 @@ class DeerFlowClient:
 
         manager = get_memory_manager()
         user_id = get_effective_user_id()
+        scope_kwargs = self._memory_scope_kwargs()
         try:
-            return manager.reload_memory(user_id=user_id)
+            return manager.reload_memory(user_id=user_id, **scope_kwargs)
         except NotImplementedError:
             pass  # no reload concept; fall back to current memory below
         try:
-            return manager.get_memory(user_id=user_id)
+            return manager.get_memory(user_id=user_id, **scope_kwargs)
         except NotImplementedError:
             raise NotImplementedError(f"reload_memory not supported by memory backend {type(manager).__name__}: implements neither reload_memory nor get_memory") from None
 
@@ -1680,14 +1695,15 @@ class DeerFlowClient:
         """Clear all persisted memory data."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().clear_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.clear_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs())
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
+        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id(), **self._memory_scope_kwargs())
         if fact_id is None:
             raise ValueError("Fact was not stored because the configured memory.max_facts capacity policy evicted it")
         return memory_data
@@ -1697,7 +1713,7 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        return manager.delete_fact(fact_id, user_id=get_effective_user_id())
+        return manager.delete_fact(fact_id, user_id=get_effective_user_id(), **self._memory_scope_kwargs())
 
     def update_memory_fact(
         self,
@@ -1716,6 +1732,7 @@ class DeerFlowClient:
             category=category,
             confidence=confidence,
             user_id=get_effective_user_id(),
+            **self._memory_scope_kwargs(),
         )
 
     def get_memory_config(self) -> dict:
