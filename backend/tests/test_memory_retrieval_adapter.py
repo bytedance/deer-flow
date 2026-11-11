@@ -35,14 +35,53 @@ def test_natural_language_hyphens_are_not_treated_as_fts5_syntax() -> None:
     assert not _is_advanced_query("real-time co-pilot node -js +python")
 
 
-@pytest.mark.skipif(not _jieba_available, reason="install the optional memory-zh extra")
+@pytest.mark.skipif(not _jieba_available, reason="requires the optional memory-zh extra to exercise the jieba branch")
 def test_chinese_subphrase_search_uses_jieba_tokenization(tmp_path: Path) -> None:
+    """With jieba installed, the same sub-phrase recall must still hold.
+
+    The complementary no-jieba case is forced with a monkeypatch below, so the
+    two tests cover the two tokenizer branches instead of skipping each other
+    on the same install.
+    """
     adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
     scope = {"userId": "alice", "agentName": "agent-a"}
     try:
         adapter.upsert(_fact("zh", "中文检索支持验证"), scope=scope, path="")
         results = adapter.search("检索", scopes=[scope], top_k=5, mode="fts5", filters=None)
         assert [item["fact"]["id"] for item in results] == ["zh"]
+    finally:
+        adapter.close()
+
+
+def test_chinese_fact_is_recallable_without_memory_zh_extra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A CJK fact indexed in the default install must stay retrievable.
+
+    ``uv sync --group dev --locked`` and the contributor CI path install no
+    ``memory-zh`` extra, so ``_tokenize`` has to segment CJK on its own. It
+    emits character bigrams (the same ``relevance.cjk_token`` strategy the
+    relevance ranker uses) on both the index and the query side; a whitespace
+    fallback would keep the whole CJK run as one FTS5 token and silently return
+    zero hits for every sub-phrase. ``_jieba_available`` is read at call time,
+    so forcing it here runs this branch even where jieba is installed.
+    """
+    monkeypatch.setattr("deerflow.agents.memory.backends.deermem.deermem.core.retrieval._jieba_available", False)
+    adapter = FTS5RetrievalAdapter(tmp_path / "facts.sqlite3")
+    scope = {"userId": "alice", "agentName": "agent-a"}
+    try:
+        adapter.upsert(_fact("zh-default", "调度器会重试失败的任务"), scope=scope, path="")
+        results = adapter.search("重试", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert results, "expected the stored Chinese fact to be recalled by the CJK sub-phrase '重试', got 0 hits: the no-jieba fallback must emit CJK bigrams instead of keeping '调度器会重试失败的任务' as one token"
+        assert [item["fact"]["id"] for item in results] == ["zh-default"]
+
+        # A single CJK character has no equal bigram token to match; the query
+        # side emits the FTS5 prefix phrase "重"* so the bigram index still hits.
+        single = adapter.search("重", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert [item["fact"]["id"] for item in single] == ["zh-default"]
+
+        # The prefix stays anchored to that character: an absent one must not
+        # start matching everything in the index.
+        absent = adapter.search("蟹", scopes=[scope], top_k=5, mode="fts5", filters=None)
+        assert absent == []
     finally:
         adapter.close()
 

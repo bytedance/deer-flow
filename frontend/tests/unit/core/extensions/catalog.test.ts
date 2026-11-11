@@ -111,7 +111,7 @@ test("preserves custom deployment extensions and module failures", () => {
   );
 });
 
-test("workflow metadata is localized, explains Phase 2 limits and merges its registration", () => {
+test("workflow metadata is localized and merges its registration", () => {
   const workflow: LoadedContribution = {
     ...contribution,
     namespace: "community.workflows",
@@ -122,9 +122,9 @@ test("workflow metadata is localized, explains Phase 2 limits and merges its reg
     [
       enUS.extensions.catalog,
       "Script workflows",
-      "No restart replay or hard monetary budget",
+      "review retained output versions",
     ],
-    [zhCN.extensions.catalog, "脚本工作流", "不支持重启回放或硬金额预算"],
+    [zhCN.extensions.catalog, "脚本工作流", "按保留版本确认成果"],
   ] as const) {
     const catalogOnly = extensionDirectory([], copy).find(
       (entry) => entry.package === "deerflow-extension-workflows",
@@ -211,5 +211,70 @@ test("knowledge platform discovery is localized and does not imply a management 
       "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-platform#readme",
     );
     expect(entry?.loaded).toBeUndefined();
+  }
+});
+
+test("installed documentation clears bundled requirements while retaining the README fallback", () => {
+  for (const requirements of [undefined, []]) {
+    const loaded = {
+      ...contribution,
+      documentation: {
+        schema_version: 1 as const,
+        id: contribution.namespace,
+        locales: {
+          en: {
+            title: "Installed",
+            description: "Current package",
+            usage: [{ title: "Start", description: "Use the package" }],
+            ...(requirements ? { requirements } : {}),
+          },
+        },
+      },
+    };
+    const entry = extensionDirectory([loaded], enUS.extensions.catalog).find(
+      (item) => item.id === loaded.namespace,
+    )!;
+    expect(entry.title).toBe("Installed");
+    expect(entry.requirements ?? []).toEqual([]);
+    expect(entry.guide).toContain("deerflow-extension-bookmarks#readme");
+  }
+});
+
+test("documentation matches language tags by case-insensitive exact match then language", () => {
+  const page = {
+    ...contribution,
+    documentation: {
+      schema_version: 1 as const,
+      id: contribution.namespace,
+      locales: {
+        "en-us": {
+          title: "English",
+          description: "English",
+          usage: [{ title: "Start", description: "Start" }],
+        },
+        zh: {
+          title: "中文",
+          description: "中文",
+          usage: [{ title: "开始", description: "开始" }],
+        },
+        "zh-cn": {
+          title: "简体",
+          description: "简体",
+          usage: [{ title: "开始", description: "开始" }],
+        },
+      },
+    },
+  };
+  for (const [locale, title] of [
+    ["en-US", "English"],
+    ["zh-CN", "简体"],
+    ["zh-TW", "中文"],
+    ["fr-FR", "English"],
+  ]) {
+    expect(
+      extensionDirectory([page], enUS.extensions.catalog, locale).find(
+        (item) => item.id === page.namespace,
+      )?.title,
+    ).toBe(title);
   }
 });
