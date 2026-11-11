@@ -1263,6 +1263,13 @@ def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuati
     return handle
 
 
+def get_agent_runs(request: Request):
+    """Return the host-bound AgentRuns capability for *request*, or ``None``."""
+    host = getattr(request.app.state, "agent_runs_host", None)
+    # Internal/channel and PAT runs deliberately receive no retained delegation.
+    return host.bind(request) if host is not None else None
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -1272,10 +1279,12 @@ def get_run_context(request: Request) -> RunContext:
     ``event_store`` / ``run_events_config`` pair stays frozen to the snapshot
     captured in :func:`langgraph_runtime` so callers never see a store bound to
     one backend paired with a config pointing at another.
+
+    Loading ``app_config`` stats and hashes ``config.yaml`` (and reparses it
+    after an edit), so async callers build the context with
+    ``asyncio.to_thread``.
     """
-    host = getattr(request.app.state, "agent_runs_host", None)
-    # Internal/channel and PAT runs deliberately receive no retained delegation.
-    agent_runs = host.bind(request) if host is not None else None
+    agent_runs = get_agent_runs(request)
     checkpointer = get_checkpointer(request)
     scheduled_task_service = getattr(request.app.state, "scheduled_task_service", None)
     return RunContext(
