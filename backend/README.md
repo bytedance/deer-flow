@@ -54,6 +54,10 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 
 Middlewares execute in strict order, each handling a specific concern:
 
+Starting a new graph invocation resets tool-progress tracking. Results and model
+retries still finishing from an earlier invocation cannot block its tools or
+restore obsolete progress hints, including same-run goal continuations.
+
 | # | Middleware | Purpose |
 |---|-----------|---------|
 | 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |
@@ -73,6 +77,12 @@ batch before tool execution. Warning-only batches remain fully counted and
 receive a transient hint on the next model request.
 
 ### Sandbox System
+
+With lazy initialization, a fresh AIO run prepares its authorized Agent skill
+view without acquiring a container until a sandbox-backed tool needs one.
+Existing sandbox state still requires eager policy rebinding; upload-based
+providers still acquire and synchronize skills eagerly. Explicit sandbox
+prewarming remains a separate opt-in behavior.
 
 Per-thread isolated execution with virtual path translation:
 
@@ -104,6 +114,10 @@ queued claims use conditional database writes, so competing workers cannot claim
 the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
+
+If the local retrieval index is busy, read-only, or temporarily unavailable,
+DeerMem falls back to substring search without deleting it. Automatic index
+recreation is reserved for SQLite-confirmed corruption or a non-database file.
 
 LLM-powered persistent context retention across conversations:
 
@@ -156,8 +170,8 @@ to a boundary (SQLite) or causing the search to fail (PostgreSQL).
 | `POST /api/skills/install` | Install skill from `.skill` archive |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
-| `GET /api/memory/config` | Memory configuration |
-| `GET /api/memory/status` | Combined config + data |
+| `GET /api/memory/config` | Memory configuration; credential values in `backend_config` are masked |
+| `GET /api/memory/status` | Combined config (masked the same way) + data |
 | `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
 | `POST /api/threads/{id}/uploads` | Upload files (optional PDF/PPT/Excel/Word-to-Markdown conversion, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |

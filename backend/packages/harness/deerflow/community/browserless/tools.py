@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
@@ -47,22 +49,23 @@ def _get_tool_config(tool_name: str) -> dict | None:
 
 
 def _coerce_timeout(value: object, default: float) -> float:
-    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+    """Parse Browserless timeout seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
-    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
-    does not become ``0.0`` and time out every request against a healthy server, and a
-    typo'd value does not raise out of tool construction.
+    Reject booleans before conversion so YAML ``timeout_s: off`` does not
+    become an immediate timeout. HTTPX treats non-positive deadlines as expired,
+    raises for NaN and treats positive infinity as an unlimited deadline.
+    Preserve positive finite values without imposing an upper limit.
     """
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(value, (int, float, str)):
         try:
-            return float(value)
-        except ValueError:
-            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+            timeout = float(value)
+        except (TypeError, ValueError, OverflowError):
+            timeout = 0.0
+        if math.isfinite(timeout) and timeout > 0:
+            return timeout
+    logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
     return default
 
 
@@ -85,13 +88,18 @@ def _get_browserless_client(tool_name: str = "web_fetch", cfg: dict | None = _UN
     if cfg is _UNSET:
         cfg = _get_tool_config(tool_name)
     base_url = DEFAULT_BASE_URL
-    token = os.getenv("BROWSERLESS_TOKEN", "")
+    token = resolve_api_key(os.getenv("BROWSERLESS_TOKEN"))
     timeout_s = 30.0
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        token = cfg.get("token", token)
+        if "token" in cfg:
+            # An explicitly configured value is authoritative, including "" and
+            # null: a self-hosted capture endpoint opts out of the cloud token,
+            # and falling back to BROWSERLESS_TOKEN would send that credential to
+            # it. Only an omitted key falls back to the environment.
+            token = resolve_api_key(cfg.get("token"))
         timeout_s = _resolve_timeout(cfg, timeout_s)
-    return BrowserlessClient(base_url=base_url, token=token, timeout_s=timeout_s)
+    return BrowserlessClient(base_url=base_url, token=token or "", timeout_s=timeout_s)
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -292,8 +300,8 @@ def _target_status_warning(result: BrowserlessScreenshotResult | BrowserlessFetc
     return f" (warning: target page responded {detail})"
 
 
-@tool("web_fetch", parse_docstring=True)
-async def web_fetch_tool(url: str) -> str:
+@tool("web_fetch", parse_docstring=True, response_format="content_and_artifact")
+async def web_fetch_tool(url: str) -> tuple[str, dict | None]:
     """Fetch the contents of a web page at a given URL using Browserless (headless Chrome).
     Only fetch EXACT URLs that have been provided directly by the user or have been returned in results from the web_search and web_fetch tools.
     This tool can NOT access content that requires authentication, such as private Google Docs or pages behind login walls.
@@ -314,11 +322,11 @@ async def web_fetch_tool(url: str) -> str:
             resolver=_resolve_host_addresses,
         )
         if url_error:
-            return url_error
+            return url_error, None
 
         backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg)
         if backend_error:
-            return backend_error
+            return backend_error, None
 
         wait_for_event = ""
         wait_for_timeout_ms = 0
@@ -344,14 +352,19 @@ async def web_fetch_tool(url: str) -> str:
         )
 
         if isinstance(result, str):
-            return result
+            return result, None
 
         article = await asyncio.to_thread(_readability_extractor.extract_article, result.html, url=url)
-        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
+        # Preserve target HTTP evidence outside page prose. Direct string callers
+        # still receive the same content; LangChain ToolMessages retain the artifact.
+        raw_status = result.target_status_code.strip()
+        status = int(raw_status) if len(raw_status) == 3 and raw_status.isascii() and raw_status.isdigit() else None
+        artifact = {"deerflow_http_response": {"status_code": status}} if status is not None and 100 <= status <= 599 else None
+        return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}", artifact
 
     except Exception as e:
         logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}"
+        return f"Error: {str(e)}", None
 
 
 @tool("web_capture", parse_docstring=True)

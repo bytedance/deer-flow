@@ -10,7 +10,157 @@
 ## [未发布]
 
 本节累积面向 **2.3.0** 里程碑（[2.3.0](https://github.com/bytedance/deer-flow/milestone/4)）的工作。
-截至 2026-10-28，该里程碑已合并 **1068 个拉取请求**。
+
+
+### 新增
+
+- **子智能体：** 后台批次可声明条目前置关系，并可登记一次主 Agent 接续，在批次结束后完成
+  用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839](https://github.com/bytedance/deer-flow/pull/7839))
+
+- **对话：** 网页端在任务运行时，可在输入框选择 Queue（排队执行）或 Steer（调整当前任务）。
+  Queue 等当前任务结束后再执行下一条消息；Steer 让主 Agent 先处理新要求，原生子 Agent 可暂停后恢复。
+  Gateway 重启后，尚未确认生效的消息可以手动重试。([#7729])
+
+- **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
+  填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
+
+### 修复
+
+- **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
+  `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
+  （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
+  ([#8126])
+
+- **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
+  接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
+  行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
+  现在仅当该 Worker 仍持有活跃运行的有效租约时，才将证据合并到行元数据
+  （`RunStore.merge_owned_metadata()`），否则在执行前停止该运行。启用心跳的自定义
+  `RunStore` 实现必须实现该方法。([#8046])
+  
+- **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
+  `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
+  或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
+  409 会提示调用方改用同一路由的 `PUT` 更新已有反馈。([#8064])
+
+- **网关：** 删除线程时不再在对话仍可读取的情况下返回成功。此前
+  `DELETE /api/threads/{id}` 在检查点存储失败时只记录 DEBUG 日志，仍删除线程元数据行并
+  返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
+  `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
+  可以再次删除。([#7992])
+
+- **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
+  卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
+  用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
+  且脱敏的地址与此前完全相同。([#8006])
+
+- **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
+  已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
+  不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
+  之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
+  在修复计划之前，恢复该任务会提示具体问题。([#7993])
+- **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
+  （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
+  Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
+  `--from-file` 创建的 Kubernetes Secret）会让传输层报出 `Illegal header value
+  b'Bearer <key>\n'`，这条包含完整密钥的消息成为模型和对话历史保存的工具结果，
+  其中四个提供方还会把它写入日志。现在这些密钥与其他提供方一样经过
+  `provider_credentials.resolve_api_key` 处理；Tavily、Exa、Firecrawl 和 fastCRW
+  的配置密钥为空时会回退到环境变量。fastCRW 没有自己的密钥时，不再让 Firecrawl SDK
+  把 `FIRECRAWL_API_KEY` 发送到 fastCRW 端点；`TAVILY_API_KEY`、`EXA_API_KEY` 或
+  `FIRECRAWL_API_KEY` 只含空白时按未设置处理，不再原样交给 SDK。([#7981])
+  
+- **社区工具：** Browserless 是最后一个直接读取原始 token 的搜索/抓取提供方。从文件读取的
+  `BROWSERLESS_TOKEN` 或配置 `token` 会保留尾部换行，并被原样用作鉴权查询参数，导致
+  `web_fetch` 和 `web_capture` 在密钥本身正确时也全部鉴权失败。现在两者都经过
+  `provider_credentials.resolve_api_key` 处理，且只有省略 `token` 键时才回退到环境变量：
+  显式配置 `""` 或 `null` 仍可让自建 capture 端点跳过鉴权。([#8043])
+  
+- **docker：** 从本地 checkout 构建的镜像不再包含本地配置。`.dockerignore`
+  此前没有排除 `config.yaml`、`config.yaml.bak`、`extensions_config.json` 和
+  `mcp_config.json`，因此配置放在旧位置 `backend/` 时，`COPY backend ./backend`
+  会把模型 API 密钥和 MCP 凭据写进每一层 gateway 镜像；`frontend/.env.local`
+  也以同样方式进入前端镜像。现在根目录和 `backend/` 下的这些文件、任意层级的
+  `.env*.local`、`frontend/*.pem`，以及扩展管理器拒绝写入扩展快照的凭据文件都会
+  被排除。本地构建的前端镜像不再内联 `frontend/.env.local` 中的 `NEXT_PUBLIC_*`
+  值；Docker 栈通过同一个 nginx 源提供前端和 Gateway，不需要这些变量。CI 发布的
+  镜像不受影响；已推送或分享过的本地镜像请重新构建。([#7958])
+  
+- **智能体：** 循环检测、运行 token 预算、模型服务安全限制或输出长度限制触发停止后，
+  未完成的 Todo 不再触发额外的模型调用或工具执行。Todo 状态仍会保留，
+  用户可在后续运行中继续处理。([#7953])
+
+- **渠道：** 飞书/Lark 的长回答不再丢失。此前卡片文本没有长度上限，并以 ASCII 转义
+  序列化，约 4,400 个中日韩字符就会让卡片请求超过飞书 30 KB 的限制（`230025`）：
+  最终更新及其回复兜底都会被拒绝，运行中卡片停留在最后一次流式内容或只剩 `▉`。
+  现在卡片不再转义中日韩字符，并按其在请求中占用的字节计算预算。流式更新只显示能
+  放下的部分；更长的最终回答会在同一条消息下以最多 10 张卡片按行续发，重试会从
+  已送达的卡片之后继续。([#7798])
+  
+- **渠道：** 企业微信群消息现在拥有独立的会话。此前每条消息都把发送者的 userid
+  同时用作会话 ID 和话题 ID，因此在没有群绑定加以区分的情况下（免认证模式、
+  `require_bound_identity: false`，以及旧版群绑定），成员的私聊和其发过言的所有群
+  共用同一个 DeerFlow 线程：群内回复可能用到该成员私聊或其他群的内容，失去原始
+  frame 的回复也会被发到私聊。现在群以 `chatid` 为键、每位成员一个线程，私聊线程
+  保持不变。通过各自 `/connect` 绑定的群保留原有线程；覆盖该机器人所有群的旧版
+  群绑定会在每个群中开始新线程。([#7794])
+  
+- **沙箱：** 使用显式授权技能视图的新 AIO 运行，在启用惰性初始化时，不再于首次调用
+  沙箱工具前创建或获取沙箱。已有沙箱绑定和需要上传技能的提供方继续保留原有的即时同步行为。
+  ([#7782])
+
+- **扩展：** 上下文压缩观察者现在能知道压缩发生在哪个任务里。在 Lead 运行或子 Agent
+  内部，观察者收到的是该任务的存储，而不再是分离存储；`CompactionEvent` 新增
+  `task_id`、`run_id`、`thread_id`（默认 `None`），取自宿主放进每个任务存储的
+  `TaskInfo`，即使没有注册生命周期贡献者也会放入。手动 `/compact` 仍收到分离存储，
+  id 为 `None`。`deerflow-extension-api` 升级到 0.2.10，已有扩展不受影响。([#7831])
+
+- **智能体：** 即使模型提供方复用消息 ID，Token 预算也会分别统计已接受的模型调用，
+  避免重复 ID 绕过配置的上限；触发硬停止时保留已完成的结构化输出工具结果。
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
+
+- **渠道：** 钉钉 AI 卡片模式（`card_template_id`）下，卡片请求失败（例如缺少卡片权限或钉钉服务异常）时
+  不再丢失回复。dingtalk-stream 会记录失败的卡片请求后按成功返回，因此文本形式的运行中提示和最终答案的
+  `sampleMarkdown` 兜底都不会执行。现在渠道自行发送卡片请求，并在失败时回退。([#7781])
+  
+- **harness：** 重试失败条目不再重新打开已取消的持久子智能体批次。`retry_item`
+  此前只保留已暂停批次的状态，因此重试已取消批次中的失败条目会把批次改回
+  `queued`，worker 随即认领并执行该条目，批次最终变为 `completed`。现在对已取消
+  批次的重试路由返回 409，包括 SQLite 上取消在重试进行中提交的情况；工作区也不再
+  为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
+  ([#7792])
+
+- **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
+  空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
+  GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
+  整个列表失败，与它的对话也会失败。已以 null 描述保存的智能体现在可以重新加载。([#7638])
+
+- **智能体：** 当模型提供方在不同轮次复用同一个工具调用 ID（例如每次响应都是 `call_0`）时，
+  澄清提问不再覆盖之前的问题。此前其消息 ID（同时也是人工输入的 `request_id`）只包含调用 ID，
+  后一个问题会原地替换前一个问题，后一次调用也因此缺少结果。现在 ID 还会包含发起该调用的
+  AIMessage；同一调用的重试仍保持原 ID。([#7762])
+
+- **项目：** 当数据目录、`users/`、某个用户目录或用户的 `projects/` 是符号链接时，
+  回收站保留期清扫不再删除仍在使用的文档原件。此前它按解析后的路径保护每个文档，
+  却遍历未解析的目录树，导致没有任何文档能匹配上，所有超过 24 小时的原件都被当作
+  孤立文件删除，Gateway 启动时和 `GET /api/trash/documents` 都会触发。([#7732])
+
+- **对话：** 队列分发开始后，取消某条排队输入不再阻止后续排队输入继续执行。([#7746])
+
+- **开发：** `scripts/dev_multi_instance.sh logs all` 现在除两个 Gateway 日志外也会输出
+  nginx 日志；此前它只输出 Gateway 日志，与不带参数的 `logs` 相同。`logs nginx` 与
+  `logs all` 还会包含 `nginx.log`（nginx 启动命令自身的输出），此前没有任何选项会输出它。
+  ([#7723])
+
+- **记忆：** `GET /api/memory/config` 与 `/api/memory/status` 现在会把 `backend_config`
+  中的凭据值（`api_key`、token、密码、`Authorization` 请求头，任意层级）遮蔽为 `***`。
+  此前它们按加载结果原样返回配置，而 `$VAR` 引用此时已被解析，因此 DeerMem 提取模型的密钥
+  或 Honcho 的 `api_key` 会以明文返回给所有拥有 `memory:read` 的调用方；在默认关闭授权时，
+  这就是所有已登录用户。非机密配置项、`api_key_env` 变量名和未设置的值保持不变。([#7665])
+- **网关：** `GET /threads/{thread_id}/token-usage` 现在在工作线程里解析实时配置。
+  此前 `build_context_usage` 直接内联调用该访问器，而 `get_app_config()` 每次调用都会重新校验
+  ——它先对整个 `config.yaml` 取摘要，再对 `extensions_config.json` 做同样的事——所以在有人打开
+  会话视图前刚好改了配置，就会让运行、消息流与其他线程共用的网关事件循环整段停顿。响应内容不变。([#7727])
 
 ## [2.2.0] — 2026-10-29
 
@@ -226,6 +376,12 @@
   选择器缺失、是目录或不可读时会在调用 Docker 之前直接失败，而文件删除后
   `make down` 仍能停止整个栈；不设置或为空的选择器保持可选的仓库根 `.env`
   默认值。([#6522])
+- **HITL：** 新增独立于推理模式的 Ask、Auto、Full 工具权限模式。Auto 通过单独的
+  无工具模型调用审核具体操作，默认复用现有模型配置；不确定或高风险操作转人工审批。
+  卡片展示完整参数，支持批准、拒绝、修改参数及可撤销的会话精确授权。主代理审批通过
+  checkpoint 支持重启恢复；交互式子代理通过属主限定的通道等待，并处理取消和过期。
+  所有模式均保留部署规则和账户权限，个人/平台 MCP 连接、参数和策略均参与授权绑定。
+  默认关闭；`config_version` 66。
 
 - **MCP：** 按未变更的服务器缓存完成包装的工具，仅在绑定对账后重新发现缺失或配置
   发生变化的服务器。将成功但未发现工具的结果与发现失败分开保存，并保留代际、共享
@@ -12413,6 +12569,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7017]: https://github.com/bytedance/deer-flow/pull/7017
 [#7018]: https://github.com/bytedance/deer-flow/pull/7018
 [#7020]: https://github.com/bytedance/deer-flow/pull/7020
+[#7022]: https://github.com/bytedance/deer-flow/issues/7022
 [#7023]: https://github.com/bytedance/deer-flow/pull/7023
 [#7024]: https://github.com/bytedance/deer-flow/pull/7024
 [#7031]: https://github.com/bytedance/deer-flow/pull/7031
@@ -12685,3 +12842,28 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7643]: https://github.com/bytedance/deer-flow/pull/7643
 [#7651]: https://github.com/bytedance/deer-flow/pull/7651
 [#7659]: https://github.com/bytedance/deer-flow/pull/7659
+[#7638]: https://github.com/bytedance/deer-flow/pull/7638
+[#7665]: https://github.com/bytedance/deer-flow/pull/7665
+[#7723]: https://github.com/bytedance/deer-flow/pull/7723
+[#7727]: https://github.com/bytedance/deer-flow/pull/7727
+[#7729]: https://github.com/bytedance/deer-flow/pull/7729
+[#7732]: https://github.com/bytedance/deer-flow/pull/7732
+[#7746]: https://github.com/bytedance/deer-flow/pull/7746
+[#7762]: https://github.com/bytedance/deer-flow/pull/7762
+[#7772]: https://github.com/bytedance/deer-flow/pull/7772
+[#7781]: https://github.com/bytedance/deer-flow/pull/7781
+[#7792]: https://github.com/bytedance/deer-flow/pull/7792
+[#7794]: https://github.com/bytedance/deer-flow/pull/7794
+[#7798]: https://github.com/bytedance/deer-flow/pull/7798
+[#7831]: https://github.com/bytedance/deer-flow/pull/7831
+[#7782]: https://github.com/bytedance/deer-flow/pull/7782
+[#7953]: https://github.com/bytedance/deer-flow/issues/7953
+[#7958]: https://github.com/bytedance/deer-flow/pull/7958
+[#7981]: https://github.com/bytedance/deer-flow/pull/7981
+[#7992]: https://github.com/bytedance/deer-flow/pull/7992
+[#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126

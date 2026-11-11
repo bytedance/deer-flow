@@ -4,7 +4,7 @@ import copy
 import pytest
 from deerflow_extension_api import ExtensionData
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from langgraph.checkpoint.base import empty_checkpoint, uuid6
+from langgraph.checkpoint.base import BaseCheckpointSaver, empty_checkpoint, uuid6
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.extensions.registry import ExtensionRegistry
@@ -92,7 +92,7 @@ class _ClearBeforeSecondGoalReadCheckpointer:
         return await self.inner.aput(*args, **kwargs)
 
 
-class _RaceAfterFirstContinuationCommitCheckpointer:
+class _RaceAfterFirstContinuationCommitCheckpointer(BaseCheckpointSaver):
     """Wrap a saver and inject a racing user message right after the first
     goal-continuation commit lands.
 
@@ -107,6 +107,7 @@ class _RaceAfterFirstContinuationCommitCheckpointer:
     """
 
     def __init__(self, inner: InMemorySaver, thread_id: str) -> None:
+        super().__init__(serde=inner.serde)
         self.inner = inner
         self.thread_id = thread_id
         self.put_count = 0

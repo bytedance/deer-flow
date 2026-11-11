@@ -1,8 +1,11 @@
 import base64
+import json
 import logging
 import math
 import threading
+import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import httpx
@@ -11,6 +14,7 @@ from agent_sandbox.core.api_error import ApiError
 from pydantic import ValidationError
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.command_scope import COMMAND_OWNER_ENV, CommandScopeCancelled, command_lock, current_command_scope
 from deerflow.sandbox.download import DEFAULT_DOWNLOAD_LIMIT as _MAX_DOWNLOAD_SIZE
 from deerflow.sandbox.download import download_limit, read_download_stream
 from deerflow.sandbox.remote_list_dir import parse_remote_list_dir_output, remote_list_dir_command
@@ -18,6 +22,7 @@ from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path_under_root, truncate_line
 
 from .backend import sandbox_http_trust_env
+from .command_cleanup import cleanup_command
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +44,11 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
 
 @dataclass
 class _ScopedShellSession:
-    """One server-side shell session serialized within an agent execution."""
+    """An execution's command lock and optional persistent shell session."""
 
     lock: threading.Lock = field(default_factory=threading.Lock)
     session_id: str | None = None
+    releasing: bool = False
 
 
 @dataclass
@@ -67,6 +73,9 @@ class AioSandbox(Sandbox):
     #: so shell state (exports, cwd, functions) carries from one command into
     #: the next — recorded bash evidence cannot prove a clean environment.
     persistent_shell_sessions = True
+    artifact_root = "/mnt/user-data"
+
+    supports_command_cancellation = True
 
     def __init__(
         self,
@@ -76,6 +85,7 @@ class AioSandbox(Sandbox):
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
         lark_cli_broker: bool | None = None,
+        max_bash_sessions: int = 50,
     ):
         """Initialize the AIO sandbox.
 
@@ -92,8 +102,13 @@ class AioSandbox(Sandbox):
                 sandbox fail-closed, so a construction site that forgets to
                 thread the attested value cannot silently authorize the
                 plaintext credential-mount overlay.
+            max_bash_sessions: Bash admission limit, no greater than the
+                admitted runtime's AIO_BASH_MAX_SESSIONS (default 50).
         """
         super().__init__(id)
+        if type(max_bash_sessions) is not int or max_bash_sessions <= 0:
+            raise ValueError("max_bash_sessions must be a positive integer")
+        self._bash_slots = threading.BoundedSemaphore(max_bash_sessions)
         self.lark_cli_broker = lark_cli_broker
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
@@ -124,6 +139,8 @@ class AioSandbox(Sandbox):
         self._recovery_session_id: str | None = None
         self._default_shell_corrupted = False
         self._closed = False
+        self._default_shell_stopped = False
+        self._command_cleanup_failed = False
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
@@ -156,15 +173,14 @@ class AioSandbox(Sandbox):
         cleanup is never blocked.
         """
         # Close admission for scoped commands before draining their sessions.
-        # A scoped call that already registered itself remains in this snapshot
-        # and is joined through its per-scope lock below; later calls fail
-        # without creating an orphaned registry entry.
+        # Keep entries registered while draining so concurrent release still
+        # joins their locks and cancellation reaches the admitted command owner.
+        # Later calls fail without creating an orphaned registry entry.
         with self._scope_registry_lock:
             if self._closed:
                 return
             self._closed = True
             scoped_sessions = list(self._scoped_shell_sessions.items())
-            self._scoped_shell_sessions.clear()
         for scope_id, scoped in scoped_sessions:
             with scoped.lock:
                 if scoped.session_id is not None and self._client is not None:
@@ -175,6 +191,10 @@ class AioSandbox(Sandbox):
                         request_options=self._bounded_cleanup_request_options(),
                     )
                     scoped.session_id = None
+                with self._scope_registry_lock:
+                    if self._scoped_shell_sessions.get(scope_id) is scoped:
+                        self._command_scopes.release(scope_id)
+                        self._scoped_shell_sessions.pop(scope_id)
 
         with self._lock:
             if self._recovery_session_id is not None and self._client is not None:
@@ -339,7 +359,7 @@ class AioSandbox(Sandbox):
             # before its execution lease ends. Fencing on pending let a
             # concurrent acquire recycle a healthy container that another run
             # was actively using.
-            return bool(self._default_shell_corrupted or shell.ambiguous or bash.ambiguous)
+            return bool(self._default_shell_corrupted or getattr(self, "_command_cleanup_failed", False) or shell.ambiguous or bash.ambiguous)
 
     def _create_shell_session(self, client) -> str:
         session_id = str(uuid.uuid4())
@@ -406,8 +426,9 @@ class AioSandbox(Sandbox):
 
         Caller must hold ``self._lock``.
         """
-        if self._default_shell_corrupted and self._recovery_session_id is None:
+        if (self._default_shell_corrupted or self._default_shell_stopped) and self._recovery_session_id is None:
             self._recovery_session_id = self._create_shell_session(client)
+            self._default_shell_stopped = False
         return self._recovery_session_id
 
     def _exec_shell(
@@ -428,7 +449,91 @@ class AioSandbox(Sandbox):
         }
         if session_id is not None:
             kwargs["id"] = session_id
+        scope = current_command_scope(self)
+        if scope is not None:
+            return self._exec_owned_shell(client, command, session_id=session_id, timeout=timeout, kwargs=kwargs, scope=scope)
         return self._format_shell_result(client.shell.exec_command(**kwargs))
+
+    def _exec_owned_shell(self, client, command, *, session_id, timeout, kwargs, scope):
+        scope.check()
+        # Keep the original command at top level; legacy AIO rejects a
+        # newline prefix. The last matching console entry belongs to this call.
+        prepared = f"export {COMMAND_OWNER_ENV}={scope.token}; {command}"
+        started = time.monotonic()
+        result = client.shell.exec_command(**{**kwargs, "command": prepared, "async_mode": True, "request_options": self._bounded_cleanup_request_options()})
+        data = result.data if result else None
+        active_id = getattr(data, "session_id", None) or session_id
+        if not active_id:
+            self._command_cleanup_failed = True
+            raise RuntimeError("AIO did not return the command session identity")
+        while True:
+            if scope.cancelled.is_set():
+                self._stop_owned_processes(scope)
+                raise CommandScopeCancelled("Sandbox execution was cancelled")
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                client.shell.kill_process(id=active_id, request_options=self._bounded_cleanup_request_options())
+                if session_id is None or self._recovery_session_id == active_id:
+                    self._recovery_session_id = None
+                    self._default_shell_stopped = True
+                return "", 124, "hard_timeout"
+            wait = client.shell.wait_for_process(id=active_id, seconds=1, max_wait_seconds=1, request_options=self._bounded_cleanup_request_options())
+            status = getattr(getattr(wait, "data", None), "status", None)
+            if scope.cancelled.is_set():
+                continue
+            if status == "running":
+                continue
+            view = client.shell.view(id=active_id, request_options=self._bounded_cleanup_request_options())
+            data = view.data if view else None
+            if data is None:
+                self._command_cleanup_failed = True
+                raise RuntimeError("AIO command result is unavailable")
+            output = next((entry.output or "" for entry in reversed(data.console or []) if entry.command == prepared), None)
+            if output is None:
+                self._command_cleanup_failed = True
+                raise RuntimeError("AIO did not return this command's console record")
+            return output, getattr(data, "exit_code", None), getattr(data, "status", status)
+
+    def cancel_command_scope(self, scope_id: str) -> None:
+        scope = self._command_scopes.find(scope_id)
+        if scope is None:
+            return
+        self.request_command_cancel(scope_id)
+        self._stop_owned_processes(scope)
+
+    def _stop_owned_processes(self, scope) -> None:
+        with scope.lock:
+            if scope.cleaned.is_set():
+                return
+            self._cleanup_owned_processes(scope)
+
+    def _cleanup_owned_processes(self, scope) -> None:
+        client = self._client
+        if client is None:
+            raise RuntimeError("Sandbox client closed before command cleanup")
+        session_id = None
+        try:
+            session_id = self._create_shell_session(client)
+            client.shell.exec_command(command=cleanup_command(scope.token), id=session_id, async_mode=True, request_options=self._bounded_cleanup_request_options())
+            deadline = time.monotonic() + 5
+            while True:
+                result = client.shell.view(id=session_id, request_options=self._bounded_cleanup_request_options())
+                output, code, status = self._format_shell_result(result)
+                if status != "running" and output:
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Sandbox process cleanup did not return a result")
+                time.sleep(0.1)
+            receipt = json.loads(output)
+            if code not in (0, None) or status not in (None, "completed") or receipt.get("remaining") != 0:
+                raise RuntimeError("Owned sandbox processes did not stop")
+            scope.cleaned.set()
+        except Exception:
+            self._command_cleanup_failed = True
+            raise
+        finally:
+            if session_id is not None:
+                self._cleanup_session_best_effort(client, session_id, context="cancelled execution cleanup", request_options=self._bounded_cleanup_request_options())
 
     def _rotate_and_retry_shell(
         self,
@@ -495,13 +600,13 @@ class AioSandbox(Sandbox):
         *,
         scope_id: str | None = None,
     ) -> str:
-        """Run no-env commands in one persistent session per subagent run.
+        """Serialize commands within a subagent scope, independently of others.
 
         Commands within a scope remain serialized, while independent subagents
         use distinct server-side sessions and can execute concurrently. Secret-
-        bearing commands keep the existing fresh ``bash.exec`` behavior.
+        bearing commands keep the per-call fresh ``bash.exec`` session semantics.
         """
-        if env or scope_id is None:
+        if scope_id is None:
             return self.execute_command(command, env=env, timeout=timeout)
         _validate_extra_env(env)
 
@@ -513,18 +618,25 @@ class AioSandbox(Sandbox):
                     scope_id,
                     _ScopedShellSession(),
                 )
-            with scoped.lock:
+                if scoped.releasing:
+                    raise RuntimeError("sandbox command scope is no longer active")
+            with command_lock(scoped.lock, current_command_scope(self)), command_lock(self._bash_slots, current_command_scope(self)) if env else nullcontext():
                 # Registration and command execution are separated by the
                 # per-scope wait.  Revalidate identity after that wait so a
                 # release/close which removed this exact scope is a hard
                 # lifecycle fence: queued callers cannot resurrect a session
                 # on an orphaned registry entry.
                 with self._scope_registry_lock:
-                    if self._closed or self._scoped_shell_sessions.get(scope_id) is not scoped:
+                    if self._closed or scoped.releasing or self._scoped_shell_sessions.get(scope_id) is not scoped:
                         raise RuntimeError("sandbox command scope is no longer active")
                 client = self._client
                 if client is None:
                     raise RuntimeError("sandbox client is closed")
+                if env:
+                    # This registry entry also makes close()/scope release drain
+                    # fresh bash work. Keep per-call env sessions independent of
+                    # the shared implicit shell and of other execution scopes.
+                    return self._execute_with_env(command, env, self._effective_command_timeout(timeout), scope_lock_held=True)
                 if scoped.session_id is None:
                     scoped.session_id = self._create_shell_session(client)
                 try:
@@ -602,21 +714,40 @@ class AioSandbox(Sandbox):
             return f"Error: {e}"
 
     def release_command_scope(self, scope_id: str) -> None:
-        """Clean up one subagent's explicit server-side shell session."""
+        """Fence new commands, drain in-flight work, then release the session.
+
+        Waiting for the scope lock has no separate deadline. An active command
+        can hold it for its remaining command timeout (600s by default), plus
+        session creation, transport/recovery and cleanup time. Callers holding
+        a thread-key serializer must account for this in their release budget.
+        Returning early would require retaining ownership until work is drained.
+        """
         with self._scope_registry_lock:
-            scoped = self._scoped_shell_sessions.pop(scope_id, None)
-        if scoped is None:
-            return
-        with scoped.lock:
-            if scoped.session_id is None or self._client is None:
+            scoped = self._scoped_shell_sessions.get(scope_id)
+            if scoped is None:
+                self._command_scopes.release(scope_id)
                 return
-            self._cleanup_session_best_effort(
-                self._client,
-                scoped.session_id,
-                context=f"execution scope {scope_id}",
-                request_options=self._bounded_cleanup_request_options(),
-            )
-            scoped.session_id = None
+            # Keep draining entries visible to close(), while fencing new
+            # and already-queued commands before waiting on their lock.
+            scoped.releasing = True
+        try:
+            with scoped.lock:
+                if scoped.session_id is None or self._client is None:
+                    return
+                self._cleanup_session_best_effort(
+                    self._client,
+                    scoped.session_id,
+                    context=f"execution scope {scope_id}",
+                    request_options=self._bounded_cleanup_request_options(),
+                )
+                scoped.session_id = None
+        finally:
+            with self._scope_registry_lock:
+                if self._scoped_shell_sessions.get(scope_id) is scoped:
+                    # Keep cancellation routed to the original owner until
+                    # execution and cleanup drain. Only this entry may retire it.
+                    self._command_scopes.release(scope_id)
+                    self._scoped_shell_sessions.pop(scope_id)
 
     @staticmethod
     def _format_timeout_duration(timeout: float) -> str:
@@ -791,7 +922,7 @@ class AioSandbox(Sandbox):
         effective_timeout = self._effective_command_timeout(timeout)
         if env:
             return self._execute_with_env(command, env, effective_timeout)
-        with self._lock:
+        with command_lock(self._lock, current_command_scope(self)):
             try:
                 client = self._client
                 if getattr(self, "_closed", False) or client is None:
@@ -884,11 +1015,16 @@ class AioSandbox(Sandbox):
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> str:
         """Execute a command with per-call environment variables injected.
 
         The persistent-shell ``shell.exec_command`` API has no env parameter, so
         injected commands use the ``bash.exec`` API which accepts per-command env.
+        If ``scope_lock_held`` is True, the caller must hold the registered
+        per-scope execution lock through this call, including recovery retries;
+        see ``_run_bash_exec`` for the drain contract.
         Each call creates an explicit transient session and closes it after the
         command, so injected request-scoped secrets are scoped to this command,
         never persist across calls, and do not consume the server's session
@@ -915,27 +1051,115 @@ class AioSandbox(Sandbox):
         """
         if self._bash_exec_unsupported:
             return _BASH_EXEC_UNSUPPORTED_ERROR
-        output, status = self._run_bash_exec(command, env, timeout)
+        output, status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
         if status in (None, "completed") and output and _ERROR_OBSERVATION_SIGNATURE in output:
             logger.warning("ErrorObservation detected in bash.exec output, retrying on a fresh session")
-            retried, retry_status = self._run_bash_exec(command, env, timeout)
+            retried, retry_status = self._run_bash_exec(command, env, timeout, scope_lock_held=scope_lock_held)
             if retry_status not in (None, "completed"):
                 return retried
             if retried and _ERROR_OBSERVATION_SIGNATURE not in retried:
                 return retried
         return output
 
+    def _render_bash_output(self, stdout, stderr, exit_code, status, timeout) -> tuple[str, str | None]:
+        output = stdout
+        if stderr:
+            output += f"\nStd Error:\n{stderr}" if output else stderr
+
+        if status == "timed_out":
+            notice = self._format_timeout_notice(timeout)
+            output = f"{output}\n{notice}" if output else notice
+            return f"{output}\nExit Code: 124", status
+
+        if status == "killed":
+            notice = "Command was killed before completion."
+            output = f"{output}\n{notice}" if output else notice
+            return output, status
+
+        if status == "running":
+            notice = "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried."
+            output = f"{output}\n{notice}" if output else notice
+            return output, status
+
+        if status not in (None, "completed"):
+            notice = self._unexpected_status_notice(status)
+            output = f"{output}\n{notice}" if output else notice
+            return output, status
+
+        if exit_code not in (0, None):
+            # Mirror LocalSandbox: keep the actual shell status in the
+            # output text (acceptance-checklist evidence).
+            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
+        return output if output else "(no output)", status
+
+    def _run_owned_bash(self, command, env, timeout, scope):
+        scope.check()
+        session_id = self._create_bash_session(self._client)
+        started = time.monotonic()
+        try:
+            prepared = f"exec < /dev/null\nexport {COMMAND_OWNER_ENV}={scope.token}\n{command}"
+            response = self._client.bash.exec(command=prepared, session_id=session_id, env=env, async_mode=True, hard_timeout=timeout, request_options=self._bounded_cleanup_request_options())
+            initial = response.data if response else None
+            command_id = getattr(initial, "command_id", None)
+            if not command_id:
+                self._command_cleanup_failed = True
+                raise RuntimeError("AIO did not return the bash command identity")
+            stdout, stderr = [], []
+            offset = stderr_offset = 0
+            while True:
+                if scope.cancelled.is_set():
+                    self._stop_owned_processes(scope)
+                    raise CommandScopeCancelled("Sandbox execution was cancelled")
+                if time.monotonic() - started >= timeout:
+                    self._client.bash.kill(session_id=session_id, signal="SIGKILL", request_options=self._bounded_cleanup_request_options())
+                    return self._render_bash_output("".join(stdout), "".join(stderr), 124, "timed_out", timeout)
+                response = self._client.bash.output(session_id=session_id, command_id=command_id, offset=offset, stderr_offset=stderr_offset, wait=True, wait_timeout=1, request_options=self._bounded_cleanup_request_options())
+                data = response.data if response else None
+                command_info = getattr(data, "command", None)
+                if command_info is None:
+                    self._command_cleanup_failed = True
+                    raise RuntimeError("AIO bash command result is unavailable")
+                stdout.append(data.stdout or "")
+                stderr.append(data.stderr or "")
+                status = command_info.status
+                if scope.cancelled.is_set():
+                    continue
+                if status != "running":
+                    return self._render_bash_output("".join(stdout), "".join(stderr), command_info.exit_code, status, timeout)
+                if (data.stdout and data.offset is None) or (data.stderr and data.stderr_offset is None):
+                    self._command_cleanup_failed = True
+                    raise RuntimeError("AIO bash output position is unavailable")
+                # Empty polls may omit offsets; retain the last known positions.
+                offset = data.offset if data.offset is not None else offset
+                stderr_offset = data.stderr_offset if data.stderr_offset is not None else stderr_offset
+        finally:
+            self._cleanup_bash_session_best_effort(self._client, session_id)
+
     def _run_bash_exec(
         self,
         command: str,
         env: dict[str, str],
         timeout: float,
+        *,
+        scope_lock_held: bool = False,
     ) -> tuple[str, str | None]:
-        """Single bash.exec invocation in an explicitly released fresh session."""
-        with self._lock:
+        """Single bash.exec invocation in an explicitly released fresh session.
+
+        ``scope_lock_held=True`` requires the caller to hold its registered
+        ``_ScopedShellSession.lock`` and a Bash permit for this entire invocation. Release/close
+        join that lock to drain work before detaching the client; the shared
+        lock is skipped only under this precondition.
+        """
+        scope = current_command_scope(self)
+        # Scoped callers already hold their registered execution lock, which
+        # close() and release_command_scope() drain before detaching the client.
+        # Unscoped calls retain the shared lock for that lifecycle guarantee.
+        with nullcontext() if scope_lock_held else command_lock(self._lock, scope), nullcontext() if scope_lock_held else command_lock(self._bash_slots, scope):
             for attempt in range(2):
                 session_id: str | None = None
                 try:
+                    if scope is not None:
+                        return self._run_owned_bash(command, env, timeout, scope)
                     session_id = self._create_bash_session(self._client)
                     result = self._client.bash.exec(
                         # /v1/bash keeps a subprocess stdin pipe open for writes.
@@ -952,39 +1176,7 @@ class AioSandbox(Sandbox):
                         request_options=self._command_request_options(timeout),
                     )
                     data = result.data if result else None
-                    stdout = (data.stdout or "") if data else ""
-                    stderr = (data.stderr or "") if data else ""
-                    exit_code = getattr(data, "exit_code", None) if data else None
-                    status = getattr(data, "status", None) if data else None
-                    output = stdout
-                    if stderr:
-                        output += f"\nStd Error:\n{stderr}" if output else stderr
-
-                    if status == "timed_out":
-                        notice = self._format_timeout_notice(timeout)
-                        output = f"{output}\n{notice}" if output else notice
-                        return f"{output}\nExit Code: 124", status
-
-                    if status == "killed":
-                        notice = "Command was killed before completion."
-                        output = f"{output}\n{notice}" if output else notice
-                        return output, status
-
-                    if status == "running":
-                        notice = "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried."
-                        output = f"{output}\n{notice}" if output else notice
-                        return output, status
-
-                    if status not in (None, "completed"):
-                        notice = self._unexpected_status_notice(status)
-                        output = f"{output}\n{notice}" if output else notice
-                        return output, status
-
-                    if exit_code not in (0, None):
-                        # Mirror LocalSandbox: keep the actual shell status in the
-                        # output text (acceptance-checklist evidence).
-                        output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
-                    return output if output else "(no output)", status
+                    return self._render_bash_output(getattr(data, "stdout", None) or "", getattr(data, "stderr", None) or "", getattr(data, "exit_code", None), getattr(data, "status", None), timeout)
                 except httpx.TimeoutException:
                     return self._transport_timeout_error(timeout), "transport_timeout"
                 except ApiError as e:

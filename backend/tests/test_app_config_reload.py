@@ -1107,3 +1107,27 @@ def test_get_app_config_keeps_config_yaml_extension_override_after_extensions_re
         assert get_app_config().extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
     finally:
         _reset_config_singletons()
+
+
+def test_middleware_scope_reloads_from_extensions_and_yaml_override(tmp_path, monkeypatch):
+    entry = {"class": "example:Observer", "kwargs": {"label": "observer"}, "apply_to": "lead"}
+    extensions_path = _stage_singleton_configs(tmp_path, monkeypatch, middlewares=[entry])
+    try:
+        assert get_app_config().extensions.middlewares[0].apply_to == "lead"
+        _peer_writes_extensions(extensions_path, middlewares=[{**entry, "apply_to": "subagent"}])
+        assert get_app_config().extensions.middlewares[0].apply_to == "subagent"
+
+        config_path = tmp_path / "config.yaml"
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        raw["extensions"] = {"middlewares": [{**entry, "apply_to": "both"}]}
+        config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        assert get_app_config().extensions.middlewares[0].apply_to == "both"
+
+        _peer_writes_extensions(extensions_path, middlewares=[entry])
+        assert get_app_config().extensions.middlewares[0].apply_to == "both"
+        raw["extensions"]["middlewares"][0]["apply_to"] = "invalid"
+        config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+        with pytest.raises(ValidationError, match="apply_to"):
+            AppConfig.from_file(str(config_path))
+    finally:
+        _reset_config_singletons()

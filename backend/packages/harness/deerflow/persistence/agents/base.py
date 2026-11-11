@@ -49,6 +49,10 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
         data["name"] = name
     known_fields = set(AgentConfig.model_fields.keys())
     data = {k: v for k, v in data.items() if k in known_fields}
+    # A bare ``description:`` in YAML, or a null the agents API used to store,
+    # means "no description"; read it as the default instead of failing.
+    if "description" in data and data["description"] is None:
+        data["description"] = ""
     try:
         return AgentConfig(**data)
     except ValidationError as exc:
