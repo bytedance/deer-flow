@@ -162,6 +162,14 @@ class TestWebFetchTool:
             _client(mock_client).get.return_value = _response(json_body="   ")
             assert _fetch() == "Error: No content found"
 
+    def test_page_with_no_readable_text_explains_itself(self, config_with_key):
+        with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:
+            _client(mock_client).get.return_value = _response(json_body="<html><head><script>var a = 1;</script><style>p{}</style></head><body></body></html>")
+            result = _fetch()
+
+        assert result.strip()
+        assert "No content could be extracted from this page" in result
+
     def test_rejected_url_never_reaches_the_api(self, config_with_key, public_url):
         public_url.return_value = "Error: URL resolves to a blocked address"
         with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:
@@ -200,6 +208,16 @@ class TestWebFetchTool:
         with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:
             _client(mock_client).get.return_value = _response(status=422, json_body={"error": {"code": "bad", "message": "Invalid URL"}})
             assert _fetch() == "Error: Piloterr API error: HTTP 422: Invalid URL"
+
+    def test_credits_exhausted_names_the_fix(self, config_with_key):
+        with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:
+            _client(mock_client).get.return_value = _response(status=402, json_body=ValueError("empty"))
+            assert _fetch() == "Error: Piloterr API error: HTTP 402: Piloterr credits exhausted, check the plan or top up at https://www.piloterr.com"
+
+    def test_rate_limit_keeps_the_api_message_and_adds_the_hint(self, config_with_key):
+        with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:
+            _client(mock_client).get.return_value = _response(status=429, json_body={"error": "Too many requests"})
+            assert _fetch() == "Error: Piloterr API error: HTTP 429: Too many requests; Piloterr rate limit reached, retry later or lower the request rate"
 
     def test_http_error_without_body(self, config_with_key):
         with patch("deerflow.community.piloterr.tools.httpx.Client") as mock_client:

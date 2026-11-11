@@ -64,6 +64,14 @@ def _coerce_int(value: object, *, default: int | None, minimum: int, maximum: in
     return min(max(number, minimum), maximum)
 
 
+# Piloterr is credit-metered: name the fix so the model does not retry these
+# as if they were transient.
+_STATUS_HINTS = {
+    402: "Piloterr credits exhausted, check the plan or top up at https://www.piloterr.com",
+    429: "Piloterr rate limit reached, retry later or lower the request rate",
+}
+
+
 def _error_detail(response: httpx.Response) -> str:
     """Piloterr errors arrive as {"error": "..."} or {"error": {"message": "..."}}."""
     try:
@@ -89,7 +97,9 @@ def _piloterr_get(engine: str, api_key: str, params: dict[str, object], timeout:
         if response.status_code >= 400:
             detail = redact_secret(_error_detail(response), api_key)
             logger.error("Piloterr API returned HTTP %s: %s", response.status_code, detail)
-            suffix = f": {detail}" if detail else ""
+            hint = _STATUS_HINTS.get(response.status_code)
+            parts = [part for part in (detail, hint) if part]
+            suffix = f": {'; '.join(parts)}" if parts else ""
             return None, f"Error: Piloterr API error: HTTP {response.status_code}{suffix}"
         try:
             body = response.json()
