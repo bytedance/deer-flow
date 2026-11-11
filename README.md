@@ -1311,6 +1311,8 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 Generated-file replies explain when a channel cannot send attachments. If some or all uploads fail, DeerFlow sends one combined notice naming the unsent files when the platform still accepts replies. Successful uploads add no duplicate confirmation. Files remain in the DeerFlow conversation; an expired reply window is logged without switching to proactive messaging.
 
+Telegram retries photos rejected for invalid dimensions or image processing once as documents, preserving the original file and reply target.
+
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
 Invalid UTF-8 in `channels/store.json` follows the same recovery policy as malformed JSON:
@@ -2532,6 +2534,9 @@ knowledge service; artifacts do not automatically enable citations. It also appe
 in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+In **Capabilities → Extensions**, an enabled extension’s detail page links directly to its registered workspace pages. The page also includes usage guidance and keeps package details under **Technical details**.
+Extension packages can provide localized purpose and usage steps in `deerflow-extension.json`, including optional prerequisites. The same detail page supports background extensions without a browser module. All bundled examples include this description; see the [authoring contract](examples/README.md#describe-the-extension).
+
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
 lets full Custom Agents collaborate through native `@` mentions, shared messages and
 asynchronous peer requests, with a separate team page and persistent member conversations.
@@ -3269,6 +3274,8 @@ On Linux and macOS, local sandbox `write_file` replacements and `str_replace` st
 Loop warnings let agents save collected results before their final answer. If the save is blocked by the read-before-write gate, the agent may read the target file and retry the save once. A looping or stopped tool must be replaced by an available alternative; if no permitted save path exists or the retry fails, the final answer includes the collected results and reports that the file was not saved. When `present_files` is available, the warning also asks the agent to present the files it already created in `/mnt/user-data/outputs` before answering, so finished outputs are delivered. Recovery calls still count toward the loop limits, and a hard stop prevents further tool execution.
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
+
+For agent tool calls, `read_file` adds source line numbers when a range in an uploaded or workspace file returns 1–40 lines and the labeled view fits the output budget. Copy the text after the first ` | ` on each line for exact edits or writes. Write tools preserve submitted text, so copying the labeled display into a write stores those labels as file content.
 
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
