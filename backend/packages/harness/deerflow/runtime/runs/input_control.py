@@ -81,8 +81,6 @@ class RunInputControl:
         self.inputs, self.agent_runs, self.thread_id, self.checkpointer = inputs, agent_runs, thread_id, checkpointer
         self.delivered: set[str] = set()
         self.acknowledged: set[str] = set()
-        self.calls: dict[str, dict] = {}
-        self.dispatch_message_ids: dict[str, str | None] = {}
         self.delegations: list[dict] = []
         self.current_input: str | None = None
         self.steering_active = False
@@ -170,8 +168,11 @@ class RunInputControl:
             self.acknowledged.update(ids)
 
     async def wait_tool(self, request, handler):
-        self.calls[request.tool_call["id"]] = dict(request.tool_call)
-        self.dispatch_message_ids[request.tool_call["id"]] = _dispatch_message_id(request)
+        # Name the dispatching AIMessage, as the graph's own capture does, so
+        # the steered entry and the captured one are the same delegation. Held
+        # per wait, not per call id: a later response reusing the id while this
+        # call is still observed must not take over its args or dispatch.
+        dispatch = AIMessage(content="", id=_dispatch_message_id(request), tool_calls=[dict(request.tool_call)])
         self.finished_calls.discard(request.tool_call["id"])
         # Create the gate before scheduling: an immediately available input
         # can arrive before the tool handler reaches the native executor.
@@ -187,7 +188,7 @@ class RunInputControl:
                     call_id = request.tool_call["id"]
                     self.pending_calls.add(call_id)
                     self.observed_tasks.add(native)
-                    watcher = asyncio.create_task(self._observe(native, call_id))
+                    watcher = asyncio.create_task(self._observe(native, call_id, dispatch))
                     self.tasks.add(watcher)
                     return ToolMessage(
                         id=gate.result_id,
@@ -203,7 +204,7 @@ class RunInputControl:
             await asyncio.gather(native, return_exceptions=True)
             raise
 
-    async def _observe(self, native, call_id):
+    async def _observe(self, native, call_id, dispatch):
         try:
             result = await native
             message = result.update["messages"][0] if hasattr(result, "update") else result
@@ -215,9 +216,6 @@ class RunInputControl:
         from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
         self.finished_calls.add(call_id)
-        # Name the dispatching AIMessage, as the graph's own capture does, so
-        # this entry and the captured one are the same delegation.
-        dispatch = AIMessage(content="", id=self.dispatch_message_ids.get(call_id), tool_calls=[self.calls[call_id]])
         self.delegations.extend({**entry, "run_id": self.inputs.run_id} for entry in extract_delegations([dispatch, message]))
         usage = normalize_token_usage(message.additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
         if usage:

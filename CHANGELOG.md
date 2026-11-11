@@ -54,7 +54,7 @@ This section accumulates work toward the **2.3.0** milestone
   dropped the reply. A rejected or denied call stayed `in_progress` the same way
   and now settles as `cancelled`. The per-run delegation cap and the ledger
   also count each dispatch once when a provider reuses tool-call ids across
-  responses (`call_0` in every response).
+  responses (`call_0` in every response). ([#8128])
 
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
@@ -16296,3 +16296,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8128]: https://github.com/bytedance/deer-flow/pull/8128

@@ -226,8 +226,8 @@ type DelegationKey = tuple[str | None, str, str | None]
 def delegation_key(entry: Mapping[str, Any]) -> DelegationKey:
     """Identify one delegation: ``(run_id, tool-call id, dispatch message id)``.
 
-    DurableContext's ``_delegation_identity`` and the cap's ``_delegation_id``
-    read the same fields from entries; keep the three in step.
+    DurableContext uses this key too. The cap's ``_delegation_id`` reads the
+    same fields from entries; keep the two in step.
     """
     return entry.get("run_id") or None, entry["id"], entry.get("dispatch_message_id") or None
 

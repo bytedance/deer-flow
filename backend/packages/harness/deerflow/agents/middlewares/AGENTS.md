@@ -36,8 +36,8 @@ ones, and treat completed work as reusable evidence rather than acceptance.
 
 On new user turns, DurableContext cancels earlier-run unanswered delegations.
 It preserves resumes, same-run continuations, and entries without `run_id`.
-A pre-turn reply prevents cancellation; legacy replies without status metadata may
-stay `in_progress`. Never infer status from reply text.
+A pre-turn reply prevents cancellation; a stamped one settles the entry with its
+status, while legacy replies without status metadata may stay `in_progress`. Never infer status from reply text.
 
 Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares`. Optional entries require their config/runtime condition.
 

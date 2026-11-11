@@ -372,12 +372,12 @@ async def test_parallel_deferred_usage_is_charged_once_to_its_dispatch():
 @pytest.mark.parametrize(("usage", "charged"), [({"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}, 7), ({"total_tokens": "many"}, None)])
 async def test_deferred_usage_survives_a_compacted_dispatch(usage, charged):
     _, _, control = await _run_controller()
-    control.calls["compacted"] = {"name": "task", "args": {}, "id": "compacted"}
+    dispatch = AIMessage(content="", id="compacted-dispatch", tool_calls=[{"name": "task", "args": {}, "id": "compacted"}])
 
     async def finished():
         return ToolMessage(content="Child finished", tool_call_id="compacted", name="task", additional_kwargs={SUBAGENT_TOKEN_USAGE_KEY: usage})
 
-    await control._observe(asyncio.create_task(finished()), "compacted")
+    await control._observe(asyncio.create_task(finished()), "compacted", dispatch)
     latest = AIMessage(id="latest", content="Summarized history", usage_metadata={"input_tokens": 1, "output_tokens": 1, "total_tokens": 2})
     update = await control.deliver({"messages": [AIMessage(id="older", content="Before"), HumanMessage(content="Next"), latest]})
 

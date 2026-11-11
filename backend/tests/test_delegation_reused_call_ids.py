@@ -161,6 +161,58 @@ async def test_steered_result_records_the_same_delegation_the_graph_captured():
     assert [entry.get("dispatch_message_id") for entry in control.delegations] == ["ai-2"]
 
 
+@pytest.mark.asyncio
+async def test_a_steered_call_keeps_its_dispatch_when_a_later_response_reuses_its_id_in_flight():
+    store = MemoryRunStore()
+    await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+    inputs = RunInputs(store, "run", "owner", "worker")
+    await inputs.submit("update", "Handle this first", "steer")
+    control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
+    releases = {2: asyncio.Event(), 3: asyncio.Event()}
+    first_history = [HumanMessage("go", id="human-1"), _dispatch(1), _result(1), _dispatch(2)]
+
+    def handler_for(job):
+        async def handler(request):
+            await releases[job].wait()
+            return _result(job)
+
+        return handler
+
+    try:
+        # job 2 is steer-paused and still running when the next response reuses call_0.
+        pending = await control.wait_tool(SimpleNamespace(tool_call=_task_call(2), state={"messages": first_history}), handler_for(2))
+        assert pending.additional_kwargs["subagent_pending"]
+        second_history = [*first_history, pending, _dispatch(3)]
+        second = asyncio.create_task(control.wait_tool(SimpleNamespace(tool_call=_task_call(3), state={"messages": second_history}), handler_for(3)))
+        await asyncio.sleep(0)
+        releases[3].set()
+        await second
+        releases[2].set()
+        await asyncio.gather(*control.tasks)
+    finally:
+        for release in releases.values():
+            release.set()
+        await control.close()
+
+    by_dispatch = {entry["dispatch_message_id"]: (entry["description"], entry["result_brief"]) for entry in control.delegations}
+    assert by_dispatch["ai-2"] == ("job 2", "result of job 2")
+    assert by_dispatch.get("ai-3", ("job 3", "result of job 3")) == ("job 3", "result of job 3")
+
+
+def test_a_new_turn_settles_a_reply_checkpointed_before_its_capture():
+    # Run 1's worker crashed after the tools checkpoint stored job 1's reply but
+    # before the next capture recorded it, so the entry is still in_progress.
+    run_1 = [HumanMessage("go", id="human-1", additional_kwargs={"run_id": "run-1"}), _dispatch(1), _result(1)]
+    ledger = merge_delegations([], [{**entry, "run_id": "run-1"} for entry in extract_delegations(run_1[:2])])
+    messages = [*run_1, HumanMessage("next", id="human-2", additional_kwargs={"run_id": "run-2"})]
+
+    update = DurableContextMiddleware().before_model({"messages": messages, "delegations": ledger}, SimpleNamespace(context={"run_id": "run-2"}))
+
+    merged = merge_delegations(ledger, update["delegations"] if update else [])
+    assert _ledger_view(merged) == [("call_0", "job 1", "completed", "result of job 1")]
+    assert [(entry["run_id"], entry["dispatch_message_id"]) for entry in merged] == [("run-1", "ai-1")]
+
+
 def test_a_new_turn_cancels_the_dangling_dispatch_of_a_reused_call_id():
     # Run 1 dispatched call_0 twice and stopped while the second subagent ran.
     run_1 = [HumanMessage("go", id="human-1", additional_kwargs={"run_id": "run-1"}), _dispatch(1), _result(1), _dispatch(2)]
