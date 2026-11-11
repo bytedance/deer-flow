@@ -3166,16 +3166,29 @@ class TestNamedAgentMemoryManagement:
             named_client.update_memory_fact("fact_123", "Use A4")
         assert mock_mgr.update_fact.call_args.kwargs["agent_name"] == "buyer"
 
-    def test_backend_that_ignores_agent_scope_raises_cleanly(self, named_client):
-        """Noop-style backends accept ``agent_name`` but ignore it, so a scoped
-        management call would report success while editing the user's default
-        bucket. Keep the existing clean unsupported-op error instead."""
+    def test_backend_that_ignores_agent_scope_refuses_the_call(self, named_client):
+        """Noop-style backends accept ``agent_name`` and return normally while
+        ignoring it, so forwarding the scope alone would report success while
+        editing the user's default bucket. The capability flag must stop the
+        call before the backend sees it."""
         mock_mgr = MagicMock()
         mock_mgr.supports_agent_scoped_management = False
-        mock_mgr.create_fact.side_effect = NotImplementedError("create_fact not supported")
+        mock_mgr.get_memory.return_value = {"version": "1.0", "facts": []}
         with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
             with pytest.raises(NotImplementedError):
+                named_client.get_memory()
+            with pytest.raises(NotImplementedError):
                 named_client.create_memory_fact("anything")
+        mock_mgr.get_memory.assert_not_called()
+        mock_mgr.create_fact.assert_not_called()
+
+    def test_backend_without_the_flag_refuses_the_call(self, named_client):
+        """A backend that predates the capability flag never advertises it."""
+        mock_mgr = MagicMock(spec=["get_memory", "create_fact"])
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=mock_mgr):
+            with pytest.raises(NotImplementedError):
+                named_client.reload_memory()
+        mock_mgr.get_memory.assert_not_called()
 
     def test_unnamed_client_keeps_the_default_bucket(self, client):
         mock_mgr = MagicMock()

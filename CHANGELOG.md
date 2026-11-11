@@ -360,6 +360,17 @@ This section accumulates work toward the **2.3.0** milestone
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
 
+- **memory:** A named client's memory management calls now read and write the
+  same agent bucket its conversations use. `DeerFlowClient` created with
+  `agent_name` left the scope out of `get_memory`, `export_memory`,
+  `import_memory`, `reload_memory`, `clear_memory` and the fact
+  create/update/delete calls, while `MemoryMiddleware` and the memory tools
+  passed it, so `create_memory_fact` stored a fact where the agent never looked
+  and clear or export reached the user's shared bucket instead of the agent's.
+  A backend that does not advertise `supports_agent_scoped_management` now
+  answers a named call with `NotImplementedError` rather than silently touching
+  the default bucket, matching the Gateway's 501. ([#8146])
+
 ## [2.2.0] — 2026-10-29
 
 This section accumulates work toward the **2.2.0** milestone
