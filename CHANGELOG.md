@@ -238,6 +238,9 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8150](https://github.com/bytedance/deer-flow/issues/8150))
+
 - **memory:** Importing a backup without a `facts` array now returns HTTP 422
   and preserves saved memory. An explicit empty array still clears the selected
   fact bucket. ([#8131])
