@@ -51,7 +51,8 @@ client or the real storage, because the payload shape is the contract.
 - **A failed emergency snapshot is retried, a failed normal update is not.**
   Compaction already removed the snapshot's messages, so no later turn re-feeds
   them. The queue retries it after 5 s and 30 s and holds that conversation's
-  later snapshots behind it. A scope cancelled mid-flight is not re-queued.
+  later updates behind it, the normal one included. The shutdown drain holds
+  nothing back. A scope cancelled mid-flight is not re-queued.
 
 ## DeerMem storage
 

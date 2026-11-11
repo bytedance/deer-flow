@@ -59,8 +59,8 @@ This section accumulates work toward the **2.3.0** milestone
 - **memory:** A memory snapshot taken before compaction is now retried when
   its extraction fails, after 5 s and again after 30 s. It used to be dropped
   on the first failure. Compaction had already removed those messages from the
-  conversation, so their facts never reached memory. Later snapshots of the
-  same conversation wait behind the retry, and clearing memory cancels it.
+  conversation, so their facts never reached memory. Later memory updates of
+  the same conversation wait behind the retry, and clearing memory cancels it.
   ([#8156])
 
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the

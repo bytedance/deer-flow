@@ -168,6 +168,96 @@ def test_dropped_snapshot_releases_later_snapshots(fake) -> None:
     assert queue.pending_count == 0
 
 
+def test_retry_holds_the_conversations_pending_normal_update(fake) -> None:
+    extracted: list[str] = []
+    outcomes = iter([False, False, True, True])
+
+    def update(**kwargs) -> bool:
+        extracted.append(kwargs["messages"][0])
+        return next(outcomes)
+
+    queue = _queue(MagicMock(side_effect=update))
+    queue.add_nowait("thread", ["compacted"], user_id="alice")
+    queue.add("thread", ["tail with a correction"], user_id="alice")  # Due after the 30 s debounce.
+
+    queue._process_queue()
+    _wake_at_armed_deadline(queue, fake)  # The second retry is now due after that debounce.
+    assert extracted == ["compacted", "compacted"]
+
+    _wake_at_armed_deadline(queue, fake)
+    # The compacted messages are older, so the tail that may correct them is extracted last.
+    assert extracted == ["compacted", "compacted", "compacted", "tail with a correction"]
+    assert queue.pending_count == 0
+
+
+def test_normal_update_arriving_during_the_backoff_waits_for_the_retry(fake) -> None:
+    extracted: list[str] = []
+    outcomes = iter([False, True, True])
+
+    def update(**kwargs) -> bool:
+        extracted.append(kwargs["messages"][0])
+        return next(outcomes)
+
+    queue = MemoryUpdateQueue(DeerMemConfig(debounce_seconds=1), MagicMock(update_memory=MagicMock(side_effect=update)))
+    queue.add_nowait("thread", ["compacted"], user_id="alice")
+    queue._process_queue()
+
+    fake.clock.return_value += 1
+    queue.add("thread", ["tail"], user_id="alice")  # Its 1 s debounce ends before the 5 s retry.
+    _wake_at_armed_deadline(queue, fake)
+    assert extracted == ["compacted", "compacted", "tail"]
+    assert queue.pending_count == 0
+
+
+def test_failed_snapshot_holds_a_normal_update_of_the_same_batch(fake) -> None:
+    extracted: list[str] = []
+    outcomes = iter([False, True, True, True])
+
+    def update(**kwargs) -> bool:
+        extracted.append(kwargs["messages"][0])
+        return next(outcomes)
+
+    queue = _queue(MagicMock(side_effect=update))
+    queue.add_nowait("thread", ["compacted"], user_id="alice")
+    queue.add("thread", ["tail"], user_id="alice")
+    queue.add("other", ["unrelated"], user_id="alice")
+
+    queue.flush()
+    assert extracted == ["compacted", "unrelated"]
+    assert [context.messages for context in queue._items] == [["compacted"], ["tail"]]
+
+    _wake_at_armed_deadline(queue, fake)
+    assert extracted == ["compacted", "unrelated", "compacted", "tail"]
+    assert queue.pending_count == 0
+
+
+def test_newer_normal_update_replaces_one_held_behind_a_retry(fake) -> None:
+    queue: MemoryUpdateQueue
+    calls: list[tuple[str, frozenset[str]]] = []
+
+    def update(**kwargs) -> bool:
+        calls.append((kwargs["messages"][0], kwargs["signals"]))
+        if len(calls) == 1:
+            # The next turn ends while the failing attempt is in flight.
+            queue.add("thread", ["newer transcript"], user_id="alice", signals=frozenset({"correction"}))
+        return len(calls) > 1
+
+    queue = _queue(MagicMock(side_effect=update))
+    queue.add_nowait("thread", ["compacted"], user_id="alice")
+    queue.add("thread", ["older transcript"], user_id="alice", signals=frozenset({"preference"}))
+
+    queue.flush()
+    while queue.pending_count and len(calls) < 10:
+        _wake_at_armed_deadline(queue, fake)
+
+    # A conversation keeps one normal update: the newer one, with both signals.
+    assert calls == [
+        ("compacted", frozenset()),
+        ("compacted", frozenset()),
+        ("newer transcript", frozenset({"preference", "correction"})),
+    ]
+
+
 def test_cancellation_during_a_failing_attempt_also_cancels_its_retry(fake) -> None:
     queue: MemoryUpdateQueue
     clear_alice = True
@@ -205,6 +295,24 @@ def test_shutdown_drain_reports_an_unsaved_snapshot_and_retries_without_backoff(
     assert queue.flush_sync(2) is True
     assert update_memory.call_count == 2
     assert queue.pending_count == 0
+
+
+def test_shutdown_drain_holds_nothing_back(fake) -> None:
+    extracted: list[str] = []
+
+    def update(**kwargs) -> bool:
+        extracted.append(kwargs["messages"][0])
+        return kwargs["messages"][0] != "failing"
+
+    queue = _queue(MagicMock(side_effect=update))
+    queue.add_nowait("thread", ["failing"], user_id="alice")
+    queue.add_nowait("thread", ["later snapshot"], user_id="alice")
+    queue.add("thread", ["tail"], user_id="alice")
+
+    # No retry follows a shutdown, so waiting for one would skip the other updates.
+    assert queue.flush_sync(2) is False
+    assert extracted == ["failing", "later snapshot", "tail"]
+    assert queue.pending_count == 1
 
 
 class _FlakyExtractor:

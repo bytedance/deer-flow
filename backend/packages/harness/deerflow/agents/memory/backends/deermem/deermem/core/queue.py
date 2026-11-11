@@ -17,9 +17,9 @@ conversation each cycle, and the updater's watermark does not advance on
 failure), so an in-memory queue covers the realistic graceful-deploy case
 without a persistence layer. Emergency snapshots cannot rely on that re-feed
 because compaction removes their messages, so the queue retries a failed one
-itself: a bounded number of times, after a backoff, holding later snapshots of
-the same conversation behind it. They are still in-memory only and are lost on
-process exit, or once every attempt has failed.
+itself: a bounded number of times, after a backoff, holding that conversation's
+later updates behind it. They are still in-memory only and are lost on process
+exit, or once every attempt has failed.
 """
 
 from __future__ import annotations
@@ -232,11 +232,11 @@ class MemoryUpdateQueue:
         # A forced flush's deadline must survive same-key coalescing.
         if existing is not None and existing.due_at <= now:
             due_at = existing.due_at
-        if bypass_watermark:
-            # Extraction keeps one conversation's snapshots in arrival order, so
-            # a new one waits behind a snapshot that is backing off before a retry.
-            held_until = [c.due_at for c in self._items if c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key]
-            due_at = max([due_at, *held_until])
+        # Extraction keeps one conversation in arrival order, so a new update
+        # waits behind a snapshot that is backing off before a retry. For a
+        # normal update this hold outlasts its debounce and max-wait deadlines.
+        held_until = [c.due_at for c in self._items if c.bypass_watermark and queue_key(c.thread_id, c.user_id, c.agent_name) == key]
+        due_at = max([due_at, *held_until])
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -341,13 +341,15 @@ class MemoryUpdateQueue:
         succeeded = 0
         failed = 0
         # Failed emergency snapshots to re-queue, each followed by the later
-        # snapshots of its conversation that were held back behind it.
+        # updates of its conversation that were held back behind it.
         requeue: list[ConversationContext] = []
         held_keys: set[tuple[str, str | None, str | None]] = set()
         try:
             for context in contexts_to_process:
                 key = queue_key(context.thread_id, context.user_id, context.agent_name)
-                if context.bypass_watermark and key in held_keys:
+                # The shutdown drain holds nothing back: no retry follows it, so
+                # every pending update gets its one attempt.
+                if key in held_keys and not skip_inter_item_delay:
                     requeue.append(context)
                     continue
                 success = False
@@ -406,7 +408,7 @@ class MemoryUpdateQueue:
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
-                self._requeue_snapshots_locked(requeue)
+                self._requeue_locked(requeue)
                 # Reschedule inside the lock: ``_schedule_timer`` read-cancels-
                 # reassigns ``self._timer`` non-atomically, and a concurrent
                 # ``add``'s ``_rearm_timer_locked`` (also under the lock) touches the
@@ -416,20 +418,24 @@ class MemoryUpdateQueue:
                 self._reprocess_pending = False
                 self._rearm_timer_locked()
 
-    def _requeue_snapshots_locked(self, contexts: list[ConversationContext]) -> None:
+    def _requeue_locked(self, contexts: list[ConversationContext]) -> None:
         """Put failed emergency snapshots back at the head. Caller must hold ``_lock``.
 
         ``contexts`` is in arrival order: each failed snapshot is followed by
-        the later snapshots of its conversation that the worker held back.
+        the later updates of its conversation that the worker held back.
         Those, and any that arrived meanwhile, wait for the same retry time so
-        extraction keeps the conversation's arrival order.
+        extraction keeps the conversation's arrival order. That includes its
+        normal update: extracted before the retry, a correction in it would be
+        followed by the older fact from the snapshot.
         """
         cancelled, self._cancelled_in_flight = self._cancelled_in_flight, []
         contexts = [context for context in contexts if not any(_in_cancel_scope(context, scope) for scope in cancelled)]
         if not contexts:
             return
         now = time.monotonic()
+        arrived_normal = {queue_key(c.thread_id, c.user_id, c.agent_name): c for c in self._items if not c.bypass_watermark}
         retry_at: dict[tuple[str, str | None, str | None], float] = {}
+        requeued: list[ConversationContext] = []
         for context in contexts:
             key = queue_key(context.thread_id, context.user_id, context.agent_name)
             if key not in retry_at:
@@ -437,10 +443,18 @@ class MemoryUpdateQueue:
                 delay = _EMERGENCY_RETRY_DELAYS_SECONDS[context.attempts - 1]
                 retry_at[key] = now + delay
                 logger.info("Retrying emergency memory snapshot for thread %s in %.0fs (trace_id=%s)", context.thread_id, delay, context.trace_id)
-        self._items = contexts + self._items
+            newer = None if context.bypass_watermark else arrived_normal.get(key)
+            if newer is None:
+                requeued.append(context)
+            else:
+                # A normal update that arrived meanwhile carries the cumulative
+                # history, so it replaces the held one as coalescing would.
+                newer.signals |= context.signals
+                newer.first_at = min(newer.first_at, context.first_at)
+        self._items = requeued + self._items
         for context in self._items:
             hold_until = retry_at.get(queue_key(context.thread_id, context.user_id, context.agent_name))
-            if context.bypass_watermark and hold_until is not None:
+            if hold_until is not None:
                 context.due_at = max(context.due_at, hold_until)
 
     def flush(self, *, skip_inter_item_delay: bool = False) -> None:
