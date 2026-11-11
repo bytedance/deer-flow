@@ -58,6 +58,12 @@ class McpRoutingConfig(BaseModel):
     )
     model_config = ConfigDict(extra="forbid")
 
+    @field_validator("priority", mode="before")
+    @classmethod
+    def _reject_boolean_priority(cls, value: object, info: ValidationInfo) -> object:
+        """Reject a boolean before the clamp below coerces ``true`` to 1 (see #6293)."""
+        return reject_boolean(value, info, kind="an integer")
+
     @field_validator("priority")
     @classmethod
     def _clamp_priority(cls, value: int) -> int:
