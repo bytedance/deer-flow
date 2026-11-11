@@ -1,5 +1,7 @@
 ### Middleware Chain
 
+ToolProgress fences late results/hint retries by entry epoch, even for one run.
+
 JSON depth failures preserve content and never abort graphs. Unclassified
 explicit failures stay `unknown` / recoverable / `try_alternative`; incidental
 JSON fields cannot establish auth failure. Producer metadata wins. Keep real
