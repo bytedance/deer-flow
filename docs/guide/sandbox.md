@@ -30,7 +30,8 @@ error even when the referenced sandbox is cached.
 When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
 
 For Docker development and production, service startup follows the configured
-sandbox mode. With `AioSandboxProvider`, an omitted `provisioner_url`, an empty
+sandbox mode, including when the `sandbox:` header or `use` field has a trailing
+YAML comment. With `AioSandboxProvider`, an omitted `provisioner_url`, an empty
 string (`""` or `''`), or YAML null (`null`, `~`, or a blank value), including
 trailing comments, selects `aio`: `provisioner` is not started and the Docker
 socket overlay is enabled. This grants the gateway host root-equivalent Docker
