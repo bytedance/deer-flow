@@ -64,6 +64,7 @@ This section accumulates work toward the **2.3.0** milestone
   feeds a snapshot only the rest. The record is in-process: a failed
   extraction, a pre-screen skip, a message without an id, and a restart or
   another Gateway replica still get the whole snapshot.
+  ([#8159](https://github.com/bytedance/deer-flow/pull/8159))
 
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
