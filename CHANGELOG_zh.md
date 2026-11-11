@@ -32,6 +32,13 @@
   而不是在派发时清理。仅为这次被拒发送而由 Gateway 准入创建的 0 消息会话会保留下来；
   要安全识别并删除它，需要后端提供条件删除。([#8092])
 
+- **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
+  接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
+  行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
+  现在仅当该 Worker 仍持有活跃运行的有效租约时，才将证据合并到行元数据
+  （`RunStore.merge_owned_metadata()`），否则在执行前停止该运行。启用心跳的自定义
+  `RunStore` 实现必须实现该方法。([#8046])
+  
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
@@ -12859,5 +12866,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8092]: https://github.com/bytedance/deer-flow/pull/8092
