@@ -2326,14 +2326,15 @@ export function useThreadStream({
     // A released send is retired only by an acceptance that names its thread:
     // an id-less frame from an older stream must never consume a newer send's
     // cleanup, and vice versa. A new-chat send carries a page placeholder
-    // instead of the server id, so it is matched as the only unnamed entry —
-    // but never while another new-chat send is still pending, which is exactly
-    // the way one send's late frame could retire the other.
+    // instead of the server id, so it is matched as the only unnamed entry. A
+    // frame that retires one never settles a pending send in the same call —
+    // that is how a late frame could retire the next send — but the retired
+    // entry is gone, so the next send's own frame is accepted.
     let retiredReleased = false;
     if (threadId) {
       const released = releasedSendsRef.current;
       let match = released.findIndex((send) => send.threadId === threadId);
-      if (match < 0 && (!pending || !pending.newThread)) {
+      if (match < 0) {
         const unnamed = released.filter(
           (send) => send.newThread || !send.threadId,
         );
