@@ -358,3 +358,38 @@ async def test_snapshot_capture_is_reset_when_the_read_is_cancelled():
     with pytest.raises(asyncio.CancelledError):
         await task
     assert after_scope == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invocation", ["sync", "async"])
+async def test_snapshot_keeps_source_line_labels_and_original_hash(tmp_path, monkeypatch, invocation):
+    path = "/mnt/user-data/workspace/report.txt"
+    source = "first\nsecond\nthird\n"
+    target = tmp_path / "report.txt"
+    target.write_text(source)
+    sandbox = LocalSandbox("snapshot-numbered", path_mappings=[PathMapping("/mnt/user-data/workspace", str(tmp_path))])
+    monkeypatch.setattr(tools, "get_app_config", lambda: SimpleNamespace(sandbox=SimpleNamespace(read_file_output_max_chars=50000)))
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized", lambda runtime: sandbox)
+
+    async def initialize(runtime):
+        return sandbox
+
+    monkeypatch.setattr(tools, "ensure_sandbox_initialized_async", initialize)
+    request = _request(path, {"start_line": 2, "end_line": 3})
+    request.runtime.tool_call_id = "read"
+    gate = ReadBeforeWriteMiddleware()
+
+    def finish(result):
+        target.write_text("external change\n")
+        return result
+
+    if invocation == "sync":
+        result = gate.wrap_tool_call(request, lambda req: finish(tools.read_file_tool.func(runtime=req.runtime, **req.tool_call["args"])))
+    else:
+
+        async def execute(req):
+            return finish(await tools.read_file_tool.coroutine(runtime=req.runtime, **req.tool_call["args"]))
+
+        result = await gate.awrap_tool_call(request, execute)
+    assert result.content == "Source lines (for exact edits, copy the text after the first ' | '):\n2 | second\n3 | third"
+    assert result.additional_kwargs[READ_MARK_KEY]["hash"] == hashlib.sha256(source.encode()).hexdigest()

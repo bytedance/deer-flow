@@ -1,5 +1,7 @@
 ### Middleware Chain
 
+ToolProgress fences late results/hint retries by entry epoch, even for one run.
+
 JSON depth failures preserve content and never abort graphs. Unclassified
 explicit failures stay `unknown` / recoverable / `try_alternative`; incidental
 JSON fields cannot establish auth failure. Producer metadata wins. Keep real
@@ -24,6 +26,8 @@ and direct plaintext; no media decoding/fetching or nested-document traversal.
 PII before splitting, budgets before escaping; hooks/history/removal on success.
 Chunk/carry/cooldown invariants and tests:
 [contract](../../../../../docs/summarization.md).
+
+vLLM compaction counts replayed reasoning. Keep it out of summary input.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 
@@ -146,7 +150,7 @@ No match: skip inspection, log ID. Tests: `test_read_mark_tool_call_correlation.
 
 Authorization identity is independent of enforcement. Gateway strips client identity overrides: only the server auth source sets `is_internal`, and only authenticated IM `body.context` supplies `channel_user_id` (never `body.config`). `build_principal_from_context` applies role defaults, strict provenance, and copied attributes; RBAC rejects unknown defaults. Delegation and `GuardrailMiddleware` share this identity. Layer 1 precedes deferred assembly across agent paths and its provider is reused for Layer 2; framework skill/memory ordering stays stable. Trusted `DeerFlowClient.stream()` accepts identity overrides. Its graph key always includes effective storage `user_id` and, when enforced, the full Principal; nested attributes are copied so mutation cannot hide stale cache state.
 
-Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-listing-authorization). Runtime skill activation remains a separate layer.
+Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-authorization). Runtime skill activation remains a separate layer.
 
 Model authorization uses `authz.py::resolve_model_authorization()` (same cached-provider, internal-role, and principal-building path as route authorization) as the Gateway integration point for the `models` router: `list_models` filters names through `filter_resources(principal, "model", ...)`, and `get_model` enforces `authorize(resource="model", action="use")` with a deny surfacing as 403; provider errors follow `authorization.fail_closed` (fail-open returns the unfiltered list / proceeds). At runtime, `lead_agent/agent.py::_authorize_model_name` — called from `_make_lead_agent` and from `DeerFlowClient._ensure_agent` — applies the same `model:use` check to the resolved model name. On deny it scans the `filter_resources`-visible names (excluding the denied model), re-verifying each candidate with `authorize("model", "use")` before falling back, because a custom provider may allow `list` while denying `use`; no usable fallback raises under `fail_closed` and keeps the original model under fail-open. The built-in RBAC provider maps this to the per-role `models` policy key. Tests: `tests/test_models_authorization.py`.
 
@@ -178,7 +182,7 @@ Before changing a later authorization phase, read the [authorization RFC](../../
    Isolate sibling warnings and keep lifecycle hooks topology-stable. Before changing this guard, read
    [Loop detection lifecycle](../../../../../docs/LOOP_DETECTION.md) for
    fallback identity, cleanup/LRU/reset, severity ordering, and test invariants.
-32. **TokenBudgetMiddleware** - `token_budget.enabled`: run-ID budgets survive continuations; missing/invalid IDs reset invocation state. With token usage tracking, place CompletedSubagentUsageMiddleware after the guard: reversed `after_model` hooks backfill terminal child usage before enforcement. Keep TokenUsageMiddleware earlier so current-step attribution reflects calls retained by all guards.
+32. **TokenBudgetMiddleware** - `token_budget.enabled`: run-ID budgets survive continuations; missing/invalid IDs reset invocation state. Confirm per-call usage anywhere in state (reused IDs replace earlier slots); retain child-usage deltas; clear unconfirmed calls on boundaries/errors; hard stops retain completed tool/result pairs. With token usage tracking, place CompletedSubagentUsageMiddleware after the guard: reversed `after_model` hooks backfill terminal child usage before enforcement. Keep TokenUsageMiddleware earlier so current-step attribution reflects calls retained by all guards.
 33. **ModelContentCompatibilityMiddleware** - Read-time sanitizer (`wrap_model_call`/`awrap_model_call`, request view only; never writes state): rewrites URL-sourced `file` blocks (any role, gated on the `url` key; an http(s) URL is preserved when the selected model's serializer accepts it — OpenAI Responses API or Anthropic) and non-fetchable-scheme (non-`http`/`https`/`data`) `image` blocks into text placeholders whose MIME/location metadata passes the shared `neutralize_untrusted_tags` guard, so pre-MCP-fix checkpoints heal on the next turn with no migration. Uses the conversion layer's `resource_placeholder_text`/`model_visible_location` for model-visible text; artifact capture scans state messages, so healing adds neither `resource_links` nor handles. See the MCP guide for conversion and the module docstring for healing; malformed URLs degrade to location-less placeholders instead of raising. Registered after DurableContext/summarization, before the date/coalescer tail.
 34. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
 35. **Configured extension middlewares** - `extensions.middlewares` in `config.yaml` or `extensions_config.json` optionally accepts `module.path:ClassName` strings or `{class, kwargs, apply_to}` objects. `deerflow.reflection.resolve_class` loads `AgentMiddleware` classes; import, class, and constructor errors fail agent creation. `kwargs` must be JSON-compatible; YAML dates/timestamps become ISO strings. Order: built-ins/custom and loop/token guards → extensions → terminal-response/safety/clarification tail. Optional `apply_to` selects both chains (default), lead, or subagent before import/construction. Trusted operator config only: paths instantiate arbitrary code. Gateway skill/MCP toggles preserve it in raw JSON; adding an API write path requires explicit trust-boundary review.
@@ -203,3 +207,19 @@ chain instead of skipping the block and reading the remaining text. Tests:
 `tests/test_llm_error_handling_middleware.py`.
 
 Receipts check IDs/anchors/status; uncited results stay unresolved. Legacy no_citation_claims remains readable.
+
+InputSanitization drops empty bare strings and empty typed text blocks from
+genuine user content lists before text-related early returns; all-empty lists
+become an empty string. Only truly empty text is swept: whitespace-only parts
+keep the turn alive. Request copies preserve metadata; history stays untouched.
+
+Scope / known provider compatibility limits (#8038, #8037 review):
+- On the upload extraction-disagreement (`rfind` failure) fallback, non-empty
+  bare strings are framed individually but remain untyped list parts. Strict
+  Chat Completions endpoints can still reject them; typing those parts is deferred.
+- Empty typed text blocks (`{"type": "text", "text": ""}`) are dropped alongside
+  empty bare strings, so Anthropic and strict Chat Completions endpoints no longer
+  see them. User content only; assistant and tool messages stay out of scope.
+- All-empty lists become `content=""`; this middleware replaces
+  messages in place rather than dropping turns, and an empty user turn can still
+  be rejected. No upstream Gateway / IM empty-turn handling is assumed.

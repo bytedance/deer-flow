@@ -137,6 +137,7 @@ class MemoryRunStore(RunStore):
             self._unindex_run(run_id, existing["thread_id"])
         self._mark_changed(self._runs[run_id])
         self._index_run(run_id, thread_id)
+        return self._runs[run_id]
 
     async def get(self, run_id, *, user_id=None):
         run = self._runs.get(run_id)
@@ -259,6 +260,30 @@ class MemoryRunStore(RunStore):
             run["stop_reason"] = stop_reason
         if goal_verdict is not None:
             run["goal_verdict"] = copy.deepcopy(goal_verdict)
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
+        return True
+
+    async def answer_approval(self, run_id, *, metadata, answered_updated_at, expected_request_id=None):
+        run = self._runs.get(run_id)
+        if run is None or run["status"] != "waiting_for_input":
+            return False
+        if expected_request_id is not None:
+            pause = (run.get("metadata") or {}).get("hitl_approval")
+            if not isinstance(pause, dict) or pause.get("request_id") != expected_request_id:
+                return False
+        run["status"] = "success"
+        run["metadata"] = copy.deepcopy(metadata)
+        run["updated_at"] = answered_updated_at
+        self._mark_changed(run)
+        return True
+
+    async def restore_approval(self, run_id, *, metadata, expected_updated_at):
+        run = self._runs.get(run_id)
+        if run is None or run["status"] != "success" or run.get("updated_at") != expected_updated_at:
+            return False
+        run["status"] = "waiting_for_input"
+        run["metadata"] = copy.deepcopy(metadata)
         run["updated_at"] = datetime.now(UTC).isoformat()
         self._mark_changed(run)
         return True
@@ -388,6 +413,15 @@ class MemoryRunStore(RunStore):
         from deerflow.utils.time import is_lease_expired
 
         return run.get("owner_worker_id") == owner_worker_id and not is_lease_expired(run.get("lease_expires_at"), grace_seconds=0)
+
+    async def merge_owned_metadata(self, run_id, metadata, *, owner_worker_id):
+        run = self._runs.get(run_id)
+        if run is None or run["status"] not in ("pending", "running") or not self._live_owner(run, owner_worker_id):
+            return False
+        run["metadata"] = {**(run.get("metadata") or {}), **copy.deepcopy(metadata)}
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        self._mark_changed(run)
+        return True
 
     async def update_lease(
         self,

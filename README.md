@@ -845,6 +845,13 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 >
 > Reconciliation uses an atomic takeover claim that re-checks the lease after candidate selection, so a successful owner renewal wins over orphan recovery and only one reconciler can report a run as recovered. When multiple Gateway workers share the Docker/AIO or E2B sandbox backend, also configure `sandbox.ownership.type: redis`; E2B uses the leases during background startup and periodic reconciliation so duplicate/orphan cleanup cannot terminate a live peer's sandbox.
 
+If a completed thread operation (such as a checkpoint, goal, or artifact write,
+branch, or deletion) fails to release its database reservation, the same Gateway
+worker retries cleanup when it receives a new run or mutation for that thread.
+This also works in single-worker deployments with lease heartbeats disabled.
+If cleanup fails again, admission returns a busy response. Completed requests
+can still replay their saved results by idempotency key.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Upgrading an existing checkout
@@ -940,6 +947,8 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    ```bash
    make dev
    ```
+
+   Local nginx writes temporary files under the checkout's `temp/` directory.
 
 5. **Access**: http://localhost:2026
 
@@ -1168,6 +1177,9 @@ failed run. Live runs require a disposable OpenSandbox service and runtime home.
 BoxLite shutdown rejects late VM registration and keeps its SDK loop open while
 in-flight acquisitions finish. If they cannot drain within five seconds,
 shutdown fails with resources still owned and can be retried.
+Startup-recovered BoxLite VMs use the same private async loop as newly created
+VMs for health checks, commands, and shutdown. Recovery skips boxes removed
+after discovery without creating replacement VMs.
 
 Successful `read_file` calls treat a JSON document's `error` field as file data,
 not a failure of the read tool. This keeps receipts accurate when inspecting
@@ -1298,6 +1310,8 @@ cleanup when migrating from legacy metadata credentials.
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
 Generated-file replies explain when a channel cannot send attachments. If some or all uploads fail, DeerFlow sends one combined notice naming the unsent files when the platform still accepts replies. Successful uploads add no duplicate confirmation. Files remain in the DeerFlow conversation; an expired reply window is logged without switching to proactive messaging.
+
+Telegram retries photos rejected for invalid dimensions or image processing once as documents, preserving the original file and reply target.
 
 Cancelling a channel restart discards its pending configuration reload, preserving newer runtime settings applied afterward.
 
@@ -1775,6 +1789,20 @@ actions remain visible beside the compact sidebar on narrow screens.
 
 ### Skills & Tools
 
+**Human approval for high-risk tools**: Set `hitl_approval.enabled: true` and
+list tools such as `write_file`, `str_replace`, or `bash` in `config.yaml` to
+pause matching calls before execution. The Web UI shows an approval card for
+each action; approval attempts execution under the existing guardrails and
+sandbox authorization, while rejection returns the reason to the agent without
+running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
+subagents and runtimes without resume support always fail closed.
+
+Pending approvals do not expire and block new runs on the same thread until
+resolved. Long argument values may be truncated in the display, but approval
+executes the original complete arguments. The feature is disabled by default.
+See [HITL Tool Approval](backend/docs/CONFIGURATION.md#hitl-tool-approval) for
+configuration and safety semantics.
+
 Agents can call the read-only `inspect_run_status` tool to inspect visible run
 token usage, message and tool-call counts, an approximate context-window fill,
 and whether a summary or unfinished to-dos exist. It returns counts only, not
@@ -1873,8 +1901,9 @@ Providers remain usable without a catalog or management page. See the
 for extension registration and configuration. The installable
 [WeKnora read-only extension](examples/deerflow-extension-weknora/README.md)
 targets WeKnora v0.8.3 and adds knowledge-base/document selection and shared
-retrieval citations. Configure explicit user-to-workspace credential bindings;
-resource authorization remains with WeKnora. The extension directory includes
+retrieval citations. Configure explicit user-to-workspace credential bindings,
+or opt into shared read-only access for authenticated users without maintaining
+a user-ID list. Resource authorization remains with WeKnora. The extension directory includes
 its installation guide.
 
 The optional [knowledge platform extension](examples/deerflow-extension-knowledge-platform/README.md)
@@ -2151,7 +2180,8 @@ Windows scripts (`.bat`, `.cmd`, `.ps1`, `.psm1`, `.js`, `.jse`, `.vbs`, `.vbe`,
 SkillScan warns about remote downloads piped into common shells, including `env` launchers, sudo, interpreter paths, and shell line continuations. It distinguishes environment dumps from `env` commands, including assignments and GNU split-string escapes. Shell parsing and split expansion are bounded; reaching a limit preserves critical findings already detected. Pipes to non-shell tools such as `jq` and `tee` do not trigger this warning.
 
 SkillScan treats HTTP/HTTPS scheme spellings and HTTP hostnames case-insensitively and recognizes bracketed IPv6
-loopback (`[::1]`) URLs as local. External IPv6 endpoints still trigger network findings,
+loopback (`[::1]`) hosts as local. Raw brackets in the URL's userinfo make it count as outbound for
+exfiltration checks. External IPv6 endpoints still trigger network findings,
 and cloud-metadata hostname detection is case-insensitive.
 
 SkillScan recognizes unquoted integer model-usage counters such as `total_tokens` and `input_tokens` in skill examples as measurements. Benchmark token statistics and signed deltas are also recognized; credential fields and other string values remain subject to secret detection.
@@ -2504,6 +2534,9 @@ knowledge service; artifacts do not automatically enable citations. It also appe
 in the extension catalog with localized installation-guide metadata.
 Reopening a bookmark resolves the conversation's current agent through the host, so
 custom-agent conversations retain their original chat entry point, including older bookmarks.
+In **Capabilities → Extensions**, an enabled extension’s detail page links directly to its registered workspace pages. The page also includes usage guidance and keeps package details under **Technical details**.
+Extension packages can provide localized purpose and usage steps in `deerflow-extension.json`, including optional prerequisites. The same detail page supports background extensions without a browser module. All bundled examples include this description; see the [authoring contract](examples/README.md#describe-the-extension).
+
 The independent [Agent teams example](examples/deerflow-extension-agent-teams/README.md)
 lets full Custom Agents collaborate through native `@` mentions, shared messages and
 asynchronous peer requests, with a separate team page and persistent member conversations.
@@ -2635,6 +2668,8 @@ When the agent asks for clarification, the Web UI shows the structured response 
 
 Unsent Web UI composer drafts survive page reloads and switching between conversations within the same browser tab. Drafts are isolated by user, agent, and conversation, include the selected skill and explicit conversation references, and are cleared once a send is accepted. Project documents already attached to the thread also survive reloads; browser-local uploads and quoted message excerpts are not persisted.
 
+The composer's paperclip button opens the local file chooser directly; the `@` button opens the reference picker for skills, project files, conversations, and plugins.
+
 If an attachment upload reports `success: false`, the Web UI stops the send even when the HTTP response is 200. The upload error is shown and the composer keeps its draft and attachments for correction or retry. Files already accepted by a partially successful upload remain on the server; this does not roll them back.
 
 Document conversion reads the live PDF-converter setting and parses documents in a background worker, keeping configuration-file checks off the Gateway event loop.
@@ -2714,13 +2749,15 @@ A pass is limited to 64 chunks and leaves history unchanged on failure or limit
 exhaustion. A limit breach starts a five-minute per-process cooldown for the
 same thread/history window and policy, including rebuilt middleware. A larger
 input budget or smaller source window permits an immediate retry. Model fallback
-and SDK retries can add calls. See the
+and SDK retries can add calls. For vLLM run models, history and retention
+estimates include assistant reasoning replayed to the provider. See the
 [summarization guide](backend/docs/summarization.md).
 
 With `task_continuity.enabled`, `history_search` searches the current task's active
 and compacted history. Its optional `role` accepts `user`, `assistant`, or `tool`
-and filters before the eight-result limit; omitting it or passing `null` preserves
-search across all roles.
+and filters before limiting results to eight distinct sources. Omitting `role` or
+passing `null` preserves search across all roles. Repeated archives of one source
+share one result slot.
 Search excerpts contain at most 600 characters around the earliest locatable
 matching occurrence that fits and include `excerpt_start` / `excerpt_end`, a
 zero-based, half-open character range
@@ -2778,6 +2815,7 @@ Manual compaction also returns HTTP 409 when execution is pending or the checkpo
 The chat header also shows a context-window gauge when the selected model has a positive `context_window` configured. It estimates the latest materialized checkpoint's message tokens and keeps the previous same-thread percentage visible while data refetches, independently of the cumulative token-usage setting.
 
 When `token_budget.enabled` and `token_usage.enabled` are both enabled, each lead-agent run budget includes completed subagent usage, including the final batch. Hidden goal continuations share the budget; a new user run starts fresh.
+The token budget counts separate accepted model calls even when their response message IDs repeat, without double-counting repeated observations or later subagent-usage increments.
 
 ### Sub-Agents
 
@@ -2906,6 +2944,11 @@ precedence over incidental log text such as `12 passed` or `2 errors`;
 independently shaped summaries from other runners still contribute evidence.
 Pytest sibling summaries retain warning counts and the optional human-readable
 duration suffix printed for runs lasting at least a minute, such as `(0:01:05)`.
+
+`tests_passed` evidence pairs each command with its own result, even when a
+provider reuses a tool-call id in a later response. Each run stays a separate
+entry in execution order, so a later failing run is decisive and an earlier
+run's output is never credited to another command.
 
 For Maven and Gradle test acceptance, a `BUILD SUCCESS` / `BUILD SUCCESSFUL`
 banner alone remains `UNVERIFIED`: builds can succeed without running tests.
@@ -3039,6 +3082,23 @@ Native workers support per-subagent `thinking_enabled` and `reasoning_effort` th
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
 ### Sandbox & File System
+
+AIO runs commands from independent subagents concurrently, including Lark CLI
+and skill commands with per-call environment variables. Commands within one
+subagent stay ordered, and each environment-bearing call uses a fresh session.
+Environment-bearing calls share a per-sandbox Bash admission limit, configured
+by `sandbox.environment.AIO_BASH_MAX_SESSIONS` (positive integer, default `50`).
+Excess calls wait without creating a session and can be cancelled while waiting;
+the slot is retained through session cleanup. This pool is separate from
+`MAX_SHELL_SESSIONS`. Docker reuse checks the persisted container environment;
+K8s reuse checks the provisioner's Pod-reported Bash capacity. Upgrade the
+provisioner with the Gateway: missing capacity metadata blocks admission.
+Cancellation remains routed to the running command while scope release or
+sandbox close waits for it to finish and clean up.
+Scope release waits for in-flight execution and cleanup without a separate drain
+deadline. Allow for the remaining command timeout (600 seconds by default), plus
+session/transport/recovery/cleanup time when setting operator-facing release
+budgets; the HTTP cleanup timeout does not bound the preceding lock wait.
 
 With local host bash enabled, the path guard permits division in simple shell
 arithmetic and recognized single-quoted Python, Node.js and Perl programs.
@@ -3217,6 +3277,8 @@ Loop warnings let agents save collected results before their final answer. If th
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
+For agent tool calls, `read_file` adds source line numbers when a range in an uploaded or workspace file returns 1–40 lines and the labeled view fits the output budget. Copy the text after the first ` | ` on each line for exact edits or writes. Write tools preserve submitted text, so copying the labeled display into a write stores those labels as file content. These labels also apply with read-before-write enabled; the version mark still hashes the original source, without display labels.
+
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
@@ -3328,8 +3390,9 @@ external image URLs keep their existing behavior.
 
 If the sample cuts a CRLF line ending in half, the preview keeps the earlier complete rows and omits the incomplete final record, including when its last field is quoted.
 
-Text artifacts are streamed with HTTP byte-range support. The Web UI initially
-loads at most 1 MiB, shows the preview size when a file is larger, and waits for
+Text artifacts are streamed with HTTP byte-range support. A resumed download
+validates its ETag against the file version that supplies its response bytes.
+The Web UI initially loads at most 1 MiB, shows the preview size for larger files, and waits for
 an explicit **Load full file** action before fetching the remainder or mounting
 the full code editor. Editing becomes available once the complete file has loaded;
 unsaved-change detection uses the full content, including when reverting edits
@@ -3651,6 +3714,8 @@ When `lastConfirmedAt` is absent, hybrid confirmation freshness and staleness re
 
 File-backed memory now separates global user context from agent facts. Each user has one `memory.json` containing only the project-independent `user` and `history` summaries; every fact is a canonical Markdown file below `agents/{agent_name}/facts/`. Existing lead-agent middleware, API, Settings, import/export, and embedded-client calls that omit `agent_name` resolve inside DeerMem to the reserved `__default__` bucket. That bucket is outside the valid custom-agent name grammar, so a real custom agent named `lead-agent` has a separate fact repository and deleting a custom agent cannot delete a memory-only directory without `config.yaml`. Public agent identifiers are case-insensitive and canonicalized to lowercase. Runtime/API readers still receive a compatibility `facts` array for the selected/default agent, so the frontend does not read agent facts from `memory.json`; structured Markdown `source` metadata is projected to the historical string field at the MemoryManager boundary. An unscoped Clear All first migrates facts from unread legacy per-agent JSON without adopting its soon-to-be-cleared summaries, then removes shared summaries and facts from every agent bucket while preserving agent configuration files, so a later read cannot resurrect skipped legacy facts; an explicitly agent-scoped clear removes only that agent's facts. On first normal read, old facts embedded in the user JSON are migrated automatically to `__default__`; facts written to the earlier implicit `lead-agent` bucket are also moved when that directory is not a real custom agent. Migration and normal writes notify the configured retrieval adapter only after durable storage locks are released. DeerMem uses a scope-aware SQLite FTS5/BM25 adapter by default, stores only rebuildable derived index data under `.retrieval/` (or under `memory.backend_config.retrieval_index_path` when set; a relative value resolves against `storage_path`), and rebuilds it in the background during Gateway startup or lazily on the first scoped search. A corrupt derived index is recreated automatically. When several Gateway instances share one `storage_path`, point `retrieval_index_path` at instance-local disk: SQLite's WAL mode is unsupported on network filesystems, each instance re-syncs a user's index on its next search after a peer writes, and a declared multi-instance deployment (`deployment.multi_instance: true` / `DEER_FLOW_MULTI_INSTANCE=1`) that leaves the index under the memory root logs a warning at startup. The Helm chart mounts a Pod-local `emptyDir` for it. Set `memory.backend_config.retrieval_adapter` to an empty string to disable it and use the local substring fallback. Chinese tokenization is optional; install the backend `memory-zh` extra (`uv sync --extra memory-zh`) for jieba-assisted sub-phrase search. Journaled writes, a shared user lock, and optimistic user-memory revisions prevent silent lost updates.
 
+FTS5 search selects the highest combined BM25, time-decay, and confidence scores across all matching facts before applying the requested result count. Requesting fewer results preserves the same ranking.
+
 Set `memory.backend_config.retrieval_relevance_enabled: true` to opt into deterministic relevance/confidence ranking and query-aware injection. This **bypasses `retrieval_adapter` for search**, including the default FTS5/BM25 and custom adapters; indexing remains configured. `retrieval_relevance_weight` controls the blend and `retrieval_diversity_weight` enables near-duplicate penalties (default 0). Scoring uses at most the first 4096 characters and 128 tokens per query/fact. Search diversifies only up to `top_k`; injection diversifies guaranteed and regular facts independently until their token budgets are reached. Leave the feature disabled to retain the existing retrieval and injection behavior.
 
 Lexical relevance measures IDF-weighted coverage of distinct query terms, so
@@ -3730,7 +3795,12 @@ editing the saved agent configuration to refresh the selection.
 
 `DeerFlowClient.stream()` includes `summary_text` in each `values` event. This is the current compacted context summary, or `None` when absent. Consumers can record changes without reading checkpoint internals; repeated snapshots may carry the same summary, and an initial snapshot may already contain one from an earlier turn.
 
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API. The HTTP Gateway also exposes `DELETE /api/threads/{thread_id}` to remove DeerFlow-managed local thread data after the LangGraph thread itself has been deleted:
+DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API.
+
+The HTTP Gateway exposes `DELETE /api/threads/{thread_id}` to remove a thread's
+files, checkpoints, and metadata. If checkpoint deletion fails, the Gateway
+returns 500 and retains the owner record for retry.
+[Thread cleanup API](backend/docs/API.md#thread-cleanup)
 
 An embedded `DeerFlowClient(config_path="custom/config.yaml")` keeps the process
 config singleton on that file, even after a working-directory change. Later edits

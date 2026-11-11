@@ -36,3 +36,46 @@ remain runtime-only and are never copied into checkpoint-persisted
 `configurable`. Public run requests cannot use these keys to disable
 clarification, impersonate a webhook channel, or override a scheduled run back
 to interactive behavior.
+
+## HITL tool approval
+
+`hitl_approval` is an operator-controlled, opt-in gate around selected tools,
+not a way for a non-interactive run to wait for clarification. Interactive
+Web/SDK runs pause through LangGraph `interrupt()` and enter
+`waiting_for_input`; only a matching approval response can resume the current
+checkpoint. Scheduled, webhook, autonomous, IM, extension, and MCP notification
+runs follow `hitl_approval.non_interactive`. Subagents and graphs without resume
+support always fail closed, including when that setting is `allow`.
+
+Resume consumption is a store-level compare-and-swap bound to the validated
+action `request_id` mapping; the middleware recomputes those IDs from the live
+AI message before applying any decision. If worker attachment fails after
+consumption, the Gateway conditionally restores that exact answered run to
+`waiting_for_input` so a valid response or all-reject can retry safely.
+
+The resume run's journal adopts the paused calls it answers, recovered from the
+durable interrupt payload. Approved calls reach the history feed through their
+tool callback; rejections have none, so the journal reconciles them under the
+resume run like other middleware-written results (#4666). Results from other
+earlier runs are not re-attributed.
+
+A call that cannot carry a stable approval decision is never paused. A null or
+duplicated call id can never match the resume validator and would block new runs
+forever; an empty id is technically matchable, but it is denied as well because
+strict providers reject an empty tool-call id when the conversation is replayed.
+The middleware removes those calls from the model response with a visible
+rejection note instead of pausing, so the tool is never executed and the thread
+stays usable. The same uniqueness rule applies when a call is denied by result:
+answering a denial `ToolMessage` also answers any other call that shares its id,
+so a shared id is stripped rather than answered, and the next request cannot
+carry the id twice. A pause stored by an older release with a null or duplicated
+id is **not** cleared by this: every resume, including all-reject, is still
+rejected, so continue the work in a new thread. In-place recovery is tracked in
+[#8071](https://github.com/bytedance/deer-flow/issues/8071).
+
+`waiting_for_input` is not a terminal success or failure. Goal checks, final
+artifact delivery checks, and batch continuation cancellation must not treat a
+pending approval as a completed source run. Pending approvals do not expire and
+block new runs on the same thread until resolved. See
+[HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for configuration and
+argument-summary visibility limits.
