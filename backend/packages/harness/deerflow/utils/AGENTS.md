@@ -1,265 +1,70 @@
-### Readability Fallback
+# Shared utilities (`deerflow/utils/`)
 
-`readability.py` caches the optional Readability.js availability probe. If the
-Node extractor is unavailable, its probe raises, or an attempted extraction
-cannot launch Node, subsequent calls in that process use readabilipy's Python
-fallback without retrying Node. A non-zero Node exit can be document-specific,
-so it falls back only for that document and later documents retry Node. If a
-future readabilipy version removes the private availability probe, log that
-once at import and attempt extraction instead of silently disabling Node. Keep
-successful Node extraction unchanged and allow unexpected parser/programming
-exceptions to propagate. The resolved-body fallback preserves article links
-when Python extraction returns the original document wrapper. Regression
-coverage lives in `tests/test_readability.py` and
-`tests/test_web_fetch_relative_links.py`.
+Small helpers that several subsystems share: atomic file publication, advisory
+file locks, off-loop assembly, document conversion and outlines, message text
+extraction, host path portability, retry hints, port allocation and the proxy
+policy for internal HTTP calls. Before you write a local variant of one of these,
+use the helper here; each exists because separate copies drifted apart.
 
-### Atomic Byte Publication
+## Verify
 
-`atomic_write.publish_bytes_atomically` owns browser screenshot and Browserless
-capture/fetch publication. It writes and fsyncs a hidden exclusive sibling before
-`os.replace`, cleaning it on failure. New files use `0666` filtered by the host
-umask; replacements preserve existing permission bits before publication. Never
-read the process umask by changing it in this threaded runtime. Behavioral tests
-for both tool imports live in `tests/test_browser_outputs_atomic.py`.
-`cleanup_failed_atomic_write` shares best-effort cleanup across this publisher,
-`skills/projection.py`'s private manifest writer, project document staging,
-extension snapshot rollback (including removal of a file that did not exist),
-the managed plugins-block rewrite, custom-skill file writes, per-user
-skill-state writes, Gateway upload staging, and the Gateway skill-archive
-upload copy and its post-install discard. The upload route discards that
-archive before closing the multipart form and suppresses close errors.
-Use it on publication failure or after deciding to discard an owned
-temporary; pass a raw descriptor only until `fdopen` succeeds, or an explicitly
-transferred duplicate descriptor owned by the cleanup caller. Shelf discards
-must preserve both a rejected project's 404 and a dedup hit's 200 response.
-Callers retain their own serialization, permissions and publication policy.
-Shelf `stage_document_bytes` drains preparation, writes, close and failure
-cleanup before propagating cancellation. Retain the opened handle across its
-handoff, but leave waiting for incoming chunks cancellable; regressions in
-`tests/test_project_document_staging_cancellation.py` cover both shelf entry points.
-Shelf conversion also drains its final staging discard before releasing
-single-flight ownership. Cleanup failures warn without replacing the conversion
-result, original error or cancellation; the retention sweep owns later retries.
-Coverage lives in `tests/test_project_document_tools.py::TestConversionCleanup`.
-Local Linux/macOS text revisions opt into a short `temporary_prefix` and
-`preserve_metadata_from` (a caller-owned descriptor). Staging starts at `0600`;
-`file_revision_metadata` transfers ownership, mode, ACLs and xattrs before data.
-macOS uses native descriptor ACL APIs and `fcopyfile(COPYFILE_XATTR)`; Linux uses
-descriptor xattrs, including its access ACL, removing inherited extras. Errors
-abort; never ignore metadata permission failures. Refuse set-id bits, macOS file
-flags and content-bound privilege attributes rather than reattach stale privileges to new
-content. Other publisher callers retain their existing mode-only contract.
-Do not restore old timestamps on a content revision, including an empty save.
-Source-descriptor close failures are best-effort warnings, not save failures;
-guard diagnostics so the publication result or original interruption survives.
-Failure cleanup must preserve the original publication exception, including
-interruptions. Descriptor close and sibling unlink are separate best-effort
-operations: a close failure must not prevent the unlink attempt.
-Attempt warning logs for cleanup `OSError`s with the temporary path and exception
-details. Guard logging-handler exceptions so diagnostics neither replace the
-publication exception (including interruptions) nor skip remaining cleanup.
-Both tools take collision names from `output_names.output_name_candidates`
-(name, `-1`..`-1000`, five timestamps); claim each atomically, never pre-check.
+```bash
+cd backend
+python -m pytest tests -q -k "atomic or file_lock or host_path or conversion or outline or llm_text or retry_after or port_allocator or http_policy"
+make test-blocking-io
+```
 
-### Model Retry Hints
+## Files on disk
 
-`retry_after.py::bounded_retry_after_ms` shares the 24-hour provider-hint ceiling
-between LLM middleware (numeric/date hints) and Claude backoff. Non-finite or
-over-limit delays return `None` for local backoff; finite negatives clamp to zero.
-Validate before integer truncation and preserve valid hints above the jitter cap.
+- **Publish bytes with `atomic_write.publish_bytes_atomically`.** A reader then
+  sees the old file or the new one, never a partial write. On failure, or when you
+  discard an owned temporary, call `cleanup_failed_atomic_write`.
+- **Do not read the process umask by changing it.** The runtime is threaded, and
+  another thread would create a file with the temporary mask.
+- **Retry a file lock only on contention**, through
+  `file_lock.retry_until_locked`. Other errors propagate at once. Each caller
+  keeps its own deadline, and clocks and sleeps are injected, so tests do not
+  patch the shared `time` module.
+- **Reject Windows device names on every platform** for a path the host will
+  create. A workspace written on Linux is opened on Windows later. Compare the
+  stem only, and leave the supplied file name unchanged.
+- **`extended_length_path()` is a spelling, not a check.** It does not replace
+  symlink resolution or confinement, and it is not used for persisted relative
+  paths or Docker mount sources.
 
-### Port Allocation Bounds
+## Off the event loop
 
-`network.py::PortAllocator.allocate` caps its exclusive search endpoint at
-65536. A valid start near 65535 must report exhaustion with `RuntimeError`
-when all remaining ports are reserved or occupied, without probing invalid
-TCP ports. Keep the last valid port allocatable and preserve `max_range`.
-Regression coverage lives in `tests/test_port_allocator_bounds.py`.
+- **Build models, tools and agents through `assembly_io.run_assembly`.** Assembly
+  can read credential files and wait on MCP discovery. The dedicated executor
+  keeps that work off the event loop and off the default thread pool, and it
+  preserves the request context. A new async entry point that assembles an agent
+  or a model uses it too.
+- **Cancellation during construction must not start inference.**
+- **Resolve the agent factory before admission**, so that an import error cannot
+  admit a run.
+- **Document conversion is always offloaded, and its worker is drained through
+  cancellation.** A small compressed Office file can take seconds, and the caller
+  deletes the source file right after it returns.
 
-### Control-Plane Proxy Policy
+## Text and content
 
-`http_policy.py::control_plane_trust_env` is the single answer to "should this
-client inherit `HTTP_PROXY`?" for DeerFlow's own hops. Loopback, private,
-link-local, `.localhost`, Docker/Podman-internal and cluster-local hostnames are
-control-plane traffic and must bypass the environment proxy; external FQDNs and
-public IPs keep it. The module stays dependency-free (no `httpx`, no sandbox
-imports) precisely so `app/channels/manager.py` and `app/gateway/health.py` can
-import it at module scope without loading the sandbox provider stack.
-`community/aio_sandbox/backend.py` re-exports it as `sandbox_http_trust_env` for
-existing sandbox call sites. Policy parity with the original sandbox-local
-implementation is covered by `tests/test_aio_sandbox_readiness.py`; the
-import-graph guard lives in `tests/test_channels.py`.
+- **Message content can be `None`, a string or a list of blocks.** Use the shared
+  extraction helpers, which ignore blocks without string text.
+- **Strip only well-formed reasoning tags.** A word that merely starts with
+  `think` is ordinary text.
+- **Outlines and previews are read as `utf-8-sig`**, so a leading BOM does not
+  become part of the first heading.
+- **`text_detection` decides which MIME types are active content** for artifact
+  and project-document downloads. Keep platform aliases mapped to their standard
+  type, and keep the generic `+xml` rule.
 
-### Goal Objective Validation
+## Network
 
-`goal_objective.py` owns the dependency-free normalized 4000-character objective
-validation shared by runtime and scheduled-task capability/repository admission.
-`runtime.goal` re-exports the helper for compatibility. Validation does not replace
-the saved original text; blank or over-limit text is rejected before persistence.
-
-### Message Text Extraction
-
-`message_content_to_text` takes raw message content and treats `None` as empty
-text so downstream empty-result, error-detail, and archive-skip fallbacks work.
-Keep its other conversions unchanged, including newline-separated list blocks
-and literal strings such as `"None"`. Do not replace it with `message_to_text`,
-which takes a whole message and uses different list/mapping semantics.
-Regression coverage lives in `tests/test_utils_messages.py`,
-`tests/test_subagent_executor.py`, and `tests/test_task_continuity.py`.
-
-`llm_text.py::extract_response_text` ignores content blocks with non-string
-`type` values, including lists and mappings, while retaining adjacent text and
-output-text blocks. Tests cover extraction and the one-shot input-polish path
-with real LangChain messages in `tests/test_utils_llm_text.py` and
-`tests/test_input_polish_router.py`.
-
-`llm_text.py::strip_think_blocks` scans opening and closing tags forward so
-repeated unclosed `<think>` prefixes in model output do not rescan the same
-suffix. Keep its case-insensitive tag handling, optional whitespace before
-the closing `>`, and the `truncate_unclosed` behavior. Regression coverage
-lives in `tests/test_utils_llm_text.py`.
-
-Opening reasoning tags require whitespace, `>`, or `/>` after the exact `think`
-name; punctuated names such as `<think-tank>`, `<think:note>`, and `<think/other>`
-are ordinary content. The shared prefix regex owns this boundary rule; do not
-duplicate it in a manual re-check. Self-closing `<think/>` and `<think />` tags
-are empty reasoning blocks: remove the tag without consuming subsequent text.
-Both cleanup functions find opening delimiters outside quoted attributes; a
-quoted `>` cannot terminate the tag or hide an answer after a self-closing tag.
-Keep exact unfinished `<think` prefixes hidden in leading summaries. Coverage:
-`tests/test_think_tag_boundaries.py`.
-
-Display summaries use `strip_leading_think_blocks` before limiting text;
-`test_run_journal_visible_summary.py` preserves literal tags in the answer.
-
-### Agent / Tool Assembly Off-Load
-
-One-shot input-polish, follow-up-suggestion, and project-file-summary helpers,
-skill moderation (`scan_skill_content`), the goal evaluator, thread title
-generation, and in-graph context compaction build providers through
-`run_assembly` before awaiting inference; the run worker calls its cached
-evaluator factory the same way. Manual compaction (`compact_thread_context`)
-builds its summarization middleware and eager models there too. Provider
-construction can read local credentials; keep it off the event loop and the
-default executor while preserving request context. Cancellation during
-construction must not start inference. A scan without `app_config`
-(in-graph `skill_manage`) reads the live config in the same pool, and its
-fail-closed fallback reuses that config rather than reading it again on the
-loop. Manual compaction without `app_config` (the `/compact` route) reads
-the live config in that pool as well. A subagent builds its chat model there
-too: `SubagentExecutor._create_agent` is awaited from `_aexecute` on the
-persistent isolated subagent loop every concurrent delegated task shares (not
-the Gateway request loop), so its `create_chat_model` call goes through
-`run_assembly`; the rest of its middleware and graph assembly is a separate
-boundary.
-Coverage includes `tests/blocking_io/test_oneshot_llm_offloop.py`,
-`tests/blocking_io/test_system_model_offloop.py`,
-`tests/blocking_io/test_title_model_offloop.py`,
-`tests/blocking_io/test_summarization_model_offloop.py`,
-`tests/blocking_io/test_compaction_model_offloop.py` and
-`tests/blocking_io/test_subagent_model_offloop.py`.
-
-`start_run` also resolves the factory through `run_assembly` before admission:
-cold imports cannot occupy the loop or its default pool, and import errors
-cannot admit a run. `tests/blocking_io/test_agent_factory_resolve_offloop.py`
-pins offload, executor isolation, request context, and failure ordering.
-
-Tool and agent assembly re-enters `get_available_tools()` and may block on MCP discovery, so the four async assembly entry points — `run_agent`'s `agent_factory` call, `task_tool`, durable batch `_execute_item`, and `abuild_checkpoint_state_accessor` — dispatch through `deerflow.utils.assembly_io.run_assembly`, a dedicated ContextVar-preserving bounded executor (`DEER_FLOW_ASSEMBLY_WORKERS`, default 8) rather than the loop's default executor; a hung MCP server therefore parks an assembly worker instead of queueing unrelated default-executor work, and the pool logs a warning when pending assemblies exceed the worker count. `tests/blocking_io/test_tool_assembly_offloop.py` pins all four offloads plus the ContextVar propagation.
-
-### Document Conversion
-
-`file_conversion.convert_file_to_markdown` resolves the live PDF converter in
-its drained parsing worker. Config cache hits still stat/hash files; keep them
-off-loop with parsing. Cold/cache-hit coverage uses real temporary configs in
-`tests/blocking_io/test_file_conversion_offloop.py`.
-
-### Uploaded Document Summaries
-
-Outlines skip root-level HTML comment blocks (`<!--` with up to three leading
-spaces through the first `-->` line). Comment contents cannot open code fences;
-comment markers inside fenced code cannot open comment blocks. Keep line numbers
-and limits unchanged. Coverage: `tests/test_file_outline_html_comments.py`.
-
-`file_outline.py` reads outlines and fallback previews as `utf-8-sig` so an
-optional leading UTF-8 BOM cannot hide a first-line heading or code fence, or
-occupy a preview line. Preserve physical line numbers, embedded U+FEFF
-characters, and the original file bytes.
-
-All outline heading styles skip root-level indented code (four leading spaces
-or a tab after up to three spaces), including PDF-style single and split bold
-headings. Keep legitimate bold headings with up to three spaces and the shared
-conversion-companion path working. Regression coverage lives in
-`tests/test_file_outline_indented_bold.py`.
-
-Split-bold headings reject numeric/punctuation/currency-only blocks after the
-section number, including parentheses, signs, leading whitespace, and `$€£¥`.
-Apply the check to the second through fourth blocks; preserve the four-block
-limit, punctuated titles containing text, and non-ASCII titles. Coverage lives
-in `tests/test_file_outline_split_bold.py`.
-
-### Active Content MIME Types
-
-`text_detection.py::_is_active_content_mime_type` is the shared download-safety
-boundary for artifacts and project documents. Keep platform aliases such as
-Windows' `image/svg` aligned with their standard active type (`image/svg+xml`),
-and preserve the generic `+xml` rule.
-
-### Conversion Worker Ownership
-
-`convert_file_to_markdown` offloads parsing for every source size: compressed
-Office files can require seconds of work below 1 MiB. It drains conversion workers
-across caller cancellation before returning control to source-file cleanup. Keep conversion
-inside `await_drained`, including when the worker fails or cancellation repeats;
-upload ingestion owns a temporary source that it removes in `finally`. Coverage
-lives in `tests/test_file_conversion_cancellation.py`.
-
-### Host Path Portability
-
-`host_paths.extended_length_path()` provides lexical Windows filesystem
-spelling (absolute `\\?\` drive paths or `\\?\UNC\` shares); it is a no-op
-on POSIX. It does not replace symlink resolution or confinement checks and
-must not be used for persisted relative paths or Docker mount sources.
-Existing extended (`\\?\`) and device (`\\.\`, including named pipes)
-namespaces pass through unchanged before normalization.
-
-`host_paths.py` rejects Windows device names for host-visible creation paths on
-every platform, including the `COM`/`LPT` aliases with superscript ¹, ² and ³.
-The console aliases `CONIN$` and `CONOUT$` are reserved too; match them
-case-insensitively before the first dot, without rejecting longer ordinary
-names such as `CONIN$notes.txt`.
-Device-name comparison ignores ASCII spaces before the first dot, so
-`NUL .txt` and `COM1  .log` remain reserved. Trim the comparison stem only,
-not the supplied filename; ordinary names such as `report .txt` and
-non-ASCII whitespace remain unchanged.
-Do not normalize arbitrary Unicode digits into device numbers: names such as
-`COM⁴.txt` and `COM¹notes.txt` are ordinary portable names. Read/removal callers
-retain their existing portability exemptions.
-
-### Advisory File Lock Retries
-
-`file_lock.retry_until_locked` owns contention-only acquisition retries for the
-Windows Lark, extension-manager and channel runtime-config locks and bounded
-skill-projection reads.
-Retry only EACCES/EAGAIN/EDEADLK; other errors propagate without sleeping.
-Keep per-caller policies: Lark has a 15-minute Windows file-lock deadline,
-extension management and channel runtime config wait indefinitely, and skill
-export retains its existing deadline, 0.02-second cadence and cancellation
-check. Clocks and sleeps are injectable; tests must not patch the shared stdlib
-time module.
-The channel caller wraps its injected sleep to warn once after 50 contention
-retries; the helper remains responsible for error classification and cadence.
-
-`parse_retry_after_date_ms(raw, now=...)` owns HTTP-date parsing for Claude, Codex
-and LLM error middleware. Interpret timezone-less asctime as UTC and apply the
-shared delay bound. Callers retain numeric/header precedence and local backoff.
-
-### Control-plane HTTP proxy policy
-
-`http_policy.control_plane_trust_env(url)` decides whether a client inherits
-`HTTP_PROXY`: loopback, private and link-local hosts are control-plane traffic
-and bypass it; external hosts keep the environment proxy. `app.channels.manager`
-uses it for both `_make_gateway_client` and `_make_langgraph_client`.
-`langgraph_sdk.get_client()` hard-codes `trust_env=True` and exposes no transport
-override, so the `runs.wait` client for local Gateways is assembled on our own
-`httpx.AsyncClient` with `trust_env=False`; otherwise #7876 keeps reproducing.
-Importing `ChannelManager` must not pull in `deerflow.community.aio_sandbox`.
+- **`http_policy.control_plane_trust_env` decides whether a client inherits the
+  proxy environment.** Loopback, private, container-internal and cluster-local
+  hosts bypass the proxy; public hosts keep it. The module has no third-party
+  imports, so the Gateway and the channels import it without loading the sandbox
+  stack. Keep it that way.
+- **Bound every provider retry hint with `retry_after`.** An unbounded
+  `Retry-After` value would park a run.
+- **`PortAllocator` never probes a port above 65535.** It reports exhaustion.
