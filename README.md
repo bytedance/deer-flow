@@ -3275,6 +3275,8 @@ Loop warnings let agents save collected results before their final answer. If th
 
 Ranged `read_file` calls count lines the same way on every sandbox provider: a line ends only at a newline. On E2B, BoxLite, Tenki, and OpenSandbox, a file with bare carriage returns (such as a saved progress log), form feeds, or Unicode line separators therefore returns the same lines as on the local sandbox, and the `start_line` a truncated read suggests points at the next unread line.
 
+For agent tool calls, `read_file` adds source line numbers when a range in an uploaded or workspace file returns 1–40 lines and the labeled view fits the output budget. Copy the text after the first ` | ` on each line for exact edits or writes. Write tools preserve submitted text, so copying the labeled display into a write stores those labels as file content.
+
 Concurrent reads and writes to the same file share a gate across synchronous and asynchronous tool calls. Async callers waiting for that gate do not occupy worker threads needed to finish the current read or write. Cancelling a waiting call leaves the current operation running; a call that already started file inspection still waits for that work to finish before releasing its gate.
 
 The built-in `grep` tool searches either one text file or all matching text files below a directory, so an agent can search an uploaded document directly without first broadening the request to the entire uploads directory.
