@@ -128,6 +128,13 @@ File-backed memory now separates global user context from agent facts. Each user
 
 FTS5 search selects the highest combined BM25, time-decay, and confidence scores across all matching facts before applying the requested result count. Requesting fewer results preserves the same ranking.
 
+Search validates index generations before returning results, so an overlapping
+refresh or delayed write notification cannot certify stale rows using an earlier
+freshness check. After bounded retries, or while a notification is still publishing,
+it uses the existing canonical substring fallback. This does not add a distributed
+transaction between search and concurrent canonical writes; manifest-read failures
+retain the existing log-and-serve policy.
+
 Set `memory.backend_config.retrieval_relevance_enabled: true` to opt into deterministic relevance/confidence ranking and query-aware injection. This **bypasses `retrieval_adapter` for search**, including the default FTS5/BM25 and custom adapters; indexing remains configured. `retrieval_relevance_weight` controls the blend and `retrieval_diversity_weight` enables near-duplicate penalties (default 0). Scoring uses at most the first 4096 characters and 128 tokens per query/fact. Search diversifies only up to `top_k`; injection diversifies guaranteed and regular facts independently until their token budgets are reached. Leave the feature disabled to retain the existing retrieval and injection behavior.
 
 Lexical relevance measures IDF-weighted coverage of distinct query terms, so

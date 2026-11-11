@@ -646,17 +646,14 @@ class FileMemoryStorage(MemoryStorage):
         # index in sync. A different live signature means another process wrote
         # the user's memory, so the scope is rebuilt before it is searched.
         self._retrieval_synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
-        # Generations bumped (under _cache_lock) whenever rebuild_index publishes
-        # or forgets a scope's rows: per scope for a scoped rebuild, storage-wide
-        # for a full one. Signature promotion after an own commit is fenced on
-        # them, because a rebuild that installed rows in between may have read
-        # its facts before that commit and has recorded its own signature.
+        # Generations (under _cache_lock) fence signature promotion and search
+        # results against overlapping index mutations: per scope for notifications
+        # and scoped rebuilds, storage-wide for a full rebuild.
         self._retrieval_index_generation = 0
         self._retrieval_scope_generations: dict[tuple[str | None, str | None], int] = {}
-        # Serializes a rebuild's row replacement with its signature publication
-        # (see rebuild_index): the adapter lock ends when the install returns, so
-        # two overlapping refreshes of one scope could otherwise install in one
-        # order and publish in the other.
+        self._retrieval_pending_notifications: dict[tuple[str | None, str | None], int] = {}
+        # Serializes rebuild installation/publication and result validation. The
+        # adapter lock alone ends before the generation or signature is updated.
         self._retrieval_publish_lock = threading.Lock()
 
     def close(self) -> None:
@@ -1006,6 +1003,34 @@ class FileMemoryStorage(MemoryStorage):
         return (*file_signature, revision)
 
     def _dispatch_retrieval_notifications(
+        self,
+        notifications: list[RetrievalNotification],
+        *,
+        user_id: str | None,
+        agent_name: str | None,
+        committed: tuple[int, tuple[Any, ...]] | None = None,
+    ) -> None:
+        """Fence searches across both the adapter mutation and its signature update."""
+        if self._retrieval is None:
+            return
+        key = self._cache_key(agent_name, user_id=user_id)
+        if notifications:
+            with self._cache_lock:
+                self._retrieval_pending_notifications[key] = self._retrieval_pending_notifications.get(key, 0) + 1
+                self._retrieval_scope_generations[key] = self._retrieval_scope_generations.get(key, 0) + 1
+        try:
+            self._apply_retrieval_notifications(notifications, user_id=user_id, agent_name=agent_name, committed=committed)
+        finally:
+            if notifications:
+                with self._cache_lock:
+                    pending = self._retrieval_pending_notifications[key] - 1
+                    if pending:
+                        self._retrieval_pending_notifications[key] = pending
+                    else:
+                        del self._retrieval_pending_notifications[key]
+                    self._retrieval_scope_generations[key] = self._retrieval_scope_generations.get(key, 0) + 1
+
+    def _apply_retrieval_notifications(
         self,
         notifications: list[RetrievalNotification],
         *,
@@ -2061,34 +2086,45 @@ class FileMemoryStorage(MemoryStorage):
     ) -> list[dict[str, Any]]:
         if self._retrieval is not None:
             requested_keys = {self._cache_key(self._scope_kwargs(scope).get("agent_name"), user_id=self._scope_kwargs(scope).get("user_id")) for scope in scopes}
-            with self._cache_lock:
-                dirty = requested_keys & self._retrieval_dirty_scopes
-                synced = {key: self._retrieval_synced_signatures.get(key) for key in requested_keys}
-            for key in requested_keys - dirty:
-                user_id, agent_name = key
-                if agent_name is None:
+            # Re-check after a refresh or overlapping publication, then use the
+            # canonical fallback under sustained contention instead of retrying forever.
+            for _ in range(2):
+                with self._cache_lock:
+                    dirty = requested_keys & self._retrieval_dirty_scopes
+                    synced = {key: self._retrieval_synced_signatures.get(key) for key in requested_keys}
+                    generation = self._retrieval_index_generation
+                    scope_generations = {key: self._retrieval_scope_generations.get(key, 0) for key in requested_keys}
+                for key in requested_keys - dirty:
+                    user_id, agent_name = key
+                    if agent_name is None:
+                        continue
+                    # Another process wrote this user's memory since this process last
+                    # indexed the scope: the live manifest signature no longer matches.
+                    try:
+                        live_signature = self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name)
+                    except (OSError, ValueError, MemoryStorageCorruption) as exc:
+                        # A transient shared-volume failure must not fail a search
+                        # the local index can answer. Leave the signature unchanged
+                        # so the next search compares again without forcing a rebuild
+                        # into the same failing read.
+                        logger.warning("Memory retrieval freshness check skipped for user %r agent %r; serving the local index: %s", user_id, agent_name, exc)
+                        logger.debug("Memory retrieval freshness check failure", exc_info=exc)
+                        continue
+                    if synced[key] != live_signature:
+                        dirty.add(key)
+                if not dirty:
+                    results = self._retrieval.search(query, scopes=scopes, top_k=top_k, mode=mode, filters=filters)
+                    # Wait for any in-flight rebuild to publish its generation
+                    # before certifying the queried rows. Notifications stay
+                    # unlocked, so also reject their unfinished metadata publication.
+                    with self._retrieval_publish_lock, self._cache_lock:
+                        if generation == self._retrieval_index_generation and all(scope_generations[key] == self._retrieval_scope_generations.get(key, 0) and not self._retrieval_pending_notifications.get(key) for key in requested_keys):
+                            return results
                     continue
-                # Another process wrote this user's memory since this process last
-                # indexed the scope: the live manifest signature no longer matches.
-                try:
-                    live_signature = self._scope_signature(self._get_memory_file_path(agent_name, user_id=user_id), agent_name)
-                except (OSError, ValueError, MemoryStorageCorruption) as exc:
-                    # The local index exists to decouple search from the shared
-                    # volume: a transient read error or a corrupt manifest must not
-                    # fail a search the index can answer. Serve it as is and keep the
-                    # recorded signature so the next search compares again; a dirty
-                    # mark would send the rebuild into the same failing read.
-                    logger.warning("Memory retrieval freshness check skipped for user %r agent %r; serving the local index: %s", user_id, agent_name, exc)
-                    logger.debug("Memory retrieval freshness check failure", exc_info=exc)
-                    continue
-                if synced[key] != live_signature:
-                    dirty.add(key)
-            if dirty:
                 dirty_scopes = [{"userId": user_id, "agentName": agent_name} for user_id, agent_name in dirty]
                 rebuild_result = self.rebuild_index(dirty_scopes)
                 if rebuild_result.get("failed"):
                     return self._search_substring(query, scopes=scopes, top_k=top_k, filters=filters)
-            return self._retrieval.search(query, scopes=scopes, top_k=top_k, mode=mode, filters=filters)
         return self._search_substring(query, scopes=scopes, top_k=top_k, filters=filters)
 
     def _search_substring(
