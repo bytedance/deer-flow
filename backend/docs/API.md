@@ -351,7 +351,7 @@ does not accept this header and keeps the existing missing-stream close of
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` or `present_shared_artifact` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -1458,7 +1458,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 
 ### Thread Cleanup
 
-Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
+Delete a thread's checkpoint data and DeerFlow-managed files and metadata.
 
 ```http
 DELETE /api/threads/{thread_id}
@@ -1475,6 +1475,14 @@ DELETE /api/threads/{thread_id}
 **Error behavior:**
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
+- `500` with `{"detail": "Failed to delete thread checkpoints."}` when a configured
+  checkpointer cannot delete the thread's checkpoints. The owner row is retained
+  for a retry.
+- `409` with `Thread has work in flight. Delete it after the work finishes.` when
+  thread work blocks deletion. After a checkpoint error, a retry can also return
+  this response until the durable delete reservation is released or reconciled.
+  In a single-worker deployment with ownership heartbeats disabled, a stranded
+  reservation is reconciled at Gateway startup.
 
 Deleting a thread also removes every user's read marker for it.
 

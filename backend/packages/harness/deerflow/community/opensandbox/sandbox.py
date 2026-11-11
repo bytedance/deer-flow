@@ -119,6 +119,7 @@ class OpenSandboxSandbox(Sandbox):
     #: Every call is a fresh ``run_command`` execution — no shell state
     #: survives into the next command.
     persistent_shell_sessions = False
+    artifact_root = "/mnt/user-data"
 
     def __init__(
         self,

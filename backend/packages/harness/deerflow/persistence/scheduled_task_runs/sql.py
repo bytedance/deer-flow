@@ -15,7 +15,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.finalization import FinalizationObserver, end_condition_reached, finalize_occurrence, finish_task_at_end_condition, is_host_pause_marker
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled, pause_unschedulable
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -24,8 +24,7 @@ from deerflow.persistence.scheduled_tasks.model import (
 )
 from deerflow.runtime.events.terminal import RecoveryTerminalPublisher, RecoveryTerminalTarget
 from deerflow.scheduler.host_notes import RUN_ERROR_END_REACHED
-from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
-from deerflow.scheduler.schedules import should_advance_schedule_cursor
+from deerflow.scheduler.schedules import should_advance_schedule_cursor, stored_next_run_at
 from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
@@ -220,8 +219,9 @@ class ScheduledTaskRunRepository:
         task.last_thread_id = row.thread_id
         # A manual recurring run is an extra trial. Keep the task's existing
         # cadence while repairing launch bookkeeping after a crash.
+        schedule_error = None
         if should_advance_schedule_cursor(task.schedule_type, trigger=row.trigger):
-            task.next_run_at = compute_next_run_at(
+            task.next_run_at, schedule_error = stored_next_run_at(
                 task.schedule_type,
                 task.schedule_spec,
                 task.timezone,
@@ -248,6 +248,7 @@ class ScheduledTaskRunRepository:
         elif not (row.trigger == "manual" and task.status == "paused"):
             task.status = "enabled"
             task.last_error = candidate.error if candidate.status in {"error", "timeout", "interrupted"} else None
+        pause_unschedulable(task, schedule_error)
 
     async def create(
         self,
@@ -737,11 +738,12 @@ class ScheduledTaskRunRepository:
                         task.lease_owner = None
                         task.lease_expires_at = None
                     else:
+                        schedule_error = None
                         if row.trigger == "manual":
                             next_at = task.next_run_at
                             task_status = task.status or "enabled"
                         else:
-                            next_at = compute_next_run_at(
+                            next_at, schedule_error = stored_next_run_at(
                                 task.schedule_type,
                                 task.schedule_spec,
                                 task.timezone,
@@ -754,6 +756,7 @@ class ScheduledTaskRunRepository:
                         task.last_error = error
                         task.lease_owner = None
                         task.lease_expires_at = None
+                        pause_unschedulable(task, schedule_error)
                     task.updated_at = datetime.now(UTC)
 
                 await session.commit()
@@ -785,12 +788,13 @@ class ScheduledTaskRunRepository:
             row.lease_expires_at = None
 
             if task is not None and can_project(task, row):
+                schedule_error = None
                 if row.trigger == "manual":
                     task_status = task.status or "enabled"
                     next_at = task.next_run_at
                 else:
                     task_status = "failed" if task.schedule_type == "once" else "enabled"
-                    next_at = compute_next_run_at(
+                    next_at, schedule_error = stored_next_run_at(
                         task.schedule_type,
                         task.schedule_spec,
                         task.timezone,
@@ -807,6 +811,7 @@ class ScheduledTaskRunRepository:
                 task.lease_owner = None
                 task.lease_expires_at = None
                 task.updated_at = datetime.now(UTC)
+                pause_unschedulable(task, schedule_error)
 
             await session.commit()
             return True

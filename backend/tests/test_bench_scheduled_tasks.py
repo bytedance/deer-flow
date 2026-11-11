@@ -75,11 +75,12 @@ def test_budget_evidence_uses_actual_checkpoint_goal_counters_and_no_missing_evi
     assert not goal_history_evidence(entries, "Produce report")["within_observed_limits"]
 
 
-def test_completion_requires_host_delivery_and_successful_run():
+@pytest.mark.parametrize("presentation_tool", ["present_files", "present_shared_artifact"])
+def test_completion_requires_host_delivery_and_successful_run(presentation_tool):
     from scripts.benchmark.scheduled_tasks.protocol import host_delivery_evidence, independent_completion
 
     path = "/mnt/user-data/outputs/report.json"
-    events = [{"event_type": "run.delivery", "content": {"satisfied": True, "matched_paths": [path], "by_tool": {"present_files": [path]}}}]
+    events = [{"event_type": "run.delivery", "content": {"satisfied": True, "matched_paths": [path], "by_tool": {presentation_tool: [path]}}}]
     delivery = host_delivery_evidence(events, path)
     assert delivery["delivered"]
     assert independent_completion(artifact_passed=True, fixture_read=True, delivered=True, run_status="success", stop_reason=None)

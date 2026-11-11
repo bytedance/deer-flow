@@ -29,7 +29,7 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import bind_authenticated_user, reset_current_user, set_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +234,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:
-            return await call_next(request)
+            verified_user_id = str(user.id) if auth_source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_PAT} else None
+            with bind_authenticated_user(verified_user_id):
+                return await call_next(request)
         finally:
             reset_current_user(token)
