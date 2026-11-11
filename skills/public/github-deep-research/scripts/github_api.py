@@ -292,12 +292,11 @@ class GitHubAPI:
         except Exception:
             summary["languages"] = {}
 
-        # Add contributor count
+        # A full first page is only a lower bound, not a total count.
         try:
-            contributors = self.get_contributors(owner, repo, limit=1)
-            # GitHub returns Link header with total, but we approximate
-            summary["contributor_count"] = len(
-                self.get_contributors(owner, repo, limit=100)
+            contributors = self.get_contributors(owner, repo, limit=100)
+            summary["contributor_count"] = (
+                "100+" if len(contributors) == 100 else len(contributors)
             )
         except Exception:
             summary["contributor_count"] = "N/A"
