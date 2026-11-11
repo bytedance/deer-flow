@@ -1,8 +1,11 @@
 import logging
+import os
 import re
+import shutil
 import subprocess
 from html import escape, unescape
 from html.parser import HTMLParser
+from pathlib import Path
 from threading import Lock
 from urllib.parse import urljoin, urlparse, uses_relative
 
@@ -24,6 +27,46 @@ except ImportError:  # pragma: no cover - compatibility with future readabilipy 
 _readability_js_launch_failed = False
 _readability_js_available_cached: bool | None = None
 _readability_js_probe_lock = Lock()
+_readability_bootstrap_attempted = False
+
+
+def _readabilipy_js_dir() -> Path:
+    import readabilipy
+
+    return Path(readabilipy.__file__).parent / "javascript"
+
+
+def _bootstrap_readability_js() -> None:
+    """Install readabilipy's node_modules on Windows when its own probe cannot.
+
+    readabilipy invokes npm as ``["npm", ...]``, which raises FileNotFoundError
+    on Windows because npm ships as ``npm.cmd`` and CreateProcess ignores
+    PATHEXT. Its node probe therefore always fails there and every extraction
+    silently degrades to the pure-Python path. Resolve npm through
+    ``shutil.which`` (PATHEXT-aware) and run ``npm install`` once, mirroring
+    ``readabilipy.utils.run_npm_install``. Any failure keeps that fallback.
+    """
+    global _readability_bootstrap_attempted
+
+    if _readability_bootstrap_attempted or os.name != "nt":
+        return
+    _readability_bootstrap_attempted = True
+
+    jsdir = _readabilipy_js_dir()
+    if not (jsdir / "package.json").is_file() or (jsdir / "node_modules").is_dir():
+        return
+    npm = shutil.which("npm")
+    if npm is None:
+        logger.warning("npm is not on PATH; Readability.js stays unavailable on this Windows host")
+        return
+    try:
+        completed = subprocess.run([npm, "install"], cwd=jsdir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)
+    except (subprocess.SubprocessError, OSError):
+        logger.warning("npm install for Readability.js failed; using the Python fallback", exc_info=True)
+        return
+    if completed.returncode != 0:
+        stderr = completed.stderr.decode(errors="replace").strip() if completed.stderr else ""
+        logger.warning("npm install for Readability.js exited with %s%s; using the Python fallback", completed.returncode, f": {stderr}" if stderr else "")
 
 
 def _readability_js_available() -> bool:
@@ -42,6 +85,7 @@ def _readability_js_available() -> bool:
         if _readability_js_available_cached is not None:
             return _readability_js_available_cached
         try:
+            _bootstrap_readability_js()
             _readability_js_available_cached = bool(_readabilipy_have_node())
         except (subprocess.SubprocessError, OSError, ValueError):
             logger.warning("Readability.js availability probe failed; using the Python fallback", exc_info=True)
