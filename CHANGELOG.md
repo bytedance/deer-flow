@@ -52,12 +52,6 @@ This section accumulates work toward the **2.3.0** milestone
   message history under the resume run instead of existing only in checkpoint
   state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
   
-- **agents:** HarnessGuard's SyntaxError hint now names the line in the file that
-  failed to parse. When the error came from an imported module, the hint used
-  the importing file's line, so two different errors in that module shared one
-  signature and the second drew a false `CRITICAL REPETITION` warning.
-  ([#8098](https://github.com/bytedance/deer-flow/pull/8098))
-
 - **summarization:** vLLM compaction counts reasoning tokens replayed to the
   model when checking the trigger and estimating how much history to keep.
   ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
