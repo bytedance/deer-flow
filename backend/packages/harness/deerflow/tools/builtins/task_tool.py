@@ -130,19 +130,11 @@ def _preflight_delegation_checks(
         return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
 
     if subagent_type == "bash":
-        host_bash_allowed = (
-            is_host_bash_allowed(runtime_app_config)
-            if runtime_app_config is not None
-            else is_host_bash_allowed()
-        )
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
         if not host_bash_allowed:
             return None, LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 
-    config = (
-        get_subagent_config(subagent_type, app_config=runtime_app_config)
-        if runtime_app_config is not None
-        else get_subagent_config(subagent_type)
-    )
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None or subagent_type not in available_subagent_names:
         if available_subagent_names:
             available = ", ".join(available_subagent_names)
@@ -950,7 +942,7 @@ async def task_tool(
         available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
     # Preflight: 只读预检，零副作用。在触发任何有副作用的委派操作
-    #（工具装配、执行器创建、后台任务注册）之前一次性完成前置条件校验。
+    # （工具装配、执行器创建、后台任务注册）之前一次性完成前置条件校验。
     # 失败即返回，helper 内部状态不变，调用方可安全重试。
     preflight_config, preflight_error = _preflight_delegation_checks(
         subagent_type=subagent_type,

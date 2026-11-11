@@ -3712,3 +3712,124 @@ def test_parallel_task_choices_do_not_mutate_parent_or_shared_config(monkeypatch
     assert {entry["config"].model for entry in seen} == {"B", "C"}
     assert shared.model == "inherit"
     assert runtime.config["metadata"]["model_name"] == "ark-model"
+
+
+def _preflight(**overrides):
+    kwargs = {
+        "subagent_type": "general-purpose",
+        "context_mode": "isolated",
+        "runtime_app_config": None,
+        "available_subagent_names": ["general-purpose"],
+        "allowed_subagents": None,
+    }
+    kwargs.update(overrides)
+    return task_tool_module._preflight_delegation_checks(**kwargs)
+
+
+def test_preflight_returns_the_resolved_config_on_success(monkeypatch):
+    resolved = _make_subagent_config()
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: resolved)
+
+    config, error = _preflight()
+
+    assert error is None
+    assert config is resolved
+
+
+def test_preflight_rejects_unknown_context_mode(monkeypatch):
+    get_config = MagicMock()
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", get_config)
+
+    config, error = _preflight(context_mode="thread")
+
+    assert config is None
+    assert error == "Unknown context_mode 'thread'. Use isolated or snapshot."
+    # The cheapest guard must fail before any registry lookup.
+    get_config.assert_not_called()
+
+
+def test_preflight_rejects_bash_when_host_bash_is_disabled(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
+
+    config, error = _preflight(subagent_type="bash")
+
+    assert config is None
+    assert error == LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+
+
+def test_preflight_allows_bash_when_host_bash_is_enabled(monkeypatch):
+    resolved = _make_subagent_config(name="bash")
+    monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: True)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: resolved)
+
+    config, error = _preflight(subagent_type="bash", available_subagent_names=["bash"])
+
+    assert error is None
+    assert config is resolved
+
+
+def test_preflight_rejects_a_subagent_outside_the_caller_policy(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
+
+    config, error = _preflight(available_subagent_names=["planner"], allowed_subagents=["planner"])
+
+    assert config is None
+    assert error == "Unknown subagent type 'general-purpose'. Available: planner"
+
+
+def test_preflight_rejects_when_no_subagent_is_permitted(monkeypatch):
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: _make_subagent_config())
+
+    config, error = _preflight(available_subagent_names=[], allowed_subagents=[])
+
+    assert config is None
+    assert error == "Unknown subagent type 'general-purpose'. Available: none permitted by caller policy"
+
+
+def test_rejected_preflight_creates_no_executor_and_assembles_no_tools(monkeypatch):
+    """Validate-then-mutate: a rejected delegation must not reach tool assembly
+    or executor construction."""
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: None)
+    executor = MagicMock()
+    assemble = MagicMock()
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", executor)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
+
+    message = _task_tool_message(_run_task_tool(runtime=_make_runtime(), prompt="do work", subagent_type="general-purpose", tool_call_id="tc-rejected"))
+
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    executor.assert_not_called()
+    assemble.assert_not_called()
+
+
+def test_task_tool_binds_the_preflight_config_on_the_happy_path(monkeypatch):
+    """Regression: the preflight helper must hand its resolved config back to
+    task_tool. When config stayed scoped inside the helper, every successful
+    delegation raised UnboundLocalError at the skills/model lookups while only
+    the rejection paths kept passing."""
+    runtime = _make_runtime()
+    resolved = _make_subagent_config()
+    assert resolved.model == "inherit"  # the branch hit on every success path
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["config"] = kwargs["config"]
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: resolved)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    message = _task_tool_message(_run_task_tool(runtime=runtime, description="happy path", prompt="do work", subagent_type="general-purpose", tool_call_id="tc-happy"))
+
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert captured["config"].model == "inherit"
