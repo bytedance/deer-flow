@@ -26,6 +26,11 @@
 
 ### 修复
 
+- **网关：** 启动运行以及模型、技能、建议问题和沙箱的授权检查不再在事件循环上读取
+  `config.yaml`。每次读取都会对配置文件计算哈希，修改后还要重新解析，此前在“设置”中改动配置后
+  会让其他请求卡顿数十毫秒。现在启动一次运行只在工作线程中加载一次配置，并全程使用同一份快照。
+  ([#8137])
+
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
   `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
   （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
@@ -12868,3 +12873,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8137]: https://github.com/bytedance/deer-flow/pull/8137

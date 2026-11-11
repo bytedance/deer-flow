@@ -51,6 +51,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** Starting a run, and the model, skill, suggestion and sandbox
+  authorization checks, no longer read `config.yaml` on the event loop. Each
+  read hashes the config files and reparses them after an edit, which stalled
+  every other request for tens of milliseconds right after a Settings change.
+  A run start now loads the config once, in a worker, and uses that one
+  snapshot throughout. ([#8137])
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -16299,3 +16306,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8137]: https://github.com/bytedance/deer-flow/pull/8137
