@@ -1000,6 +1000,18 @@ class MemoryUpdater:
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
                 raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
+        # Duplicate detection must cover BOTH storage paths (the apply_changes
+        # override and the base save() path) and run before capacity selection,
+        # which can drop one of two same-id entries and hide the duplicate.
+        # The error type lives at the manager boundary (same type as #8151).
+        from deerflow.agents.memory.manager import MemoryDuplicateFactIdError
+
+        seen_import_ids: set[str] = set()
+        for fact in memory_data.get("facts", []):
+            fact_id = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+            if fact_id in seen_import_ids:
+                raise MemoryDuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+            seen_import_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -1008,15 +1020,6 @@ class MemoryUpdater:
             for fact in incoming_facts:
                 fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
                 fact["confidence"] = _coerce_source_confidence(fact)
-            # Duplicate detection must happen before capacity selection: the
-            # policy can drop one of two same-id entries, hiding the duplicate
-            # from the storage-level guard and making the import outcome depend
-            # on entry order (Copilot review on #8153).
-            incoming_ids_seen: set[str] = set()
-            for fact in incoming_facts:
-                if fact["id"] in incoming_ids_seen:
-                    raise ValueError(f"Duplicate fact id {fact['id']!r} in import")
-                incoming_ids_seen.add(fact["id"])
             incoming_facts, capacity_decision, shadow_decision = self._select_for_capacity(
                 incoming_facts,
                 agent_name=agent_name,

@@ -12,6 +12,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.persistent_writes import run_drained_write
 from app.gateway.secret_masking import mask_secret_values, normalize_config_key
 from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
+from deerflow.agents.memory.manager import MemoryDuplicateFactIdError
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
@@ -596,6 +597,8 @@ async def import_memory(body: MemoryImportRequest, request: Request, agent_name:
         raise _unsupported_501(manager, "import memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
         raise _map_memory_manager_error(exc) from exc
+    except MemoryDuplicateFactIdError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid memory import: {exc}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid memory import: facts must be a list of objects with non-empty content.") from exc
     except OSError as exc:

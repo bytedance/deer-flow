@@ -1172,3 +1172,22 @@ def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
 
     assert response.status_code == 200
     assert not (tmp_path / "users" / "alice" / "agents").exists()
+
+
+def test_import_memory_route_names_duplicate_fact_id_in_detail() -> None:
+    """A MemoryDuplicateFactIdError surfaces its own detail verbatim, not the
+    generic facts-array message (Copilot P2 on #8153)."""
+    from deerflow.agents.memory.manager import MemoryDuplicateFactIdError
+
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.import_memory.side_effect = MemoryDuplicateFactIdError("Duplicate fact id 'fact_dup' in memory import")
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/memory/import",
+                json={"facts": [{"id": "fact_dup", "content": "x", "category": "context", "confidence": 0.9, "createdAt": "2026-03-20T00:00:00Z", "source": "manual"}]},
+            )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid memory import: Duplicate fact id 'fact_dup' in memory import"

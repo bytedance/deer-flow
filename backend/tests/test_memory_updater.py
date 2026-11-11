@@ -24,7 +24,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _normalize_memory_update_fact,
     _parse_memory_update_response,
 )
-from deerflow.agents.memory.manager import LangfuseMemoryCallbacks
+from deerflow.agents.memory.manager import LangfuseMemoryCallbacks, MemoryDuplicateFactIdError
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
@@ -2059,25 +2059,31 @@ def _fact(content: str, fact_id: str, revision: int = 1) -> dict[str, object]:
     }
 
 
-def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path, agent_name: str | None) -> None:
     """A backup with two entries for the same fact id must be rejected whether
     the first entry matches the stored fact or not - the outcome used to depend
-    on entry order because unchanged entries were skipped from the write map."""
+    on entry order because unchanged entries were skipped from the write map.
+    The seeded snapshot must survive the rejection in both orders."""
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig
 
     for order in ("unchanged-first", "edited-first"):
         config = DeerMemConfig(storage_path=str(tmp_path / order), retrieval_adapter="")
         storage = FileMemoryStorage(config)
         updater = MemoryUpdater(config, storage)
-        # Seed the store with the saved fact.
-        updater.import_memory_data(_make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")]), agent_name="researcher")
+        seed = _make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")])
+        updater.import_memory_data(seed, agent_name=agent_name)
 
         unchanged = _fact("Keep PostgreSQL", "fact_dup")
         edited = _fact("Use SQLite instead", "fact_dup")
         facts = [unchanged, edited] if order == "unchanged-first" else [edited, unchanged]
 
-        with pytest.raises(ValueError, match="Duplicate fact id"):
-            updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
+        with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
+            updater.import_memory_data(_make_memory(facts=facts), agent_name=agent_name)
+
+        # The rejection must not have touched the seeded snapshot.
+        snapshot_after_seed = updater.get_memory_data(agent_name=agent_name)
+        assert storage.load(agent_name=agent_name) == snapshot_after_seed
 
 
 def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) -> None:
@@ -2093,5 +2099,5 @@ def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) 
     facts.append(_fact("second copy", "fact_dup", revision=1))
     assert len(facts) > 10  # over capacity
 
-    with pytest.raises(ValueError, match="Duplicate fact id"):
+    with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
         updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
