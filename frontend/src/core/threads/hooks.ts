@@ -177,6 +177,8 @@ type PendingApprovalSubmission = {
  */
 type PendingSend = {
   threadId: string;
+  /** The conversation did not exist yet when the send started. */
+  newThread: boolean;
   options?: SendMessageOptions;
   settled: boolean;
   promise: Promise<void>;
@@ -190,7 +192,7 @@ type PendingSend = {
  * belongs to the run: if the Gateway accepted it afterwards, its one-time
  * composer state must be retired exactly once.
  */
-type ReleasedSend = Pick<PendingSend, "threadId" | "options">;
+type ReleasedSend = Pick<PendingSend, "threadId" | "newThread" | "options">;
 
 /** Upper bound on released sends kept for a late acceptance. */
 const MAX_RELEASED_SENDS = 8;
@@ -2165,6 +2167,10 @@ export function useThreadStream({
   // and to allow access to the current thread id in onUpdateEvent
   const threadIdRef = useRef<string | null>(threadId ?? null);
   const startedRef = useRef(false);
+  // The SDK thread id at send time: undefined means the conversation is new,
+  // so the run's frame supplies the real id (a page may pass a placeholder).
+  const sdkThreadIdRef = useRef<string | undefined>(threadId);
+  sdkThreadIdRef.current = threadId;
   const pendingSendRef = useRef<PendingSend | null>(null);
   // Sends whose caller was released on navigation can still be accepted later;
   // keep each one until that acceptance so a late frame cannot strand its draft.
@@ -2290,15 +2296,18 @@ export function useThreadStream({
   const acceptPendingSend = useCallback((threadId?: string) => {
     // A released send is retired only by an acceptance that names its thread:
     // an id-less frame from an older stream must never consume a newer send's
-    // cleanup, and vice versa. A send started from the new-chat page has no
-    // thread id yet, so it is matched when it is the only unknown one.
+    // cleanup, and vice versa. A send started from the new-chat page may not
+    // know the server's thread id yet, so it is matched when it is the only
+    // such released send.
     if (threadId) {
       const released = releasedSendsRef.current;
       let match = released.findIndex((send) => send.threadId === threadId);
       if (match < 0) {
-        const unknown = released.filter((send) => !send.threadId);
-        const candidate = unknown[0];
-        if (unknown.length === 1 && candidate) {
+        const unnamed = released.filter(
+          (send) => send.newThread || !send.threadId,
+        );
+        const candidate = unnamed[0];
+        if (unnamed.length === 1 && candidate) {
           match = released.indexOf(candidate);
         }
       }
@@ -2320,12 +2329,18 @@ export function useThreadStream({
     if (!pending || pending.settled) {
       return;
     }
-    // A new-chat send starts without a thread id; the acceptance names it. Only
-    // a send that already knows its thread rejects a mismatched acceptance.
-    if (threadId && pending.threadId && threadId !== pending.threadId) {
+    // A new-chat send may carry only the page's placeholder id: the run's frame
+    // names the server's real thread, which the send adopts. A send on an
+    // existing conversation still rejects a frame from another thread.
+    if (
+      threadId &&
+      pending.threadId &&
+      threadId !== pending.threadId &&
+      !pending.newThread
+    ) {
       return;
     }
-    if (!pending.threadId && threadId) {
+    if (threadId) {
       pending.threadId = threadId;
     }
     pending.settled = true;
@@ -2370,7 +2385,11 @@ export function useThreadStream({
     // accepted after this much navigation.
     releasedSendsRef.current = [
       ...releasedSendsRef.current.slice(-MAX_RELEASED_SENDS + 1),
-      { threadId: pending.threadId, options: pending.options },
+      {
+        threadId: pending.threadId,
+        newThread: pending.newThread,
+        options: pending.options,
+      },
     ];
     pending.resolve();
   }, []);
@@ -3381,6 +3400,7 @@ export function useThreadStream({
         void accepted.catch(() => undefined);
         const pending: PendingSend = {
           threadId,
+          newThread: sdkThreadIdRef.current === undefined,
           options,
           settled: false,
           promise: accepted,

@@ -188,8 +188,8 @@ test("ignores an acceptance frame that names another thread", async () => {
 });
 
 test("accepts a new-chat send whose thread id the frame supplies", async () => {
-  // A send started from the new-chat page does not know its thread yet; the
-  // acceptance names it and must still retire the draft.
+  // A send that has no thread id yet is named by the acceptance; it must still
+  // retire the draft.
   const { result } = await renderThreadStream();
   const onSent = rs.fn();
 
