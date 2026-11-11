@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the size of directory-scoped AGENTS.md instruction chains."""
+"""Check the size of directory-scoped AGENTS.md instruction chains and the root README."""
 
 from __future__ import annotations
 
@@ -10,14 +10,17 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
 
-ROOT_SOFT = 16 * 1024
-ROOT_HARD = 20 * 1024
-MODULE_SOFT = 28 * 1024
-MODULE_HARD = 32 * 1024
-LOCAL_SOFT = 40 * 1024
-LOCAL_HARD = 48 * 1024
-CHAIN_SOFT = 80 * 1024
-CHAIN_HARD = 100 * 1024
+# Agents read every AGENTS.md from the edited directory up to the root on each
+# task, so one file and the whole chain each have a budget. Codex stops loading
+# the chain at 32 KiB.
+AGENT_SOFT = 6 * 1024
+AGENT_HARD = 8 * 1024
+CHAIN_SOFT = 24 * 1024
+CHAIN_HARD = 32 * 1024
+# The root README is an index into docs/guide/; reference detail belongs in a guide.
+README_PATH = PurePosixPath("README.md")
+README_SOFT = 12 * 1024
+README_HARD = 16 * 1024
 
 
 class Finding(NamedTuple):
@@ -32,16 +35,12 @@ def normalized_utf8_size(text: str) -> int:
     return len(normalized.encode("utf-8"))
 
 
-def agent_budget(path: PurePosixPath) -> tuple[int, int]:
-    if path == PurePosixPath("AGENTS.md"):
-        return ROOT_SOFT, ROOT_HARD
-    if len(path.parts) == 2:
-        return MODULE_SOFT, MODULE_HARD
-    return LOCAL_SOFT, LOCAL_HARD
-
-
 def guidance_paths(paths: Iterable[PurePosixPath]) -> set[PurePosixPath]:
     return {path for path in paths if path.name == "AGENTS.md"}
+
+
+def budgeted_paths(paths: Iterable[PurePosixPath]) -> set[PurePosixPath]:
+    return {path for path in paths if path.name == "AGENTS.md" or path == README_PATH}
 
 
 def _is_descendant_or_same(path: PurePosixPath, parent: PurePosixPath) -> bool:
@@ -82,6 +81,7 @@ def _budget_finding(
     base_actual: int | None,
     relevant_change: bool,
     label: str,
+    remedy: str = "Delete what the code, the tests or git already state.",
 ) -> Finding | None:
     if actual > hard:
         if base_actual is None or actual > base_actual:
@@ -89,7 +89,7 @@ def _budget_finding(
                 "error",
                 code,
                 path,
-                f"{label} is {actual} bytes; hard limit is {hard}. Remove inherited or local instructions.",
+                f"{label} is {actual} bytes; hard limit is {hard}. {remedy}",
             )
         if relevant_change:
             return Finding(
@@ -126,14 +126,13 @@ def analyze(
 
     for path in sorted(agents):
         actual = normalized_utf8_size(head_files[path])
-        soft, hard = agent_budget(path)
         base_actual = normalized_utf8_size(base_files[path]) if path in base_files else None
         file_finding = _budget_finding(
             code="AG001",
             path=path,
             actual=actual,
-            soft=soft,
-            hard=hard,
+            soft=AGENT_SOFT,
+            hard=AGENT_HARD,
             base_actual=base_actual,
             relevant_change=_relevant_change([path], changed_paths),
             label="AGENTS.md",
@@ -161,6 +160,23 @@ def analyze(
         )
         if chain_finding:
             findings.append(chain_finding)
+
+    if README_PATH in head_files:
+        readme_finding = _budget_finding(
+            code="AG003",
+            path=README_PATH,
+            actual=normalized_utf8_size(head_files[README_PATH]),
+            soft=README_SOFT,
+            hard=README_HARD,
+            base_actual=(
+                normalized_utf8_size(base_files[README_PATH]) if README_PATH in base_files else None
+            ),
+            relevant_change=_relevant_change([README_PATH], changed_paths),
+            label="Root README.md",
+            remedy="Move reference detail to a topic guide under docs/guide/ and link it.",
+        )
+        if readme_finding:
+            findings.append(readme_finding)
 
     return sorted(findings, key=lambda finding: (finding.path.as_posix(), finding.code))
 
@@ -194,7 +210,7 @@ def _worktree_paths(repo_root: Path) -> set[PurePosixPath]:
 
 def _load_worktree_agents(repo_root: Path) -> dict[PurePosixPath, str]:
     files: dict[PurePosixPath, str] = {}
-    for path in guidance_paths(_worktree_paths(repo_root)):
+    for path in budgeted_paths(_worktree_paths(repo_root)):
         local_path = repo_root / Path(path.as_posix())
         if local_path.is_file():
             files[path] = local_path.read_text(encoding="utf-8")
@@ -204,7 +220,7 @@ def _load_worktree_agents(repo_root: Path) -> dict[PurePosixPath, str]:
 def _load_ref_agents(repo_root: Path, ref: str | None) -> dict[PurePosixPath, str]:
     if not ref or set(ref) == {"0"}:
         return {}
-    paths = guidance_paths(
+    paths = budgeted_paths(
         _parse_paths(_run_git(repo_root, ["ls-tree", "-r", "--name-only", "-z", ref]))
     )
     return {
@@ -226,7 +242,7 @@ def _changed_paths(
         revision_range = (
             f"{base_ref}...{head_ref}" if use_merge_base else f"{base_ref}..{head_ref}"
         )
-        return guidance_paths(
+        return budgeted_paths(
             _parse_paths(
                 _run_git(repo_root, ["diff", "--name-only", "-z", revision_range, "--"])
             )
@@ -235,7 +251,7 @@ def _changed_paths(
     untracked = _parse_paths(
         _run_git(repo_root, ["ls-files", "--others", "--exclude-standard", "-z"])
     )
-    return guidance_paths(tracked | untracked)
+    return budgeted_paths(tracked | untracked)
 
 
 def _print_finding(finding: Finding, github_annotations: bool) -> None:
@@ -298,7 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_finding(finding, args.github_annotations)
     errors = sum(finding.severity == "error" for finding in findings)
     warnings = sum(finding.severity == "warning" for finding in findings)
-    print(f"Agent guidance check: {len(head_files)} AGENTS.md, {errors} errors, {warnings} warnings.")
+    print(f"Agent guidance check: {len(guidance_paths(head_files))} AGENTS.md, {errors} errors, {warnings} warnings.")
     return 1 if errors or (warnings and args.strict_warnings) else 0
 
 
