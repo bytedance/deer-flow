@@ -84,8 +84,20 @@ def _is_conversation_message(message: Any) -> bool:
     if isinstance(message, HumanMessage):
         # Hidden clarification responses are user input; memory/todo reminders
         # and other framework-injected HumanMessages are not.
-        return is_genuine_user_message(message)
+        return is_genuine_user_message(message) or _is_steered_subagent_report(message)
     return isinstance(message, (AIMessage, ToolMessage)) and not message.additional_kwargs.get("hide_from_ui")
+
+
+def _is_steered_subagent_report(message: HumanMessage) -> bool:
+    """Return True for the hidden report a Steer delivers after freeing the turn.
+
+    ``RunInputControl.wait_tool`` ends the parent turn with a "result is
+    pending" ``task`` result and appends the real report later as this hidden
+    message. It is framework-delivered conversation data, not parent authority:
+    the next delegation must inherit it, because the visible ``task`` result
+    stays pending in the retained history.
+    """
+    return message.name == "subagent-result" and bool(message.content)
 
 
 @dataclass(frozen=True)

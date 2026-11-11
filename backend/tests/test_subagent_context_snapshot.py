@@ -346,6 +346,31 @@ def test_snapshot_keeps_only_valid_hidden_user_responses(response_kind):
     assert "<system>" not in snapshot.content_json
 
 
+def test_snapshot_keeps_a_steered_subagent_report_the_parent_already_has():
+    """A Steer frees the parent's turn before its subagent finishes.
+
+    ``RunInputControl.wait_tool`` returns a "result is pending" ``task``
+    placeholder and delivers the real report later as a hidden
+    ``subagent-result`` HumanMessage. The snapshot dropped that hidden message
+    and kept the placeholder, so the next delegation inherited a pending call
+    instead of the report the parent had already received.
+    """
+    call = {"name": "task", "args": {"prompt": "read the quotes"}, "id": "call-1"}
+    report = json.dumps({"source": "subagent", "task_call_id": "call-1", "result": "North Paper 38.75, West Paper 42.50"}, ensure_ascii=False)
+    messages = [
+        HumanMessage(content="Delegate to general-purpose", id="user-1"),
+        AIMessage(content="", tool_calls=[call], id="ai-1"),
+        ToolMessage(content="The subagent result is pending and will arrive in this Run. The user has sent an updated requirement.", tool_call_id="call-1", name="task", id="pending-1", additional_kwargs={"subagent_pending": True}),
+        HumanMessage(content=report, name="subagent-result", id="run-input-result-run-1-call-1", additional_kwargs={"hide_from_ui": True, "untrusted_input": True}),
+        HumanMessage(content="Ask the reviewer to compare the quotes", id="user-2"),
+    ]
+
+    snapshot = ParentContextSnapshot.from_state({"messages": messages})
+    text = message_content_to_text(snapshot.to_message().content)
+
+    assert "North Paper 38.75, West Paper 42.50" in text
+
+
 @pytest.mark.parametrize("injection", ["legacy-summary", "previous-snapshot"])
 def test_framework_only_history_has_no_snapshot(injection):
     message = HumanMessage(content="PRIVATE_SUMMARY", name="summary") if injection == "legacy-summary" else ParentContextSnapshot.from_state({"messages": [HumanMessage(content="PRIVATE_ANCESTOR_CONTEXT")]}).to_message()
