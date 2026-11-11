@@ -3487,11 +3487,12 @@ def test_task_tool_completed_flags_unknown_citation(monkeypatch):
     assert verdict["unknown"] == ["r9"]
 
 
-def test_task_tool_completed_flags_uncited_action_claims(monkeypatch):
-    message = _run_completed_task_tool(monkeypatch, result_text="I wrote the report.", tool_receipts=[])
+@pytest.mark.parametrize("text", ["I wrote the report.", "A report would be useful."])
+def test_task_tool_completed_does_not_guess_uncited_claims(monkeypatch, text):
+    message = _run_completed_task_tool(monkeypatch, result_text=text, tool_receipts=[])
 
     verdict = message.additional_kwargs["subagent_receipt_verdict"]
-    assert verdict["no_citation_claims"] is True
+    assert verdict["no_citation_claims"] is False
     assert verdict["citation_resolved"] is False
 
 

@@ -178,14 +178,10 @@ export function ThreadSidebarItem({
   }, [t.chats.pinChatFailed, thread, updatePinnedThread]);
 
   const handleShare = useCallback(async () => {
-    // Always use Vercel URL for sharing so others can access
-    const VERCEL_URL = "https://deer-flow-v2.vercel.app";
-    const isLocalhost =
-      window.location.hostname === "localhost" ||
-      window.location.hostname === "127.0.0.1";
-    // On localhost: use Vercel URL; On production: use current origin
-    const baseUrl = isLocalhost ? VERCEL_URL : window.location.origin;
-    const shareUrl = `${baseUrl}${pathOfThread(thread)}`;
+    // Link to this deployment, the only place the thread exists. Never
+    // rewrite the origin to another host: the thread id would leave the
+    // deployment and the link would not open the thread.
+    const shareUrl = `${window.location.origin}${pathOfThread(thread)}`;
     try {
       const didCopy = await writeTextToClipboard(shareUrl);
       if (!didCopy) {

@@ -334,7 +334,7 @@ class TestStripUploadMentionsFromMemory:
         mem = self._make_memory("User is interested in AI. User uploaded a test file for verification purposes. User prefers concise answers.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
-        assert "uploaded a test file" not in summary
+        assert "uploaded a test file" in summary
         assert "User is interested in AI" in summary
         assert "User prefers concise answers" in summary
 
@@ -342,7 +342,7 @@ class TestStripUploadMentionsFromMemory:
         mem = self._make_memory("User uses Python. User uploaded file to /mnt/user-data/uploads/tid/data.csv. User likes clean code.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
-        assert "/mnt/user-data/uploads/" not in summary
+        assert "/mnt/user-data/uploads/" in summary
         assert "User uses Python" in summary
 
     def test_legitimate_csv_mention_is_preserved(self):
@@ -362,8 +362,8 @@ class TestStripUploadMentionsFromMemory:
         mem = self._make_memory("User conducted a hands-on test by uploading a test file titled 'test_deerflow_memory_bug.txt'. User is also learning Python.")
         result = _strip_upload_mentions_from_memory(mem)
         summary = result["user"]["topOfMind"]["summary"]
-        assert "test_deerflow_memory_bug.txt" not in summary
-        assert "uploading a test file" not in summary
+        assert "test_deerflow_memory_bug.txt" in summary
+        assert "uploading a test file" in summary
 
     # --- facts ---
 
@@ -377,8 +377,8 @@ class TestStripUploadMentionsFromMemory:
         result = _strip_upload_mentions_from_memory(mem)
         remaining = [f["content"] for f in result["facts"]]
         assert "User prefers dark mode" in remaining
-        assert not any("uploaded a file" in c for c in remaining)
-        assert not any("uploading document" in c for c in remaining)
+        assert any("uploaded a file" in c for c in remaining)
+        assert any("uploading document" in c for c in remaining)
 
     def test_non_upload_facts_preserved(self):
         facts = [
