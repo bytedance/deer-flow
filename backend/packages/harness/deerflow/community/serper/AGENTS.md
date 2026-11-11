@@ -50,3 +50,11 @@ Image result URLs use `community.url_safety.safe_public_result_url` (imported
 as `_safe_public_url`); do not add a provider-local copy. It checks strings
 without DNS and shares the non-public address predicate with fetch validation.
 Tests: `tests/test_image_result_url_safety.py` plus the existing provider suite.
+
+Completion diagnostics use call-local `_Completion` passed to `_serper_post`;
+the outer `_completion` scope emits once at DEBUG, including early exits.
+Count immediately before `client.post`; measure actual sleep with monotonic
+samples, including interrupted waits. Keep fields bounded to tool, attempts,
+elapsed/backoff seconds, outcome and fixed stop reasons; never retain payloads
+or exceptions. Ordinary logging failures must preserve results and exceptions.
+Tests: `tests/test_serper_completion.py` (offline HTTPX, concurrent calls).
