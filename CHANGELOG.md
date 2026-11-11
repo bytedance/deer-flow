@@ -47,6 +47,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **frontend:** **Share** in a sidebar chat's menu now copies a link to the
+  deployment you are using. On `localhost` and `127.0.0.1`, the default
+  `make dev` and Docker addresses, it copied a link to the hosted demo
+  (`deer-flow-v2.vercel.app`) instead. That link never opened the
+  conversation, and opening it sent the thread id to an outside host.
+  ([#8126])
+
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
@@ -16287,3 +16294,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
