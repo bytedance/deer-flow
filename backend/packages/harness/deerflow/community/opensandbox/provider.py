@@ -138,12 +138,18 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             raise ValueError("sandbox.sandbox_timeout must be non-negative") from exc
         if not math.isfinite(sandbox_timeout) or sandbox_timeout < 0:
             raise ValueError("sandbox.sandbox_timeout must be non-negative")
+        secure_access = option("secure_access", False)
+        if secure_access is None:
+            secure_access = False
+        if not isinstance(secure_access, bool):
+            raise ValueError("sandbox.secure_access must be true or false")
         return {
             "api_key": api_key,
             "domain": domain,
             "protocol": protocol,
             "request_timeout": self._positive_float("request_timeout", option("request_timeout"), DEFAULT_REQUEST_TIMEOUT),
             "use_server_proxy": bool(option("use_server_proxy", False)),
+            "secure_access": secure_access,
             "image": option("image") or DEFAULT_IMAGE,
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
@@ -310,6 +316,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             env=self._config["environment"] or None,
             metadata=metadata,
             connection_config=connection_config,
+            secure_access=self._config["secure_access"],
         )
         try:
             bootstrap = remote.commands.run(

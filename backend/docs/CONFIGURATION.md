@@ -1646,6 +1646,7 @@ sandbox:
    request_timeout: 30                # management request timeout seconds
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
+   secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
