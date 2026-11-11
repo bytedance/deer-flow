@@ -3,6 +3,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
 
@@ -82,7 +83,7 @@ def _build_client(cfg: dict | None) -> Crawl4AiClient:
     timeout_s: float = float(DEFAULT_TIMEOUT_S)
     if cfg is not None:
         base_url = cfg.get("base_url", base_url)
-        token = cfg.get("token", token)
+        token = resolve_api_key(cfg.get("token")) or ""
         timeout_s = _coerce_timeout(cfg.get("timeout"), DEFAULT_TIMEOUT_S)
     return Crawl4AiClient(base_url=base_url, token=token, timeout_s=timeout_s)
 

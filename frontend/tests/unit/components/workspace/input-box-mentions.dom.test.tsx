@@ -333,7 +333,7 @@ describe("mention selection focus", () => {
       '[contenteditable="true"]',
     )!;
     act(() => focusReferenceAt(editor, 2));
-    const picker = screen.getByTestId("add-attachments-button");
+    const picker = screen.getByTestId("mention-button");
     act(() => picker.focus());
     holdAnimationFrames();
     fireEvent.click(picker);
@@ -630,11 +630,29 @@ describe("unified composer mentions", () => {
     enterMention(container, "@");
     expect(screen.queryByRole("option", { name: "Writer brief" })).toBeNull();
   });
-  it("the attachment button opens the same picker", () => {
-    renderComposer();
+  it("the attachment button opens the file input directly", () => {
+    const { container } = renderComposer();
+    const fileInput =
+      container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const click = rs.spyOn(fileInput, "click");
     fireEvent.click(screen.getByTestId("add-attachments-button"));
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("mention-picker")).toBeNull();
+  });
+  it("the mention button keeps the reference picker and its upload action", () => {
+    const { container } = renderComposer();
+    const fileInput =
+      container.querySelector<HTMLInputElement>('input[type="file"]')!;
+    const click = rs.spyOn(fileInput, "click");
+    fireEvent.click(screen.getByTestId("mention-button"));
+    expect(click).not.toHaveBeenCalled();
     expect(screen.getByTestId("mention-picker")).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "research Research a topic" }),
+    ).toBeTruthy();
     expect(screen.getByRole("option", { name: "Upload a file" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("option", { name: "Upload a file" }));
+    expect(click).toHaveBeenCalledTimes(1);
   });
   it("does not select upload automatically for an unknown query", () => {
     const { container } = renderComposer();

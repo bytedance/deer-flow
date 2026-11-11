@@ -7,6 +7,7 @@ import {
   MessageCircleIcon,
   MessageSquarePlusIcon,
   RefreshCcwIcon,
+  ShieldCheckIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -50,6 +51,8 @@ import {
   deriveHumanInputThreadState,
   extractHumanInputRequest,
   shouldClearPendingHumanInputOnThreadError,
+  type HitlApprovalRequest,
+  type HitlApprovalResponse,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
@@ -113,6 +116,7 @@ import { Tooltip } from "../tooltip";
 import { ConversationOutline } from "./conversation-outline";
 import {
   HumanInputCard,
+  ToolApprovalCard,
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
@@ -334,6 +338,12 @@ export function MessageList({
   onRegenerateMessage,
   onEditAndRegenerateMessage,
   onSubmitHumanInput,
+  approvalRequests = [],
+  approvalMetadataLoading = false,
+  approvalMetadataError = false,
+  onReloadApprovalMetadata,
+  waitingForInputRunIds = new Set<string>(),
+  onSubmitApproval,
   onBranchTurn,
   canRegenerate = false,
   activeRunId,
@@ -369,6 +379,15 @@ export function MessageList({
   onSubmitHumanInput?: (
     request: HumanInputRequest,
     response: HumanInputResponse,
+  ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
+  approvalRequests?: HitlApprovalRequest[];
+  approvalMetadataLoading?: boolean;
+  approvalMetadataError?: boolean;
+  onReloadApprovalMetadata?: () => unknown;
+  waitingForInputRunIds?: ReadonlySet<string>;
+  onSubmitApproval?: (
+    request: HitlApprovalRequest,
+    responses: HitlApprovalResponse[],
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
   onBranchTurn?: (
     messageId: string,
@@ -1450,11 +1469,29 @@ export function MessageList({
                         ),
                         group.id !== undefined &&
                           branchableAssistantGroupIds.has(group.id),
-                        group.id === latestAssistantGroupId,
+                        !group.messages.some(
+                          (message) =>
+                            message.type === "ai" &&
+                            "run_id" in message &&
+                            typeof message.run_id === "string" &&
+                            waitingForInputRunIds.has(message.run_id),
+                        ) && group.id === latestAssistantGroupId,
                         sidecarSurface
                           ? undefined
                           : skillUsageByGroupIndex.get(groupIndex),
                       )}
+                    {group.type === "assistant" &&
+                    approvalRequests.length > 0 &&
+                    groupIndex === lastGroupIndex ? (
+                      <p
+                        className="text-muted-foreground flex items-center gap-1.5 text-sm"
+                        data-testid="awaiting-approval"
+                        role="status"
+                      >
+                        <ShieldCheckIcon className="size-4" />
+                        {t.humanInput.approval.waiting}
+                      </p>
+                    ) : null}
                   </div>,
                   inlineDurationRunIds,
                 );
@@ -1707,6 +1744,10 @@ export function MessageList({
                       )}
                       showTokenDebugSummaries={showTokenDebugSummaries}
                       toolArtifacts={thread.values?.tool_artifacts}
+                      awaitingApproval={
+                        approvalRequests.length > 0 &&
+                        groupIndex === lastGroupIndex
+                      }
                     />
                   </MessageArtifactPathsContext.Provider>
                   {renderTokenUsage({
@@ -1719,6 +1760,47 @@ export function MessageList({
               );
             }}
           />
+          {approvalRequests.map((request) => (
+            <ToolApprovalCard
+              disabled={thread.isLoading}
+              key={request.request_id}
+              request={request}
+              onSubmit={onSubmitApproval}
+            />
+          ))}
+          {approvalMetadataError && approvalRequests.length === 0 ? (
+            <div
+              className="border-destructive/30 bg-destructive/5 space-y-3 rounded-lg border p-4"
+              data-testid="approval-metadata-error"
+            >
+              <p className="text-destructive text-sm" role="alert">
+                {t.humanInput.approval.loadFailed}
+              </p>
+              {onReloadApprovalMetadata ? (
+                <Button
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                  onClick={() => void onReloadApprovalMetadata()}
+                >
+                  <RefreshCcwIcon className="size-4" />
+                  {t.humanInput.approval.reload}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          {approvalMetadataLoading &&
+          !approvalMetadataError &&
+          approvalRequests.length === 0 ? (
+            <p
+              className="text-muted-foreground flex items-center gap-1.5 text-sm"
+              data-testid="approval-metadata-loading"
+              role="status"
+            >
+              <ShieldCheckIcon className="size-4" />
+              {t.humanInput.approval.loading}
+            </p>
+          ) : null}
           {renderTaskEventLines(placedTaskEvents?.tail)}
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">

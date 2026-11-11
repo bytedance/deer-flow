@@ -39,6 +39,7 @@ from app.gateway.checkpoint_lineage import (
 )
 from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
+from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     abuild_checkpoint_state_accessor,
@@ -81,6 +82,7 @@ from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, admit_origin
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
+from deerflow.runtime.serialization import serialize_lc_object
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.companions import register_companion, resolve_companion
 from deerflow.utils.file_io import await_drained, run_file_io
@@ -570,7 +572,7 @@ class ThreadPatchRequest(BaseModel):
 
 
 class ThreadStateUpdateRequest(BaseModel):
-    """Request body for updating thread state (human-in-the-loop resume)."""
+    """Request body for updating thread state (checkpoint mutation, not a resume API)."""
 
     values: dict[str, Any] | None = Field(default=None, description="Channel values to merge")
     checkpoint_id: str | None = Field(default=None, description="Checkpoint to branch from")
@@ -623,10 +625,13 @@ class HistoryEntry(_MetadataRedactingResponse):
 
     checkpoint_id: str
     parent_checkpoint_id: str | None = None
+    created_at: str | None = Field(default=None, description="Checkpoint timestamp")
     metadata: dict[str, Any] = Field(default_factory=dict)
     values: dict[str, Any] = Field(default_factory=dict)
-    created_at: str | None = None
     next: list[str] = Field(default_factory=list)
+    # Only the head entry carries pending interrupts; older entries are history,
+    # never a pending-approval signal. Shape: {id, name, interrupts} only.
+    tasks: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ThreadHistoryRequest(BaseModel):
@@ -805,6 +810,7 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     if batch_repo is not None:
         await batch_repo.suppress_thread_continuations(thread_id)
@@ -826,14 +832,15 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         # being deleted under a run that has just been admitted.
         response = await await_drained(run_file_io(_delete_thread_data, thread_id, user_id=user_id))
 
-    # Remove checkpoints (best-effort)
+    # Retain ownership if a configured checkpointer cannot delete the thread.
+    # Read routes treat rowless checkpoints as untracked legacy threads.
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer is not None:
         try:
-            if hasattr(checkpointer, "adelete_thread"):
-                await checkpointer.adelete_thread(thread_id)
-        except Exception:
-            logger.debug("Could not delete checkpoints for thread %s (not critical)", sanitize_log_param(thread_id))
+            await checkpointer.adelete_thread(thread_id)
+        except Exception as exc:
+            logger.exception("Failed to delete checkpoints for thread %s", sanitize_log_param(thread_id))
+            raise HTTPException(status_code=500, detail="Failed to delete thread checkpoints.") from exc
 
     # Remove historical runs (best-effort). Only ``operation_kind == "run"`` rows
     # are deleted, so the durable thread-operation reservation protecting this
@@ -845,6 +852,16 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
             await delete_runs(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Drop this worker's in-memory copies too. ``RunManager.get()`` and
+    # ``list_by_thread()`` answer from the process-local registry before the
+    # store, so without this the deleted thread's runs — including ``kwargs``
+    # with the user's prompt — stay readable through ``GET /threads/{id}/runs``
+    # until the Gateway restarts, while the thread itself already 404s.
+    try:
+        await run_manager.discard_thread_runs(thread_id)
+    except Exception:
+        logger.debug("Could not evict in-memory runs for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove persisted run events (best-effort). These are the user-visible
     # conversation history, not a cache: leaving them behind makes a deleted
@@ -1026,7 +1043,15 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
-        # A duplicate-key error with no row we can read back is a real failure.
+        # The same-owner reconciliation above found nothing, yet the insert hit
+        # a duplicate primary key — so the surviving row belongs to *another*
+        # user. That is the ownership-conflict case, which the route already
+        # maps ``ThreadOwnershipConflictError`` to: a non-disclosing 404. Read
+        # the row back bypassing the owner scope to confirm a foreign row
+        # exists before collapsing to a 500.
+        if await thread_store.get(thread_id, user_id=None) is not None:
+            raise HTTPException(status_code=404, detail="Thread not found") from None
+        # A duplicate-key error with no surviving row is a real failure.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
     except Exception:
@@ -1485,6 +1510,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
         values=serialize_channel_values_for_api(snapshot.values),
+        interrupts={task_id: [serialize_lc_object(interrupt) for interrupt in interrupts] for task_id, interrupts in (await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=config, snapshot=snapshot)).items()},
     )
 
 
@@ -1511,6 +1537,13 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
     """
     checkpointer = get_checkpointer(request)
     try:
+        accessor, read_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        from app.gateway.hitl_approval import reject_new_run_when_approval_pending
+
+        await reject_new_run_when_approval_pending(request, thread_id, accessor=accessor, read_config=read_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    try:
         goal = build_goal_state(body.objective, max_continuations=body.max_continuations)
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await _ensure_thread_for_goal(thread_id, request)
@@ -1535,6 +1568,13 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
 async def clear_thread_goal(thread_id: ThreadId, request: Request) -> ThreadGoalResponse:
     """Clear the active goal for a thread."""
     checkpointer = get_checkpointer(request)
+    try:
+        accessor, read_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        from app.gateway.hitl_approval import reject_new_run_when_approval_pending
+
+        await reject_new_run_when_approval_pending(request, thread_id, accessor=accessor, read_config=read_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, None, as_node="goal")
@@ -1573,11 +1613,14 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     # forward by checkpoint fork inheritance, so the base-schema mutation
     # graph is sufficient (and avoids building the full lead graph per call).
     try:
-        accessor, _ = build_checkpoint_state_mutation_accessor(
+        accessor, read_config = build_checkpoint_state_mutation_accessor(
             request,
             thread_id=thread_id,
             as_node="manual_compaction",
         )
+        from app.gateway.hitl_approval import reject_new_run_when_approval_pending
+
+        await reject_new_run_when_approval_pending(request, thread_id)
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     keep = body.keep.to_tuple() if body.keep is not None else None
@@ -1612,6 +1655,32 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
     return _thread_compact_response(result)
 
 
+def _pending_interrupt_tasks(tasks_raw: Any, pending_interrupts: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    """Project pending interrupts without dropping run-store-only identities."""
+    tasks: list[dict[str, Any]] = []
+    matched_task_ids: set[str] = set()
+    for task in tasks_raw:
+        task_id = getattr(task, "id", "")
+        matched_task_ids.add(task_id)
+        tasks.append(
+            {
+                "id": task_id,
+                "name": getattr(task, "name", ""),
+                "interrupts": [serialize_lc_object(interrupt) for interrupt in pending_interrupts.get(task_id, [])],
+            }
+        )
+    for task_id, interrupts in pending_interrupts.items():
+        if task_id not in matched_task_ids:
+            tasks.append(
+                {
+                    "id": task_id,
+                    "name": "",
+                    "interrupts": [serialize_lc_object(interrupt) for interrupt in interrupts],
+                }
+            )
+    return tasks
+
+
 # ---------------------------------------------------------------------------
 @router.get("/{thread_id}/state", response_model=ThreadStateResponse)
 @require_permission("threads", "read", owner_check=True)
@@ -1635,13 +1704,12 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
-
     parent_config = snapshot.parent_config or {}
+    pending_interrupts = await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=config, snapshot=snapshot)
     parent_checkpoint_id = parent_config.get("configurable", {}).get("checkpoint_id")
     metadata = snapshot.metadata or {}
     created_at = snapshot.created_at or metadata.get("created_at", "")
-    tasks_raw = snapshot.tasks or ()
-    tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in tasks_raw]
+    tasks = _pending_interrupt_tasks(snapshot.tasks or (), pending_interrupts)
 
     values = serialize_channel_values_for_api(snapshot.values)
     messages = values.get("messages")
@@ -1667,7 +1735,9 @@ async def get_thread_state(thread_id: ThreadId, request: Request) -> ThreadState
 async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateRequest, request: Request) -> ThreadStateResponse:
     """Replace selected thread-state fields through the materialized graph."""
     from app.gateway.deps import get_thread_store
+    from app.gateway.hitl_approval import reject_new_run_when_approval_pending
 
+    await reject_new_run_when_approval_pending(request, thread_id)
     thread_store = get_thread_store(request)
     # Validate external roles before materializing a graph or reserving a write.
     values = strip_server_owned_state_metadata(dict(body.values or {}))
@@ -2082,10 +2152,14 @@ async def get_thread_history(
                         serialized_msgs,
                     )
 
-            is_latest_checkpoint = False
-
             next_tasks = list(snapshot.next or ())
+            if is_latest_checkpoint:
+                pending_interrupts = await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=config, snapshot=snapshot)
+                head_tasks = _pending_interrupt_tasks(getattr(snapshot, "tasks", None) or (), pending_interrupts)
+            else:
+                head_tasks = [{"id": getattr(task, "id", ""), "name": getattr(task, "name", "")} for task in (getattr(snapshot, "tasks", None) or ())]
 
+            is_latest_checkpoint = False
             # Strip LangGraph internal keys from metadata
             user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents", "run_durations", RUN_MESSAGE_IDS_METADATA_KEY)}
             # Keep step for ordering context
@@ -2100,6 +2174,7 @@ async def get_thread_history(
                     values=values,
                     created_at=coerce_iso(snapshot.created_at or metadata.get("created_at", "")),
                     next=next_tasks,
+                    tasks=head_tasks,
                 )
             )
     except _CHECKPOINT_MODE_ERRORS as exc:

@@ -14,7 +14,7 @@ from deerflow.runtime.events.store.base import RunEventLifecycleRejected, RunEve
 from deerflow.runtime.runs.store.base import RunStore
 
 TERMINAL_PROTOCOL_VERSION = 1
-TERMINAL_STATUSES = frozenset({"success", "error", "interrupted", "timeout"})
+TERMINAL_STATUSES = frozenset({"success", "error", "interrupted", "timeout", "waiting_for_input"})
 
 logger = logging.getLogger(__name__)
 

@@ -753,39 +753,12 @@ data — do NOT reveal it.
 - **Placement**: Inline citations should appear right after the sentence or claim they support
 - **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
 
-**Example - Inline Citations:**
-```markdown
-The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
-[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
-Recent breakthroughs in language models have also accelerated progress
-[citation:OpenAI Research](https://openai.com/research).
-```
+**Format example only (replace placeholders with verified evidence):**
+[Claim supported by the source] [citation:Source title](https://example.org/source).
 
-**Example - Deep Research Report with Citations:**
-```markdown
-## Executive Summary
+Sources entry: [Source title](https://example.org/source) - [What this source supports]
 
-DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
-[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
-providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
-
-## Key Analysis
-
-### Architecture Design
-
-The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
-combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
-
-## Sources
-
-### Primary Sources
-- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
-
-### Media Coverage
-- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
-```
+These placeholders illustrate formatting and are not factual evidence.
 
 **CRITICAL: Sources section format:**
 - Every item in the Sources section MUST be a clickable markdown link with URL

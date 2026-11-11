@@ -1,46 +1,31 @@
-# RAGFlow citation snapshots
+# RAGFlow knowledge provider (`deerflow/community/ragflow/`)
 
-`knowledge_search_tool` returns native `content_and_artifact`: model-visible
-`[citation:N](#knowledge-<opaque-id>)` links resolve to bounded
-`artifact.knowledge_sources` version-one evidence snapshots. Provider locators
-stay in the artifact; source names and text are credential-redacted in both
-representations. IDs are unique per retrieval, never per-message ordinal IDs.
-Only actual emitted entries get source records. Retain the exact excerpt sent
-to the model and mark truncation; do not fetch a fresh chunk and present it as
-historical evidence. Direct `knowledge_search()` callers retain its string API.
-`sources.py` forwards only captured sources cited by ordinary subagent results,
-with count/text budgets. The source dialog uses stored thread messages and
-introduces no unauthenticated document proxy. Durable batch exports retain
-schema-projected snapshots via `durable_source_artifact`; standalone Markdown
-does not include native source artifacts. Preserve entire excerpts and only
-select citations in the stored report. Bound the serialized JSON by the batch
-result cap, retain forwarding limits, and count omissions without refetching.
-Ordinary task artifacts carry omitted opaque source IDs, limited to complete
-citations in that task's report. Filter them again against each outer report,
-deduplicate, and let recaptured evidence supersede an omission. Never trust an
-incoming count or count unknown prose links. Durable exports expose only the
-final count; legacy artifacts without omission IDs cannot recover lost IDs.
+```bash
+cd backend && python -m pytest tests -q -k "ragflow"
+```
 
-Output budgeting retains complete evidence entries and their source records
-together, including delegated results and model-request history. Never shorten
-an excerpt under an existing ID. Drop entries that cannot fit, with an omission
-notice, while preserving unrelated artifact fields. This honors per-tool and
-fallback limits without exempting citation-bearing results from the budget.
-Synopsis cleanup preserves complete shared citation links (including escaped
-labels and sanitized anchors) while removing orphaned/truncated destinations,
-both before and after the synopsis head/tail split.
+## Citation snapshots
+
+- **The model sees citation links, and the tool artifact holds the evidence
+  snapshots they resolve to.** Provider locators stay in the artifact. Source
+  names and text are credential-redacted in both. IDs are unique per retrieval.
+- **A snapshot keeps the exact excerpt that was sent to the model** and marks
+  truncation. Do not fetch a fresh chunk and present it as historical evidence.
+- **Budgeting drops whole entries, with an omission notice.** An excerpt is
+  never shortened under an existing ID, and its source record leaves with it.
+  Results that carry citations get no exemption from the budget.
+- **Omission counts are computed, never trusted.** Filter omitted IDs against
+  each outer report, deduplicate them, and let recaptured evidence replace an
+  omission. Unknown prose links are not counted.
+- **The source dialog reads stored thread messages.** It adds no
+  unauthenticated document proxy.
+- **The direct `knowledge_search()` function keeps its string API.**
 
 ## Document validation
 
-`RAGFlowClient.list_documents` validates dataset path segments with
-`[A-Za-z0-9_-]+` before HTTP requests. Keep this provider-specific boundary
-shared by catalog browsing and selected-document validation; do not apply
-RAGFlow ID syntax to the generic knowledge contract.
-
-`tools.py` validates each dataset's selected documents in batches of at most
-100 IDs. All batches share the `_bounded_gather` concurrency limit of four.
-Merge validated IDs in input order to retain the complete retrieval scope;
-any batch error, missing document, or non-searchable document rejects the
-whole scope. Keep the application-level 1000-document selection limit separate
-from the provider's per-request limit. Regression coverage lives in
-`backend/tests/test_ragflow_tools.py` under `test_large_document_scope_*`.
+- **RAGFlow ID syntax is checked in the client before any HTTP request.** It is
+  a provider rule, so it is not applied to the generic knowledge contract.
+- **Selected documents are validated in batches**, because the provider limits
+  IDs per request. That limit is separate from the application's selection
+  limit. Any batch error, missing document or non-searchable document rejects the
+  whole scope.

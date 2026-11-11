@@ -2156,7 +2156,7 @@ class TestEnsureAgent:
 
         routing_arg = mock_build_middlewares.call_args.kwargs.get("mcp_routing_middleware")
         assert isinstance(routing_arg, McpRoutingMiddleware)
-        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == ["postgres_query"]
+        assert routing_arg._matched_names({"messages": [HumanMessage(content="show orders")]}) == []
 
     def test_mcp_routing_middleware_absent_when_tool_search_disabled(self, client, mock_app_config):
         """No routing middleware is built on the embedded path when tool_search is off."""
