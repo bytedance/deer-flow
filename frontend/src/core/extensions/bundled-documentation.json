@@ -1,0 +1,625 @@
+{
+  "deerflow-extension-agent-teams": {
+    "schema_version": 1,
+    "id": "community.agent-teams",
+    "locales": {
+      "zh-CN": {
+        "title": "Agent 团队",
+        "description": "让多个 Agent 围绕同一个目标协作，共享进展，交接任务。",
+        "usage": [
+          {
+            "title": "组建你的团队",
+            "description": "选择 2–8 个已有的自定义 Agent，给团队命名，并设定共同目标。"
+          },
+          {
+            "title": "用 @ 分配任务",
+            "description": "在团队对话中输入 @ 并选择成员，再发送任务；成员会在各自的会话中处理。"
+          },
+          {
+            "title": "查看进展与成果",
+            "description": "在活动记录中查看成员回复和交接；展开任务可打开成员会话、处理提问或下载成果。"
+          }
+        ],
+        "requirements": [
+          "至少准备 2 个自定义 Agent；如限制了工具分组，需要允许 extensions。"
+        ]
+      },
+      "en-US": {
+        "title": "Agent teams",
+        "description": "Bring Agents together around a shared goal, share progress and hand off tasks.",
+        "usage": [
+          {
+            "title": "Build your team",
+            "description": "Choose 2–8 existing Custom Agents, name your team and set a shared goal."
+          },
+          {
+            "title": "Delegate with @mentions",
+            "description": "Type @ and select members in the team composer, then send a task to their own conversations."
+          },
+          {
+            "title": "Review progress and results",
+            "description": "Read replies and handoffs in the activity feed. Expand a task to open its conversation, answer questions or download results."
+          }
+        ],
+        "requirements": [
+          "Prepare at least two Custom Agents; allow the extensions tool group if using a tool-group allowlist."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-agent-teams#readme"
+  },
+  "deerflow-extension-bookmarks": {
+    "schema_version": 1,
+    "id": "community.bookmarks",
+    "locales": {
+      "zh-CN": {
+        "title": "会话书签",
+        "description": "收藏有用的回答，在独立页面查找与整理自己的书签。",
+        "usage": [
+          {
+            "title": "收藏有用的回答",
+            "description": "在已有回答的会话菜单中，选择“书签 → 保存最后一条回答”。"
+          },
+          {
+            "title": "查找与整理",
+            "description": "打开“我的书签”，按文字搜索、修改名称，或回到原会话查看上下文。"
+          }
+        ]
+      },
+      "en-US": {
+        "title": "Bookmarks",
+        "description": "Save useful answers and find and organize your own bookmarks on a dedicated page.",
+        "usage": [
+          {
+            "title": "Save a useful answer",
+            "description": "In a conversation with an answer, choose Bookmarks → Save last answer from its menu."
+          },
+          {
+            "title": "Find and organize",
+            "description": "Open My bookmarks to search saved text, rename entries or return to their source conversations."
+          }
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-bookmarks#readme"
+  },
+  "deerflow-extension-example": {
+    "schema_version": 1,
+    "id": "catalog/example",
+    "locales": {
+      "zh-CN": {
+        "title": "扩展开发示例",
+        "description": "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+        "usage": [
+          {
+            "title": "安装到开发环境",
+            "description": "参考包内文档安装示例，配置并重启 Gateway。它用于演示扩展开发接口。"
+          },
+          {
+            "title": "运行任务并检查统计",
+            "description": "执行包含工具调用的任务，再通过示例统计 API 查看调用次数、结果类型与耗时。"
+          }
+        ]
+      },
+      "en-US": {
+        "title": "Extension development example",
+        "description": "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+        "usage": [
+          {
+            "title": "Install in a development environment",
+            "description": "Follow the package guide to install, configure and restart Gateway. This package demonstrates extension development contracts."
+          },
+          {
+            "title": "Run a task and inspect statistics",
+            "description": "Run a task that uses tools, then inspect call counts, outcome types and durations through the example statistics API."
+          }
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example#readme"
+  },
+  "deerflow-extension-jev-classify": {
+    "schema_version": 1,
+    "id": "community.jev-classify",
+    "locales": {
+      "zh-CN": {
+        "title": "文本分类",
+        "description": "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
+        "usage": [
+          {
+            "title": "提供文本和分类标准",
+            "description": "在对话中提供待分类的文本列表，说明各类别的含义和边界；也可上传表格并指出文本列。"
+          },
+          {
+            "title": "让 Agent 执行分类",
+            "description": "要求使用文本分类工具，检查返回标签；如需表格，让 Agent 将标签写回输出文件。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置 Jev 或兼容聊天接口的分类服务；待分类文本会发送给该服务。"
+        ]
+      },
+      "en-US": {
+        "title": "Text classification",
+        "description": "Label a list of texts with supplied categories using the deployment-configured classification service.",
+        "usage": [
+          {
+            "title": "Provide texts and categories",
+            "description": "Give the Agent a list of texts and explain the categories, or upload a table and identify its text column."
+          },
+          {
+            "title": "Ask the Agent to classify",
+            "description": "Ask it to use the text classification tool and inspect the labels. For a table, ask it to write labels into an output file."
+          }
+        ],
+        "requirements": [
+          "An administrator must configure Jev or a compatible chat endpoint. Texts to classify are sent to that service."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-classify#readme"
+  },
+  "deerflow-extension-jev-context": {
+    "schema_version": 1,
+    "id": "community.jev-context",
+    "locales": {
+      "zh-CN": {
+        "title": "上下文裁剪",
+        "description": "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
+        "usage": [
+          {
+            "title": "正常进行对话",
+            "description": "启用后自动检查长对话中的旧工具输出，不需要打开独立页面或输入额外命令。"
+          },
+          {
+            "title": "达到阈值时自动处理",
+            "description": "满足配置的上下文阈值和调用间隔后，裁剪已过时的只读工具结果，保留近期消息和受保护内容。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置 TypeSafe Jev 服务凭据及触发阈值；处理时会向该服务发送限定范围的对话内容。"
+        ]
+      },
+      "en-US": {
+        "title": "Context pruning",
+        "description": "Shorten older read-only tool results while preserving recent messages and native summaries.",
+        "usage": [
+          {
+            "title": "Continue your conversation",
+            "description": "Once enabled, it automatically checks old tool output in long conversations. No separate page or command is needed."
+          },
+          {
+            "title": "Prune when the threshold is reached",
+            "description": "After the configured token threshold and call interval, obsolete read-only results are shortened while recent and protected content is retained."
+          }
+        ],
+        "requirements": [
+          "An administrator must configure TypeSafe Jev credentials and thresholds. Processing sends bounded conversation content to that service."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-context#readme"
+  },
+  "deerflow-extension-jev-screening": {
+    "schema_version": 1,
+    "id": "catalog/screening",
+    "locales": {
+      "zh-CN": {
+        "title": "内容风险提示",
+        "description": "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
+        "usage": [
+          {
+            "title": "按平常方式搜索与读取",
+            "description": "启用后，在 Agent 获取网页、搜索或 MCP 工具结果时自动检查部分内容。"
+          },
+          {
+            "title": "结合提示判断内容",
+            "description": "检测到可疑指令时，会在工具结果中增加风险提示。它提供提醒，不阻断工具，也不保证识别所有风险。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置 TypeSafe Jev 服务；待检查的内容片段会发送给该服务。"
+        ]
+      },
+      "en-US": {
+        "title": "Content risk warnings",
+        "description": "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
+        "usage": [
+          {
+            "title": "Search and read as usual",
+            "description": "Once enabled, the middleware checks bounded excerpts of fetched pages, search results and MCP tool output."
+          },
+          {
+            "title": "Review advisory warnings",
+            "description": "Suspicious instructions add a warning to the tool result. Screening is advisory; it does not block tools or guarantee detection."
+          }
+        ],
+        "requirements": [
+          "An administrator must configure TypeSafe Jev. Content excerpts are sent to that service for screening."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-screening#readme"
+  },
+  "deerflow-extension-knowledge": {
+    "schema_version": 1,
+    "id": "catalog/knowledge",
+    "locales": {
+      "zh-CN": {
+        "title": "知识范围选择示例",
+        "description": "用示例文档演示知识库和文件范围选择、检索及来源引用。",
+        "usage": [
+          {
+            "title": "选择示例知识范围",
+            "description": "在对话的知识范围选择器中选择 Synthetic guides，可进一步选择 Synthetic knowledge note。"
+          },
+          {
+            "title": "提问并查看引用",
+            "description": "让 Agent 搜索 Cedar，检查回答中的来源引用。此插件使用公开的虚构演示文档。"
+          }
+        ],
+        "requirements": [
+          "管理员已启用知识检索工具和范围选择，并将工具连接到此示例 Provider。"
+        ]
+      },
+      "en-US": {
+        "title": "Knowledge scope example",
+        "description": "Search sample documents within selected knowledge bases or files and inspect source citations.",
+        "usage": [
+          {
+            "title": "Select the example scope",
+            "description": "Choose Synthetic guides in the chat scope selector, optionally narrowing it to Synthetic knowledge note."
+          },
+          {
+            "title": "Ask and inspect citations",
+            "description": "Ask the Agent to search for Cedar and inspect its source citations. This example uses a public synthetic document."
+          }
+        ],
+        "requirements": [
+          "The administrator must enable knowledge retrieval and scope selection and connect the tool to this example provider."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge#readme"
+  },
+  "deerflow-extension-knowledge-center": {
+    "schema_version": 1,
+    "id": "knowledge-center",
+    "locales": {
+      "zh-CN": {
+        "title": "知识中心",
+        "description": "在独立页面浏览知识空间、导入资料，并查看文档处理状态。",
+        "usage": [
+          {
+            "title": "选择空间与知识库",
+            "description": "打开知识中心，选择你有权限访问的空间及其中的知识库。"
+          },
+          {
+            "title": "导入资料",
+            "description": "按页面提供的操作导入文件、网址或文本。可用按钮取决于你的权限和服务支持。"
+          },
+          {
+            "title": "查看处理状态",
+            "description": "检查返回的文档记录或按文档标识查询状态，必要时手动刷新。"
+          }
+        ],
+        "requirements": [
+          "已安装并启用知识空间与连接、知识入库与处理扩展，并为你分配可访问的空间和资源。"
+        ]
+      },
+      "en-US": {
+        "title": "Knowledge center",
+        "description": "Browse knowledge spaces, import content and inspect document processing on a dedicated page.",
+        "usage": [
+          {
+            "title": "Choose a space and knowledge base",
+            "description": "Open Knowledge center and select an accessible space and mapped knowledge base."
+          },
+          {
+            "title": "Import content",
+            "description": "Use the available controls to import a file, URL or text. Controls depend on your permissions and provider support."
+          },
+          {
+            "title": "Inspect processing",
+            "description": "Inspect the returned document record or look up a document by ID, refreshing its status when needed."
+          }
+        ],
+        "requirements": [
+          "Enable the knowledge platform and management extensions and grant you access to spaces and resources."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-center#readme"
+  },
+  "deerflow-extension-knowledge-management": {
+    "schema_version": 1,
+    "id": "knowledge-management",
+    "locales": {
+      "zh-CN": {
+        "title": "知识入库与处理",
+        "description": "导入文件、网址和文本，并查询、管理文档处理任务。",
+        "usage": [
+          {
+            "title": "连接已有管理入口",
+            "description": "由管理员通过知识中心或管理 API，选择已授权的知识库与操作。此扩展本身提供后台接口。"
+          },
+          {
+            "title": "导入并查询处理结果",
+            "description": "提交文件、网址或文本，保留返回的文档标识，再查询处理状态；可用操作由上游能力和权限共同决定。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置 WeKnora 管理连接及明确的用户、知识库和操作授权。"
+        ]
+      },
+      "en-US": {
+        "title": "Knowledge ingestion and processing",
+        "description": "Import files, URLs and text, then inspect and manage document processing.",
+        "usage": [
+          {
+            "title": "Use an existing management entry",
+            "description": "Use Knowledge center or the management API to select an authorized knowledge base and operation. This extension provides backend endpoints."
+          },
+          {
+            "title": "Ingest and inspect processing",
+            "description": "Submit a file, URL or text, retain the returned document ID and query its status. Available operations depend on upstream capabilities and permissions."
+          }
+        ],
+        "requirements": [
+          "The administrator must configure a WeKnora management connection and explicit user, knowledge-base and operation grants."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-management#readme"
+  },
+  "deerflow-extension-knowledge-platform": {
+    "schema_version": 1,
+    "id": "knowledge-platform",
+    "locales": {
+      "zh-CN": {
+        "title": "知识空间与连接",
+        "description": "组织知识空间、连接与成员权限，让团队按授权范围使用资料。",
+        "usage": [
+          {
+            "title": "由管理员配置空间与资源",
+            "description": "通过平台管理接口配置连接、空间成员和可访问资源，明确操作权限。"
+          },
+          {
+            "title": "在授权范围内使用",
+            "description": "通过知识中心或平台接口选择可访问的空间和知识库，再进行导入与状态查询。"
+          }
+        ],
+        "requirements": [
+          "已安装知识入库与处理扩展，并配置连接、持久化存储和空间策略。"
+        ]
+      },
+      "en-US": {
+        "title": "Knowledge spaces and connections",
+        "description": "Organize knowledge spaces, connections and membership for authorized access.",
+        "usage": [
+          {
+            "title": "Configure spaces and resources",
+            "description": "An administrator configures connections, space membership, accessible resources and permitted operations through the platform API."
+          },
+          {
+            "title": "Work within an authorized space",
+            "description": "Use Knowledge center or platform APIs to select an accessible space and knowledge base, then ingest content or inspect processing."
+          }
+        ],
+        "requirements": [
+          "Install the knowledge management extension and configure connections, persistent storage and space policies."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-platform#readme"
+  },
+  "deerflow-extension-lightrag": {
+    "schema_version": 1,
+    "id": "catalog/lightrag",
+    "locales": {
+      "zh-CN": {
+        "title": "LightRAG",
+        "description": "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
+        "usage": [
+          {
+            "title": "在对话中提出检索问题",
+            "description": "让 Agent 查询已连接知识库中的文档、实体或实体间关系。"
+          },
+          {
+            "title": "查看来源依据",
+            "description": "检查结果的文档引用；实体关系只展示服务返回的边，有文档片段支持时才提供对应引用。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置 LightRAG 连接、凭据、用户绑定和相关检索工具。"
+        ]
+      },
+      "en-US": {
+        "title": "LightRAG",
+        "description": "Retrieve documents and entity relations from LightRAG with shared source citations.",
+        "usage": [
+          {
+            "title": "Ask a retrieval question",
+            "description": "Ask the Agent to search the connected knowledge base for documents, entities or relationships."
+          },
+          {
+            "title": "Inspect supporting sources",
+            "description": "Check document citations. Relations reflect returned edges and receive document citations only when supporting excerpts are available."
+          }
+        ],
+        "requirements": [
+          "The administrator must configure the LightRAG connection, credentials, user bindings and retrieval tools."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-lightrag#readme"
+  },
+  "deerflow-extension-report-sections": {
+    "schema_version": 1,
+    "id": "community.report-sections",
+    "locales": {
+      "zh-CN": {
+        "title": "分段长文写作",
+        "description": "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
+        "usage": [
+          {
+            "title": "在对话里提出写作任务",
+            "description": "告诉 Agent 报告主题、目标读者和章节要求，并要求使用分段长文写作工具。"
+          },
+          {
+            "title": "先定大纲，再逐章完成",
+            "description": "让 Agent 先保存大纲，再逐章撰写和保存。需要修改时，在同一对话中指出要修改的章节。"
+          },
+          {
+            "title": "汇总并下载",
+            "description": "全部章节完成后，让 Agent 合并报告；在对话的文件成果中下载 Markdown 文档。"
+          }
+        ]
+      },
+      "en-US": {
+        "title": "Sectioned long-form writing",
+        "description": "Write long reports section by section and assemble them into a downloadable Markdown document.",
+        "usage": [
+          {
+            "title": "Describe the report in chat",
+            "description": "Tell the Agent the topic, audience and chapter requirements, and ask it to use the sectioned writing tool."
+          },
+          {
+            "title": "Outline, then write each chapter",
+            "description": "Ask the Agent to save an outline, then write and save chapters one at a time. Request chapter revisions in the same conversation."
+          },
+          {
+            "title": "Assemble and download",
+            "description": "Ask the Agent to assemble the finished chapters, then download the Markdown document from the conversation artifacts."
+          }
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-report-sections#readme"
+  },
+  "deerflow-extension-retrieval": {
+    "schema_version": 1,
+    "id": "example.retrieval",
+    "locales": {
+      "zh-CN": {
+        "title": "本地检索示例",
+        "description": "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+        "usage": [
+          {
+            "title": "在对话里试一次检索",
+            "description": "让 Agent 使用本地检索示例搜索 release，查看匹配到的固定演示文档。"
+          },
+          {
+            "title": "检查返回结果",
+            "description": "观察文字摘要与结构化工具成果；示例数据是虚构的，不代表真实知识库内容。"
+          }
+        ]
+      },
+      "en-US": {
+        "title": "Local retrieval example",
+        "description": "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+        "usage": [
+          {
+            "title": "Try a search in chat",
+            "description": "Ask the Agent to use the local retrieval example to search for release and inspect the matching demonstration document."
+          },
+          {
+            "title": "Inspect the result",
+            "description": "Review its text summary and structured tool artifact. The fixed corpus is synthetic, not a real knowledge base."
+          }
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-retrieval#readme"
+  },
+  "deerflow-extension-weknora": {
+    "schema_version": 1,
+    "id": "catalog/weknora",
+    "locales": {
+      "zh-CN": {
+        "title": "WeKnora 知识检索",
+        "description": "检索 WeKnora 知识库和所选文档，并展示来源引用。",
+        "usage": [
+          {
+            "title": "选择检索范围",
+            "description": "在对话中选择已授权的 WeKnora 知识库，按需缩小到具体文档。"
+          },
+          {
+            "title": "提问并核对来源",
+            "description": "提出与已入库资料相关的问题，查看返回片段和来源引用。"
+          }
+        ],
+        "requirements": [
+          "已有完成索引的 WeKnora 知识库；管理员已配置连接、凭据、用户授权和检索工具。"
+        ]
+      },
+      "en-US": {
+        "title": "WeKnora knowledge retrieval",
+        "description": "Search WeKnora knowledge bases and selected documents with source citations.",
+        "usage": [
+          {
+            "title": "Select a search scope",
+            "description": "Choose an authorized WeKnora knowledge base in chat and narrow it to specific documents when needed."
+          },
+          {
+            "title": "Ask and verify sources",
+            "description": "Ask a question about indexed content and inspect the retrieved excerpts and source citations."
+          }
+        ],
+        "requirements": [
+          "An indexed WeKnora knowledge base is required, with an administrator-configured connection, credentials, user grants and retrieval tool."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-weknora#readme"
+  },
+  "deerflow-extension-workflows": {
+    "schema_version": 1,
+    "id": "community.workflows",
+    "locales": {
+      "zh-CN": {
+        "title": "脚本工作流",
+        "description": "运行可检查的 Agent 脚本工作流，跟踪步骤进度，并按保留版本确认成果。",
+        "usage": [
+          {
+            "title": "打开脚本工作流",
+            "description": "进入工作流页面，准备一个受支持的 JavaScript 工作流及其输入参数。"
+          },
+          {
+            "title": "提交并查看执行过程",
+            "description": "启动后查看步骤进度、Agent 子会话和执行结果；需要人工确认的步骤会等待你的处理。"
+          },
+          {
+            "title": "按保留版本确认成果",
+            "description": "检查实际保留的输出版本，再确认或继续工作流。重启恢复取决于工作流和部署是否支持。"
+          }
+        ],
+        "requirements": [
+          "管理员已配置可调用的 Agent 和持久化存储；Gateway 运行在 Linux 或 macOS。"
+        ]
+      },
+      "en-US": {
+        "title": "Script workflows",
+        "description": "Run inspectable Agent workflows, track steps and review retained output versions.",
+        "usage": [
+          {
+            "title": "Open Script workflows",
+            "description": "Open the workflow page and prepare a supported JavaScript workflow and its input arguments."
+          },
+          {
+            "title": "Run and inspect",
+            "description": "Start the workflow and inspect steps, Agent conversations and results. Human checkpoints wait for your response."
+          },
+          {
+            "title": "Review retained output",
+            "description": "Inspect the retained output version before approving or continuing. Restart recovery depends on workflow and deployment compatibility."
+          }
+        ],
+        "requirements": [
+          "The administrator must configure allowed Agents and persistent storage on a Linux or macOS Gateway."
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-workflows#readme"
+  }
+}

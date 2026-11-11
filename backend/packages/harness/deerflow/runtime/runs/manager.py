@@ -412,6 +412,10 @@ class RunManager:
         self._admission_locks = AsyncKeyedLockTable[str]()
         self._snapshot_locks = AsyncKeyedLockTable[str]()
         self._pending_admissions: dict[str, dict[str, int]] = {}
+        # Only operations whose bodies have exited enter this ledger. Retain
+        # their captured owner without retaining the completed request task.
+        # A later same-thread admission retries release under its existing gate.
+        self._pending_operation_releases: dict[str, dict[str, str | None]] = {}
         self._store = store
         self._persistence_retry_policy = persistence_retry_policy or PersistenceRetryPolicy()
         self._worker_id = worker_id or _generate_worker_id()
@@ -1938,14 +1942,42 @@ class RunManager:
                 record = self._runs.get(run_id)
                 if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
                     raise ValueError("Assembly/run binding mismatch")
+                if record.ownership_lost:
+                    raise RuntimeError("Unable to persist assembly evidence: this worker lost lease ownership of the run")
                 if EVIDENCE_KEY in record.metadata:
                     if record.metadata[EVIDENCE_KEY] != evidence:
                         raise ValueError("Run assembly evidence is immutable")
                     return
                 record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
-            if not await self._persist_to_store(record):
+                owned = self.heartbeat_enabled and self._store is not None and not record.store_only
+            # A full snapshot would also rewrite status, owner, lease and error,
+            # undoing a peer's takeover after this worker's lease expired.
+            persisted = await self._merge_owned_metadata(record, {EVIDENCE_KEY: evidence}) if owned else await self._persist_to_store(record)
+            if not persisted:
                 record.metadata.pop(EVIDENCE_KEY, None)
                 raise RuntimeError("Unable to persist assembly evidence")
+
+    async def _merge_owned_metadata(self, record: RunRecord, metadata: dict[str, Any]) -> bool:
+        """Write metadata keys only under this worker's live lease; fence on rejection."""
+        try:
+            merged = await self._call_store_with_retry(
+                "merge_owned_metadata",
+                record.run_id,
+                lambda: self._store.merge_owned_metadata(record.run_id, copy.deepcopy(metadata), owner_worker_id=self._worker_id),
+            )
+        except NotImplementedError:
+            logger.warning(
+                "Unable to persist metadata for run %s: heartbeat RunStore.merge_owned_metadata must atomically enforce the owner and a live lease",
+                record.run_id,
+            )
+            return False
+        except Exception:
+            logger.warning("Failed to persist owned metadata for run %s", record.run_id, exc_info=True)
+            return False
+        if merged is not True:
+            await self._mark_ownership_lost(record, reason="The durable store rejected this worker's metadata write.")
+            return False
+        return not record.ownership_lost
 
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
@@ -2295,23 +2327,39 @@ class RunManager:
         execution_fence=None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
-        return await self._admit_thread_operation(
-            thread_id,
-            assistant_id,
-            operation_kind=ThreadOperationKind.run,
-            on_disconnect=on_disconnect,
-            metadata=metadata,
-            kwargs=kwargs,
-            multitask_strategy=multitask_strategy,
-            model_name=model_name,
-            user_id=user_id,
-            idempotency_key=idempotency_key,
-            evidence_origin=evidence_origin,
-            evidence_agent_id=evidence_agent_id,
-            idempotency_request=idempotency_request,
-            run_id=run_id,
-            execution_fence=execution_fence,
-        )
+
+        async def admit() -> RunRecord:
+            return await self._admit_thread_operation(
+                thread_id,
+                assistant_id,
+                operation_kind=ThreadOperationKind.run,
+                on_disconnect=on_disconnect,
+                metadata=metadata,
+                kwargs=kwargs,
+                multitask_strategy=multitask_strategy,
+                model_name=model_name,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                evidence_origin=evidence_origin,
+                evidence_agent_id=evidence_agent_id,
+                idempotency_request=idempotency_request,
+                run_id=run_id,
+                execution_fence=execution_fence,
+            )
+
+        try:
+            return await admit()
+        except ConflictError:
+            if idempotency_key is None:
+                raise
+            # Let the Store replay an evicted idempotent result before cleanup.
+            # A new key blocked by a finished reservation gets one recovery
+            # attempt, then returns through the ordinary atomic admission path.
+            async with self._admission_locks.hold(thread_id):
+                if not self._pending_operation_releases.get(thread_id):
+                    raise
+                await self._release_completed_thread_operations(thread_id)
+            return await admit()
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
         """Terminalize an unseen replacement and confirm its durable state."""
@@ -2412,7 +2460,6 @@ class RunManager:
         if multitask_strategy not in _supported_strategies:
             raise UnsupportedStrategyError(f"Multitask strategy '{multitask_strategy}' is not yet supported. Supported strategies: {', '.join(_supported_strategies)}")
 
-        lease_expires_at = self._compute_lease_expires_at()
         grace_seconds = self._run_ownership_config.grace_seconds if self._run_ownership_config else 10
 
         if execution_fence is not None and (self._store is None or not _store_accepts_idempotency_parameter(self._store, "execution_fence") or multitask_strategy != "reject"):
@@ -2434,7 +2481,6 @@ class RunManager:
             updated_at=now,
             model_name=model_name,
             owner_worker_id=self._worker_id,
-            lease_expires_at=lease_expires_at,
             idempotency_key=idempotency_key,
             evidence_origin=evidence_origin,
             evidence_agent_id=evidence_agent_id,
@@ -2451,6 +2497,10 @@ class RunManager:
                             raise RunIdempotencyKeyMismatch("Run idempotency key resolved to a different thread or user")
                         existing.idempotency_reused = True
                         return existing
+
+            if idempotency_key is None:
+                await self._release_completed_thread_operations(thread_id)
+            async with self._lock:
 
                 def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
                     # A locally held record for this key already returned above, so
@@ -2489,6 +2539,10 @@ class RunManager:
 
             # 2) Persist with only the same-thread admission gate held. The
             #    store is the source of truth for cross-process atomicity.
+            # Gate contention and completed-operation release can consume a
+            # whole lease interval. Start the new lease after those waits.
+            lease_expires_at = self._compute_lease_expires_at()
+            record.lease_expires_at = lease_expires_at
             if self._store is not None:
                 if idempotency_request is not None and not _store_accepts_idempotency_parameter(self._store, "idempotency_request"):
                     raise RunIdempotencyUnsupported("The configured RunStore does not support keyed resume idempotency")
@@ -2653,6 +2707,36 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
+    async def _release_completed_thread_operations(self, thread_id: str) -> None:
+        """Retry known finished operations; caller holds the thread admission gate.
+
+        This is request-driven and uses the ordinary bounded Store retry policy.
+        Failed or cancelled deletes retain their exact IDs and captured owners;
+        a missing row is already released, including after an uncertain commit.
+        Live reservations and peer-owned work never enter this local ledger.
+        """
+        pending = self._pending_operation_releases.get(thread_id)
+        if not pending or self._store is None:
+            return
+        for run_id, user_id in tuple(pending.items()):
+            try:
+                await self._call_store_with_retry(
+                    "release thread operation",
+                    run_id,
+                    lambda: self._store.delete_thread_operation(run_id, user_id=user_id),
+                )
+            except Exception as exc:
+                raise ConflictError(f"Thread {thread_id} has a completed operation awaiting cleanup") from exc
+            # Remove both local ownership records only after confirmed release.
+            # There is no await between unregistering and acknowledging the ID.
+            async with self._lock:
+                removed = self._runs.pop(run_id, None)
+                if removed is not None:
+                    self._unindex_run_locked(run_id, removed.thread_id)
+                pending.pop(run_id, None)
+        if not pending:
+            self._pending_operation_releases.pop(thread_id, None)
+
     @asynccontextmanager
     async def reserve_thread_operation(
         self,
@@ -2692,17 +2776,21 @@ class RunManager:
                 raise ConflictError(f"Thread {thread_id} reservation lease was lost") from None
             raise
         finally:
+            if self._store is not None:
+                # Register before the first cleanup await so cancellation also
+                # leaves a retryable release owned by this manager.
+                # The manager's event loop owns the ledger, and each ledger
+                # update is synchronous. The lock in the release path protects
+                # the run registry and its index.
+                self._pending_operation_releases.setdefault(thread_id, {})[record.run_id] = record.user_id
             try:
                 if self._store is not None:
                     try:
-                        await self._call_store_with_retry(
-                            "release thread operation",
-                            record.run_id,
-                            lambda: self._store.delete_thread_operation(record.run_id, user_id=record.user_id),
-                        )
+                        async with self._admission_locks.hold(thread_id):
+                            await self._release_completed_thread_operations(thread_id)
                     except Exception:
                         logger.warning(
-                            "Failed to release persisted thread operation %s; leaving it for orphan reconciliation",
+                            "Failed to release persisted thread operation %s; leaving it for orphan reconciliation or same-thread admission retry",
                             record.run_id,
                             exc_info=True,
                         )

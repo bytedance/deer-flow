@@ -1,0 +1,28 @@
+{
+  "dataset": "context-memory-synthetic-v1",
+  "question": "Which context applies here?",
+  "thread_history_control": "BENCH-THREAD-HISTORY",
+  "default_fact": "BENCH-DEFAULT-PREFERENCE",
+  "agent": "bench-agent",
+  "agent_fact": "BENCH-AGENT-PREFERENCE",
+  "project_only_fact": "BENCH-PROJECT-ONLY-PREFERENCE",
+  "projects": {
+    "alpha": {
+      "instructions": "BENCH-ALPHA-INSTRUCTIONS",
+      "document": "BENCH-ALPHA-DOCUMENT.md"
+    },
+    "beta": {
+      "instructions": "BENCH-BETA-INSTRUCTIONS",
+      "document": "BENCH-BETA-DOCUMENT.md"
+    }
+  },
+  "invalidation": {
+    "replacement": {
+      "old": "BENCH-OLD-REPLACEMENT",
+      "new": "BENCH-NEW-REPLACEMENT"
+    },
+    "deletion": {
+      "old": "BENCH-OLD-DELETION"
+    }
+  }
+}
