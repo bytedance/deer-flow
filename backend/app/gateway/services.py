@@ -1022,6 +1022,7 @@ _DEFAULT_ASSISTANT_ID = "lead_agent"
 _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     {
         "model_name",
+        "tool_approval_mode",
         "mode",
         "thinking_enabled",
         "reasoning_effort",
@@ -1061,6 +1062,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
             "__run_input_control",
+            "__tool_approval_runtime",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             THREAD_INCARNATION_METADATA_GUARD_KEY,
@@ -2438,6 +2440,9 @@ async def start_run(
                     enabled=get_app_config().hitl_approval.enabled,
                     body=body,
                 )
+                resume_map = getattr(validated_approval_request_ids, "resume_map", None)
+                if isinstance(resume_map, dict):
+                    graph_input = Command(resume=resume_map)
         else:
             if admitted_run is None:
                 await reject_new_run_when_approval_pending(request, thread_id)
@@ -2486,6 +2491,12 @@ async def start_run(
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        from deerflow.approvals.policy import resolve_mode
+
+        try:
+            resolve_mode(get_app_config().hitl_approval, config.get("context") or {})
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.
