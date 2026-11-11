@@ -509,16 +509,26 @@ class CodexChatModel(BaseChatModel):
         if refusal:
             additional_kwargs["refusal"] = refusal
 
+        response_metadata = {
+            "model": response.get("model", self.model),
+            "usage": usage,
+        }
+        if refusal:
+            # A refusal-only turn carries no output_text, so the empty-response
+            # guard (LLMErrorHandlingMiddleware) would otherwise treat it as an
+            # empty response and retry it away before the safety middleware can
+            # classify the refusal. Stamping the finish_reason lets
+            # model_response.finish_reason() see "refusal" and pass the message
+            # through instead of raising EmptyModelResponseError.
+            response_metadata["finish_reason"] = "refusal"
+
         message = AIMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else [],
             invalid_tool_calls=invalid_tool_calls,
             additional_kwargs=additional_kwargs,
             usage_metadata=usage_metadata,
-            response_metadata={
-                "model": response.get("model", self.model),
-                "usage": usage,
-            },
+            response_metadata=response_metadata,
         )
 
         return ChatResult(
