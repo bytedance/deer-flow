@@ -20,6 +20,15 @@ Alembic stamp/upgrade workers started inside `bootstrap_schema()` remain owned b
 
 On SQLite, `BEGIN IMMEDIATE` takes the database-wide write lock, so every unrelated writer (run status, thread metadata, the scheduler) waits for the transaction and fails with `database is locked` after `busy_timeout` (30s). Do slow work such as document conversion before opening a locked transaction; lock only to revalidate and publish, as `ProjectDocumentRepository.publish_under_live_lock` does. `tests/test_project_document_tools.py::TestConversionSerialization` pins this.
 
+## Managed subagent file creation
+
+`managed_subagents/file.py` stages and fsyncs complete definitions, then uses
+`os.link` for create-only publication across processes; the RLock alone is not
+cross-process protection. Only `FileExistsError` becomes a name conflict. Updates
+retain `os.replace`; discard staging through `cleanup_failed_atomic_write` in
+either case. `tests/test_managed_subagent_create_race.py` gates independent spawn
+workers after fsync and checks the winner, different-name controls and cleanup.
+
 ## Batch lease recovery
 
 Batch lease recovery includes paused parents only when they have expired active
