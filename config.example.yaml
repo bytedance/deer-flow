@@ -115,9 +115,10 @@ token_budget:
 # Recursion Limits
 # ============================================================================
 # A run's recursion_limit caps the number of LangGraph super-steps (each is at
-# least one LLM call). Clients may override the default per request; invalid or
-# non-positive client values fall back to this configured default.
-recursion_limit: 100
+# least one LLM call). The default preserves the web UI and scheduled-run budget;
+# lower it to constrain default Gateway runs. Clients may override it per request.
+# Existing config.yaml values are kept on upgrade; edit that file to change them.
+recursion_limit: 1000
 
 # The Gateway never trusts a configured or client-supplied value above this
 # ceiling, preventing runaway API cost / DoS. Raise it only if you legitimately

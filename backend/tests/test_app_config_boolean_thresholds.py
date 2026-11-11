@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from deerflow.config.app_config import AppConfig, LlmCallConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.scheduler_config import SchedulerConfig
 
 LLM_CALL_INT_FIELDS = (
     "max_concurrent_calls",
@@ -49,3 +50,10 @@ def test_recursion_limits_reject_booleans(field: str, value: bool) -> None:
 def test_recursion_limits_keep_numeric_inputs() -> None:
     config = _app_config(recursion_limit="25")
     assert config.recursion_limit == 25
+
+
+def test_gateway_and_scheduler_recursion_defaults_match() -> None:
+    gateway_default = _app_config().recursion_limit
+
+    assert gateway_default == 1000
+    assert SchedulerConfig().recursion_limit == gateway_default

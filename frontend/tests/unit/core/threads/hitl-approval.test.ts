@@ -11,7 +11,6 @@ import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import {
   buildHitlApprovalSubmitOptions,
   deriveHitlApprovalState,
-  THREAD_RUN_RECURSION_LIMIT,
 } from "@/core/threads/hooks";
 
 const request: HitlApprovalRequest = {
@@ -172,7 +171,7 @@ describe("HITL approval interrupt state", () => {
 });
 
 describe("HITL approval resume options", () => {
-  it("uses the current head, resumable values stream, normal recursion limit, and paused send context", () => {
+  it("uses the current head, resumable values stream, and paused send context without an override", () => {
     const responses = createHitlApprovalResponses(request, {
       "call-1": "approve",
       "call-2": "approve",
@@ -194,13 +193,13 @@ describe("HITL approval resume options", () => {
       command: { resume: { responses } },
       streamMode: ["values"],
       streamResumable: true,
-      config: { recursion_limit: THREAD_RUN_RECURSION_LIMIT },
       context: {
         thread_id: "thread-1",
         model_name: "model-for-paused-turn",
         conversation_references: ["referenced-thread"],
       },
     });
+    expect(options).not.toHaveProperty("config");
     expect("streamSubgraphs" in options).toBe(false);
   });
 });

@@ -183,12 +183,12 @@ test("resume keeps paused send context, clears stale pending state, and never su
     checkpoint: null,
     streamResumable: true,
     streamMode: ["values"],
-    config: { recursion_limit: 1000 },
     context: {
       model_name: "paused-model",
       conversation_references: ["authorized-thread"],
     },
   });
+  expect(options).not.toHaveProperty("config");
   expect("streamSubgraphs" in options!).toBe(false);
   expect(rendered.result.current.hasPendingApproval).toBe(false);
   expect(rendered.result.current.approvalRequests).toEqual([]);

@@ -149,7 +149,6 @@ type SendMessageOptions = {
   onSent?: () => void;
 };
 
-export const THREAD_RUN_RECURSION_LIMIT = 1000;
 export const HITL_APPROVAL_ACCEPTANCE_TIMEOUT_MS = 10_000;
 
 type PausedRunContext = {
@@ -213,7 +212,6 @@ export function buildHitlApprovalSubmitOptions({
     command: { resume: { responses } },
     streamMode: ["values" as const],
     streamResumable: true,
-    config: { recursion_limit: THREAD_RUN_RECURSION_LIMIT },
     context: buildRunContext({
       settings,
       threadId,
@@ -3189,9 +3187,6 @@ export function useThreadStream({
             // custom events, while subgraph frames would leak a delegated
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
-            config: {
-              recursion_limit: THREAD_RUN_RECURSION_LIMIT,
-            },
             context: buildRunContext({
               settings: context,
               threadId,
@@ -3454,9 +3449,6 @@ export function useThreadStream({
           metadata: prepared.metadata,
           // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
-          config: {
-            recursion_limit: THREAD_RUN_RECURSION_LIMIT,
-          },
           // Replaying a turn never carries conversation references: the grant
           // is per send, so a regenerate or edit runs without them unless the
           // user attaches them again.
