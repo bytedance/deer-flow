@@ -1937,14 +1937,42 @@ class RunManager:
                 record = self._runs.get(run_id)
                 if record is None or evidence.get("run_id") != run_id or evidence.get("thread_id") != record.thread_id:
                     raise ValueError("Assembly/run binding mismatch")
+                if record.ownership_lost:
+                    raise RuntimeError("Unable to persist assembly evidence: this worker lost lease ownership of the run")
                 if EVIDENCE_KEY in record.metadata:
                     if record.metadata[EVIDENCE_KEY] != evidence:
                         raise ValueError("Run assembly evidence is immutable")
                     return
                 record.metadata = {**record.metadata, EVIDENCE_KEY: copy.deepcopy(evidence)}
-            if not await self._persist_to_store(record):
+                owned = self.heartbeat_enabled and self._store is not None and not record.store_only
+            # A full snapshot would also rewrite status, owner, lease and error,
+            # undoing a peer's takeover after this worker's lease expired.
+            persisted = await self._merge_owned_metadata(record, {EVIDENCE_KEY: evidence}) if owned else await self._persist_to_store(record)
+            if not persisted:
                 record.metadata.pop(EVIDENCE_KEY, None)
                 raise RuntimeError("Unable to persist assembly evidence")
+
+    async def _merge_owned_metadata(self, record: RunRecord, metadata: dict[str, Any]) -> bool:
+        """Write metadata keys only under this worker's live lease; fence on rejection."""
+        try:
+            merged = await self._call_store_with_retry(
+                "merge_owned_metadata",
+                record.run_id,
+                lambda: self._store.merge_owned_metadata(record.run_id, copy.deepcopy(metadata), owner_worker_id=self._worker_id),
+            )
+        except NotImplementedError:
+            logger.warning(
+                "Unable to persist metadata for run %s: heartbeat RunStore.merge_owned_metadata must atomically enforce the owner and a live lease",
+                record.run_id,
+            )
+            return False
+        except Exception:
+            logger.warning("Failed to persist owned metadata for run %s", record.run_id, exc_info=True)
+            return False
+        if merged is not True:
+            await self._mark_ownership_lost(record, reason="The durable store rejected this worker's metadata write.")
+            return False
+        return not record.ownership_lost
 
     async def update_model_name(self, run_id: str, model_name: str | None) -> None:
         """Update the model name for a run."""
