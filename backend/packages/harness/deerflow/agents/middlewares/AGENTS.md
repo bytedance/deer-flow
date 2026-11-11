@@ -1,5 +1,7 @@
 ### Middleware Chain
 
+ToolProgress fences late results/hint retries by entry epoch, even for one run.
+
 JSON depth failures preserve content and never abort graphs. Unclassified
 explicit failures stay `unknown` / recoverable / `try_alternative`; incidental
 JSON fields cannot establish auth failure. Producer metadata wins. Keep real
@@ -24,6 +26,8 @@ and direct plaintext; no media decoding/fetching or nested-document traversal.
 PII before splitting, budgets before escaping; hooks/history/removal on success.
 Chunk/carry/cooldown invariants and tests:
 [contract](../../../../../docs/summarization.md).
+
+vLLM compaction counts replayed reasoning. Keep it out of summary input.
 
 Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
 

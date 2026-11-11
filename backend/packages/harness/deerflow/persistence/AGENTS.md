@@ -78,10 +78,10 @@ recheck policy, aborting on activation; retained-snapshot isolation fails closed
 Strict startup cannot downgrade durable policy.
 [Offline cutover](../../../../../README.md#configuration).
 
-`RunRepository.update_status(..., owner_worker_id=...)` and
-`finalize_if_not_cancelled(..., owner_worker_id=...)` require that owner and a
-live lease. Increment the change clock before taking the run row lock to retain
-the existing clock/row lock order. PostgreSQL checks `clock_timestamp()` after
+`RunRepository.update_status`/`finalize_if_not_cancelled` with an owner, and
+`merge_owned_metadata`, require that owner and a live lease. Increment the
+change clock before taking the run row lock to retain the existing clock/row
+lock order. PostgreSQL checks `clock_timestamp()` after
 `SELECT FOR UPDATE`, rather than transaction-start `now()`; SQLite evaluates its
 database clock in the conditional UPDATE after acquiring its writer lock.
 `renew_lease` and legacy `update_lease` also reject expired existing leases and

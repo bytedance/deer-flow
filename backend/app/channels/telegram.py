@@ -598,13 +598,24 @@ class TelegramChannel(Channel):
 
         try:
             input_file = await asyncio.to_thread(_load_telegram_input_file, attachment.actual_path, attachment.filename)
+            from telegram.error import BadRequest
+
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
                 kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
                 if reply_to:
                     kwargs["reply_to_message_id"] = reply_to
                     if chat_id > 0:
                         kwargs["allow_sending_without_reply"] = True
-                sent = await bot.send_photo(**kwargs)
+                try:
+                    sent = await bot.send_photo(**kwargs)
+                except BadRequest as exc:
+                    if str(exc).casefold() not in {"photo_invalid_dimensions", "image_process_failed"}:
+                        raise
+                    logger.info("[Telegram] photo rejected (%s); delivering as document: %s", exc, attachment.filename)
+                    # A rejected photo can still be delivered unchanged as a file.
+                    # Keep the reply target and reuse the already loaded bytes.
+                    kwargs["document"] = kwargs.pop("photo")
+                    sent = await bot.send_document(**kwargs)
             else:
                 kwargs = {"chat_id": chat_id, "document": input_file}
                 if reply_to:

@@ -1,5 +1,14 @@
 ### Python Extension System (Runtime and Distribution)
 
+Optional `deerflow-extension.json` is public package documentation, read beside an
+already-resolved entrypoint only after successful registration. Validate and project
+known fields at startup; never inspect private config or import disabled plugins for
+copy. Missing files preserve legacy behavior; invalid files add a safe warning.
+`LoadedExtensions.documentation` carries the snapshot into discovery, including
+registered backend extensions without browser/full-stack contributions. Requirements
+are optional. The package checker and bundled-catalog generator share the validator.
+Tests: `test_extension_documentation.py`; authoring: `examples/README.md`.
+
 `registry.knowledge_provider(name, provider)` (extension-api 0.2.7) adds an
 operator-installed read-only `deerflow.knowledge.RetrievalProvider`. The host
 validates advertised async operations, attributes entries and rolls them back
