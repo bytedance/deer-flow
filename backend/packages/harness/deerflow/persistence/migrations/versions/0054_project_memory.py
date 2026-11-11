@@ -2,8 +2,8 @@
 
 import sqlalchemy as sa
 
-revision = "0053_project_memory"
-down_revision = "0052_batch_continuation"
+revision = "0054_project_memory"
+down_revision = "0053_tool_approvals"
 branch_labels = None
 depends_on = None
 

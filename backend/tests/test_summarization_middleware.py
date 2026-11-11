@@ -1210,6 +1210,50 @@ def _factory_app_config(model_names, *, summary_model_name=None, summarization_k
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual"])
+@pytest.mark.parametrize("custom_prompt", [None, "Operator summary:\n{messages}"], ids=["built-in", "custom"])
+async def test_compaction_requests_use_configured_or_builtin_summary_prompt(monkeypatch, manual, custom_prompt):
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(content="compressed summary")
+    model.ainvoke = AsyncMock(return_value=AIMessage(content="compressed summary"))
+    model.with_config.return_value = model
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda *args, **kwargs: model)
+    app_config = _factory_app_config(
+        ("summary-model",),
+        summarization_kwargs={
+            "trigger": ContextSize(type="messages", value=4),
+            "keep": ContextSize(type="messages", value=2),
+            "summary_prompt": custom_prompt,
+        },
+    )
+    messages = _messages()
+    approval = 'Wait for the exact phrase "review V-592 approved" and then wait for final confirmation.'
+    messages[0] = HumanMessage(content=approval)
+    state = {"messages": messages}
+
+    if manual:
+        from deerflow.runtime.context_compaction import _create_compaction_middleware
+
+        middleware = _create_compaction_middleware(app_config=app_config, keep=None)
+        assert await middleware.acompact_state(state, _runtime(), force=True) is not None
+        prompt = model.ainvoke.await_args.args[0]
+    else:
+        middleware = create_summarization_middleware(app_config=app_config)
+        assert middleware is not None
+        assert middleware.before_model(state, _runtime()) is not None
+        prompt = model.invoke.call_args.args[0]
+
+    assert approval in prompt
+    if custom_prompt is None:
+        assert "## ACTIVE USER REQUIREMENTS" in prompt
+        assert "Preserve the original wording of any literal approval phrase" in prompt
+        assert "which action it permits" in prompt
+    else:
+        assert prompt.startswith("Operator summary:\n")
+        assert "## ACTIVE USER REQUIREMENTS" not in prompt
+
+
 @pytest.fixture
 def vllm_compaction(monkeypatch):
     models = {

@@ -92,6 +92,13 @@ import {
   retainThreadTokenUsagePlaceholder,
   threadTokenUsageQueryKey,
 } from "./token-usage";
+import {
+  approvalsKey,
+  combineNativeApprovals,
+  fetchToolApprovals,
+  submitLiveApproval,
+  useToolApprovalFeature,
+} from "./tool-approvals";
 import type {
   AgentThread,
   AgentThreadState,
@@ -160,6 +167,7 @@ type PausedRunContext = {
 type PendingApprovalSubmission = {
   threadId: string;
   requestId: string;
+  requestIds: string[];
   resolve: (accepted: boolean) => void;
   timeout: number | undefined;
 };
@@ -169,6 +177,7 @@ export function deriveHitlApprovalState({
   restInterrupts,
   historyLoading,
   restInterruptsError = false,
+  pendingApprovalRun = false,
   next,
   answeredRequestIds,
 }: {
@@ -176,6 +185,7 @@ export function deriveHitlApprovalState({
   restInterrupts?: unknown;
   historyLoading: boolean;
   restInterruptsError?: boolean;
+  pendingApprovalRun?: boolean;
   next: readonly string[];
   answeredRequestIds: ReadonlySet<string>;
 }) {
@@ -187,11 +197,12 @@ export function deriveHitlApprovalState({
     (request) => !answeredRequestIds.has(request.request_id),
   );
   return {
-    requests: pendingRequests,
+    requests: combineNativeApprovals(pendingRequests),
     hasPendingApproval:
       pendingRequests.length > 0 ||
       ((historyLoading || restInterruptsError) &&
-        next.includes("HitlApprovalMiddleware.after_model")),
+        (pendingApprovalRun ||
+          next.includes("HitlApprovalMiddleware.after_model"))),
   };
 }
 
@@ -1955,6 +1966,10 @@ export function invalidateStoppedThreadCaches(
   }
 
   void queryClient.invalidateQueries({ queryKey: ["thread", threadId] });
+  void queryClient.invalidateQueries({
+    queryKey: ["tool-approvals"],
+    predicate: (query) => query.queryKey[2] === threadId,
+  });
   void queryClient.invalidateQueries({ queryKey: runInputsKey(threadId) });
   void queryClient.invalidateQueries({
     queryKey: threadHistoryQueryKey(threadId),
@@ -2373,6 +2388,8 @@ export function useThreadStream({
             current.threadId === meta.thread_id ? current.requestIds : [],
           );
           requestIds.add(acceptedRequestId);
+          for (const id of pendingApproval?.requestIds ?? [])
+            requestIds.add(id);
           return { threadId: meta.thread_id, requestIds };
         });
       }
@@ -2591,6 +2608,21 @@ export function useThreadStream({
 
   const { isLoading: isThreadLoading, joinStream } = thread;
   const runInputAccount = useContext(AuthQueryScopeContext);
+  const approvalFeature = useToolApprovalFeature(!!runInputAccount && !isMock);
+  const liveApprovals = useQuery({
+    queryKey: approvalsKey(onStreamThreadId ?? "", runInputAccount),
+    queryFn: ({ signal }) => fetchToolApprovals(onStreamThreadId!, signal),
+    enabled:
+      !!approvalFeature.data?.enabled &&
+      !!onStreamThreadId &&
+      !!runInputAccount &&
+      !isMock,
+    refetchInterval: (query) =>
+      isThreadLoading || activeRunId || query.state.data?.requests.length
+        ? 1000
+        : false,
+    retry: false,
+  });
   const inputCapability = useRunInputsEnabled(!!runInputAccount && !isMock);
   const inputQuery = useQuery({
     queryKey: [...runInputsKey(onStreamThreadId ?? ""), runInputAccount],
@@ -3234,6 +3266,30 @@ export function useThreadStream({
       request: HitlApprovalRequest,
       responses: HitlApprovalResponse[],
     ) => {
+      if (request.transport === "live") {
+        if (
+          threadId !== onStreamThreadId ||
+          !liveApprovals.data?.requests?.some(
+            (pending) =>
+              pending.request_id === request.request_id &&
+              pending.run_id === request.run_id,
+          )
+        )
+          return false;
+        try {
+          await submitLiveApproval(threadId, request, responses);
+          await queryClient.invalidateQueries({
+            queryKey: approvalsKey(threadId, runInputAccount),
+          });
+          return true;
+        } catch (error) {
+          await queryClient.invalidateQueries({
+            queryKey: approvalsKey(threadId, runInputAccount),
+          });
+          toast.error(getStreamErrorMessage(error));
+          return false;
+        }
+      }
       if (thread.isLoading || sendInFlightRef.current) return false;
       const expected = new Set(
         request.actions.map((action) => action.tool_call_id),
@@ -3284,6 +3340,7 @@ export function useThreadStream({
       const submission: PendingApprovalSubmission = {
         threadId,
         requestId: request.request_id,
+        requestIds: request.actions.map((action) => action.request_id),
         resolve: resolveAccepted,
         timeout: undefined,
       };
@@ -3348,7 +3405,17 @@ export function useThreadStream({
         sendInFlightRef.current = false;
       }
     },
-    [context, queryClient, settlePendingApproval, stopThread, t, thread],
+    [
+      context,
+      queryClient,
+      settlePendingApproval,
+      stopThread,
+      t,
+      thread,
+      onStreamThreadId,
+      liveApprovals.data,
+      runInputAccount,
+    ],
   );
 
   const submitPreparedReplay = useCallback(
@@ -3792,6 +3859,13 @@ export function useThreadStream({
         liveInterrupt: thread.interrupt,
         restInterrupts,
         restInterruptsError,
+        pendingApprovalRun: (runsQuery.data ?? []).some(
+          (run) =>
+            run.status === "waiting_for_input" &&
+            extractHitlApprovalRequests(run.metadata?.hitl_approval).some(
+              (request) => !answeredApprovalRequestIds.has(request.request_id),
+            ),
+        ),
         historyLoading:
           isHistoryLoading || restInterruptsLoading || thread.isThreadLoading,
         next: thread.history?.[0]?.next ?? [],
@@ -3803,6 +3877,7 @@ export function useThreadStream({
       restInterrupts,
       restInterruptsError,
       restInterruptsLoading,
+      runsQuery.data,
       thread.history,
       thread.interrupt,
       thread.isThreadLoading,
@@ -3828,8 +3903,13 @@ export function useThreadStream({
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
-    approvalRequests: approvalState.requests,
-    hasPendingApproval: approvalState.hasPendingApproval,
+    approvalRequests: [
+      ...approvalState.requests,
+      ...(liveApprovals.data?.requests ?? []),
+    ],
+    hasPendingApproval:
+      approvalState.hasPendingApproval ||
+      !!liveApprovals.data?.requests?.length,
     submitHitlApproval,
     waitingForInputRunIds,
     editAndRegenerateMessage,

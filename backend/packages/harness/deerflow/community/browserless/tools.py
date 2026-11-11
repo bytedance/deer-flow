@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import re
 from datetime import UTC, datetime
@@ -48,22 +49,23 @@ def _get_tool_config(tool_name: str) -> dict | None:
 
 
 def _coerce_timeout(value: object, default: float) -> float:
-    """Coerce a config timeout into seconds, falling back to ``default`` on bad input.
+    """Parse Browserless timeout seconds, falling back to ``default`` on bad input.
 
-    Mirrors ``crawl4ai._coerce_timeout`` / ``jina_ai._coerce_timeout``: booleans and
-    non-numeric strings fall back to the default, so ``timeout_s: off`` (YAML ``False``)
-    does not become ``0.0`` and time out every request against a healthy server, and a
-    typo'd value does not raise out of tool construction.
+    Reject booleans before conversion so YAML ``timeout_s: off`` does not
+    become an immediate timeout. HTTPX treats non-positive deadlines as expired,
+    raises for NaN and treats positive infinity as an unlimited deadline.
+    Preserve positive finite values without imposing an upper limit.
     """
     if isinstance(value, bool):
         return default
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+    if isinstance(value, (int, float, str)):
         try:
-            return float(value)
-        except ValueError:
-            logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
+            timeout = float(value)
+        except (TypeError, ValueError, OverflowError):
+            timeout = 0.0
+        if math.isfinite(timeout) and timeout > 0:
+            return timeout
+    logger.warning("Browserless: invalid timeout %r in config; using %ss", value, default)
     return default
 
 
