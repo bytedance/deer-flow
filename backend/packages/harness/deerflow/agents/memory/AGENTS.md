@@ -48,6 +48,9 @@ client or the real storage, because the payload shape is the contract.
 - **Emergency snapshots and normal updates stay separate.** Normal updates for one
   conversation coalesce. Snapshots taken before compaction do not, because
   successive compactions remove different messages.
+- **A snapshot skips only what this process already extracted.** A message is
+  recorded after its extraction was persisted and matches on id, type and text.
+  Feed everything else: compaction removes a skipped message for good.
 
 ## DeerMem storage
 

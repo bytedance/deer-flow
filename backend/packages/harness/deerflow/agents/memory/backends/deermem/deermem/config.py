@@ -330,7 +330,9 @@ class DeerMemConfig(BaseModel):
             "watermarks.json sidecar (one entry per thread). Over capacity the "
             "cache drops its least-recently-used entry and the sidecar its "
             "least-recently-advanced thread; a thread missing from both "
-            "re-extracts one batch on its next turn. 0 = unbounded."
+            "re-extracts one batch on its next turn. The same cap bounds the "
+            "in-memory record of extracted messages that keeps a "
+            "pre-compaction snapshot from extracting them again. 0 = unbounded."
         ),
     )
     # ── Message processing (externalized patterns / prompts) ──
