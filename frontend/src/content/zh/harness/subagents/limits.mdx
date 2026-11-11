@@ -17,7 +17,7 @@ import { Callout } from "nextra/components";
 | 每次 run 总量      | `subagents.max_total_per_run`，请求上下文 `max_total_subagents` 可临时覆盖 | 6                                               | 1 到 50                              | 多余调用被丢弃。若响应前总量已经用尽，助手消息末尾追加 `[SUBAGENT LIMIT REACHED] ...`，本 run 的 `stop_reason` 记为 `subagent_limit_capped`；某次响应只是越过上限时，仅截断并记日志 |
 | 轮次               | `subagents.max_turns`（仅内置）、`subagents.agents.<name>.max_turns`     | general-purpose 150，bash 60，自定义 50         | 大于等于 1                           | 保留部分结果并标记 `turn_capped`；没有可用文本时 `failed`                                          |
 | 超时               | `subagents.timeout_seconds`（仅内置）、`subagents.agents.<name>.timeout_seconds` | 内置 1800 秒，自定义与设置页管理 900 秒 | 大于等于 1                           | 状态 `timed_out`                                                                                   |
-| 轮询次数           | 由超时推导：`(timeout_seconds + 60) / 5` 次，每 5 秒一次                 | 随超时                                          |                                      | 状态 `polling_timed_out`，运行时请求取消并安排延迟清理                                             |
+| 主等待期限         | 派发后固定：`5 * (((timeout_seconds + 60) // 5) + 1)` 秒 | 内置 1800 秒超时对应 1865 秒 | | 保留状态 `polling_timed_out`，请求取消并安排延迟清理 |
 | token 预算         | `subagents.token_budget`，`subagents.agents.<name>.token_budget`         | 开启；`max_tokens` 2,000,000，摘要压缩开启时 1,000,000；`warn_threshold` 0.7 | `max_tokens` 大于等于 1000 | 当前轮被截断并强制收尾，`completed` + `token_capped`                                                |
 | 循环检测           | `loop_detection`（与 Lead Agent 共用）                                   | 开启；`warn_threshold` 3，`hard_limit` 5，`window_size` 20，`tool_freq_warn` 30，`tool_freq_hard_limit` 50 |  | `completed` + `loop_capped`                                                                        |
 | 摘要压缩           | `summarization`（与 Lead Agent 共用）                                    | 示例配置开启，按 32,000 token 触发，保留最近 10 条消息 |                          | 压缩后系统提示与最新用户消息保留，摘要写入 `summary_text` 并每次回注                              |
@@ -57,6 +57,16 @@ recursion_limit = max_turns × (每轮节点数) + (每次调用一次性节点�
 轮次用尽时执行器捕获 `GraphRecursionError`，保留最后一段助手文本作为部分结果并标记 `turn_capped`。
 
 超时以墙钟计算，超过后子 Agent 被取消，状态 `timed_out`。轮次和超时是两条独立的轴：调大 `max_turns` 时通常要同步调大 `timeout_seconds`，否则失败只是从轮次换成了超时。
+
+## 进度与结果交付
+
+普通 `task` 在子任务发布新增步骤、运行状态变化或终态时收到唤醒。父侧读取一致快照，按游标顺序转发未消费步骤，不再每 5 秒轮询。usage 和证据更新继续进入快照，但不单独唤醒消费者。
+
+主等待使用派发成功后固定一次的单调时钟 deadline，预算为 `5 * (((timeout_seconds + 60) // 5) + 1)` 秒（`timeout_seconds=1800` 时为 1865 秒），包含主循环内的事件处理时间。进度不会重置期限。到期后重新检查 registry 与结果：已经发布的终态优先交付；否则保留兼容状态 `polling_timed_out`，请求取消并安排延迟清理。事件处理器和后续验收检查没有新增强制超时。
+
+结果交付不等待执行清理。硬超时可先返回，stream/sandbox 清理继续持有容量与资源；正常 registry 移除仍等待清理栅栏。取消后的等待与延迟清理继续使用原轮询。registry 移除不发送通知，因此外部强制删除 entry 且之后没有发布时，可能到 deadline 才能发现。
+
+取消和超时终态复用既有 usage 尾部监督，在父 loop 上补报最终累计记录，按 source run ID 去重。完整入账的条件是父 loop 可接收报告，且清理在现有监督预算内完成；loop 关闭或预算耗尽沿用既有诊断，不提供持久化补报。
 
 ## 失控行为防护
 

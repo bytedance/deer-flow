@@ -72,8 +72,13 @@ def _runtime(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+class _CompletedResult(SimpleNamespace):
+    def snapshot(self, after_message_index=0):
+        return SimpleNamespace(**vars(self), revision=0, message_start_index=0, message_count=len(self.ai_messages))
+
+
 def _completed_result() -> SimpleNamespace:
-    return SimpleNamespace(
+    return _CompletedResult(
         status=_FakeSubagentStatus.COMPLETED,
         ai_messages=[],
         result="done",

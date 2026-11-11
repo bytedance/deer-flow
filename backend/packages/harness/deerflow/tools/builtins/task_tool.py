@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from time import monotonic as _monotonic
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from langchain.tools import InjectedToolCallId, tool
@@ -610,7 +611,7 @@ def _summarize_usage(records: list[dict] | None) -> dict | None:
     }
 
 
-def _report_usage_records(recorder: Any, result: Any, *, final: bool = False) -> None:
+def _report_usage_records(recorder: Any, result: Any, *, final: bool = False, records: list[dict] | None = None) -> None:
     """Deliver usage records to a resolved recorder (flag-gated, never raises).
 
     Shared core of both report paths: the unwind reports directly with a
@@ -622,7 +623,8 @@ def _report_usage_records(recorder: Any, result: Any, *, final: bool = False) ->
     """
     if not final and getattr(result, "usage_reported", True):
         return
-    records = getattr(result, "token_usage_records", None) or []
+    if records is None:
+        records = getattr(result, "token_usage_records", None) or []
     if not records:
         return
     if recorder is None:
@@ -635,7 +637,7 @@ def _report_usage_records(recorder: Any, result: Any, *, final: bool = False) ->
         logger.warning("Failed to report subagent token usage", exc_info=True)
 
 
-def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) -> None:
+def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False, records: list[dict] | None = None) -> None:
     """Report subagent token usage to the parent RunJournal, if available.
 
     Each subagent task's snapshot must be reported only once (guarded by
@@ -646,7 +648,7 @@ def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) ->
     from the poller, or via ``call_soon_threadsafe`` from the deferred
     cleaner — preserving the journal's ``deerflow_loop_bound`` contract.
     """
-    _report_usage_records(_find_usage_recorder(runtime), result, final=final)
+    _report_usage_records(_find_usage_recorder(runtime), result, final=final, records=records)
 
 
 def _supervise_terminal_usage_tail(
@@ -1110,17 +1112,19 @@ async def task_tool(
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
     execution_id = executor.execute_async(prompt, task_id=tool_call_id)
+    # Preserve the old nominal budget, including its final five-second interval.
+    # Cleanup helpers keep their separate polling budgets.
+    max_poll_count = (config.timeout_seconds + 60) // 5
+    deadline = _monotonic() + 5 * (max_poll_count + 1)
     if input_control is not None:
         input_control.bind_execution(tool_call_id, execution_id)
 
-    # Poll for task completion in backend (removes need for LLM to poll)
-    poll_count = 0
+    # Consume published changes without a periodic wakeup.
     last_status = None
     last_message_count = 0  # Track how many AI messages we've already sent
-    # Polling timeout: execution timeout + 60s buffer, checked every 5s
-    max_poll_count = (config.timeout_seconds + 60) // 5
+    pending_delivery = None
 
-    logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
+    logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s)")
 
     writer = get_stream_writer()
     try:
@@ -1139,9 +1143,14 @@ async def task_tool(
         )
 
         while True:
-            result = get_background_task_result(execution_id)
+            if pending_delivery is None:
+                holder = get_background_task_result(execution_id)
+                result = None
+            else:
+                holder, result = pending_delivery
+                pending_delivery = None
 
-            if result is None:
+            if holder is None:
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} not found in background tasks")
                 await aemit_custom_event(
                     {"type": "task_failed", "task_id": tool_call_id, "error": "Task disappeared from background tasks"},
@@ -1155,6 +1164,12 @@ async def task_tool(
                     error=error,
                 )
 
+            # Recheck registry and terminal publication at the deadline before
+            # choosing the legacy polling_timed_out outcome.
+            deadline_expired = _monotonic() >= deadline
+            if result is None:
+                result = holder.snapshot(after_message_index=0 if deadline_expired else last_message_count)
+
             # Log status changes for debugging
             if result.status != last_status:
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} status: {result.status.value}")
@@ -1167,11 +1182,11 @@ async def task_tool(
 
             # Check for new AI messages and send task_running events
             ai_messages = result.ai_messages or []
-            current_message_count = len(ai_messages)
+            current_message_count = result.message_count
             if current_message_count > last_message_count:
                 # Send task_running event for each new message
                 for i in range(last_message_count, current_message_count):
-                    message = ai_messages[i]
+                    message = ai_messages[i - result.message_start_index]
                     await aemit_custom_event(
                         {
                             "type": "task_running",
@@ -1189,7 +1204,7 @@ async def task_tool(
 
             # Check if task completed, failed, or timed out
             if result.status == SubagentStatus.COMPLETED:
-                _report_subagent_usage(runtime, result)
+                _report_subagent_usage(runtime, holder, records=result.token_usage_records)
                 await aemit_custom_event(
                     {
                         "type": "task_completed",
@@ -1200,7 +1215,7 @@ async def task_tool(
                     },
                     writer=writer,
                 )
-                logger.info(f"[trace={trace_id}] Task {tool_call_id} completed after {poll_count} polls")
+                logger.info(f"[trace={trace_id}] Task {tool_call_id} completed")
                 cleanup_background_task(execution_id)
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
@@ -1245,7 +1260,7 @@ async def task_tool(
                     knowledge_sources=getattr(result, "knowledge_sources", None),
                 )
             elif result.status == SubagentStatus.FAILED:
-                _report_subagent_usage(runtime, result)
+                _report_subagent_usage(runtime, holder, records=result.token_usage_records)
                 await aemit_custom_event(
                     {
                         "type": "task_failed",
@@ -1272,7 +1287,7 @@ async def task_tool(
                     source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
-                _report_subagent_usage(runtime, result)
+                _report_subagent_usage(runtime, holder, records=result.token_usage_records)
                 await aemit_custom_event(
                     {
                         "type": "task_cancelled",
@@ -1284,6 +1299,7 @@ async def task_tool(
                     writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} cancelled: {result.error}")
+                _supervise_terminal_usage_tail(runtime, execution_id, trace_id, _TERMINAL_USAGE_TAIL_POLLS, holder)
                 cleanup_background_task(execution_id)
                 return result_command(
                     tool_call_id=tool_call_id,
@@ -1295,7 +1311,7 @@ async def task_tool(
                     source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
-                _report_subagent_usage(runtime, result)
+                _report_subagent_usage(runtime, holder, records=result.token_usage_records)
                 await aemit_custom_event(
                     {
                         "type": "task_timed_out",
@@ -1312,7 +1328,7 @@ async def task_tool(
                     execution_id,
                     trace_id,
                     _TERMINAL_USAGE_TAIL_POLLS,
-                    result,
+                    holder,
                 )
                 cleanup_background_task(execution_id)
                 return result_command(
@@ -1325,17 +1341,26 @@ async def task_tool(
                     source_messages=getattr(result, "ai_messages", None),
                 )
 
-            # Still running, wait before next poll
-            await asyncio.sleep(5)
-            poll_count += 1
-
-            # Polling timeout as a safety net (in case thread pool timeout doesn't work)
-            # Set to execution timeout + 60s buffer, in 5s poll intervals
-            # This catches edge cases where the background task gets stuck
-            if poll_count > max_poll_count:
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                # Step forwarding above can await handlers after the deadline
+                # was already observed. Recheck immediately before deciding,
+                # without letting more progress extend the fixed wait budget.
+                final_holder = get_background_task_result(execution_id)
+                if final_holder is None:
+                    pending_delivery = (None, None)
+                    continue
+                final_snapshot = final_holder.snapshot()
+                if final_snapshot.status.is_terminal:
+                    # Deliver this exact snapshot through the shared progress
+                    # and terminal branches, even if its registry entry is
+                    # externally removed before the consumer resumes.
+                    pending_delivery = (final_holder, final_snapshot)
+                    continue
+                holder, result = final_holder, final_snapshot
                 timeout_minutes = config.timeout_seconds // 60
-                logger.error(f"[trace={trace_id}] Task {tool_call_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
-                _report_subagent_usage(runtime, result)
+                logger.error(f"[trace={trace_id}] Task {tool_call_id} waiting deadline expired (should have been caught by execution timeout)")
+                _report_subagent_usage(runtime, holder, records=result.token_usage_records)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 await aemit_custom_event(
                     {
@@ -1361,6 +1386,7 @@ async def task_tool(
                     tool_receipts=getattr(result, "tool_receipts", None),
                     source_messages=getattr(result, "ai_messages", None),
                 )
+            await holder.wait_for_change(result.revision, timeout=remaining)
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively, then
         # wait for the terminal result so the final token usage snapshot is

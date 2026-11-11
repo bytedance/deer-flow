@@ -118,6 +118,24 @@ class SubagentStatus(Enum):
         }
 
 
+@dataclass(frozen=True)
+class _SubagentSnapshot:
+    """One isolated read of published data, without execution lifecycle state."""
+
+    revision: int
+    status: SubagentStatus
+    result: str | None
+    error: str | None
+    stop_reason: str | None
+    ai_messages: list[dict[str, Any]]
+    message_start_index: int
+    message_count: int
+    token_usage_records: list[dict[str, int | str | None]]
+    tool_receipts: list[dict[str, Any]] | None
+    bash_executions: list[dict[str, Any]] | None
+    knowledge_sources: list[dict[str, Any]]
+
+
 @dataclass
 class SubagentResult:
     """Result of a subagent execution.
@@ -186,6 +204,8 @@ class SubagentResult:
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     execution_done_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _revision: int = field(default=0, init=False, repr=False)
+    _change_waiters: dict[asyncio.Future, asyncio.AbstractEventLoop] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -194,6 +214,83 @@ class SubagentResult:
         if self.status.is_terminal or self.completed_at is not None:
             self.execution_done_event.set()
 
+    def snapshot(self, after_message_index: int = 0) -> _SubagentSnapshot:
+        """Copy only unread steps while running; terminal delivery needs all steps."""
+        with self._state_lock:
+            messages = self.ai_messages or []
+            start = 0 if self.status.is_terminal else after_message_index
+            return _SubagentSnapshot(
+                revision=self._revision,
+                status=self.status,
+                result=self.result,
+                error=self.error,
+                stop_reason=self.stop_reason,
+                ai_messages=deepcopy(messages[start:]),
+                message_start_index=start,
+                message_count=len(messages),
+                token_usage_records=deepcopy(self.token_usage_records),
+                tool_receipts=deepcopy(self.tool_receipts),
+                bash_executions=deepcopy(self.bash_executions),
+                knowledge_sources=deepcopy(self.knowledge_sources),
+            )
+
+    async def wait_for_change(self, revision: int, *, timeout: float) -> None:
+        """Subscribe atomically with a version recheck on the consumer's loop."""
+        loop = asyncio.get_running_loop()
+        with self._state_lock:
+            if self._revision != revision:
+                return
+            future = loop.create_future()
+            self._change_waiters[future] = loop
+        try:
+            await asyncio.wait_for(future, timeout=timeout)
+        except TimeoutError:
+            pass
+        finally:
+            with self._state_lock:
+                self._change_waiters.pop(future, None)
+
+    def _take_change_waiters_locked(self) -> dict[asyncio.Future, asyncio.AbstractEventLoop]:
+        self._revision += 1
+        waiters, self._change_waiters = self._change_waiters, {}
+        return waiters
+
+    @staticmethod
+    def _wake_change_waiters(waiters: dict[asyncio.Future, asyncio.AbstractEventLoop]) -> None:
+        def complete(future: asyncio.Future) -> None:
+            if not future.done():
+                future.set_result(None)
+
+        for future, loop in waiters.items():
+            try:
+                loop.call_soon_threadsafe(complete, future)
+            except RuntimeError:
+                # A consumer may have closed its loop after subscription.
+                # Notification failure must never change the published result.
+                pass
+
+    def try_set_running(self) -> bool:
+        with self._state_lock:
+            if self.status.is_terminal:
+                return False
+            self.started_at = _utcnow()
+            if self.status is SubagentStatus.RUNNING:
+                return True
+            self.status = SubagentStatus.RUNNING
+            waiters = self._take_change_waiters_locked()
+        self._wake_change_waiters(waiters)
+        return True
+
+    def publish_steps(self, messages: list[dict[str, Any]], records: list[dict[str, int | str | None]]) -> None:
+        """Publish a captured suffix and its usage together before notifying."""
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            self.ai_messages.extend(deepcopy(messages))
+            self.token_usage_records = deepcopy(records)
+            waiters = self._take_change_waiters_locked() if messages else {}
+        self._wake_change_waiters(waiters)
+
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
         """Publish cumulative usage, including timeout/cancel cleanup tails."""
         with self._state_lock:
@@ -201,7 +298,7 @@ class SubagentResult:
                 SubagentStatus.CANCELLED,
                 SubagentStatus.TIMED_OUT,
             }:
-                self.token_usage_records = list(records)
+                self.token_usage_records = deepcopy(records)
 
     def update_tool_receipts(self, receipts: list[dict[str, Any]] | None) -> None:
         """Publish receipts from the latest yielded state while still running."""
@@ -297,15 +394,17 @@ class SubagentResult:
             if stop_reason is not None:
                 self.stop_reason = stop_reason
             if ai_messages is not None:
-                self.ai_messages = ai_messages
+                self.ai_messages = deepcopy(ai_messages)
             if token_usage_records is not None:
-                self.token_usage_records = token_usage_records
+                self.token_usage_records = deepcopy(token_usage_records)
             if tool_receipts is not None:
                 self.tool_receipts = [dict(receipt) for receipt in tool_receipts]
             self.admission_failure = admission_failure
             self.completed_at = completed_at or _utcnow()
             self.status = status
-            return True
+            waiters = self._take_change_waiters_locked()
+        self._wake_change_waiters(waiters)
+        return True
 
 
 def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
@@ -1713,11 +1812,8 @@ class SubagentExecutor:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
                 async with slot:
-                    with result._state_lock:
-                        if result.status.is_terminal:
-                            return result
-                        result.status = SubagentStatus.RUNNING
-                        result.started_at = _utcnow()
+                    if not result.try_set_running():
+                        return result
                     return await self._aexecute_admitted(task, result)
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
@@ -1793,10 +1889,7 @@ class SubagentExecutor:
                 self.trace_id,
                 self.config.name,
             )
-        ai_messages = result.ai_messages
-        if ai_messages is None:
-            ai_messages = []
-            result.ai_messages = ai_messages
+        ai_messages = result.snapshot().ai_messages
         # O(1) duplicate detection for streamed AI messages. ``stream_mode="values"``
         # re-yields the full state every super-step, so the same trailing message is
         # re-examined on each chunk; an id-keyed set keeps that check O(1) instead of
@@ -1980,8 +2073,6 @@ class SubagentExecutor:
                         cancelled_during_stream = True
                         break
 
-                    result.update_token_usage_records(collector.snapshot_records())
-
                     # Capture every step message (assistant turns AND tool outputs)
                     # appended since the last chunk. A single super-step can append
                     # several ToolMessages when the model emits multiple tool calls in
@@ -1990,6 +2081,7 @@ class SubagentExecutor:
                     messages = chunk.get("messages") or []
                     previous_count = len(ai_messages)
                     processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                    result.publish_steps(ai_messages[previous_count:], collector.snapshot_records())
                     if len(ai_messages) > previous_count:
                         logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
             finally:

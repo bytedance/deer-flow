@@ -126,7 +126,12 @@ async def test_real_task_tool_events_reach_astream_events(monkeypatch):
         model="test-model",
         timeout_seconds=10,
     )
-    completed = SimpleNamespace(
+
+    class _CompletedResult(SimpleNamespace):
+        def snapshot(self, after_message_index=0):
+            return SimpleNamespace(**vars(self), revision=0, message_start_index=0, message_count=len(self.ai_messages))
+
+    completed = _CompletedResult(
         status=_SubagentStatus.COMPLETED,
         ai_messages=[],
         result="delegated result",
