@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.runtime.events.store.base import RunEventStoreNotCommittedError
 from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
 # ---------------------------------------------------------------------------
@@ -208,7 +209,7 @@ async def test_put_batch_failure_rolls_back_no_partial_records(monkeypatch):
         # First attempt — fails after partial output; expect raise. The
         # in-memory seq counter is advanced because reservation happens under
         # the lock, but the partial file contents must be rolled back.
-        with pytest.raises(OSError):
+        with pytest.raises(RunEventStoreNotCommittedError):
             await store.put_batch(events)
 
         # Retry the full batch with the real append, matching worker.py's
@@ -259,7 +260,7 @@ async def test_mixed_run_batch_failure_restores_all_run_files(monkeypatch):
             {"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace", "content": "new-r1"},
             {"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace", "content": "new-r2"},
         ]
-        with pytest.raises(OSError, match="second-run"):
+        with pytest.raises(RunEventStoreNotCommittedError, match="second-run"):
             await store.put_batch(events)
 
         assert r1_path.read_bytes() == original_r1
