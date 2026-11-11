@@ -92,11 +92,12 @@ def test_normalize_memory_data_does_not_mutate_caller() -> None:
     assert payload == snapshot
 
 
-@pytest.mark.parametrize("confidence,expected", [(None, 0.5), (True, 0.5), ("invalid", 0.5), (float("nan"), 0.5), (float("inf"), 0.5), (0, 0), (-1, 0), (2, 1), ("0.8", 0.8)])
+@pytest.mark.parametrize("confidence,expected", [(None, 0.5), (True, 0.5), ("invalid", 0.5), (float("nan"), 0.5), (float("inf"), 0.5), (0, 0), (-1, 0), (2, 1), ("0.8", 0.8), (10**400, 1.0), (-(10**400), 0.0)])
 def test_normalize_legacy_fact_metadata(confidence, expected):
     fact = {"id": "legacy", "content": "  Keep conclusions first.  ", "confidence": confidence, "source": "  "}
     result = normalize_memory_data({"facts": [fact]})["facts"][0]
     assert result["confidence"] == expected
+    assert fact["confidence"] is confidence
     assert result["content"] == "Keep conclusions first."
     assert result["source"] == "unknown"
 

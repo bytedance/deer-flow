@@ -519,6 +519,23 @@ def test_first_agent_load_removes_legacy_per_agent_memory_json(storage: FileMemo
     assert "facts" not in json.loads(user_memory_path.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("confidence,expected", [(10**400, 1.0), (-(10**400), 0.0)], ids=["positive", "negative"])
+def test_legacy_agent_overflow_migration_keeps_verified_backup(storage: FileMemoryStorage, confidence: int, expected: float) -> None:
+    user_memory_path = storage._get_memory_file_path("agent-a", user_id="alice")
+    legacy_path = user_memory_path.parent / "agents" / "agent-a" / "memory.json"
+    legacy_path.parent.mkdir(parents=True)
+    memory = _memory_with_fact("legacy agent fact")
+    memory["facts"][0]["confidence"] = confidence
+    original = json.dumps(memory).encode("utf-8")
+    legacy_path.write_bytes(original)
+
+    loaded = storage.load("agent-a", user_id="alice")
+
+    assert loaded["facts"][0]["confidence"] == expected
+    assert legacy_path.with_name("memory.json.v1.bak").read_bytes() == original
+    assert storage.reload("agent-a", user_id="alice")["facts"] == loaded["facts"]
+
+
 def test_lazy_agent_migration_notifies_retrieval_adapter(tmp_path: Path) -> None:
     class RecordingRetrieval:
         def __init__(self) -> None:
