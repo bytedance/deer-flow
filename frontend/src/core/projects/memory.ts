@@ -42,6 +42,7 @@ export function useProjectMemory(projectId: string) {
       memoryRequest<ProjectMemory>(projectId, "", { signal }),
     enabled: !isStaticWebsiteOnly(),
     refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
   });
 }
 

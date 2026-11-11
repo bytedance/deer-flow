@@ -1895,6 +1895,8 @@ class MemoryUpdater:
             verdict_payload = getattr(verdict, "payload", None)
             if isinstance(verdict_payload, dict):
                 metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
+            if getattr(verdict, "skip", False) and project is not None:
+                metrics["project_memory_prescreen_veto"] = True
             if getattr(verdict, "skip", False) and project is None:
                 # The pre-screen decided this batch is not worth a call: consume it
                 # and advance the watermark (nothing else runs -- no prompt, no
@@ -1984,7 +1986,15 @@ class MemoryUpdater:
                 signals=frozenset(feed_signals),
             )
             if success and project is not None:
-                project["apply"](_parse_memory_update_response(response.content), self._config.fact_confidence_threshold)
+                try:
+                    project["apply"](_parse_memory_update_response(response.content), self._config.fact_confidence_threshold)
+                except Exception:
+                    # The user pool has committed. Consume this batch rather than
+                    # replaying its paid extraction and user writes on every turn.
+                    metrics["project_memory_apply_success"] = False
+                    logger.warning("Project memory apply failed after user memory committed; consuming extraction batch", exc_info=True)
+                else:
+                    metrics["project_memory_apply_success"] = True
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
                 # suffix, so this is messages[-1]). Skipped on the emergency

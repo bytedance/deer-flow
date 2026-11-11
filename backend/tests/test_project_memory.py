@@ -212,6 +212,8 @@ def test_same_llm_call_routes_project_facts_without_global_leak(repo, tmp_path, 
     model = Mock()
     model.invoke.return_value = AIMessage(content=json.dumps({"user": {}, "history": {}, "newFacts": [fact(), dict(fact("Prefers Chinese"), scope="user")]}))
     config = DeerMemConfig(storage_path=str(tmp_path / "global"), token_counting="char", staleness_review_enabled=False)
+    metrics = []
+    config.extraction_callback = metrics.append
     config.project_memory = lambda messages, thread_id, user_id: prepare_project_extraction(messages, thread_id, user_id, repo=repo)
     storage = FileMemoryStorage(config)
     updater = MemoryUpdater(config=config, storage=storage, llm=model)
@@ -225,3 +227,75 @@ def test_same_llm_call_routes_project_facts_without_global_leak(repo, tmp_path, 
     assert [f["content"] for f in repo.get("p1", "u1")["facts"]] == ["Reports exclude tax"]
     assert [f["content"] for f in storage.load("__default__", user_id="u1")["facts"]] == ["Prefers Chinese"]
     assert "Project memory" in str(model.invoke.call_args.args[0])
+    assert metrics[0]["project_memory_apply_success"] is True
+    assert metrics[0]["project_memory_prescreen_veto"] is True
+
+
+@pytest.mark.parametrize("error", [RuntimeError("synthetic project store failure"), json.JSONDecodeError("synthetic project parse failure", "", 0)])
+def test_project_apply_failure_consumes_committed_batch_without_replaying_llm(repo, tmp_path, monkeypatch, caplog, error):
+    from unittest.mock import Mock
+
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
+    from deerflow.projects.memory import prepare_project_extraction, with_project_memory
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    model = Mock()
+    model.invoke.return_value = AIMessage(content=json.dumps({"user": {}, "history": {}, "newFacts": [fact(), dict(fact("Prefers Chinese"), scope="user")]}))
+    metrics = []
+    config = DeerMemConfig(storage_path=str(tmp_path / "global"), token_counting="char", staleness_review_enabled=False)
+    config.extraction_callback = metrics.append
+    config.project_memory = lambda messages, thread_id, user_id: prepare_project_extraction(messages, thread_id, user_id, repo=repo)
+    project_apply = Mock(side_effect=error)
+    monkeypatch.setattr(repo, "apply", project_apply)
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config=config, storage=storage, llm=model)
+    messages = with_project_memory([HumanMessage(content="Reports exclude tax", id="h1"), AIMessage(content="Understood", id="a1")], {PROJECT_CONTEXT_KEY: {"project_id": "p1", "memory": repo.get("p1", "u1")}})
+
+    assert updater.update_memory(messages, thread_id="t1", agent_name="__default__", user_id="u1")
+    assert [f["content"] for f in storage.load("__default__", user_id="u1")["facts"]] == ["Prefers Chinese"]
+    assert repo.get("p1", "u1")["facts"] == []
+    assert len(metrics) == 1
+    assert metrics[0]["success"] is True  # The user pool really committed.
+    assert metrics[0]["project_memory_apply_success"] is False
+    assert "Project memory apply failed" in caplog.text
+    # Both the in-process and persisted watermark must consume the batch.
+    for current in (updater, MemoryUpdater(config=config, storage=FileMemoryStorage(config), llm=model)):
+        assert current.update_memory(messages, thread_id="t1", agent_name="__default__", user_id="u1")
+    assert model.invoke.call_count == 1
+    assert project_apply.call_count == 1
+    assert len(metrics) == 1
+
+
+def test_user_commit_failure_remains_retryable_before_project_apply(repo, tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
+    from deerflow.projects.memory import prepare_project_extraction, with_project_memory
+    from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+
+    model = Mock()
+    model.invoke.return_value = AIMessage(content=json.dumps({"user": {}, "history": {}, "newFacts": [fact(), dict(fact("Prefers Chinese"), scope="user")]}))
+    metrics = []
+    config = DeerMemConfig(storage_path=str(tmp_path / "global"), token_counting="char", staleness_review_enabled=False)
+    config.extraction_callback = metrics.append
+    config.project_memory = lambda messages, thread_id, user_id: prepare_project_extraction(messages, thread_id, user_id, repo=repo)
+    storage = FileMemoryStorage(config)
+    commit = storage.apply_changes
+    monkeypatch.setattr(storage, "apply_changes", Mock(side_effect=OSError("synthetic user commit failure")))
+    project_apply = Mock(wraps=repo.apply)
+    monkeypatch.setattr(repo, "apply", project_apply)
+    updater = MemoryUpdater(config=config, storage=storage, llm=model)
+    messages = with_project_memory([HumanMessage(content="Reports exclude tax", id="h1"), AIMessage(content="Understood", id="a1")], {PROJECT_CONTEXT_KEY: {"project_id": "p1", "memory": repo.get("p1", "u1")}})
+    assert not updater.update_memory(messages, thread_id="t1", agent_name="__default__", user_id="u1")
+    assert metrics[0]["success"] is False
+    assert "project_memory_apply_success" not in metrics[0]
+    project_apply.assert_not_called()
+    monkeypatch.setattr(storage, "apply_changes", commit)
+    assert updater.update_memory(messages, thread_id="t1", agent_name="__default__", user_id="u1")
+    assert model.invoke.call_count == 2
+    assert project_apply.call_count == 1
+    assert metrics[-1]["project_memory_apply_success"] is True

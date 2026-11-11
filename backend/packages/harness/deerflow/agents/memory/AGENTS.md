@@ -1,6 +1,9 @@
 Project facts: `projects/memory.py` owns the bounded SQL pool and DeerMem host
 hook. User edits fence queued writes; capture copies pin scope; injection honors
 agent/global memory opt-outs. See README Project memory.
+An active pool vetoes the user-only pre-screen (`project_memory_prescreen_veto`).
+After a user commit, project-apply failures are logged, reported separately as
+`project_memory_apply_success: false`, and consumed without replaying extraction.
 
 ### Memory System
 

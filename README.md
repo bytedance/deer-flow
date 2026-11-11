@@ -3915,6 +3915,18 @@ pool. Project facts are pinned with the instructions at run start and are used
 only inside that project. They are background context, subordinate to explicit
 instructions and the current request.
 
+An active project pool keeps the shared extraction call enabled for every
+eligible batch, even when the user-memory pre-screen would skip it: that
+pre-screen does not assess project facts. Existing project facts also add input
+tokens. Turn off automatic extraction in the project's Instructions tab to stop
+this project-specific work while retaining its stored facts.
+
+Project writes are best-effort after the user pool commits. If the project write
+fails, the batch is consumed so later turns do not replay the paid model call or
+the committed user writes. The failure is logged and reported separately as
+`project_memory_apply_success: false`; `success` still describes the user-pool
+commit. A failed project update is not automatically retried.
+
 The Instructions tab shows these facts below the editor. Delete incorrect or
 outdated facts, turn automatic extraction off, or move a fact into instructions.
 Turning extraction off preserves existing facts and their injection; deleting

@@ -11,6 +11,11 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
 - **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
   `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
   `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
@@ -16275,3 +16280,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
