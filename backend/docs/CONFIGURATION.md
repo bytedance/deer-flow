@@ -1981,7 +1981,7 @@ while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
 use `/home/alice/...`. Native Windows paths can use forward slashes as above,
 or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
 backslashes literal; only double-quoted scalars interpret backslash escapes.
-These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+These are path examples; the [local development prerequisites](../../docs/guide/deployment.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
