@@ -271,3 +271,42 @@ async def test_scope_agent_lookup_rejects_an_invalid_agent_name_without_loading(
 
     assert excinfo.value.status_code == 422
     assert excinfo.value.detail == detail
+
+
+@pytest.mark.anyio
+async def test_scope_agent_lookup_bounds_an_oversized_invalid_agent_name(monkeypatch) -> None:
+    """Admission echoes the caller's raw ``agent_name``; a huge value must not bloat the 422 or logs."""
+    from app.gateway import services
+
+    def _unexpected(name, *, user_id=None):
+        raise AssertionError("an invalid agent name must not reach the agent store")
+
+    monkeypatch.setattr(services, "load_agent_config", _unexpected)
+    oversized = "Bad Name!" + "x" * 100_000
+
+    with pytest.raises(HTTPException) as excinfo:
+        await services._load_scope_agent_config(assistant_id=oversized, user_id="u1")
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail.startswith("Invalid agent_name 'Bad Name!xxx")
+    assert excinfo.value.detail.endswith(": must contain only letters, digits, and hyphens after normalization.")
+    assert len(excinfo.value.detail) < 400
+
+
+@pytest.mark.anyio
+async def test_scope_agent_lookup_bounds_an_oversized_missing_agent_name(monkeypatch) -> None:
+    """A syntactically valid name has no length cap either, so the not-found detail is bounded too."""
+    from app.gateway import services
+
+    def _missing(name, *, user_id=None):
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(services, "load_agent_config", _missing)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await services._load_scope_agent_config(assistant_id="a" * 100_000, user_id="u1")
+
+    assert excinfo.value.status_code == 422
+    assert excinfo.value.detail.startswith("Agent 'aaa")
+    assert excinfo.value.detail.endswith("' not found")
+    assert len(excinfo.value.detail) < 400

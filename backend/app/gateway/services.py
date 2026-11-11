@@ -1451,6 +1451,11 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
+# Error details echo caller-supplied agent names; bound them so an oversized
+# value cannot bloat the response or any log line that records the detail.
+_MAX_ECHOED_AGENT_NAME_CHARS = 200
+
+
 def custom_agent_name(assistant_id: str | None, *, field: str = "assistant_id") -> str | None:
     """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
 
@@ -1465,7 +1470,7 @@ def custom_agent_name(assistant_id: str | None, *, field: str = "assistant_id") 
         return None
     normalized = assistant_id.strip().lower().replace("_", "-")
     if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-        raise ValueError(f"Invalid {field} {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        raise ValueError(f"Invalid {field} {assistant_id!r:.{_MAX_ECHOED_AGENT_NAME_CHARS}}: must contain only letters, digits, and hyphens after normalization.")
     return normalized
 
 
@@ -2217,11 +2222,11 @@ async def _load_scope_agent_config(
             user_id=user_id,
         )
     except FileNotFoundError as exc:
-        raise HTTPException(status_code=422, detail=f"Agent '{normalized}' not found") from exc
+        raise HTTPException(status_code=422, detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' not found") from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail=f"Agent '{normalized}' configuration could not be loaded",
+            detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' configuration could not be loaded",
         ) from exc
 
 
