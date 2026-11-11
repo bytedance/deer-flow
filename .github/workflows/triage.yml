@@ -55,7 +55,13 @@ jobs:
             // ---- area: replaces .github/labeler.yml (path -> area) ----
             const AREA_RULES = [
               ['area:frontend', [/^frontend\//]],
-              ['area:backend',  [/^backend\/app\//, /^backend\/packages\/harness\/deerflow\/(runtime|persistence|config|tools|guardrails|tracing|models|utils|uploads)\//]],
+              // Cover both backend packages. Keep the harness exclusions aligned
+              // with the dedicated tree rules below; the offline replay checks this.
+              ['area:backend',  [
+                /^backend\/app\//,
+                /^backend\/packages\/harness\/(?!deerflow\/(?:agents|subagents|reflection|sandbox|skills|mcp)\/)/,
+                /^backend\/packages\/extension-api\//,
+              ]],
               ['area:agents',   [/^backend\/packages\/harness\/deerflow\/(agents|subagents|reflection)\//, /(^|\/)langgraph\.json$/, /^backend\/.*\/prompts\//]],
               ['area:sandbox',  [/^docker\//, /^backend\/packages\/harness\/deerflow\/sandbox\//, /(^|\/)Dockerfile$/]],
               ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend\/src\/core\/skills\//]],

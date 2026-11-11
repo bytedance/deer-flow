@@ -3,11 +3,13 @@ import logging
 import os
 
 from langchain.chat_models import BaseChatModel
+from langchain_openai import ChatOpenAI
 from langchain_openai.chat_models.base import BaseChatOpenAI
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.managed_model_providers import OPENAI_GPT6_MODELS, get_managed_model_provider
+from deerflow.models.openai_response import GuardedChatOpenAI
 from deerflow.models.reasoning import ReasoningContract, ReasoningPolicyError, resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.reflection import resolve_class
 from deerflow.tracing import build_tracing_callbacks
@@ -572,6 +574,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if model_config is None:
         raise ValueError(f"Model {name} not found in config") from None
     model_class = resolve_class(model_config.use, BaseChatModel)
+    if model_config.use == "langchain_openai:ChatOpenAI" and model_class is ChatOpenAI:
+        model_class = GuardedChatOpenAI
     model_settings_from_config = model_config.model_dump(exclude_none=True, exclude=set(_MODEL_METADATA_FIELDS))
     if isinstance(model_config.reasoning, bool | str):
         # Before the capability contract, ``reasoning`` was an unrestricted

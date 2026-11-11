@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
 import threading
 import time
 from collections import deque
@@ -13,6 +12,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, override
 
+import httpx
+import openai
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
@@ -26,6 +27,7 @@ from langgraph.errors import GraphBubbleUp
 from deerflow.agents.middlewares.model_response import append_visible_text, finish_reason, has_tool_call_intent, has_visible_content, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.models.request_admission import AdmissionError
+from deerflow.models.response_errors import EmptyModelResponseError
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
@@ -39,21 +41,6 @@ _NON_CIRCUIT_FAILURE_REASONS = {"burst_rate", "empty_response"}
 @dataclass(slots=True)
 class _CircuitAdmission:
     generation: int = -1
-
-
-class EmptyModelResponseError(RuntimeError):
-    """The model completed normally without producing persistent content."""
-
-    code = "EMPTY_RESPONSE"
-
-    def __init__(
-        self,
-        message: str = "Model returned a completed response with no content",
-        *,
-        response_message: AIMessage | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.response_message = response_message
 
 
 def _raise_for_empty_response(response: ModelCallResult) -> None:
@@ -82,55 +69,6 @@ def _consume_empty_response_retry(request: ModelRequest) -> bool:
 
 
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
-_BUSY_PATTERNS = (
-    "server busy",
-    "temporarily unavailable",
-    "try again later",
-    "please retry",
-    "please try again",
-    "overloaded",
-    "high demand",
-    "rate limit",
-    "负载较高",
-    "服务繁忙",
-    "稍后重试",
-    "请稍后重试",
-)
-_QUOTA_PATTERNS = (
-    "insufficient_quota",
-    "quota",
-    "billing",
-    "credit",
-    "payment",
-    "余额不足",
-    "超出限额",
-    "额度不足",
-    "欠费",
-)
-_AUTH_PATTERNS = (
-    "authentication",
-    "unauthorized",
-    "invalid api key",
-    "invalid_api_key",
-    "permission",
-    "forbidden",
-    "access denied",
-    "无权",
-    "未授权",
-)
-
-# Provider burst-rate (``limit_burst_rate``) signals. This is a *rate-of-change*
-# limit, not a quota limit: the provider throttles when request RPM ramps up too
-# steeply (e.g. the 08:30 morning peak going 0 -> full throttle in seconds).
-# Matched against both the error message and the error ``code``/``type``.
-_BURST_PATTERNS = (
-    "limit_burst_rate",
-    "rate increased too quickly",
-    "burst rate",
-    "请求速率增长过快",
-    "突发速率",
-)
-
 # Per-exception retry budget overrides.
 #
 # Some transient errors are retriable in principle but expensive to retry at
@@ -167,39 +105,7 @@ _REASON_RETRY_BUDGETS: dict[str, int] = {
 
 # Lower-cased message of the ``ValueError`` langchain_core raises when a
 # streamed response (HTTP 200) yields no generation chunk at all.
-_EMPTY_STREAM_MARKER = "no generations found in stream"
-
-# An HTTP status written into the text of an error that carries no status:
-# ``[504]`` - but not an index such as ``messages[502]``, which the bracketed
-# form's lookbehind rejects; ``HTTP 502``, ``(HTTP 502)``, ``HTTP/1.1 502``;
-# ``status 503``, ``status: 503``, ``status_code=503``, ``"status": 503``. The
-# keyword is required and must be separated from the number - by spaces or tabs
-# after ``HTTP``, and also by ``:`` or ``=`` after ``status`` - so a bare number
-# (``130504 tokens``), one on the next line or one run into the keyword
-# (``status503``) never counts. Digits are ASCII only: ``\d`` and ``int()``
-# also accept other scripts' digits. The spaces before and after ``:``/``=``
-# are separate runs, which keeps matching linear in the length of the message.
-_IN_BAND_STATUS_RE = re.compile(r"(?<![\w\]])\[([0-9]{3})\]|\bhttp(?:/[0-9](?:\.[0-9])?)?[ \t]+([0-9]{3})\b|\bstatus(?:[ _]?code)?(?:[\"']?[ \t]*[:=][ \t]*|[\"']?[ \t]+)([0-9]{3})\b")
-
-# Runs of ``_``, ``-`` and whitespace. A status-less error's busy check reads each
-# run as one space, so ``rate-limit`` and ``RATE_LIMIT_...`` match ``rate limit``.
-_SEPARATOR_RUN_RE = re.compile(r"[\s_\-]+")
-
-# Exception class names that indicate the upstream stream-chunk watchdog
-# fired because the model stalled mid-flight. These deserve a more specific
-# user-facing message than the generic "temporarily unavailable" copy,
-# because the typical root cause is a long tool-call serialization stalling
-# the upstream stream — and the most actionable advice we can give the user
-# is "ask for a shorter / split output" rather than "wait and retry".
-# Generic connection drops (httpx RemoteProtocolError / ReadError) are
-# intentionally excluded: they routinely fire on transient network blips
-# with normal payloads, where the "split the work" guidance is misleading.
-_STREAM_DROP_EXCEPTIONS: frozenset[str] = frozenset(
-    {
-        "StreamChunkTimeoutError",
-    }
-)
-
+_EMPTY_STREAM_MARKER = "no generations found in stream."
 
 # Process-global LLM call concurrency cap. ONE limiter is shared across every
 # ``LLMErrorHandlingMiddleware`` instance and every call path: the lead agent
@@ -504,6 +410,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         return {
             "empty_response_retry_limit": 1,
             "empty_response_retry_scope": "run",
+            "error_classification": "structured_evidence_v1",
         }
 
     def _max_attempts_for(self, exc: BaseException, reason: str = "transient") -> int:
@@ -520,6 +427,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         class_override = _RETRY_BUDGET_OVERRIDES.get(type(exc).__name__)
         if class_override is not None:
             candidates.append(class_override)
+        # Connection/timeout types already establish a transient transport failure.
+        if isinstance(exc, openai.APIError) and not isinstance(exc, openai.APIConnectionError) and not _has_status_or_error_code(exc):
+            candidates.append(2)
         reason_override = _REASON_RETRY_BUDGETS.get(reason)
         if reason_override is not None:
             candidates.append(reason_override)
@@ -623,76 +533,41 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _classify_error(self, exc: BaseException) -> tuple[bool, str]:
         if isinstance(exc, AdmissionError):
             return False, "admission"
-        detail = _extract_error_detail(exc)
-        lowered = detail.lower()
-        error_code = _extract_error_code(exc)
-        status_code = _extract_status_code(exc)
-        # A provider that has already answered ``200`` reports a later failure
-        # inside the stream; the openai SDK raises it as a bare ``APIError`` with
-        # no status code and no response. Only such status-less errors take a
-        # status from their own fields and text (``_extract_in_band_status``).
-        # As with a mid-stream ``ReadError``, a retry re-runs the whole call:
-        # tokens the failed attempt already streamed are not taken back.
-        status_less = status_code is None
-
         if isinstance(exc, EmptyModelResponseError):
             return True, "empty_response"
-        if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
-            return False, "quota"
-        if _matches_any(lowered, _AUTH_PATTERNS):
+        status = _extract_status_code(exc)
+        if status is None:
+            status = _extract_in_band_status(exc, include_type=False)
+        code = _extract_error_code(exc)
+        code = code.strip().casefold() if isinstance(code, str) else None
+        if status in {401, 403}:
             return False, "auth"
-        # Burst-rate (limit_burst_rate) 429 is retriable but needs its own
-        # policy: a tight retry budget and a longer backoff base (see
-        # _REASON_RETRY_BUDGETS / _build_retry_delay_ms). Detected before the
-        # generic 429->transient mapping so it isn't lumped in with ordinary
-        # transient errors.
-        if _matches_any(lowered, _BURST_PATTERNS) or _matches_any(str(error_code).lower(), _BURST_PATTERNS):
-            return True, "burst_rate"
-
-        exc_name = exc.__class__.__name__
-        if exc_name in {
-            "APITimeoutError",
-            "APIConnectionError",
-            "InternalServerError",
-            "ReadTimeout",
-            "ConnectTimeout",
-            "WriteTimeout",
-            "PoolTimeout",
-            "TimeoutException",
-            "ReadError",  # httpx.ReadError: connection dropped mid-stream
-            "RemoteProtocolError",  # httpx: server closed connection unexpectedly
-            "StreamChunkTimeoutError",  # langchain-openai: chunk gap exceeded stream_chunk_timeout
-        }:
-            return True, "transient"
-        # Upstream sometimes returns ``200 OK`` with an empty
-        # ``generations`` list (observed against Volces "coding" /
-        # ark.cn-beijing.volces.com). ``langchain_core.language_models.
-        # chat_models.ainvoke`` then crashes with
-        # ``IndexError: list index out of range`` at
-        # ``llm_result.generations[0][0].message``. That isn't really a
-        # client bug — it's a transient upstream-payload glitch — so we
-        # route it through the same retry/backoff path as other transient
-        # provider failures rather than failing the whole run.
-        if isinstance(exc, IndexError):
-            return True, "transient"
-        # The streaming counterpart of the empty-``generations`` glitch above:
-        # ``langchain_core.language_models.chat_models.generate_from_stream``
-        # raises ``ValueError("No generations found in stream.")`` when the
-        # provider answers ``200 OK`` but the stream carries no chunk at all.
-        # Same upstream-payload glitch, same retry/backoff path.
-        if isinstance(exc, ValueError) and _EMPTY_STREAM_MARKER in lowered:
-            return True, "transient"
-        if status_less:
-            status_code = _extract_in_band_status(exc)
-            if status_code is not None and 500 <= status_code <= 599:
+        # Exact provider codes refine a rate-limit response, never override a
+        # contradictory HTTP status. Prose is retained as diagnostic data only.
+        if status in {None, 429}:
+            if code in {"insufficient_quota", "quota_exceeded", "billing_hard_limit_reached"}:
+                return False, "quota"
+            if code == "limit_burst_rate":
+                return True, "burst_rate"
+            if code in {"rate_limit_exceeded", "rate_limit_error"}:
                 return True, "transient"
-        if status_code in _RETRIABLE_STATUS_CODES:
+        if status is None:
+            status = _extract_in_band_status(exc)
+        if status is not None:
+            return (True, "transient") if status in _RETRIABLE_STATUS_CODES or 500 <= status <= 599 else (False, "generic")
+        if code in {"invalid_api_key", "authentication_error", "permission_denied"}:
+            return False, "auth"
+        if isinstance(exc, (TimeoutError, ConnectionError, httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, openai.APIConnectionError)):
             return True, "transient"
-        if _matches_any(lowered, _BUSY_PATTERNS):
-            return True, "busy"
-        if status_code is None and (_matches_any(_normalize_separators(detail), _BUSY_PATTERNS) or _matches_any(_normalize_separators(str(error_code)), _BUSY_PATTERNS)):
-            return True, "busy"
-
+        # This exact LangChain adapter sentinel is a protocol failure, unlike
+        # arbitrary IndexError or text mentioning an empty response.
+        if isinstance(exc, ValueError) and str(exc).strip().casefold() == _EMPTY_STREAM_MARKER:
+            return True, "transient"
+        # OpenAI can report a failure inside an HTTP-200 stream without a
+        # status or structured error code. Exception type is the only evidence
+        # available in that case, so allow one reconnect and then surface it.
+        if isinstance(exc, openai.APIError) and not _has_status_or_error_code(exc):
+            return True, "transient"
         return False, "generic"
 
     def _bounded_model_call_sync(
@@ -853,20 +728,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if reason == "empty_response":
             return "The configured LLM provider returned an empty response after one automatic retry. Please continue the conversation or use a different model."
         if reason in {"busy", "transient"}:
-            # Stream-drop failures (chunk-gap timeout, peer-closed connection,
-            # raw read error) almost always point at a single oversized
-            # tool-call payload — the model spent so long serializing JSON
-            # arguments that the upstream provider buffered and the stream
-            # gap exceeded `stream_chunk_timeout`. Surfacing this distinct
-            # cause lets the user split or shorten their next request
-            # instead of helplessly retrying the same prompt.
-            if type(exc).__name__ in _STREAM_DROP_EXCEPTIONS:
-                return (
-                    "The model's streaming response was interrupted before it could "
-                    "finish. This usually happens when a single response or tool call "
-                    "is very large — please ask the assistant to split the work into "
-                    "smaller steps, or shorten the requested output, and try again."
-                )
+            if isinstance(exc, (TimeoutError, httpx.ReadError, httpx.RemoteProtocolError)):
+                return "The model's streaming response was interrupted before it could finish. The cause is unknown from this error. Please try again; if it persists, inspect the provider and connection diagnostics."
             return "The configured LLM provider is temporarily unavailable after multiple retries. Please wait a moment and continue the conversation."
         return f"LLM request failed: {detail}"
 
@@ -1076,10 +939,6 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             raise
 
 
-def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:
-    return any(pattern in detail for pattern in patterns)
-
-
 def _extract_error_code(exc: BaseException) -> Any:
     for attr in ("code", "error_code"):
         value = getattr(exc, attr, None)
@@ -1088,6 +947,10 @@ def _extract_error_code(exc: BaseException) -> Any:
 
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
+        for key in ("code", "type"):
+            value = body.get(key)
+            if value not in (None, ""):
+                return value
         error = body.get("error")
         if isinstance(error, dict):
             for key in ("code", "type"):
@@ -1100,23 +963,15 @@ def _extract_error_code(exc: BaseException) -> Any:
 def _extract_status_code(exc: BaseException) -> int | None:
     for attr in ("status_code", "status"):
         value = getattr(exc, attr, None)
-        if isinstance(value, int):
+        if isinstance(value, int) and not isinstance(value, bool):
             return value
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
-    return status if isinstance(status, int) else None
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
-def _extract_in_band_status(exc: BaseException) -> int | None:
-    """Return the HTTP status that a status-less error carries in its contents.
-
-    Three sources, in order; the first that yields a status decides:
-    a numeric ``code`` on the error, or a numeric ``code``/``status``/
-    ``status_code`` in its body or the body's ``error`` object; an explicit
-    status in the message (``_IN_BAND_STATUS_RE``, leftmost match in 400-599);
-    and ``type == "server_error"``, which OpenAI-compatible APIs use for 5xx
-    failures (500).
-    """
+def _extract_in_band_status(exc: BaseException, *, include_type: bool = True) -> int | None:
+    """Read only explicit numeric fields or the provider's server_error type."""
     body = getattr(exc, "body", None)
     body = body if isinstance(body, dict) else {}
     error = body.get("error")
@@ -1133,14 +988,39 @@ def _extract_in_band_status(exc: BaseException) -> int | None:
         status = _as_http_status(value)
         if status is not None:
             return status
-    for match in _IN_BAND_STATUS_RE.finditer(_extract_error_detail(exc).lower()):
-        status = int(next(group for group in match.groups() if group))
-        if 400 <= status <= 599:
-            return status
-    for value in (getattr(exc, "type", None), body.get("type"), error.get("type")):
-        if isinstance(value, str) and value.strip().lower() == "server_error":
-            return 500
+    if include_type:
+        for value in (getattr(exc, "type", None), body.get("type"), error.get("type")):
+            if isinstance(value, str) and value.strip().lower() == "server_error":
+                return 500
     return None
+
+
+def _has_status_or_error_code(exc: BaseException) -> bool:
+    """Return whether an exception carries a usable status or explicit code."""
+    status = _extract_status_code(exc)
+    if status is None:
+        status = _extract_in_band_status(exc, include_type=False)
+    if status is not None:
+        return True
+
+    for attr in ("code", "error_code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value.strip():
+            return True
+
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return False
+    candidates = [body]
+    error = body.get("error")
+    if isinstance(error, dict):
+        candidates.append(error)
+    for candidate in candidates:
+        for key in ("code", "error_code"):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+    return False
 
 
 def _as_http_status(value: Any) -> int | None:
@@ -1151,11 +1031,6 @@ def _as_http_status(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and 400 <= value <= 599:
         return value
     return None
-
-
-def _normalize_separators(text: str) -> str:
-    """Lower-case ``text`` and replace each run of ``_``, ``-`` and whitespace with one space."""
-    return _SEPARATOR_RUN_RE.sub(" ", text.lower())
 
 
 def _extract_retry_after_ms(exc: BaseException) -> int | None:

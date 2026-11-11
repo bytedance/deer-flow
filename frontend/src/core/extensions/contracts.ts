@@ -3,6 +3,8 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { Translations } from "@/core/i18n";
 import type { AgentThread } from "@/core/threads/types";
 
+import type { ExtensionDocumentation } from "./documentation";
+
 export type ExtensionSettings = Readonly<
   Record<string, boolean | number | string>
 >;
@@ -49,6 +51,9 @@ export type FrontendContribution = {
   description: string;
   settings: ExtensionSettings;
   backend_actions?: string[];
+  model_tools?: string[];
+  documentation?: ExtensionDocumentation;
+  runtime_only?: boolean;
 };
 export type ConversationActionContext = {
   thread: AgentThread;
