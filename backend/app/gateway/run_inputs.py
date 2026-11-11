@@ -100,16 +100,19 @@ async def answered_pause_run_id(store, thread_id: str, *, user_id: str | None, e
     A resume admitted through checkpoint-only recovery has no answer handle:
     an earlier attempt consumed the paused row and then died. That row still
     reads ``success`` with the paused marker and pending queue items, so the
-    recovered resume can continue it instead of stranding them.
+    recovered resume can continue it instead of stranding them. Returns the
+    newest such row; drained pauses are skipped rather than ending the search,
+    so an older pause that still holds inputs is found whatever the
+    dispatch order left behind.
     """
     for row in await store.list_input_runs(thread_id, user_id=user_id):
         if row["run_id"] == exclude_run_id:
             continue
         state = row.get("run_inputs") or {}
-        if row["status"] == "success" and _paused(row, state):
-            if any(item["mode"] == "queue" and item["status"] == "pending" for item in state.get("items", [])):
-                return row["run_id"]
-            return None
+        if row["status"] != "success" or not _paused(row, state):
+            continue
+        if any(item["mode"] == "queue" and item["status"] == "pending" for item in state.get("items", [])):
+            return row["run_id"]
     return None
 
 

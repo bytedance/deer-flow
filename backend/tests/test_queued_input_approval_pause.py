@@ -452,3 +452,21 @@ async def test_recovered_resume_finds_the_consumed_pause(chain_store):
     # Once the held queue is resolved there is nothing to continue.
     await consumed.pause()
     assert await answered_pause_run_id(chain_store, "thread", user_id=USER_ID, exclude_run_id="recovery") is None
+
+
+@pytest.mark.asyncio
+async def test_recovered_resume_skips_a_drained_newer_pause(chain_store):
+    """A drained newer pause must not shadow an older one that still holds inputs."""
+    from app.gateway.run_inputs import answered_pause_run_id
+
+    older = await _queued_run(chain_store, "older", "A", status="running")
+    await older.mark_paused()
+    await older.hold()
+    await chain_store.update_status("older", "success")
+    newer = await _queued_run(chain_store, "newer", "B", status="running")
+    await newer.mark_paused()
+    await newer.pause()
+    await chain_store.update_status("newer", "success")
+    await chain_store.put("recovery", thread_id="thread", user_id=USER_ID, status="pending")
+
+    assert await answered_pause_run_id(chain_store, "thread", user_id=USER_ID, exclude_run_id="recovery") == "older"
