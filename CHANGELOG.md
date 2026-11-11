@@ -51,6 +51,17 @@ This section accumulates work toward the **2.3.0** milestone
   tool-call IDs, preserving stale-pause checks and removing ambiguous calls
   without executing them. ([#8071](https://github.com/bytedance/deer-flow/issues/8071))
 
+- **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
+  worker that had lost its run to a peer could put the row back. Its assembly
+  evidence write was an unconditional full-row upsert, so after a peer
+  reclaimed the run it reset the row to `running` and erased the takeover
+  error. The run could then finish as `success` after the peer had already
+  reported it failed, or be reclaimed a second time. The evidence is now merged
+  into the row's metadata only while the worker still holds a live lease on an
+  active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
+  the run before executing it. Custom `RunStore` implementations used with
+  heartbeats must implement that method. ([#8046])
+
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
   (`None`) or repeats one within a response made the middleware pause with an
@@ -16273,6 +16284,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
