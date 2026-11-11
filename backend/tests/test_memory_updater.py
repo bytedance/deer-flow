@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
+    FileMemoryStorage,
     MemoryManifestRevisionConflict,
     MemoryStorage,
 )
@@ -1967,7 +1969,6 @@ class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
         assert normalized["confidence"] == confidence
 
     def test_update_memory_drops_the_bad_fact_and_keeps_the_rest(self, tmp_path) -> None:
-        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 
         response = {
             "user": {},
@@ -2044,3 +2045,36 @@ class TestParseMemoryUpdateFactsToRemoveGate:
         except json.JSONDecodeError:
             return
         raise AssertionError('decoy object {"user": "alice"} must be rejected')
+
+
+def _fact(content: str, fact_id: str, revision: int = 1) -> dict[str, object]:
+    return {
+        "id": fact_id,
+        "content": content,
+        "category": "context",
+        "confidence": 0.9,
+        "createdAt": "2026-03-20T00:00:00Z",
+        "source": "manual",
+        "revision": revision,
+    }
+
+
+def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path) -> None:
+    """A backup with two entries for the same fact id must be rejected whether
+    the first entry matches the stored fact or not - the outcome used to depend
+    on entry order because unchanged entries were skipped from the write map."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig
+
+    for order in ("unchanged-first", "edited-first"):
+        config = DeerMemConfig(storage_path=str(tmp_path / order), retrieval_adapter="")
+        storage = FileMemoryStorage(config)
+        updater = MemoryUpdater(config, storage)
+        # Seed the store with the saved fact.
+        updater.import_memory_data(_make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")]), agent_name="researcher")
+
+        unchanged = _fact("Keep PostgreSQL", "fact_dup")
+        edited = _fact("Use SQLite instead", "fact_dup")
+        facts = [unchanged, edited] if order == "unchanged-first" else [edited, unchanged]
+
+        with pytest.raises(ValueError, match="Duplicate fact id"):
+            updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
