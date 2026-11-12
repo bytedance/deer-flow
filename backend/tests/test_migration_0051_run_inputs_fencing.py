@@ -52,7 +52,7 @@ async def test_both_migration_branches_upgrade_to_one_head(tmp_path, backend, pr
             )
         await asyncio.to_thread(command.upgrade, cfg, "head")
         async with engine.connect() as conn:
-            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0052_batch_continuation"]
+            assert (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalars().all() == ["0054_project_memory"]
             columns = await conn.run_sync(lambda sync: {c["name"] for c in inspect(sync).get_columns("runs")})
             assert {"run_inputs_json", "run_incarnation", "producer_epoch", "producer_state"} <= columns
             assert (await conn.execute(text("SELECT status,run_inputs_json,run_incarnation,producer_epoch,producer_state FROM runs WHERE run_id='old'"))).one() == ("success", None, None, None, None)

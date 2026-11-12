@@ -119,6 +119,21 @@ secrets:
   # add channel tokens, search keys, etc. as needed
 ```
 
+`image.registry` prefixes the DeerFlow gateway, frontend, and provisioner
+images. In a cluster that pulls only from a mirror, set the full BusyBox
+repository for `init-home` and `init-extensions` in the same values file.
+
+```yaml
+gateway:
+  initContainers:
+    image:
+      repository: registry.example.com/mirror/busybox
+      tag: "1.36"
+```
+
+Set `nginx.image.repository`, `postgresql.image.repository`, and
+`redis.image.repository` separately for the corresponding bundled services.
+
 The default ingress annotations permit a 100 MiB local `.skill` archive plus
 multipart framing, stream request bodies without ingress buffering, and allow
 up to 600 seconds for a response, which the API requests that wait on a model
@@ -135,7 +150,7 @@ they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 65
+  config_version: 66
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -485,7 +500,8 @@ triggers a rolling restart.
 **Resource defaults.** Every workload ships with modest requests+limits in
 `values.yaml`; override per workload (`gateway.resources`, `frontend.resources`,
 `nginx.resources`, `provisioner.resources`, `postgresql.primary.resources`,
-`redis.primary.resources`).
+`redis.primary.resources`). The gateway's init containers have their own
+`gateway.initContainers.resources` and `gateway.initContainers.image`.
 
 ### Not yet enforced (deferred hardening)
 

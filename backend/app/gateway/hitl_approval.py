@@ -13,9 +13,17 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from app.gateway.checkpoint_lineage import hitl_approval_payloads
+from deerflow.approvals.protocol import combine_approval_payloads
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 
 logger = logging.getLogger(__name__)
+
+
+class ApprovalRequestIds(dict):
+    """Identity map plus the validated LangGraph interrupt-ID resume map."""
+
+    resume_map: dict | None = None
+
 
 if TYPE_CHECKING:
     from deerflow.runtime.runs.manager import ApprovalAnswerHandle
@@ -153,6 +161,26 @@ async def find_pending_interrupts(
         if grouped:
             return grouped
 
+    try:
+        run_store = get_run_store(request)
+    except (HTTPException, AttributeError) as exc:
+        if not isinstance(exc, AttributeError) and exc.status_code != 503:
+            raise
+        runs = []
+    else:
+        runs = await run_store.list_by_thread(thread_id, limit=10)
+    # A current loop snapshot is authoritative for ordinary polling. Update
+    # checkpoints can have moved the head past an unconsumed interrupt, and
+    # checkpoint-only compositions have no snapshot: retain recovery for both.
+    if (
+        snapshot is not None
+        and (getattr(snapshot, "metadata", None) or {}).get("source") == "loop"
+        and (getattr(snapshot, "config", None) or {}).get("configurable", {}).get("checkpoint_id")
+        and not (read_config or {}).get("configurable", {}).get("checkpoint_id")
+        and not any(run.get("status") == "waiting_for_input" for run in runs)
+    ):
+        return {}
+
     checkpointer = getattr(accessor, "checkpointer", None)
     if checkpointer is None:
         try:
@@ -168,13 +196,6 @@ async def find_pending_interrupts(
         if grouped:
             return grouped
 
-    try:
-        run_store = get_run_store(request)
-    except (HTTPException, AttributeError) as exc:
-        if isinstance(exc, AttributeError) or exc.status_code == 503:
-            return {}
-        raise
-    runs = await run_store.list_by_thread(thread_id, limit=10)
     for run in runs:
         if run.get("status") != "waiting_for_input":
             continue
@@ -222,7 +243,7 @@ async def current_approval_request_ids(
     """Read the current live pause's identity for checkpoint-only recovery."""
     pending = await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=read_config)
     payloads = hitl_approval_payloads(pending)
-    return _approval_request_ids(payloads[0]) if payloads else None
+    return _approval_request_ids(combine_approval_payloads(payloads)) if payloads else None
 
 
 async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any, read_config: dict[str, Any], enabled: bool, body: Any) -> dict[str, str] | None:
@@ -249,7 +270,8 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
 
     if responses is None:
         raise _error(422, "invalid_approval_response", "resume must carry a 'responses' list for hitl_approval")
-    expected_request_ids = _approval_request_ids(payloads[0])
+    expected_request_ids = ApprovalRequestIds(_approval_request_ids(combine_approval_payloads(payloads)))
+    action_by_request = {action["request_id"]: action for payload in payloads for action in payload["actions"]}
     expected_ids = list(expected_request_ids)
     expected_set = set(expected_ids)
     if len(responses) != len(expected_ids):
@@ -266,8 +288,35 @@ async def validate_resume_request(*, request: Any, thread_id: str, accessor: Any
         if response_id in seen_ids:
             raise _error(422, "invalid_approval_response", "duplicate tool_call_id")
         seen_ids.add(response_id)
-        if response.get("option_id") not in ("approve", "reject"):
-            raise _error(422, "invalid_approval_response", "unsupported option_id; expected 'approve' or 'reject'")
+        action = action_by_request[response["request_id"]]
+        supported = ("approve", "reject", "edit", "approve_thread") if all(payload.get("version") == 2 for payload in payloads) else ("approve", "reject")
+        if response.get("option_id") not in supported:
+            raise _error(422, "invalid_approval_response", f"unsupported option_id; expected one of {', '.join(repr(option) for option in supported)}")
+        if response.get("option_id") == "approve_thread" and not action.get("grant_allowed"):
+            raise _error(422, "invalid_approval_response", "This operation does not permit a thread grant")
+        if response.get("option_id") == "edit":
+            from jsonschema import Draft202012Validator
+
+            from deerflow.approvals.policy import canonical_json
+
+            args, schema = response.get("args"), action.get("args_schema")
+            try:
+                limit = min(payload.get("max_payload_bytes", 512 * 1024) for payload in payloads)
+                if not isinstance(args, dict) or not isinstance(schema, dict) or len(canonical_json(args).encode()) > limit:
+                    raise ValueError("Invalid arguments")
+                Draft202012Validator(schema).validate(args)
+                if isinstance(schema.get("properties"), dict) and set(args) - set(schema["properties"]):
+                    raise ValueError("Unknown or injected arguments")
+            except Exception as exc:
+                raise _error(422, "invalid_approval_arguments", "Edited arguments do not match the tool schema") from exc
+
+    if all(payload.get("version") == 2 for payload in payloads):
+        expected_request_ids.resume_map = {
+            item.id: {"responses": [response for response in responses if response["request_id"] in {action["request_id"] for action in item.value["actions"]}]}
+            for interrupts in pending.values()
+            for item in interrupts
+            if isinstance(getattr(item, "value", None), dict) and item.value.get("kind") == "hitl_approval"
+        }
 
     if all_reject:
         return expected_request_ids

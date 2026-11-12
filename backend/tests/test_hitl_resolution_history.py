@@ -1,7 +1,7 @@
 """A resumed HITL decision reaches the persisted history feed.
 
 The approval pause and its resolution run as two Runs. A rejected call never
-executes, so HITL answers it in ``after_model`` of the resume run and no
+executes, so the approval gate answers it in the resume run and no
 ``on_tool_end`` fires. The resume run's journal must still own that call, or the
 rejection exists only in checkpoint state and disappears from
 ``/messages`` (and from the reloaded conversation once compaction drops it).
@@ -9,9 +9,11 @@ rejection exists only in checkpoint state and disappears from
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from langgraph.types import Command, Interrupt
 from starlette.testclient import TestClient
 from test_hitl_approval_api import (  # noqa: F401
     _MODEL_PATCH,
@@ -32,7 +34,7 @@ from test_hitl_approval_api import (  # noqa: F401
     isolated_deer_flow_home,
 )
 
-from deerflow.runtime.runs.worker import _hitl_action_calls, _hitl_action_tool_names
+from deerflow.runtime.runs.worker import _hitl_action_calls, _pending_hitl_resume_actions
 
 pytestmark = pytest.mark.no_auto_user
 
@@ -94,12 +96,32 @@ def test_mixed_decision_keeps_both_results_in_the_history_feed(isolated_app):  #
         assert sorted(_run_tool_result_call_ids(client, tid, resume_run_id)) == ["call_hitl_1", "call_hitl_2"]
 
 
-def test_replay_gate_names_do_not_depend_on_an_adoptable_call_id():
+def test_journal_adoption_requires_a_usable_call_id():
     actions = [
         {"tool_call_id": "call_1", "tool_name": "write_file"},
         {"tool_name": "bash"},
         {"tool_call_id": "", "tool_name": "str_replace"},
     ]
 
-    assert _hitl_action_tool_names(actions) == {"write_file", "bash", "str_replace"}
     assert _hitl_action_calls(actions) == {"call_1": "write_file"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire", ["legacy", "parallel", "wrong_group", "consumed"])
+async def test_journal_adopts_only_the_interrupts_answered_by_resume(monkeypatch, wire):
+    actions = [{"tool_call_id": "call_1", "tool_name": "write_file"}, {"tool_call_id": "call_2", "tool_name": "bash"}]
+    groups = [actions] if wire == "legacy" else [[action] for action in actions]
+    interrupts = [Interrupt(id=f"interrupt-{i}", value={"kind": "hitl_approval", "pending_tool_call_ids": [action["tool_call_id"] for action in group], "actions": group}) for i, group in enumerate(groups)]
+    responses = [{"tool_call_id": action["tool_call_id"], "option_id": "reject"} for action in actions]
+    resume = {"responses": responses} if wire == "legacy" else {f"interrupt-{i}": {"responses": [response]} for i, response in enumerate(responses)}
+    if wire == "wrong_group":
+        resume = {"unrelated-" + key: value for key, value in resume.items()}
+
+    async def history(*args, **kwargs):
+        if wire == "consumed":
+            yield SimpleNamespace(pending_writes=[("task", "__resume__", responses)])
+        yield SimpleNamespace(pending_writes=[("task", "__interrupt__", interrupts)])
+
+    monkeypatch.setattr("deerflow.runtime.checkpoint_history.recent_checkpoint_history", history)
+    result = await _pending_hitl_resume_actions(object(), {}, Command(resume=resume))
+    assert _hitl_action_calls(result) == ({} if wire in {"wrong_group", "consumed"} else {"call_1": "write_file", "call_2": "bash"})
