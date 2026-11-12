@@ -60,6 +60,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
 - **channels:** A WeCom group command that follows the bot mention now runs as a
   command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
   the classifier required a bare leading `/`, so `/new` and `/status` sent in a
@@ -84,6 +90,12 @@ This section accumulates work toward the **2.3.0** milestone
   active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
   the run before executing it. Custom `RunStore` implementations used with
   heartbeats must implement that method. ([#8046])
+
+- **subagents:** Concurrent creates for the same managed-subagent name in shared
+  file storage now preserve the winning definition and return HTTP 409 to the
+  losing request instead of reporting two successes and overwriting one definition.
+  Gateway startup also probes hard-link support and warns if the storage volume
+  cannot support managed subagent creation. ([#8132](https://github.com/bytedance/deer-flow/pull/8132))
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
@@ -257,6 +269,9 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8151])
+
 - **memory:** Importing a backup without a `facts` array now returns HTTP 422
   and preserves saved memory. An explicit empty array still clears the selected
   fact bucket. ([#8131])
@@ -16339,3 +16354,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151
