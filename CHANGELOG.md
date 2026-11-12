@@ -58,6 +58,14 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
+  could reorder parallel writes during replay or lose paged ancestor history.
+  The ordering and Postgres pagination contracts now fail on regression instead
+  of skipping. ([#8139])
+
 ### Fixed
 
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
@@ -16346,5 +16354,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174

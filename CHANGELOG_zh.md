@@ -24,6 +24,13 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### 变更
+
+- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0、
+  SQLite saver 3.1.2 和 Postgres saver 3.1.3，排除会在重放时重排并行写入或
+  丢失分页祖先历史的版本。顺序和 Postgres 分页契约在回归时现在会直接失败，
+  不再跳过。([#8139])
+
 ### 修复
 
 - **通道：** 企业微信不再丢弃 2–10 MB 的图片。此前适配器把图片上限定为 2 MB（同一协议中语音的限制），
@@ -12875,4 +12882,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
