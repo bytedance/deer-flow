@@ -1025,7 +1025,11 @@ async def task_tool(
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+        # get_app_config() reads config/extension files (and may fully reload
+        # them) on every miss. Resolve it on the assembly pool like every other
+        # fallback above so the inherit path cannot stall the calling event
+        # loop (issue #5172).
+        resolved_app_config = await run_assembly(get_app_config)
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive
@@ -1077,6 +1081,9 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    approval_runtime = parent_context.get("__tool_approval_runtime")
+    if approval_runtime is not None:
+        executor_kwargs["approval_runtime"] = approval_runtime.child()
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:

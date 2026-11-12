@@ -807,8 +807,16 @@ export const zhCN: Translations = {
     viewTrash: "回收站",
     documentsLoadFailed: "无法加载项目文档",
     threadFilesLoadFailed: "无法加载对话文件",
-    interimMemoryNotice:
-      "记忆目前仍为全局：在第三阶段之前，项目中讨论的内容仍可能进入你的全局记忆。",
+    memoryTitle: "项目记忆",
+    memoryAutoExtract: "自动提取",
+    memoryDescription:
+      "从项目对话中提炼长期有效的事实，仅用于本项目。关闭自动提取会保留已有记忆；不再需要的内容可直接删除。自动提取需开启全局记忆功能。",
+    memoryEmpty: "还没有项目记忆。项目对话中形成的约定和经验会显示在这里。",
+    memoryPromote: "转入指令",
+    memoryPromoted: "已转入项目指令",
+    memorySaveFirst: "请先保存上方的指令修改，再转入记忆。",
+    memoryLoadFailed: "无法加载项目记忆。",
+    memoryActionFailed: "项目记忆更新失败，请刷新后重试。",
   },
 
   trash: {
@@ -1810,6 +1818,21 @@ export const zhCN: Translations = {
     selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
     approval: {
+      modeLabel: "工具权限",
+      modeAsk: "请求批准",
+      modeAuto: "自动审批",
+      modeFull: "完全访问",
+      askDescription: "需要审批的操作，由你批准后执行。",
+      autoDescription: "逐次审核操作；风险或授权需要你决定时，再请求批准。",
+      fullDescription: "跳过逐次审批，仍受部署规则和工具账户权限限制。",
+      approveThread: "本会话允许",
+      grantScope: "仅限此工具和完全相同的参数，可在“工具权限”中撤销。",
+      editArguments: "修改参数",
+      fullArguments: "完整参数",
+      invalidArguments: "请输入有效的 JSON 对象，服务端还会校验工具参数格式。",
+      revokeGrants: "撤销会话授权",
+      grantsRevoked: "已撤销会话授权",
+      childApproval: "子代理正在等待你的批准。",
       title: "工具调用需要审批",
       description:
         "继续前请检查每个操作。较长的值可能在显示时被截断，但省略的内容仍会完整参与执行。批准后将尝试执行工具，其他执行检查仍然有效。",

@@ -1464,6 +1464,53 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
     assert events[-1]["error"] == "subagent crashed"
 
 
+def test_task_tool_inherit_model_resolves_app_config_off_loop(monkeypatch):
+    """The inherit-path app-config fallback must not run blocking config IO on the calling event loop (issue #5172)."""
+    config = _make_subagent_config()
+    events = []
+    loop_thread_id = threading.get_ident()
+    caller_threads: list[int] = []
+    get_available_tools = MagicMock(return_value=[])
+
+    def record_get_app_config():
+        caller_threads.append(threading.get_ident())
+        return SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+    monkeypatch.setattr(task_tool_module, "get_app_config", record_get_app_config)
+
+    output = _run_task_tool(
+        runtime=None,
+        description="执行任务",
+        prompt="inherit fallback",
+        subagent_type="general-purpose",
+        tool_call_id="tc-inherit-off-loop",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: ok"
+    assert caller_threads, "expected the inherit fallback to resolve the app config"
+    assert all(thread_id != loop_thread_id for thread_id in caller_threads), "get_app_config ran on the event loop thread"
+    # The resolved fallback config must flow through to tool assembly.
+    assert get_available_tools.call_args.kwargs.get("app_config").models[0].name == "default-model"
+
+
 def test_task_tool_returns_timed_out_message(monkeypatch):
     config = _make_subagent_config()
     events = []
