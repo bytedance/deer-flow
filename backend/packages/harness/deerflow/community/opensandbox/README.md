@@ -22,6 +22,7 @@ sandbox:
   # request_timeout: 30
   # ready_timeout: 30
   # use_server_proxy: false
+  # secure_access: false
   # sandbox_timeout: 14400  # remote lifetime; 0 means explicit cleanup only
   # bash_command_timeout: 600  # default command timeout
   # replicas: 3             # active + warm sandboxes per gateway process
@@ -34,6 +35,19 @@ sandbox:
 `OPEN_SANDBOX_DOMAIN` are set. `use_server_proxy` is useful when DeerFlow can
 reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
+
+Use unquoted `true` or `false` for `use_server_proxy` and `secure_access`.
+Omitted and `null` values default to `false`. Quoted booleans and other
+non-boolean values cause a provider startup error.
+
+`secure_access: true` creates each sandbox with OpenSandbox
+[Secure Access](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/secure-access.md):
+the ingress gateway, and the server proxy, then reject endpoint requests that
+lack the sandbox's access token. The server issues the token with the endpoint
+and the SDK attaches it to every execd and file request, so no token setting is
+needed in DeerFlow. The server must run the Kubernetes runtime with
+`[ingress] mode = "gateway"`; the Docker runtime and other ingress modes reject
+the create with HTTP 400.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
 Gateway process environment once, when `config.yaml` loads; a missing variable
