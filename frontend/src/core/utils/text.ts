@@ -1,3 +1,37 @@
+export type CodePointSlice = {
+  text: string;
+  codePointCount: number;
+  truncated: boolean;
+};
+
+/**
+ * Slice `value` to at most `maxLength` code points without materializing the
+ * whole string as an array. The scan stops as soon as the budget is exceeded,
+ * so a multi-megabyte value costs only the prefix it needs.
+ */
+export function sliceToCodePoints(
+  value: string,
+  maxLength: number,
+): CodePointSlice {
+  const limit = Number.isNaN(maxLength)
+    ? 0
+    : Math.max(0, Math.floor(maxLength));
+  let end = 0;
+  let count = 0;
+  for (const character of value) {
+    if (count === limit) {
+      return {
+        text: value.slice(0, end),
+        codePointCount: count,
+        truncated: true,
+      };
+    }
+    end += character.length;
+    count += 1;
+  }
+  return { text: value, codePointCount: count, truncated: false };
+}
+
 /**
  * Truncate `value` to at most `maxLength` code points.
  *
@@ -16,12 +50,14 @@ export function truncateToCodePoints(
   maxLength: number,
   ellipsis = "",
 ): string {
-  const characters = Array.from(value);
-  if (characters.length <= maxLength) {
+  const bounded = sliceToCodePoints(value, maxLength);
+  if (!bounded.truncated) {
     return value;
   }
   if (ellipsis && maxLength > ellipsis.length) {
-    return characters.slice(0, maxLength - ellipsis.length).join("") + ellipsis;
+    return (
+      sliceToCodePoints(value, maxLength - ellipsis.length).text + ellipsis
+    );
   }
-  return characters.slice(0, maxLength).join("");
+  return bounded.text;
 }
