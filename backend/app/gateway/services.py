@@ -702,6 +702,19 @@ def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict
     return normalized
 
 
+def _reject_overwrite_marker(value: Mapping[str, Any], *, location: str) -> None:
+    """Refuse a value LangGraph would apply with ``Overwrite`` semantics.
+
+    ``Overwrite`` reaches the validator in two dict spellings: the sentinel form
+    ``{"__overwrite__": value}`` and the dataclass-erased form an orjson round
+    trip produces, ``{"type": "__overwrite__", "value": value}``. Either one
+    bypasses the channel reducer and stores the caller's value directly on an
+    initialized channel, so a shape check alone cannot catch it.
+    """
+    if "__overwrite__" in value or value.get("type") == "__overwrite__":
+        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+
+
 def _normalize_external_promoted(value: Any, *, location: str) -> dict[str, Any] | None:
     """Reject deferred-tool promotion records the reducer cannot merge.
 
@@ -718,6 +731,7 @@ def _normalize_external_promoted(value: Any, *, location: str) -> dict[str, Any]
         return None
     if not isinstance(value, Mapping):
         raise HTTPException(status_code=400, detail=f"{location} must be an object with a catalog_hash and a names list")
+    _reject_overwrite_marker(value, location=location)
     catalog_hash = value.get("catalog_hash")
     if not isinstance(catalog_hash, str) or not catalog_hash:
         raise HTTPException(status_code=400, detail=f"{location}.catalog_hash must be a non-empty string")
@@ -736,8 +750,7 @@ def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | N
         return None
     if not isinstance(value, Mapping) or not isinstance(value.get("objective"), str):
         raise HTTPException(status_code=400, detail=f"{location} must be an object with a string objective")
-    if "__overwrite__" in value or value.get("type") == "__overwrite__":
-        raise HTTPException(status_code=400, detail=f"{location} cannot contain an Overwrite marker")
+    _reject_overwrite_marker(value, location=location)
     try:
         objective = normalize_goal_objective(value["objective"])
     except ValueError as exc:

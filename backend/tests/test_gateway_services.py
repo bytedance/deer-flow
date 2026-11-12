@@ -922,6 +922,8 @@ def test_state_values_reject_unusable_skill_context_with_400():
         {"catalog_hash": "abc", "names": "search"},
         {"catalog_hash": "abc", "names": [1]},
         {"catalog_hash": "abc", "names": [], "turn_id": 3},
+        {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"},
+        {"catalog_hash": "abc", "names": [], "__overwrite__": "oops"},
     ],
     ids=[
         "string-channel",
@@ -932,6 +934,8 @@ def test_state_values_reject_unusable_skill_context_with_400():
         "names-not-a-list",
         "names-not-strings",
         "turn-id-not-a-string",
+        "erased-overwrite-marker",
+        "sentinel-overwrite-marker",
     ],
 )
 def test_normalize_input_rejects_unusable_promoted_with_400(promoted):
@@ -973,6 +977,26 @@ def test_state_values_reject_unusable_promoted_with_400():
 
     assert excinfo.value.status_code == 400
     assert "values.promoted" in excinfo.value.detail
+
+
+def test_state_values_reject_an_overwrite_marker_in_promoted():
+    """An ``Overwrite`` written as a plain dict bypasses the channel reducer.
+
+    LangGraph accepts the dataclass-erased form ``{"type": "__overwrite__",
+    "value": ...}`` on an initialized channel and stores the value directly, so
+    a record that carries it alongside valid fields would persist a non-object
+    promotion value that the shape checks above cannot see.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"}})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+    assert "Overwrite" in excinfo.value.detail
 
 
 def test_state_values_keep_usable_promoted_record():
