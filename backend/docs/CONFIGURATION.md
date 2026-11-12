@@ -1304,8 +1304,8 @@ offline mocked tests verify request composition and local filtering, not provide
 retrieval behavior. No paid API calls are needed for the regression suite.
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, You.com)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serper, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya, SpecStream, You.com)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, SpecStream, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -1371,6 +1371,14 @@ default it refuses URLs that resolve to private, loopback, link-local,
 shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
+
+Each Browserless tool entry reads its request timeout from `timeout_s`, with
+`timeout` as an alias when `timeout_s` is absent. The default is 30 seconds.
+Zero, negative, and non-finite values fall back to the default with a warning.
+Strings that cannot be parsed as numbers also trigger this fallback. HTTPX can
+time out immediately for non-positive values. It raises an error for NaN and
+applies no deadline for positive infinity. Browserless preserves positive finite
+values in seconds, including very large values.
 
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
@@ -1973,7 +1981,7 @@ while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
 use `/home/alice/...`. Native Windows paths can use forward slashes as above,
 or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
 backslashes literal; only double-quoted scalars interpret backslash escapes.
-These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+These are path examples; the [local development prerequisites](../../docs/guide/deployment.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
@@ -2077,6 +2085,7 @@ models:
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `SPECSTREAM_API_KEY` - [SpecStream](https://specstream.ai) key for `web_search` and `web_fetch`
 - `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `YDC_API_KEY` - You.com Search API key for `web_search` (optional: without it the provider uses You.com's keyless free-tier endpoint)
 - `BROWSERLESS_TOKEN` - Browserless token for `web_fetch` (Browserless provider) and `web_capture`, sent as the `token` query parameter (required by Browserless Cloud and by a self-hosted instance started with `TOKEN`)
@@ -2252,6 +2261,92 @@ Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
 Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
+
+
+## HITL Tool Approval
+
+Set `hitl_approval.enabled: true` to gate bound tools immediately before execution.
+The default is disabled for existing installations. When enabled, unknown tools,
+file writes, shell commands, and both personal and deployment MCP tools are
+reviewed. Concrete host read/navigation tools can run directly; an MCP server's
+read-only annotation never grants permission.
+
+```yaml
+hitl_approval:
+  enabled: true
+  default_mode: ask
+  allowed_modes: [ask, auto]
+  review_unknown_tools: true
+  tools: []
+  allow_tools: []
+  deny_tools: []
+  always_ask_tools: []
+  reviewer_model: null
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
+  non_interactive: deny
+  max_actions: 32
+```
+
+| Mode | Behavior |
+| --- | --- |
+| `ask` | Present an approval card for operations requiring review. |
+| `auto` | Independently assess the concrete operation against user intent. Allow low/medium-risk authorized operations; ask for uncertainty or high risk; deny critical violations. |
+| `full` | Skip individual approvals within mandatory deployment and account restrictions. |
+
+Clients select `context.tool_approval_mode` per run from the operator's `allowed_modes`.
+The default ceiling permits Ask and Auto. Full requires explicitly adding `full`
+to that operator-owned list; the client selection is not persisted server-side
+and cannot extend the ceiling.
+This setting is separate from Flash/Thinking/Pro/Ultra. `deny_tools` blocks in
+every mode. `always_ask_tools` requires a human in every mode and cannot receive
+a chat grant. Uninspectable tool implementations cannot receive chat grants.
+Implementation fingerprints include both execution callables and their callable
+adapters, so changing an asynchronous implementation requires fresh approval. `allow_tools` is an explicit operator exception. `tools` adds
+otherwise routine tools to review; disabling `review_unknown_tools` restores a
+selected-tool policy. These are trusted deployment settings, never model output.
+
+Auto uses a separate, tool-free model invocation. `reviewer_model` names an
+existing configured profile; null reuses the effective execution profile. No new
+provider or credentials are required. Review input contains original user intent,
+tool identity/schema, and complete arguments, treating tool material as untrusted
+data. Reviewer callbacks cannot enter the Agent message stream; the host records
+its token usage. Each review adds model latency and usage. Invalid output,
+timeout, provider failure, or oversized input requests human approval. In an
+unattended run these outcomes deny execution. Model review supplements the host's
+rules and sandbox; it is not a security isolation boundary.
+
+Cards show complete arguments and support approve, reject with a reason, edit
+and approve, or allow the exact operation for this chat. Edits are validated
+against the public tool schema and rerun through mandatory authorization. Injected
+runtime fields cannot be edited. Grants bind owner, thread incarnation, tool
+implementation/schema/connection, arguments, and policy. A changed MCP connection
+requires fresh approval. Revoke grants from the Tool permissions menu. SQL-backed
+deployments persist grants; memory-only deployments keep them for the process.
+
+Root pauses use native checkpoints and block fresh runs until resolved. Native
+parallel interrupts resume by their individual IDs; decisions cannot approve a
+stale proposal. Root pauses have no time expiry; policy/tool changes fail closed,
+and disabling the feature still permits the existing all-reject escape hatch.
+The full card must fit `max_payload_bytes`; oversized cards deny execution rather
+than hiding part of the operation. `max_actions` bounds calls in a model turn;
+zero removes that count limit.
+
+Delegated calls use an owner-scoped live approval endpoint and suspend the original
+child invocation. The wait expires after `child_approval_timeout_seconds`, or the
+child's execution deadline if earlier. Cancellation, lost run ownership and worker
+restart invalidate pending child approvals; they do not replay the delegated task.
+The UI polls pending child cards while the parent is active. Authenticated session
+ownership is required to answer these cards. Requests and audit records are deleted
+with their thread. Scheduled, webhook and other unattended origins cannot open a
+human wait. The legacy `non_interactive: allow` explicitly bypasses Ask for those
+root runs; it never overrides mandatory deny/ask rules, Auto uncertainty, or an
+unresumable child.
+
+Approval permits an execution attempt. Guardrails, read-before-write rules,
+sandbox restrictions and tool-account authorization still run afterward.
 
 
 ## Best Practices

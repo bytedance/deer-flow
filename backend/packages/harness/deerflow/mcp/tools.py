@@ -1237,6 +1237,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
