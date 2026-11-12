@@ -1201,13 +1201,6 @@ def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
 
     assert response.status_code == 200
     assert not (tmp_path / "users" / "alice" / "agents").exists()
-
-
-def test_import_memory_route_names_duplicate_fact_id_in_detail() -> None:
-    """A MemoryDuplicateFactIdError surfaces its own detail verbatim, not the
-    generic facts-array message (Copilot P2 on #8153)."""
-
-
     app = make_authed_test_app()
     app.include_router(memory.router)
     mock_mgr = MagicMock()
