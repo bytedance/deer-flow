@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -381,6 +382,27 @@ def _validate_agent_storage(config: AppConfig) -> None:
             "custom agents and managed subagents are stored per-node on local disk and are not visible "
             "across workers/nodes. Set agent_storage.backend='db' to share them.",
             signal[0],
+        )
+
+
+def _probe_managed_subagent_file_storage() -> None:
+    """Warn early if this volume cannot support create-only publication."""
+    from deerflow.config.paths import get_paths
+
+    root = get_paths().managed_subagents_dir
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        # A private directory keeps probe names out of the JSON catalog and
+        # lets independent Gateway workers probe without touching each other.
+        with tempfile.TemporaryDirectory(prefix=".hardlink-probe-", dir=root) as scratch:
+            source = Path(scratch) / "source"
+            source.touch()
+            os.link(source, Path(scratch) / "linked")
+    except OSError as exc:
+        logger.warning(
+            "Managed subagent hard-link probe failed for %s: %s. Managed subagent creation may fail on this volume. Use a volume with working hard links or set agent_storage.backend='db' with SQLite/Postgres.",
+            root,
+            exc,
         )
 
 
@@ -788,6 +810,8 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    if getattr(getattr(startup_config, "agent_storage", None), "backend", None) == "file":
+        await asyncio.to_thread(_probe_managed_subagent_file_storage)
     # Warn when login lockouts stay per-process under several Gateway processes.
     _validate_login_throttle_storage(startup_config)
     # IM chat-to-thread bindings need no companion warning: ``resolve_channel_store``
@@ -865,6 +889,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+        from deerflow.approvals.store import ApprovalStore
+
+        app.state.approval_store = ApprovalStore(sf)
 
         # The login throttle store is resolved once per process from the startup
         # snapshot and the engine above (auth.local.throttle_storage is
@@ -1245,13 +1272,20 @@ def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
     return frozenset(selected)
 
 
-def _run_completion_hook(*, scheduled_task_service: Any | None):
+def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuations: Any | None = None):
     """Notify the scheduler after ordinary run finalization."""
 
     async def handle(record: Any) -> None:
-
-        if scheduled_task_service is not None:
-            await scheduled_task_service.handle_run_completion(record)
+        # Scheduler persistence is best-effort: a store outage must not skip the
+        # batch cancellation below, or claimed follow-ups of hard-stopped runs
+        # stay in `dispatching` forever (#7969).
+        try:
+            if scheduled_task_service is not None:
+                await scheduled_task_service.handle_run_completion(record)
+        except Exception:
+            logger.warning("Scheduled task completion hook failed for run %s (non-fatal)", record.run_id, exc_info=True)
+        if batch_continuations is not None:
+            await batch_continuations.source_finished(record)
 
     return handle
 
@@ -1281,11 +1315,13 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
+        approval_store=getattr(request.app.state, "approval_store", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
         on_run_completed=_run_completion_hook(
             scheduled_task_service=scheduled_task_service,
+            batch_continuations=getattr(request.app.state, "batch_continuations", None),
         ),
     )
 

@@ -560,6 +560,17 @@ def test_evaluate_goal_completion_shows_tool_evidence_to_the_evaluator():
     assert 'Tool result (present_files): "Successfully presented files"' in human_message.content
 
 
+def test_evaluator_does_not_treat_async_registration_as_completion():
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": false, "blocker": "external_wait", "reason": "The result is still pending", "evidence_summary": "Registered only"}'))
+
+    asyncio.run(goal.evaluate_goal_completion(goal.build_goal_state("Produce and deliver the final report"), _file_task_messages(), model=fake_model))
+
+    system_message, _ = fake_model.ainvoke.await_args.args[0]
+    assert "Registering a Batch, job, task, or scheduled continuation is not evidence that the objective is complete" in system_message.content
+    assert "actual requested result or artifact must exist or be delivered" in system_message.content
+
+
 def test_evaluate_goal_completion_injects_langfuse_metadata(monkeypatch):
     """Regression test for the goal evaluator's Langfuse tracing gap.
 

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "example.retrieval",
+  "locales": {
+    "zh-CN": {
+      "title": "本地检索示例",
+      "description": "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
+      "usage": [
+        {
+          "title": "在对话里试一次检索",
+          "description": "让 Agent 使用本地检索示例搜索 release，查看匹配到的固定演示文档。"
+        },
+        {
+          "title": "检查返回结果",
+          "description": "观察文字摘要与结构化工具成果；示例数据是虚构的，不代表真实知识库内容。"
+        }
+      ]
+    },
+    "en-US": {
+      "title": "Local retrieval example",
+      "description": "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
+      "usage": [
+        {
+          "title": "Try a search in chat",
+          "description": "Ask the Agent to use the local retrieval example to search for release and inspect the matching demonstration document."
+        },
+        {
+          "title": "Inspect the result",
+          "description": "Review its text summary and structured tool artifact. The fixed corpus is synthetic, not a real knowledge base."
+        }
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-retrieval#readme"
+}

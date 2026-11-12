@@ -65,7 +65,7 @@ def test_sources_require_real_evidence_and_optional_locators() -> None:
 
 def test_budget_never_leaves_citations_without_visible_evidence() -> None:
     result = RetrievalResult(hits=[RetrievalHit(content="x" * 500, source=KnowledgeSource(provider="demo", title="Guide", excerpt="x" * 500))])
-    for budget in (1, 20, 80, 200, 800):
+    for budget in (0, 1, 20, 80, 200, 800):
         content, artifact = format_result(result, max_total_chars=budget, max_chars_per_chunk=50)
         assert len(content) <= budget
         for source in artifact["knowledge_sources"]:
@@ -74,6 +74,74 @@ def test_budget_never_leaves_citations_without_visible_evidence() -> None:
             assert len(source["excerpt"]) <= 50
         if "#knowledge-source-" in content:
             assert artifact["knowledge_sources"]
+
+
+@pytest.mark.parametrize("oversized_index", [0, 1])
+@pytest.mark.parametrize("attributed", [False, True])
+def test_budget_skips_oversized_hits_and_retains_later_evidence(oversized_index, attributed):
+    sources = [KnowledgeSource(provider="demo", title=title, excerpt=excerpt) for title, excerpt in [("First", "First evidence"), ("Second", "Second evidence")]]
+    large = KnowledgeSource(provider="demo", title="Large", excerpt="oversized evidence " * 100)
+    hits = [RetrievalHit(content=source.excerpt, source=source if attributed else None) for source in sources]
+    hits.insert(oversized_index, RetrievalHit(content=large.excerpt, source=large if attributed else None))
+    result = RetrievalResult(hits=hits)
+    snapshot = result.model_dump()
+
+    text, artifact = format_result(result, max_total_chars=400)
+
+    assert len(text) <= 400
+    assert text.index("First evidence") < text.index("Second evidence")
+    assert "oversized evidence" not in text
+    assert text.startswith("[")
+    assert text.endswith("… (response truncated)")
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == (sources if attributed else [])
+    assert len(artifact["knowledge_sources"]) == (2 if attributed else 0)
+    assert result.model_dump() == snapshot
+
+
+def test_default_budget_retains_short_source_after_oversized_hit():
+    sources = [KnowledgeSource(provider="demo", title=f"Guide {i}", excerpt=f"Evidence {i}: " + "x" * 788) for i in range(1, 9)]
+    large = KnowledgeSource(provider="demo", title="L" * 500, excerpt="z" * 800)
+    short = KnowledgeSource(provider="demo", title="Short policy", excerpt="Annual leave is 15 days.")
+    result = RetrievalResult(hits=[RetrievalHit(content=source.excerpt, source=source) for source in [*sources, large, short]])
+
+    text, artifact = format_result(result)
+
+    assert len(text) <= 8000
+    assert short.excerpt in text
+    assert text.endswith("… (response truncated)")
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == [*sources, short]
+    assert len(artifact["knowledge_sources"]) == 9
+
+
+@pytest.mark.parametrize("oversized_first", [False, True])
+def test_exact_budget_retains_complete_source(oversized_first):
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="evidence")
+    hits = [RetrievalHit(content=source.excerpt, source=source)]
+    if oversized_first:
+        hits.insert(0, RetrievalHit(content="x" * 800))
+    index = 2 if oversized_first else 1
+    expected = f"[{index}] [citation:Guide](#knowledge-source-{source.id})\nevidence"
+
+    text, artifact = format_result(RetrievalResult(hits=hits), max_total_chars=len(expected))
+
+    assert text == expected
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == [source]
+    assert len(artifact["knowledge_sources"]) == 1
+
+
+@pytest.mark.parametrize("short_position", [100, 101])
+def test_skipping_oversized_hits_preserves_first_hundred_limit(short_position):
+    source = KnowledgeSource(provider="demo", title="Short", excerpt="Fitting evidence")
+    hits = [RetrievalHit(content="x" * 800)] * (short_position - 1)
+    hits.append(RetrievalHit(content=source.excerpt, source=source))
+
+    text, artifact = format_result(RetrievalResult(hits=hits), max_total_chars=200)
+
+    assert len(text) <= 200
+    assert (source.excerpt in text) == (short_position == 100)
+    assert text.endswith("… (response truncated)")
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == ([source] if short_position == 100 else [])
+    assert len(artifact["knowledge_sources"]) == (1 if short_position == 100 else 0)
 
 
 def test_forward_only_valid_tool_evidence_and_deduplicate_replay() -> None:

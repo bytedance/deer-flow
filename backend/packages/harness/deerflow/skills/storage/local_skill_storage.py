@@ -205,6 +205,10 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError(f"Invalid skill: {message}")
         if not skill_name or "/" in skill_name or "\\" in skill_name or ".." in skill_name:
             raise ValueError(f"Invalid skill name: {skill_name}")
+        # The skill name becomes ``custom/<name>``; refuse names that cannot be
+        # created as a host path component (Windows reserved device names) so
+        # the install fails here instead of mid-write on the target host.
+        self.validate_skill_name(skill_name, for_creation=True)
 
         target = custom_dir / skill_name
         if target.exists():

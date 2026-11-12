@@ -604,7 +604,17 @@ def _convert_call_tool_result(
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    # ``BlobResourceContents.mimeType`` is optional in the MCP spec, but
+                    # langchain-core refuses a base64 block without one. Degrade to a
+                    # generic binary type instead of raising, so the rest of the result —
+                    # including the text blocks the server returned — survives. The
+                    # sibling ``ResourceLink`` branch already degrades the same way.
+                    lc_content.append(
+                        create_file_block(
+                            base64=res.blob,
+                            mime_type=mime or "application/octet-stream",
+                        )
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
@@ -1227,6 +1237,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 
