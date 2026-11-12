@@ -24,7 +24,17 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### 变更
+
+- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0、
+  SQLite saver 3.1.2 和 Postgres saver 3.1.3，排除会在重放时重排并行写入或
+  丢失分页祖先历史的版本。顺序和 Postgres 分页契约在回归时现在会直接失败，
+  不再跳过。([#8139])
+
 ### 修复
+
+- **通道：** 企业微信不再丢弃 2–10 MB 的图片。此前适配器把图片上限定为 2 MB（同一协议中语音的限制），
+  超出即在上传前被跳过，消息到达时缺少图片。现在图片上限与平台的 10 MB 对齐；普通文件 20 MB 的限制不变。([#8174])
 
 - **通道：** WeCom 群聊中 `@机器人 /new` 这类带提及的命令现在按命令执行。WeCom 会把提及保留在
   正文里，而命令识别要求裸的前导 `/`，于是群里的 `/new`、`/status` 被当成聊天轮次。现在仅在命令
@@ -63,6 +73,15 @@
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
   之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
   在修复计划之前，恢复该任务会提示具体问题。([#7993])
+
+- **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
+  都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
+  `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
+  `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
+  的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
+  请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -12878,3 +12897,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8174]: https://github.com/bytedance/deer-flow/pull/8174
