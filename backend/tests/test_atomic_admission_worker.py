@@ -14,6 +14,15 @@ from deerflow.runtime import RunManager, RunStatus
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
+# The first worker start in a process pays the one-time import and pre-run
+# capture cost of the whole agent path before the graph's first node runs:
+# measured at 5.6 s on a native Windows 11 host, against 0.12 s or less for
+# every later start in the same process. The deadline on ``started`` guards
+# against a worker that never reaches the graph, not the cost of getting there,
+# so the first start in a process gets a cold-start budget. Later waits in these
+# tests only coordinate in-test events and keep their tight deadlines.
+COLD_START_TIMEOUT_SECONDS = 30
+
 
 @pytest.fixture
 def anyio_backend():
@@ -100,7 +109,7 @@ async def test_real_worker_atomic_replacement_retains_finalization_authority(sto
         return result
 
     try:
-        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(started.wait(), COLD_START_TIMEOUT_SECONDS)
         if stale_renewal_race:
             stale_renewal = asyncio.create_task(manager._renew_leases())
             await asyncio.wait_for(stale_renewal_entered.wait(), 2)
@@ -222,7 +231,7 @@ async def test_fenced_worker_does_not_begin_rollback_checkpoint_writes(store):
         )
     )
     try:
-        await asyncio.wait_for(started.wait(), 2)
+        await asyncio.wait_for(started.wait(), COLD_START_TIMEOUT_SECONDS)
         before = await graph.aget_state(config)
         # A rollback intent may already be local when its execution lease is
         # lost. Cancellation delivered by fencing cannot grant rollback rights.
