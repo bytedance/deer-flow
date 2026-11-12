@@ -65,18 +65,19 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
     assert "via Corepack" not in result.stderr
 
 
-def test_runner_uses_corepack_when_direct_pnpm_conflicts_with_package_manager(tmp_path: Path):
+@pytest.mark.parametrize("direct_version", ["11.25.0", "10.26.2-rc.1"])
+def test_runner_uses_corepack_when_direct_pnpm_conflicts_with_package_manager(tmp_path: Path, direct_version: str):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     direct = _write_fake_command(bin_dir, "pnpm", "direct")
     if os.name == "nt":
         direct.write_text(
-            '@echo off\r\nif "%1"=="--version" (echo 11.25.0 & exit /b 0)\r\necho direct^|%CD%^|%*\r\n',
+            f'@echo off\r\nif "%1"=="--version" (echo {direct_version} & exit /b 0)\r\necho direct^|%CD%^|%*\r\n',
             encoding="utf-8",
         )
     else:
         direct.write_text(
-            '#!/bin/sh\nif [ "$1" = "--version" ]; then echo 11.25.0; exit 0; fi\nprintf "direct|%s|%s\\n" "$PWD" "$*"\n',
+            f'#!/bin/sh\nif [ "$1" = "--version" ]; then echo {direct_version}; exit 0; fi\nprintf "direct|%s|%s\\n" "$PWD" "$*"\n',
             encoding="utf-8",
         )
     _write_fake_command(bin_dir, "corepack", "corepack")
@@ -102,6 +103,45 @@ def test_runner_rejects_mismatched_pnpm_without_corepack(tmp_path: Path):
     assert result.returncode == 127
     assert "pnpm 11.25.0 is on PATH" in result.stderr
     assert "pins 10.26.2" in result.stderr
+
+
+@pytest.mark.parametrize("package_content", [None, "{", "{}"])
+def test_runner_reports_unreadable_or_unpinned_package_manifest(tmp_path: Path, monkeypatch, capsys, package_content: str | None):
+    package_json = tmp_path / "package.json"
+    if package_content is not None:
+        package_json.write_text(package_content, encoding="utf-8")
+    run_pnpm = PNPM_MODULE["run_pnpm"]
+    monkeypatch.setitem(run_pnpm.__globals__, "PACKAGE_JSON_PATH", package_json)
+    monkeypatch.setitem(run_pnpm.__globals__, "find_pnpm_command", lambda: ["pnpm"])
+
+    assert run_pnpm(["install"]) != 0
+    assert "frontend/package.json" in capsys.readouterr().err
+
+
+def test_runner_warns_when_direct_pnpm_version_is_unparseable(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_command(bin_dir, "pnpm", "direct")
+
+    result = _run_pnpm(bin_dir, "install")
+
+    assert result.returncode == 0
+    assert "could not determine pnpm version" in result.stderr.lower()
+
+
+def test_version_probe_does_not_read_stdin(monkeypatch):
+    run_pnpm = PNPM_MODULE["run_pnpm"]
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout="10.26.2\n")
+
+    monkeypatch.setitem(run_pnpm.__globals__, "find_pnpm_command", lambda: ["pnpm"])
+    monkeypatch.setitem(run_pnpm.__globals__, "subprocess", SimpleNamespace(run=fake_run, DEVNULL=-3))
+
+    assert run_pnpm(["install"]) == 0
+    assert calls[0]["stdin"] == -3
 
 
 def test_runner_prefers_cmd_shim_on_windows(monkeypatch):

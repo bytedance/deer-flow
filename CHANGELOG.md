@@ -68,6 +68,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **setup:** Local commands use the pnpm version pinned by the frontend when a
+  different global pnpm is on `PATH`, falling back to Corepack or reporting an
+  actionable mismatch before installation. ([#8183](https://github.com/bytedance/deer-flow/pull/8183))
+
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.
