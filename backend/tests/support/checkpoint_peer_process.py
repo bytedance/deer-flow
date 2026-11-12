@@ -3,6 +3,7 @@
 import asyncio
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -37,6 +38,10 @@ async def main(thread_id: str, schema: str) -> None:
         await manager.reconcile_orphaned_inflight_runs(
             error="reclaimed",
             stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+            # The host wall clock can step backward (WSL2, NTP). A future
+            # ``before`` keeps the old run inside the candidate window; the
+            # expired lease still gates the takeover.
+            before=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         )
         new_run = await manager.create_or_reject(thread_id, user_id="alice")
         await manager.set_status(new_run.run_id, RunStatus.running)

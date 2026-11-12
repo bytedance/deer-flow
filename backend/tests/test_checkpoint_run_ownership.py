@@ -182,6 +182,10 @@ async def _exercise_takeover(saver, *, detect_local_loss: bool) -> None:
             await new_manager.reconcile_orphaned_inflight_runs(
                 error="reclaimed",
                 stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+                # The host wall clock can step backward (WSL2, NTP). A future
+                # ``before`` keeps this run inside the candidate window; the
+                # expired lease still gates the takeover.
+                before=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
             )
             new_run = await new_manager.create_or_reject(old_run.thread_id, user_id="alice")
             await new_manager.set_status(new_run.run_id, RunStatus.running)
