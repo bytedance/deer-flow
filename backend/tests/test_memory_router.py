@@ -9,7 +9,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
-from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryDuplicateFactIdError
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
@@ -1206,7 +1206,7 @@ def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
 def test_import_memory_route_names_duplicate_fact_id_in_detail() -> None:
     """A MemoryDuplicateFactIdError surfaces its own detail verbatim, not the
     generic facts-array message (Copilot P2 on #8153)."""
-    from deerflow.agents.memory.manager import MemoryDuplicateFactIdError
+
 
     app = make_authed_test_app()
     app.include_router(memory.router)

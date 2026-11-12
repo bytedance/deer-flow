@@ -2120,6 +2120,7 @@ def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path)
     storage = FileMemoryStorage(config)
     updater = MemoryUpdater(config, storage)
     updater.import_memory_data(_make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")]), agent_name="researcher")
+    expected = storage.load(agent_name="researcher")
 
     unchanged = _fact("Keep PostgreSQL", "fact_dup", revision=1)
     edited = _fact("Use SQLite instead", "fact_dup", revision=1)
@@ -2129,3 +2130,5 @@ def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path)
             user_id=None,
             agent_name="researcher",
         )
+    # The rejection must not partially apply the first entry.
+    assert storage.load(agent_name="researcher") == expected
