@@ -16,8 +16,6 @@ from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.agents.memory.manager import MemoryDuplicateFactIdError
-
 from ..config import DeerMemConfig
 from .eviction import (
     EVICTION_POLICY_CONFIDENCE,
@@ -40,6 +38,10 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class DuplicateFactIdError(ValueError):
+    """A backup contains more than one entry for a fact ID."""
 
 
 # Thread pool for offloading sync memory updates when called from an async
@@ -1008,7 +1010,7 @@ class MemoryUpdater:
             for fact in memory_data["facts"]:
                 fact_id = fact["id"]
                 if fact_id in seen_ids:
-                    raise MemoryDuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+                    raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
                 seen_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
