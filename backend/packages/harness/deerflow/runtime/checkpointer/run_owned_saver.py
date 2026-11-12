@@ -70,6 +70,7 @@ class RunOwnedSaver(BaseCheckpointSaver):
                 yield connection_source
 
         async with source.lock, connection() as conn, drained_async_context(conn.transaction()):
+            await conn.execute("SELECT run_id FROM runs WHERE run_id = %s FOR UPDATE", (self._record.run_id,))
             cursor = await conn.execute(
                 """
                 SELECT 1 FROM runs
@@ -77,8 +78,7 @@ class RunOwnedSaver(BaseCheckpointSaver):
                   AND run_incarnation IS NOT DISTINCT FROM %s
                   AND producer_epoch IS NOT DISTINCT FROM %s
                   AND status IN ('pending', 'running')
-                  AND lease_expires_at > CURRENT_TIMESTAMP
-                FOR UPDATE
+                  AND lease_expires_at > clock_timestamp()
                 """,
                 (
                     self._record.run_id,

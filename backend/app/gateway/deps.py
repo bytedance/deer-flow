@@ -274,6 +274,42 @@ def multi_process_deployment(config: AppConfig) -> bool:
     return _multi_process_signal(config) is not None
 
 
+def _validate_checkpoint_lease_storage(config: AppConfig) -> None:
+    """Keep PostgreSQL checkpoint writes in the run lease database."""
+    ownership = getattr(config, "run_ownership", None)
+    if ownership is None or not ownership.heartbeat_enabled:
+        return
+    checkpointer = getattr(config, "checkpointer", None)
+    if checkpointer is None:
+        return
+    database = config.database
+    if database.backend != "postgres":
+        if checkpointer.type == "postgres":
+            raise SystemExit("PostgreSQL checkpoint lease fencing requires database.backend='postgres'.")
+        return
+    if checkpointer.type != "postgres":
+        raise SystemExit("PostgreSQL checkpoint lease fencing requires checkpointer.type='postgres'.")
+    if checkpointer.postgres_schema != database.postgres_schema:
+        raise SystemExit("PostgreSQL checkpoint lease fencing requires one schema for database and checkpointer.")
+
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ArgumentError
+
+    def identity(raw: str):
+        if not isinstance(raw, str) or not raw:
+            raise SystemExit("PostgreSQL checkpoint lease fencing requires valid database URLs.")
+        try:
+            url = make_url(raw)
+        except (ArgumentError, TypeError, ValueError):
+            raise SystemExit("PostgreSQL checkpoint lease fencing requires valid database URLs.") from None
+        if url.drivername not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"}:
+            raise SystemExit("PostgreSQL checkpoint lease fencing requires PostgreSQL database URLs.")
+        return url.set(drivername="postgresql")
+
+    if identity(checkpointer.connection_string) != identity(database.postgres_url):
+        raise SystemExit("PostgreSQL checkpoint lease fencing requires one database URL for database and checkpointer.")
+
+
 def _channel_leader_lease(config: AppConfig) -> ChannelLeaderLeaseConfig:
     """Parse ``channels.leader_lease``; a malformed block exits with the dotted path in the message."""
     try:
@@ -804,6 +840,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # SQLite write-locks cannot support concurrent multi-process access.
     # ------------------------------------------------------------------
     _enforce_postgres_for_multi_worker(startup_config)
+    _validate_checkpoint_lease_storage(startup_config)
     # Reject a malformed DEER_FLOW_CREDENTIALS_KEY, or a missing one where
     # declared instances store credentials but cannot share the generated file.
     _enforce_credentials_key(startup_config)

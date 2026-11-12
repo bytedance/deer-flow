@@ -137,6 +137,8 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
 - [Changelog](CHANGELOG.md) - Release notes
 
+With PostgreSQL run heartbeats, a legacy `checkpointer` override must match the database URL and schema.
+
 ## ⚠️ Security Notice
 
 DeerFlow can execute commands and read and write files. It is designed to run in a local trusted environment, and a Gateway admin account is equivalent to code execution on the host. Before you deploy it on a server or expose it to a network, read the full [Security Notice](docs/guide/security.md) and [SECURITY.md](SECURITY.md).

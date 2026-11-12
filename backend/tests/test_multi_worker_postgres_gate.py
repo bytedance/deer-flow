@@ -28,6 +28,7 @@ from app.gateway.deps import (
     langgraph_runtime,
 )
 from app.gateway.routers.browser import _browser_tools_enabled
+from deerflow.config.checkpointer_config import CheckpointerConfig
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, GENERATE_KEY_COMMAND
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.deployment_config import MULTI_INSTANCE_ENV_VAR, DeploymentConfig, multi_instance_declaration
@@ -69,6 +70,23 @@ def _cluster_ready(**overrides):
     kwargs = dict(heartbeat_enabled=True, stream_bridge_type="redis")
     kwargs.update(overrides)
     return _config_with_backend("postgres", **kwargs)
+
+
+@pytest.mark.anyio
+async def test_checkpoint_schema_mismatch_stops_before_engine_start() -> None:
+    config = _config_with_backend("postgres", heartbeat_enabled=True)
+    config.database = DatabaseConfig(backend="postgres", postgres_url="postgresql://user:pass@localhost/app", postgres_schema="runs")
+    config.checkpointer = CheckpointerConfig(
+        type="postgres",
+        connection_string="postgresql://user:pass@localhost/app",
+        postgres_schema="checkpoints",
+    )
+    init_engine = AsyncMock()
+    with patch("deerflow.persistence.engine.init_engine_from_config", init_engine):
+        with pytest.raises(SystemExit, match="schema"):
+            async with langgraph_runtime(FastAPI(), config):
+                pass
+    init_engine.assert_not_awaited()
 
 
 @pytest.fixture(autouse=True)

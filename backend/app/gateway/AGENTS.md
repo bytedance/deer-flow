@@ -61,6 +61,9 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
   run store; use the store's claim and cancel primitives so that a lease renewal
   between your read and your write is not overwritten. Multi-worker deployments
   need `run_events.backend: db`.
+- **Checkpoint lease storage.** When PostgreSQL run heartbeats are enabled, a
+  legacy `checkpointer` override must match the database URL and schema.
+  `langgraph_runtime` rejects a mismatch before it opens the persistence engine.
 - **Idempotency keys.** Scope an external `Idempotency-Key` to its owner and thread
   before it reaches `RunManager`; the manager's index is process-wide.
 - **`/wait` on a reused run** returns the durable run status and error. The latest

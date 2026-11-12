@@ -45,7 +45,8 @@ make test-blocking-io
 - **Graph writes follow the active run lease.** `RunOwnedSaver` checks each write.
   PostgreSQL writes lock the run row in the same transaction as the checkpoint.
   Keep the source saver lock while this transaction uses its connection.
-  The run row and checkpoint tables must use the same PostgreSQL schema.
+  Check lease expiry with `clock_timestamp()` after the run row lock.
+  The run row and checkpoint tables must use the same PostgreSQL URL and schema.
 
 ## Admission and terminal commit
 

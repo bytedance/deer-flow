@@ -22,6 +22,7 @@ from deerflow.persistence.postgres_url import normalize_asyncpg_url
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunProducerPolicyRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
+from deerflow.runtime.checkpointer.run_owned_saver import CheckpointOwnershipLostError, RunOwnedSaver
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
 
@@ -52,7 +53,7 @@ def _graph(saver, node):
 async def saver(request):
     if request.param == "memory":
         checkpointer = _YieldingSaver()
-        yield SimpleNamespace(checkpointer=checkpointer, store=MemoryRunStore(), schema=None, session_factory=None)
+        yield SimpleNamespace(checkpointer=checkpointer, store=MemoryRunStore(), schema=None, session_factory=None, kind=request.param)
         return
     uri = os.environ.get("TEST_POSTGRES_URI")
     if not uri:
@@ -92,6 +93,7 @@ async def saver(request):
                     store=RunRepository(session_factory),
                     schema=schema,
                     session_factory=session_factory,
+                    kind=request.param,
                 )
         else:
             async with aio.AsyncPostgresSaver.from_conn_string(dsn_with_search_path(uri, schema)) as checkpointer:
@@ -106,6 +108,7 @@ async def saver(request):
                     store=RunRepository(session_factory),
                     schema=schema,
                     session_factory=session_factory,
+                    kind=request.param,
                 )
     finally:
         async with admin.begin() as conn:
@@ -114,8 +117,7 @@ async def saver(request):
         await engine.dispose()
 
 
-@pytest.mark.anyio
-async def test_lost_owner_cannot_replace_recovered_checkpoint_head(saver) -> None:
+async def _exercise_takeover(saver, *, detect_local_loss: bool) -> None:
     checkpointer = saver.checkpointer
     store = saver.store
     ownership = RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True)
@@ -158,8 +160,11 @@ async def test_lost_owner_cannot_replace_recovered_checkpoint_head(saver) -> Non
             async with saver.session_factory() as session:
                 await session.execute(update(RunRow).where(RunRow.run_id == old_run.run_id).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=40)))
                 await session.commit()
-        await old_manager._renew_leases()
-        assert old_run.ownership_lost
+        if detect_local_loss:
+            await old_manager._renew_leases()
+            assert old_run.ownership_lost
+        else:
+            assert not old_run.ownership_lost
 
         config = {"configurable": {"thread_id": old_run.thread_id}}
         if saver.schema is not None:
@@ -186,6 +191,13 @@ async def test_lost_owner_cannot_replace_recovered_checkpoint_head(saver) -> Non
         assert before.checkpoint["channel_values"]["value"] == "new"
         before_ids = {item.checkpoint["id"] async for item in checkpointer.alist(config)}
 
+        if not detect_local_loss:
+            assert not old_run.ownership_lost
+            stale = dict(before.checkpoint)
+            stale["id"] = str(uuid4())
+            with pytest.raises(CheckpointOwnershipLostError):
+                await RunOwnedSaver(checkpointer, old_manager, old_run).aput(before.config, stale, before.metadata, {})
+
         release.set()
         await asyncio.wait_for(old_run.task, 5)
         after = await checkpointer.aget_tuple(config)
@@ -204,3 +216,116 @@ async def test_lost_owner_cannot_replace_recovered_checkpoint_head(saver) -> Non
         await asyncio.gather(old_run.task, return_exceptions=True)
         if saver.schema is None:
             await checkpointer.adelete_thread(old_run.thread_id)
+
+
+@pytest.mark.anyio
+async def test_lost_owner_cannot_replace_recovered_checkpoint_head(saver) -> None:
+    await _exercise_takeover(saver, detect_local_loss=True)
+
+
+@pytest.mark.anyio
+async def test_database_takeover_fences_checkpoint_write(saver) -> None:
+    if saver.schema is None:
+        pytest.skip("This test needs PostgreSQL")
+    await _exercise_takeover(saver, detect_local_loss=False)
+
+
+@pytest.mark.anyio
+async def test_checkpoint_writer_rechecks_lease_after_row_lock_wait(saver) -> None:
+    if saver.kind != "postgres":
+        pytest.skip("This test uses one PostgreSQL connection")
+    checkpointer = saver.checkpointer
+    manager = RunManager(
+        store=saver.store,
+        worker_id="worker-a",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-lock-wait-" + uuid4().hex, user_id="alice")
+    await manager.set_status(run.run_id, RunStatus.running)
+    config = {"configurable": {"thread_id": run.thread_id}}
+
+    async def node(state: _State) -> _State:
+        return state
+
+    await _graph(checkpointer, node).ainvoke({"value": "before"}, config=config)
+    before = await checkpointer.aget_tuple(config)
+    assert before is not None
+    before_ids = {item.checkpoint["id"] async for item in checkpointer.alist(config)}
+    stale = dict(before.checkpoint)
+    stale["id"] = str(uuid4())
+    pid_cursor = await checkpointer.conn.execute("SELECT pg_backend_pid()")
+    writer_pid = (await pid_cursor.fetchone())["pg_backend_pid"]
+    writer = None
+    async with saver.session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("UPDATE runs SET lease_expires_at = clock_timestamp() + interval '2 seconds' WHERE run_id = :run_id"),
+                {"run_id": run.run_id},
+            )
+            try:
+                writer = asyncio.create_task(RunOwnedSaver(checkpointer, manager, run).aput(before.config, stale, before.metadata, {}))
+
+                async def writer_waits_for_row_lock() -> None:
+                    while True:
+                        async with saver.session_factory() as observer:
+                            wait_type = await observer.scalar(
+                                text("SELECT wait_event_type FROM pg_stat_activity WHERE pid = :pid"),
+                                {"pid": writer_pid},
+                            )
+                        if wait_type == "Lock":
+                            return
+                        await asyncio.sleep(0.01)
+
+                await asyncio.wait_for(writer_waits_for_row_lock(), 5)
+                await session.execute(
+                    text("SELECT pg_sleep_until(lease_expires_at + interval '0.05 seconds') FROM runs WHERE run_id = :run_id"),
+                    {"run_id": run.run_id},
+                )
+            except BaseException:
+                if writer is not None:
+                    writer.cancel()
+                    await asyncio.gather(writer, return_exceptions=True)
+                raise
+    assert writer is not None
+    assert not run.ownership_lost
+    with pytest.raises(CheckpointOwnershipLostError):
+        await asyncio.wait_for(writer, 5)
+    assert {item.checkpoint["id"] async for item in checkpointer.alist(config)} == before_ids
+
+
+@pytest.mark.anyio
+async def test_rollback_checkpoint_delete_requires_active_lease(saver) -> None:
+    checkpointer = saver.checkpointer
+    manager = RunManager(
+        store=saver.store,
+        worker_id="worker-a",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-rollback-delete-" + uuid4().hex, user_id="alice")
+    await manager.set_status(run.run_id, RunStatus.running)
+    config = {"configurable": {"thread_id": run.thread_id}}
+
+    async def node(state: _State) -> _State:
+        return state
+
+    graph = _graph(checkpointer, node)
+    await graph.ainvoke({"value": "before"}, config=config)
+    owned = RunOwnedSaver(checkpointer, manager, run)
+    await owned.adelete_thread(run.thread_id)
+    assert await checkpointer.aget_tuple(config) is None
+
+    await graph.ainvoke({"value": "preserve"}, config=config)
+    preserved = await checkpointer.aget_tuple(config)
+    assert preserved is not None
+    if saver.session_factory is None:
+        saver.store._runs[run.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=40)).isoformat()
+    else:
+        async with saver.session_factory() as session:
+            await session.execute(update(RunRow).where(RunRow.run_id == run.run_id).values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=40)))
+            await session.commit()
+    assert not run.ownership_lost
+    with pytest.raises(CheckpointOwnershipLostError):
+        await owned.adelete_thread(run.thread_id)
+    after = await checkpointer.aget_tuple(config)
+    assert after is not None
+    assert after.checkpoint["id"] == preserved.checkpoint["id"]
