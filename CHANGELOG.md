@@ -60,6 +60,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
 - **channels:** A WeCom group command that follows the bot mention now runs as a
   command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
   the classifier required a bare leading `/`, so `/new` and `/status` sent in a
