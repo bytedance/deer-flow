@@ -859,8 +859,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {

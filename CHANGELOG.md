@@ -20,6 +20,11 @@ This section accumulates work toward the **2.3.0** milestone
   display source line numbers when the result contains 1–40 lines and the
   labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
 
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
 - **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
   reasoning mode. Auto uses a separate tool-free review call with an existing
   model profile; uncertain or high-risk operations require a human. Cards show
@@ -55,6 +60,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** A WeCom group command that follows the bot mention now runs as a
+  command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
+  the classifier required a bare leading `/`, so `/new` and `/status` sent in a
+  group became chat turns. Leading mentions are skipped for the command lookup
+  only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
+  and DingTalk handling. ([#8118])
+  
 - **subagents:** Apply tool allowlists and denylists to middleware-declared
   tools even when global authorization is disabled, including the default
   denial of `task`. Restricted subagents reject non-Sequence declarations
@@ -253,6 +265,9 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8151])
+
 - **memory:** Importing a backup without a `facts` array now returns HTTP 422
   and preserves saved memory. An explicit empty array still clears the selected
   fact bucket. ([#8131])
@@ -16317,5 +16332,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151
