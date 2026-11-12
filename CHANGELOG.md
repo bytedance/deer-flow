@@ -203,6 +203,11 @@ This section accumulates work toward the **2.3.0** milestone
   mirrors `ThreadOwnershipConflictError`; a duplicate key with no surviving row
   is still surfaced as a 500. ([#8057])
 
+- **models:** Cancelling a Codex-backed run now closes its upstream HTTP/SSE
+  connection, including while waiting for response headers, and retry waits
+  are cancellable. Local resources are released; the remote service may still
+  continue generation. ([#8053](https://github.com/bytedance/deer-flow/pull/8053))
+
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
