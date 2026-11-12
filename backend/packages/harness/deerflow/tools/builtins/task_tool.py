@@ -101,27 +101,31 @@ def _preflight_delegation_checks(
     runtime_app_config: Any | None,
     allowed_subagents: Any | None,
 ) -> tuple[Any | None, str | None]:
-    """只读预检（Preflight / Validate-then-Mutate）。
+    """Read-only preflight (validate-then-mutate).
 
-    在触发任何有副作用的委派操作（工具装配、SubagentExecutor 创建、
-    后台任务注册）之前，一次性完成所有前置条件校验。
+    Runs every precondition check in one pass before any side-effecting
+    delegation work (tool assembly, SubagentExecutor creation, background task
+    registration) is triggered.
 
-    本 helper 自身零副作用：
-    - 不创建 SubagentExecutor
-    - 不注册后台任务
-    - 不装配 MCP/业务工具
-    - 不快照父上下文
-    - 不抢占或取消任何源任务
+    This helper has zero side effects of its own:
+    - Does not create a SubagentExecutor
+    - Does not register background tasks
+    - Does not assemble MCP/business tools
+    - Does not snapshot the parent context
+    - Does not preempt or cancel any source task
 
-    返回 (config, None) 表示全部通过；返回 (None, error_str) 表示拒绝，
-    调用方应直接返回失败。helper 内部状态不变，调用方可安全重试。
-    注意：helper 运行前调用方已在 RunInputControl 上注册了子网关条目，
-    该条目为良性重试可复用，不属于 helper 自身的副作用。
+    Returns (config, None) when every check passes; returns (None, error_str)
+    when rejected, and the caller should return the failure directly. The
+    helper's internal state is unchanged, so callers can retry safely.
+    Note: before this helper runs, the caller has already registered a child
+    gateway entry on RunInputControl; that entry can be reused for benign
+    retries and is not a side effect of this helper itself.
 
-    未来若合入 recovery 特性，应在本 helper 内补充只读的源任务可恢复性
-    检查（类型兼容、历史可提取、非空），仅当全部通过后再由调用方执行
-    supersede_and_claim_resumable_task，避免被拒绝的恢复请求消耗源任务
-    （见 issue #7633）。
+    If the recovery feature lands later, add read-only source-task
+    recoverability checks here (type compatibility, extractable history,
+    non-empty), and have the caller run supersede_and_claim_resumable_task only
+    after all checks pass, so a rejected recovery request does not consume the
+    source task (see issue #7633).
     """
     config: Any | None = None
 
@@ -943,11 +947,13 @@ async def task_tool(
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
 
-    # Preflight: 只读预检，零副作用。在触发任何有副作用的委派操作
-    # （工具装配、执行器创建、后台任务注册）之前一次性完成前置条件校验。
-    # 失败即返回，helper 内部状态不变，调用方可安全重试。context_mode guard
-    # 是 helper 内最先执行的分支，catalog discovery 被移到 guard 之后，
-    # 保证非法模式不会触发 managed-subagent store 访问。
+    # Preflight: read-only checks with zero side effects. Complete every
+    # precondition check in one pass before any side-effecting delegation work
+    # (tool assembly, executor creation, background task registration). Return
+    # immediately on failure; the helper's internal state is unchanged, so the
+    # caller can retry safely. The context_mode guard is the first branch
+    # executed inside the helper, and catalog discovery was moved after the
+    # guard so an invalid mode never triggers a managed-subagent store access.
     preflight_config, preflight_error = _preflight_delegation_checks(
         subagent_type=subagent_type,
         context_mode=context_mode,
