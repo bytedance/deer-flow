@@ -812,6 +812,9 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     user_id = get_effective_user_id()
     run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+    approval_store = getattr(request.app.state, "approval_store", None)
+    if approval_store is not None:
+        await await_drained(approval_store.delete_thread(thread_id, user_id=user_id))
     if batch_repo is not None:
         await batch_repo.suppress_thread_continuations(thread_id)
 
@@ -1043,7 +1046,15 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_response(thread_id, existing_record)
-        # A duplicate-key error with no row we can read back is a real failure.
+        # The same-owner reconciliation above found nothing, yet the insert hit
+        # a duplicate primary key — so the surviving row belongs to *another*
+        # user. That is the ownership-conflict case, which the route already
+        # maps ``ThreadOwnershipConflictError`` to: a non-disclosing 404. Read
+        # the row back bypassing the owner scope to confirm a foreign row
+        # exists before collapsing to a 500.
+        if await thread_store.get(thread_id, user_id=None) is not None:
+            raise HTTPException(status_code=404, detail="Thread not found") from None
+        # A duplicate-key error with no surviving row is a real failure.
         logger.exception("Failed to write thread_meta for %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to create thread")
     except Exception:
@@ -1793,6 +1804,7 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         updates[GOAL_OUTCOME_CHANNEL] = None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
+            await reject_new_run_when_approval_pending(request, thread_id)
             source_metadata = await accessor.aget_metadata(read_config)
             update_config = {
                 **read_config,
@@ -1809,6 +1821,8 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Update state after the run finishes.") from None
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        raise
     except Exception:
         logger.exception("Failed to update state for thread %s", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to update thread state")

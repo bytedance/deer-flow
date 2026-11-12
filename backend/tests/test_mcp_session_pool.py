@@ -1819,6 +1819,9 @@ async def test_http_transport_tools_not_pooled():
         "myserver": {"transport": "http", "url": "http://localhost:8000/mcp"},
         "playwright": {"transport": "stdio", "command": "npx", "args": ["-y", "@anthropic/mcp-server-playwright"]},
     }
+    for name, server in extensions_config.get_enabled_mcp_servers.return_value.items():
+        server.model_dump.return_value = servers_config[name]
+    extensions_config.mcp_servers = extensions_config.get_enabled_mcp_servers.return_value
 
     with (
         patch("deerflow.mcp.tools.ExtensionsConfig.from_file", return_value=extensions_config),

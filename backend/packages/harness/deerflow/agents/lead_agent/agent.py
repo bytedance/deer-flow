@@ -828,11 +828,11 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool) -> None:
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None) -> None:
     hitl_config = getattr(app_config, "hitl_approval", None)
-    if hitl_config is None or not hitl_config.enabled:
+    if hitl_config is None or hitl_config.enabled is not True:
         return
-    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+    from deerflow.approvals.middleware import ToolApprovalMiddleware
 
     known_tool_names = {tool.name for tool in final_tools}
     unknown_names = set(hitl_config.tools) - known_tool_names
@@ -844,16 +844,11 @@ def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_c
         hitl_config.non_interactive,
         hitl_config.max_actions,
     )
-    middlewares.insert(
-        0,
-        HitlApprovalMiddleware(
-            tool_names=set(hitl_config.tools),
-            non_interactive=hitl_config.non_interactive,
-            max_actions=hitl_config.max_actions,
-            supports_resume=supports_resume,
-            pii_config=getattr(app_config, "pii_redaction", None),
-        ),
-    )
+    # Resolve artifact handles first, then approve the concrete operation.
+    # Authorization remains inside this wrapper so edited arguments are checked
+    # by the same mandatory guardrails before reaching the bound tool.
+    index = next((i + 1 for i, middleware in enumerate(middlewares) if type(middleware).__name__ == "ArtifactResolutionMiddleware"), 0)
+    middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
 
 
 def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
@@ -1259,7 +1254,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             app_config=resolved_app_config,
             authorization_provider=_authz_provider,
         )
-        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False)
+        _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False, model_name=model_name)
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1423,7 +1418,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
-    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False))
+    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,

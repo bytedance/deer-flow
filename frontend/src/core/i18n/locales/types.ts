@@ -77,6 +77,26 @@ export interface Translations {
     catalogEntry: string;
     catalogHint: string;
     installationGuide: string;
+    detail: {
+      guide: string;
+      gettingStarted: string;
+      requirements: string;
+      loaded: string;
+      loadedHint: string;
+      tools: string;
+      pages: string;
+      management: string;
+      readyHint: string;
+      disabledHint: string;
+      failedHint: string;
+      noPageHint: string;
+      guideHint: string;
+      technicalDetails: string;
+      package: string;
+      namespace: string;
+      refresh: string;
+      refreshHint: string;
+    };
     catalog: Record<
       | "workflows"
       | "reportSections"
@@ -93,7 +113,12 @@ export interface Translations {
       | "weknora"
       | "lightrag"
       | "example",
-      { title: string; description: string }
+      {
+        title: string;
+        description: string;
+        gettingStarted?: { title: string; description: string }[];
+        requirements?: string[];
+      }
     >;
     pageUnavailable: string;
     pageUnavailableHint: string;
@@ -1596,6 +1621,21 @@ export interface Translations {
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
     approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
       title: string;
       description: string;
       waiting: string;

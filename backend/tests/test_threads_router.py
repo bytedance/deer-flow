@@ -1358,7 +1358,12 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> N
     assert winners == [final_record["user_id"]]
     assert final_record["user_id"] in owners
     assert len(failures) == 1
-    assert failures[0].status_code == 500
+    # The losing request now hits the unscoped duplicate-key recovery path and
+    # resolves the surviving (legacy, owner-less) row as a 404 ownership
+    # conflict rather than a 500, while the single-winner assertions above and
+    # the non-disclosing detail below are preserved.
+    assert failures[0].status_code == 404
+    assert failures[0].detail == "Thread not found"
     assert all(not table._entries_by_loop for table in worker_locks)
 
 
@@ -1396,6 +1401,42 @@ def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
 
     with TestClient(app) as client:
         response = client.post("/api/threads", json={"thread_id": "broken-thread", "metadata": {}})
+
+    assert response.status_code == 500, response.text
+
+
+def test_create_thread_keeps_real_integrity_failure_as_500() -> None:
+    """A duplicate-key ``IntegrityError`` with no surviving row stays a 500.
+
+    The recovery path rescues the idempotency race only when a row now exists;
+    an ``IntegrityError`` that coincides with no readable row — a genuine
+    constraint violation unrelated to the caller-chosen id — must still surface
+    as a 500 rather than being collapsed into the ownership-conflict 404. This
+    pins the fall-through branch that the unscoped duplicate-key read would
+    otherwise silently convert into a 404.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app, store, _checkpointer = _build_thread_app()
+
+    class _IntegrityFailureNoSurvivingRowStore(_PermissiveThreadMetaStore):
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+        async def get(self, thread_id, *, user_id=None):  # type: ignore[override]
+            # No row survives the failed insert, so the unscoped duplicate-key
+            # read returns nothing and the route must not treat this as a
+            # cross-owner conflict.
+            return None
+
+    app.state.thread_store = _IntegrityFailureNoSurvivingRowStore(store)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "integrity-no-row", "metadata": {}})
 
     assert response.status_code == 500, response.text
 

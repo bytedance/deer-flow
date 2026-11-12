@@ -11,16 +11,24 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
-- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
-  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
-  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
-  approval card with per-field argument summaries. Approve executes the call,
-  reject returns the reason to the model without executing. IM channels,
-  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
-  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
-  support always reject matching calls regardless of that setting.
-  `hitl_approval.max_actions` configures the approval-batch count limit
-  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
+- **summarization:** The built-in compaction prompt guides the summarizer to
+  preserve active user requirements, literal approval phrases, action conditions,
+  and explicit revisions. Explicit `summarization.summary_prompt` configurations
+  continue to take precedence. ([#8114](https://github.com/bytedance/deer-flow/pull/8114))
+
+- **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
+  display source line numbers when the result contains 1–40 lines and the
+  labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+
+- **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
+  reasoning mode. Auto uses a separate tool-free review call with an existing
+  model profile; uncertain or high-risk operations require a human. Cards show
+  complete arguments and support approve, reject, edit and exact-operation chat
+  grants with revocation. Root approvals survive restart through checkpoints;
+  interactive subagents wait through an owner-scoped channel with cancellation
+  and expiry. Mandatory deployment rules and account permissions apply in every
+  mode. Personal/platform MCP connections, policy and arguments bind approvals.
+  Disabled by default; see the configuration guide. `config_version` 66.
 
 - **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
   access for authenticated users, without maintaining a per-user allowlist.
@@ -47,9 +55,78 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** A WeCom group command that follows the bot mention now runs as a
+  command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
+  the classifier required a bare leading `/`, so `/new` and `/status` sent in a
+  group became chat turns. Leading mentions are skipped for the command lookup
+  only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
+  and DingTalk handling. ([#8118])
+  
+- **frontend:** **Share** in a sidebar chat's menu now copies a link to the
+  deployment you are using. On `localhost` and `127.0.0.1`, the default
+  `make dev` and Docker addresses, it copied a link to the hosted demo
+  (`deer-flow-v2.vercel.app`) instead. That link never opened the
+  conversation, and opening it sent the thread id to an outside host.
+  ([#8126])
+
+- **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
+  worker that had lost its run to a peer could put the row back. Its assembly
+  evidence write was an unconditional full-row upsert, so after a peer
+  reclaimed the run it reset the row to `running` and erased the takeover
+  error. The run could then finish as `success` after the peer had already
+  reported it failed, or be reclaimed a second time. The evidence is now merged
+  into the row's metadata only while the worker still holds a live lease on an
+  active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
+  the run before executing it. Custom `RunStore` implementations used with
+  heartbeats must implement that method. ([#8046])
+
+- **agents:** A high-risk tool call without a usable id no longer wedges the
+  thread when `hitl_approval` is enabled. A provider that omits a tool-call id
+  (`None`) or repeats one within a response made the middleware pause with an
+  approval payload the Gateway can never validate: every resume answered 422
+  and every new run stayed 409-blocked, all-reject included. An empty id was
+  technically resumable but is denied as well, since strict providers reject it
+  when the conversation is replayed. Such calls are now removed from the model
+  response with a visible rejection note instead of pausing, and deny paths no
+  longer build an invalid `ToolMessage` for a null id. A call whose id an
+  ordinary call also carries is stripped before it can be answered by result,
+  so the next request cannot advertise the id twice with two results.
+  A pause stored before
+  this change stays unresolvable; in-place recovery is tracked in [#8071].
+  ([#8069])
+
+- **runtime:** A HITL rejection, including the all-reject escape after approval is
+  disabled or the gated tools change during a pause, now reaches the thread's
+  message history under the resume run instead of existing only in checkpoint
+  state. ([#8073](https://github.com/bytedance/deer-flow/pull/8073))
+  
+- **summarization:** vLLM compaction counts reasoning tokens replayed to the
+  model when checking the trigger and estimating how much history to keep.
+  ([#8077](https://github.com/bytedance/deer-flow/pull/8077))
+
+- **gateway:** Posting feedback twice for the same run now returns a 409
+  instead of a 500. `POST /api/threads/{id}/runs/{run_id}/feedback` allows one
+  feedback row per user and run; a retry, or feedback on another message of the
+  same run, hit that unique key and the Gateway failed with an unhandled
+  database error. The 409 points callers at `PUT` on the same route, which
+  updates the existing feedback. ([#8064])
+  
+- **frontend:** Reopening a conversation restores successfully handed-off shared
+  artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
+
+- **sandbox:** BoxLite VMs recovered at startup now run health checks, commands,
+  and cleanup on the provider's event loop, avoiding sync/async SDK mismatches
+  that made healthy recovered VMs fail their first command. ([#8072])
+
+- **uploads:** Re-uploading a file whose name collides with a compound archive
+  suffix no longer inserts the dedupe counter inside the suffix. A second
+  `report.tar.gz` is now named `report_1.tar.gz` (matching `report_1.tar` and
+  `report_1.txt`), instead of `report.tar_1.gz`, so the extension stays intact
+  for file-type detection. ([#8042](https://github.com/bytedance/deer-flow/pull/8042))
 
 - **gateway:** Deleting a thread no longer reports success while its
   conversation stays readable. When the checkpoint store failed during
@@ -60,12 +137,24 @@ This section accumulates work toward the **2.3.0** milestone
   returns a 500 and keeps the thread, so the owner can delete it again.
   ([#7992])
 
+- **gateway:** Creating a thread with a caller-supplied `thread_id` that
+  already belongs to another user now returns a non-disclosing 404
+  (`Thread not found`) instead of a 500. The duplicate-key recovery path reads
+  the surviving row back bypassing the owner scope so the cross-owner case
+  mirrors `ThreadOwnershipConflictError`; a duplicate key with no surviving row
+  is still surfaced as a 500. ([#8057])
+
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
   detector was quadratic in the length of such a run, and redaction re-scans
   every user message on every model call, so one 100 KB paste blocked every
   thread for about 6 s per model call. The scan is now linear, and it redacts
   exactly the same addresses as before. ([#8006])
+
+- **agents:** Token budgets count separate accepted model calls even when a
+  provider reuses message IDs, so repeated IDs no longer bypass the configured
+  cap. Hard stops preserve already-completed structured-output tool results.
+  ([#8050](https://github.com/bytedance/deer-flow/pull/8050))
   
 - **subagents:** Managed subagent creation now rejects Windows reserved device
   names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) at the shared
@@ -107,6 +196,15 @@ This section accumulates work toward the **2.3.0** milestone
   `TAVILY_API_KEY`, `EXA_API_KEY` or `FIRECRAWL_API_KEY` now counts as missing
   instead of reaching the SDK as is. ([#7981])
   
+- **community:** Browserless is the last search/fetch provider that read its
+  token raw. A `BROWSERLESS_TOKEN` or configured `token` from a file kept its
+  trailing newline and became the auth query parameter, so every `web_fetch`
+  and `web_capture` request failed authentication while the key was correct.
+  Both now go through `provider_credentials.resolve_api_key`, and only an
+  omitted `token` key falls back to the environment: an explicit `""` or
+  `null` keeps opting a self-hosted capture endpoint out of authentication.
+  ([#8043])
+  
 - **docker:** Images built from a checkout no longer contain its local
   configuration. `.dockerignore` did not exclude `config.yaml`,
   `config.yaml.bak`, `extensions_config.json` or `mcp_config.json`, so a
@@ -125,6 +223,12 @@ This section accumulates work toward the **2.3.0** milestone
   tool execution after a loop-detection, run token-budget, provider-safety, or
   model output-length stop. Todo state is preserved so users can continue in a
   later run. ([#7953])
+
+- **runtime:** A thread can accept new runs and mutations after a transient
+  database failure leaves a completed operation's reservation in place. The
+  next request for the thread on the same Gateway worker retries the release,
+  including in single-worker deployments with lease heartbeats disabled.
+  ([#8068](https://github.com/bytedance/deer-flow/pull/8068))
 
 - **channels:** Long Feishu/Lark answers are no longer lost. Card text was
   unbounded and ASCII-escaped, so an answer of about 4,400 CJK characters made
@@ -148,6 +252,10 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** Importing a backup without a `facts` array now returns HTTP 422
+  and preserves saved memory. An explicit empty array still clears the selected
+  fact bucket. ([#8131])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
@@ -16199,6 +16307,15 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
-[#8006]: https://github.com/bytedance/deer-flow/pull/8006
-
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
+[#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
+[#8057]: https://github.com/bytedance/deer-flow/pull/8057
+[#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8069]: https://github.com/bytedance/deer-flow/issues/8069
+[#8071]: https://github.com/bytedance/deer-flow/issues/8071
+[#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8131]: https://github.com/bytedance/deer-flow/pull/8131
