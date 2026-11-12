@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 65
+config_version: 66
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1655,13 +1655,13 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
-  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # Best-effort per-document LLM summaries on the shelf (default on). When
   # enabled, each newly uploaded/promoted document gets a one-line generated
   # description rendered into the injected <documents> index and returned by
   # the documents API. Generation failures leave the summary empty and never
   # affect uploads. Rendering of already-stored summaries stays on even when
   # generation is disabled.
-  summaries_enabled: false
+  summaries_enabled: true
   # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
   summary_max_bytes: 256
   # Optional model override for summary generation; unset uses the default
@@ -2012,6 +2012,7 @@ sandbox:
 #   # request_timeout: 30             # finite positive management API request timeout seconds
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
@@ -2152,15 +2153,26 @@ verification:
 # ============================================================================
 # Pause high-risk tool calls for human approval before execution.
 # enabled=false (default) leaves all behavior unchanged.
-# The high-risk list is host-owned security policy edited by the operator.
-# non_interactive: deny | allow — behavior for IM channels, GitHub runs,
-# scheduled tasks, and other non-interactive entry points. Subagents and
-# runtimes without resume support always fail closed regardless of this setting.
+# The deployment policy covers writes and unknown tools, including MCP.
+# non_interactive: deny | allow is a legacy Ask-mode root-run override.
+# Auto uncertainty still denies unattended execution. Interactive children
+# wait through the parent-owned approval channel within their execution deadline.
 # Approval is not authorization: read_before_write, guardrails, and sandbox
 # authorization still apply after approval ("approve to try executing").
 hitl_approval:
   enabled: false
-  tools: []  # e.g. [write_file, str_replace, bash]
+  tools: []  # Extra tools to review, including otherwise trusted read tools.
+  default_mode: ask  # ask | auto | full; independent of reasoning mode
+  allowed_modes: [ask, auto]  # Operator ceiling for client selections.
+  review_unknown_tools: true  # Includes extension, personal and platform MCP tools.
+  allow_tools: []
+  deny_tools: []  # Mandatory in every mode.
+  always_ask_tools: []  # Cannot use automatic review or thread grants.
+  reviewer_model: null  # Existing model profile; null reuses the execution model.
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
   non_interactive: deny
   # Maximum matching tool calls in one approval batch; 0 disables the count limit.
   max_actions: 32
@@ -2326,7 +2338,7 @@ summarization:
   # Set to null to skip trimming (not recommended for very long conversations)
   trim_tokens_to_summarize: 15564
 
-  # Custom summary prompt template (null = use default LangChain prompt)
+  # Custom summary prompt template (null = use DeerFlow's built-in prompt)
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
@@ -2851,7 +2863,7 @@ run_events:
   #         database trigger after an offline cutover.
   # Restart-required; strict requires database.backend: postgres and backend: db.
   # Stop every Gateway, activate the database policy, then restart all with the
-  # matching cutover ID. See README.md#configuration for the offline cutover.
+  # matching cutover ID. See docs/guide/configuration.md for the offline cutover.
   producer_fencing: "off"
   # producer_cutover_id: deployment-2026-10-27
 
