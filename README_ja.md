@@ -315,8 +315,6 @@ channels:
   # オプション: 全モバイルチャネルのグローバルセッションデフォルト
   session:
     assistant_id: lead_agent
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false

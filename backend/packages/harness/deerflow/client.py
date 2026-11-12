@@ -1390,6 +1390,26 @@ class DeerFlowClient:
             ]
         }
 
+    def _memory_scope_kwargs(self, manager) -> dict[str, str]:
+        """Scope a memory management call to this client's named agent.
+
+        A named client's graph stores and reads its memory in that agent's
+        bucket: ``MemoryMiddleware`` and the memory tools both pass
+        ``agent_name``. A management call that omits it targets the user's
+        default bucket instead, so a fact written through the client is never
+        injected back into the same client's conversations.
+
+        A backend that accepts ``agent_name`` but ignores it would report
+        success while editing the user's default bucket, so a named client
+        refuses the call there instead of silently touching that data. The
+        Gateway answers the same request with 501.
+        """
+        if self._agent_name is None:
+            return {}
+        if getattr(manager, "supports_agent_scoped_management", False) is not True:
+            raise NotImplementedError(f"agent-scoped memory management not supported by memory backend {type(manager).__name__}")
+        return {"agent_name": self._agent_name}
+
     def get_memory(self) -> dict:
         """Get current memory data.
 
@@ -1398,19 +1418,22 @@ class DeerFlowClient:
         """
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().get_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.get_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
 
     def export_memory(self) -> dict:
         """Export current memory data for backup or transfer."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().get_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.get_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
 
     def import_memory(self, memory_data: dict) -> dict:
         """Import and persist full memory data."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().import_memory(memory_data, user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.import_memory(memory_data, user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
 
     def get_model(self, name: str) -> dict | None:
         """Get a specific model's configuration by name.
@@ -1667,12 +1690,15 @@ class DeerFlowClient:
 
         manager = get_memory_manager()
         user_id = get_effective_user_id()
+        # Resolved before the fallback below: an unsupported agent scope must
+        # not be mistaken for "no reload concept" and retried as a user-wide read.
+        scope_kwargs = self._memory_scope_kwargs(manager)
         try:
-            return manager.reload_memory(user_id=user_id)
+            return manager.reload_memory(user_id=user_id, **scope_kwargs)
         except NotImplementedError:
             pass  # no reload concept; fall back to current memory below
         try:
-            return manager.get_memory(user_id=user_id)
+            return manager.get_memory(user_id=user_id, **scope_kwargs)
         except NotImplementedError:
             raise NotImplementedError(f"reload_memory not supported by memory backend {type(manager).__name__}: implements neither reload_memory nor get_memory") from None
 
@@ -1680,14 +1706,15 @@ class DeerFlowClient:
         """Clear all persisted memory data."""
         from deerflow.agents.memory import get_memory_manager
 
-        return get_memory_manager().clear_memory(user_id=get_effective_user_id())
+        manager = get_memory_manager()
+        return manager.clear_memory(user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
 
     def create_memory_fact(self, content: str, category: str = "context", confidence: float = 0.5) -> dict:
         """Create a single fact manually."""
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
+        memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
         if fact_id is None:
             raise ValueError("Fact was not stored because the configured memory.max_facts capacity policy evicted it")
         return memory_data
@@ -1697,7 +1724,7 @@ class DeerFlowClient:
         from deerflow.agents.memory import get_memory_manager
 
         manager = get_memory_manager()
-        return manager.delete_fact(fact_id, user_id=get_effective_user_id())
+        return manager.delete_fact(fact_id, user_id=get_effective_user_id(), **self._memory_scope_kwargs(manager))
 
     def update_memory_fact(
         self,
@@ -1716,6 +1743,7 @@ class DeerFlowClient:
             category=category,
             confidence=confidence,
             user_id=get_effective_user_id(),
+            **self._memory_scope_kwargs(manager),
         )
 
     def get_memory_config(self) -> dict:
@@ -1777,6 +1805,7 @@ class DeerFlowClient:
         """
         validate_thread_id(thread_id)
         from deerflow.uploads.companions import invalidate_overwritten_upload, register_companion
+        from deerflow.utils.atomic_write import cleanup_failed_atomic_write
         from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
         # Validate all files upfront to avoid partial uploads.
@@ -1824,7 +1853,7 @@ class DeerFlowClient:
                     conversion_source = None
                     if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
                         if conversion_sources is None:
-                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-")
+                            conversion_sources = tempfile.TemporaryDirectory(prefix="deerflow-upload-source-", ignore_cleanup_errors=True)
                         conversion_source = Path(conversion_sources.name) / dest_name
                     if dest_name in existing_names:
                         if conversion_source is not None:
@@ -1836,7 +1865,9 @@ class DeerFlowClient:
                         dest_name = dest.name
                 except UnsafeUploadPathError:
                     if conversion_source is not None:
-                        conversion_source.unlink(missing_ok=True)
+                        # Skipping one unsafe file must survive a failed discard,
+                        # or a locked temp turns the skip into a batch failure.
+                        cleanup_failed_atomic_write(conversion_source)
                     logger.warning("Skipping upload with unsafe destination: %s", dest_name)
                     skipped_files.append(dest_name)
                     continue
@@ -1905,12 +1936,16 @@ class DeerFlowClient:
                         seen_names.discard(unique_md_name)
 
                 if conversion_source is not None:
-                    conversion_source.unlink(missing_ok=True)
+                    # The upload already succeeded; a capture we cannot discard
+                    # must not replace that result or drop the later files.
+                    cleanup_failed_atomic_write(conversion_source)
                 uploaded_files.append(info)
         finally:
             if conversion_pool is not None:
                 conversion_pool.shutdown(wait=True)
             if conversion_sources is not None:
+                # ignore_cleanup_errors keeps a locked capture from turning a
+                # decided batch outcome into a cleanup error.
                 conversion_sources.cleanup()
 
         message = f"Successfully uploaded {len(uploaded_files)} file(s)"

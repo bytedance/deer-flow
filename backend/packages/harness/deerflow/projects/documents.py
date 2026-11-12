@@ -211,7 +211,10 @@ def _place_staging(staging_path: Path, final_path: Path) -> None:
 
 
 def _remove_staging(staging_path: Path) -> None:
-    staging_path.unlink(missing_ok=True)
+    # Conversion already has an outcome (including cancellation). A busy or
+    # inaccessible temporary must not replace it; the retention sweep can
+    # retry the leftover after its existing age guard.
+    cleanup_failed_atomic_write(staging_path)
 
 
 def _remove_namespace(paths: Paths, *, user_id: str, relpath: str) -> None:
@@ -450,7 +453,9 @@ async def _convert_and_publish(repo: ProjectDocumentRepository, paths: Paths, *,
         # ``content_missing``, not ``binary``.
         locked = await repo.publish_under_live_lock(row["id"], project_id=row["project_id"], publish=_publish, user_id=user_id)
     finally:
-        await run_file_io(_remove_staging, staging_path)
+        # Keep single-flight ownership until cleanup's worker has settled,
+        # even if the reader is cancelled repeatedly while it is unlinking.
+        await await_drained(run_file_io(_remove_staging, staging_path))
     if locked is None:
         # Purged/trashed (or foreign) before the locked revalidation: the
         # staged output was discarded, nothing published (§6.3).
@@ -593,17 +598,33 @@ async def read_file_chunks(path: Path, *, chunk_size: int = 65536) -> AsyncItera
 
     Shared by the from-thread promote path (thread file → shelf staging) and
     the attach path (staged shelf copy → thread-upload ingestion).
+
+    Cancellation contract: once an open/read/close has been admitted to the
+    file-I/O worker, the caller's cancellation is delivered only after that
+    operation settles (:func:`await_drained`). The opened handle is retained
+    the moment the worker returns it, so a cancellation racing the result
+    handoff cannot leak it, and the cleanup close never races an in-flight
+    read. Waiting for the next chunk (the ``yield`` itself) stays immediately
+    cancellable. (#7491)
     """
 
     def _open() -> Any:
         return open(path, "rb")
 
-    handle = await run_file_io(_open)
+    retained: list[Any] = []
+
+    async def _open_and_retain() -> Any:
+        handle = await run_file_io(_open)
+        retained.append(handle)
+        return handle
+
     try:
-        while chunk := await run_file_io(handle.read, chunk_size):
+        handle = await await_drained(_open_and_retain())
+        while chunk := await await_drained(run_file_io(handle.read, chunk_size)):
             yield chunk
     finally:
-        await run_file_io(handle.close)
+        for open_handle in retained:
+            await await_drained(run_file_io(open_handle.close))
 
 
 def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str, row: dict) -> None:

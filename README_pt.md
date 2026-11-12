@@ -335,7 +335,7 @@ O tráfego de controle do sandbox AIO local é sempre direto: endereços de loop
 
 Os processos do backend pegam as mudanças do `config.yaml` automaticamente no próximo acesso à configuração, então atualizar metadados de modelo não exige reinício manual durante o desenvolvimento.
 
-Os runs do Gateway usam o `recursion_limit` de nível superior do `config.yaml` quando a requisição de API não informa um. O padrão é `100`; valores válidos por requisição têm precedência, e `max_recursion_limit` (padrão `1000`) limita os dois. As mudanças valem para o próximo run sem reiniciar o Gateway. Essa configuração de nível superior se aplica aos runs da API do Gateway; os runs de canais de IM e do `DeerFlowClient` embutido mantêm os próprios padrões e caminhos de override por chamada. As configurações de armazenamento de checkpoint `database.checkpoint_channel_mode` e `database.checkpoint_delta.snapshot_frequency` (padrão `10`) são exceções: as duas ficam congeladas quando o processo constrói um agente pela primeira vez (inclusive via `DeerFlowClient`) e exigem reinício do processo para serem alteradas com segurança.
+Os runs do Gateway usam o `recursion_limit` de nível superior do `config.yaml` quando a requisição de API não informa um. O padrão é `100`; valores válidos por requisição têm precedência, e `max_recursion_limit` (padrão `1000`) limita os dois. As mudanças valem para o próximo run sem reiniciar o Gateway. Essa configuração de nível superior se aplica aos runs da API do Gateway e dos canais de IM. Um `recursion_limit` no `session.config` de um canal de IM tem precedência, e os runs do canal GitHub mantêm o próprio piso. Os runs do `DeerFlowClient` embutido mantêm os próprios padrões e caminhos de override por chamada. As configurações de armazenamento de checkpoint `database.checkpoint_channel_mode` e `database.checkpoint_delta.snapshot_frequency` (padrão `10`) são exceções: as duas ficam congeladas quando o processo constrói um agente pela primeira vez (inclusive via `DeerFlowClient`) e exigem reinício do processo para serem alteradas com segurança.
 
 A seção opcional `database.checkpoint_cache` (apenas no modo de canal delta) faz cache dos históricos de checkpoint materializados: `type` é `memory` (padrão) ou `redis`, e `max_entries: 0` desativa o cache. O backend `redis` funciona só no Gateway/async; o caminho síncrono da TUI e do cliente embutido aceita apenas `memory`. O cache serve só para desempenho, os resultados são idênticos com ele desativado. Por isso ele nunca é congelado, e workers que compartilham o mesmo banco de checkpoints podem usar configurações de cache diferentes sem problema.
 
@@ -606,8 +606,6 @@ channels:
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
-    config:
-      recursion_limit: 100
     context:
       thinking_enabled: true
       is_plan_mode: false

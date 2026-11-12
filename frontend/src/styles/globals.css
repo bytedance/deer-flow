@@ -1,6 +1,28 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* File-format identity colors; keep semantic tokens for the surrounding UI. */
+.file-type-icon {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.file-type-icon[data-file-kind="sheet"] {
+  background: light-dark(#e7f5ec, #17392c);
+  color: light-dark(#187442, #70d6a1);
+}
+.file-type-icon[data-file-kind="document"] {
+  background: light-dark(#eaf1fd, #1d304d);
+  color: light-dark(#2864c5, #8bb7ff);
+}
+.file-type-icon[data-file-kind="slides"] {
+  background: light-dark(#fff0e8, #472b23);
+  color: light-dark(#bb4b28, #ffa17f);
+}
+.file-type-icon[data-file-kind="data"] {
+  background: light-dark(#f1edfb, #32284a);
+  color: light-dark(#7751b5, #c4a5ee);
+}
+
 @source "../../node_modules/streamdown/dist/index.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 @source "../../node_modules/@streamdown/mermaid/dist/*.js";
@@ -471,4 +493,43 @@ html.dark .shiki span {
     /* Override this registry rule with an important utility, e.g. cursor-default!. */
     cursor: pointer;
   }
+}
+
+/*
+ * Nextra's search panel and highlights use its --nextra-bg and primary color
+ * variables, which only its <Head> component defines. The app never renders
+ * it, so the panel was see-through, the active row's text was unreadable, and
+ * matches rendered white on transparent.
+ * Use the app's tokens instead.
+ */
+.nextra-search-results.nextra-scrollbar {
+  background-color: var(--popover);
+}
+
+/*
+ * Mobile search results live inside the modal sheet's scroll-lock boundary.
+ * Lift the panel above the sheet and its other controls.
+ */
+.nextra-search-results {
+  z-index: 60;
+  pointer-events: auto;
+}
+
+/* Below `sm` search only lives in the mobile sheet; match its input width. */
+@media (max-width: 639px) {
+  .nextra-search-results {
+    width: var(--input-width);
+  }
+}
+
+.nextra-search-results [role="option"][data-focus] {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.nextra-search-results [role="option"] mark {
+  background-color: color-mix(in oklch, var(--foreground) 12%, transparent);
+  color: inherit;
+  font-weight: 600;
+  border-radius: 2px;
 }

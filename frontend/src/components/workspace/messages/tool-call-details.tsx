@@ -1,23 +1,28 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatToolDetail } from "@/core/messages/tool-detail-preview";
+import { isErrorToolMessage } from "@/core/messages/tool-error";
 
 export function ToolCallDetails({
   name,
   callId,
   args,
   resultMessage,
+  pendingResultLabel,
+  children,
 }: {
   name: string;
   callId?: string;
   args: Record<string, unknown>;
   resultMessage?: Extract<Message, { type: "tool" }>;
+  pendingResultLabel?: string;
+  children?: ReactNode;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -40,17 +45,18 @@ export function ToolCallDetails({
           <Payload label={t.toolCalls.toolName} value={name} />
           <Payload label={t.toolCalls.callId} value={callId ?? "—"} />
           <Payload label={t.toolCalls.input} value={args} />
+          {children}
           {resultMessage ? (
             <Payload
               label={
-                resultMessage.status === "error"
+                isErrorToolMessage(resultMessage)
                   ? t.toolCalls.error
                   : t.toolCalls.result
               }
               value={resultMessage.content}
             />
           ) : (
-            <p>{t.toolCalls.noResult}</p>
+            <p>{pendingResultLabel ?? t.toolCalls.noResult}</p>
           )}
         </div>
       )}

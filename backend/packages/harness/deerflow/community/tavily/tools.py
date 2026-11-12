@@ -1,24 +1,35 @@
+import asyncio
 import json
 import logging
+import os
 
 from langchain.tools import tool
 from tavily import AsyncTavilyClient
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
+from deerflow.config.tool_config import ToolConfig
 
 logger = logging.getLogger(__name__)
 
 _FORMAT_ERROR = "Tavily returned an unexpected response format"
+_UNSET = object()
 
 
-def _get_tavily_client(tool_name: str = "web_search") -> AsyncTavilyClient:
-    config = get_app_config().get_tool_config(tool_name)
+def _get_tavily_client(tool_name: str = "web_search", config: ToolConfig | None = _UNSET) -> AsyncTavilyClient:
+    """Build a Tavily client, from ``config`` when the caller already read it."""
+    if config is _UNSET:
+        config = get_app_config().get_tool_config(tool_name)
     api_key = None
     if config is not None and "api_key" in config.model_extra:
-        api_key = config.model_extra.get("api_key")
-    return AsyncTavilyClient(api_key=api_key)
+        api_key = resolve_api_key(config.model_extra.get("api_key"))
+    if api_key is None:
+        api_key = resolve_api_key(os.getenv("TAVILY_API_KEY"))
+    # The SDK re-reads TAVILY_API_KEY unstripped when api_key is None; "" makes a
+    # blank value fail as a missing key instead.
+    return AsyncTavilyClient(api_key=api_key or "")
 
 
 def _response_objects(data: object, container: str) -> list[dict] | None:
@@ -52,7 +63,9 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         query: The query to search for.
         time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
-    config = get_app_config().get_tool_config("web_search")
+    # Config resolution stats and hashes the config files; keep it off the event
+    # loop, and build the client from the same read.
+    config = (await asyncio.to_thread(get_app_config)).get_tool_config("web_search")
     max_results = 5
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results")
@@ -66,7 +79,7 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         search_kwargs["include_domains_mode"] = "filter"
     if time_range is not None:
         search_kwargs["time_range"] = time_range
-    client = _get_tavily_client()
+    client = _get_tavily_client(config=config)
     try:
         res = await client.search(query, **search_kwargs)
     finally:
@@ -97,7 +110,8 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    client = _get_tavily_client("web_fetch")
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    client = await asyncio.to_thread(_get_tavily_client, "web_fetch")
     try:
         res = await client.extract([url])
     finally:

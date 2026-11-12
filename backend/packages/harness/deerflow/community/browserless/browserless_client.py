@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,46 @@ def _get_header(headers: Any, name: str) -> str:
     if value:
         return str(value)
     return str(headers.get(name.lower(), ""))
+
+
+async def _settle(future: "asyncio.Future[Any]") -> Any:
+    """Await a future that owns a resource, even if this task is cancelled again.
+
+    Cleanup must not be the thing that gets abandoned: the caller remembers its
+    own cancellation and re-raises it once the resource is released.
+    """
+    while True:
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            if future.cancelled():
+                raise
+
+
+async def _open_client(**kwargs: Any) -> httpx.AsyncClient:
+    """Build an ``httpx.AsyncClient`` without loading TLS trust on the event loop.
+
+    The constructor resolves the system trust store synchronously, so it has to
+    run in a thread. That alone is not enough: a cancellation can arrive while
+    the worker is still inside the constructor, and then the await is abandoned
+    while the thread goes on to hand back a live client that nobody closes. So
+    own the construction as a task and, once cancelled, wait for it and close
+    whatever it produced before the cancellation propagates.
+    """
+    construction: asyncio.Task[httpx.AsyncClient] = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, **kwargs))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+        try:
+            late_client = await _settle(construction)
+        except Exception as error:
+            logger.error(f"Browserless HTTPX client construction failed after cancellation: {error!s}")
+        else:
+            try:
+                await _settle(asyncio.create_task(late_client.aclose()))
+            except Exception as error:
+                logger.error(f"Closing a Browserless HTTPX client built after cancellation failed: {error!s}")
+        raise
 
 
 class BrowserlessClient:
@@ -142,7 +183,9 @@ class BrowserlessClient:
 
         logger.debug(f"Fetching URL via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Construction loads TLS trust synchronously, off the loop, and owns the
+            # client even when this coroutine is cancelled mid-construction.
+            async with await _open_client(timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/content",
                     json=payload,
@@ -232,7 +275,9 @@ class BrowserlessClient:
 
         logger.debug(f"Capturing URL screenshot via Browserless: {url}")
         try:
-            async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+            # Construction loads TLS trust synchronously, off the loop, and owns the
+            # client even when this coroutine is cancelled mid-construction.
+            async with await _open_client(timeout=self.timeout_s) as client:
                 resp = await client.post(
                     f"{self.base_url}/screenshot",
                     json=payload,

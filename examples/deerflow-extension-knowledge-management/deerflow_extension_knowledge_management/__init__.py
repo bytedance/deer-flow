@@ -13,6 +13,7 @@ from .router import NAMESPACE, build_router
 
 class Settings(Model):
     enabled: bool = Field(default=False, strict=True)
+    routes_enabled: bool = Field(default=True, strict=True)
     provider_factory: str = "deerflow_extension_knowledge_management.weknora:WeKnoraManagement"
     provider_config: dict[str, Any] = Field(default_factory=dict)
 
@@ -28,9 +29,10 @@ def install(registry, config):
     settings = Settings.model_validate(dict(config))
     if not settings.enabled:
         return
-    # Executable factory paths are operator-owned configuration, never HTTP input.
-    module, attribute = settings.provider_factory.split(":", 1)
-    provider = getattr(import_module(module), attribute)(settings.provider_config)
     if not registry.plugin(PluginContribution(namespace=NAMESPACE, title="Knowledge management", enabled=True, backend=(BackendAction("contract", describe_contract),))):
         raise RuntimeError("Host does not support knowledge management plugin admission")
-    registry.routers((build_router(provider),))
+    if settings.routes_enabled:
+        # Executable factory paths are operator-owned configuration, never HTTP input.
+        module, attribute = settings.provider_factory.split(":", 1)
+        provider = getattr(import_module(module), attribute)(settings.provider_config)
+        registry.routers((build_router(provider),))

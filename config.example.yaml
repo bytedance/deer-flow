@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 62
+config_version: 66
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -75,6 +75,7 @@ logging:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
 #     - class: my_company.deerflow_middlewares:LatencyStampingMiddleware
+#       apply_to: lead  # both (default), lead, or subagent
 #       kwargs:
 #         header: X-DeerFlow-Latency
 
@@ -396,29 +397,20 @@ models:
   # for example on Docker Desktop:
   #   base_url: http://host.docker.internal:8080/v1
 
-  # Example: Anthropic Claude model (with extended thinking)
-  # supports_thinking: true is required — without it, DeerFlow silently falls
-  # back to non-thinking mode even when the UI thinking toggle is on.
-  # budget_tokens is required by the Anthropic API when thinking.type=enabled
-  # (no server default; min 1024; must be less than max_tokens).
-  # - name: claude-sonnet-4
-  #   display_name: Claude Sonnet 4
+  # Example: Anthropic Claude model (thinks by default)
+  # Claude Sonnet 5.5 rejects extended thinking (budget_tokens), thinking
+  # type disabled, temperature, top_p and top_k, so leave them out.
+  # max_tokens covers both thinking and the answer.
+  # - name: claude-sonnet-5-5
+  #   display_name: Claude Sonnet 5.5
   #   use: langchain_anthropic:ChatAnthropic
-  #   model: claude-sonnet-4-20250514
+  #   model: claude-sonnet-5-5
   #   api_key: $ANTHROPIC_API_KEY
   #   default_request_timeout: 600.0
   #   max_retries: 2
-  #   max_tokens: 16000         # Per-call output cap
+  #   max_tokens: 16000         # Per-call output cap (thinking + answer)
   #   context_window: 200000    # Total prompt + completion capacity
   #   supports_vision: true
-  #   supports_thinking: true
-  #   when_thinking_enabled:
-  #     thinking:
-  #       type: enabled
-  #       budget_tokens: 4096   # required; min 1024; must be < max_tokens
-  #   when_thinking_disabled:
-  #     thinking:
-  #       type: disabled
 
   # Example: Google Gemini model (native SDK, no thinking support)
   # - name: gemini-2.5-pro
@@ -1070,6 +1062,17 @@ tools:
   #   contents_max_characters: 2000 # per-result content cap; 0 disables it
   #   # api_key: $SOFYA_API_KEY     # Optional explicit env-var reference
 
+  # Web search tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # SpecStream answers from the live web: ranked results with a snippet each, plus a
+  # direct answer when the sources agree on one. Sign up at https://specstream.ai to get a key.
+  # Note: set SPECSTREAM_API_KEY in your environment before starting the app.
+  # Avoid putting literal API keys in config.yaml; use the $VAR form instead.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_search_tool
+  #   max_results: 5
+  #   # api_key: $SPECSTREAM_API_KEY  # Optional explicit env-var reference
+
   # Web search tool (uses You.com; YDC_API_KEY optional)
   # You.com runs its own web index and returns extracted page snippets rather
   # than a single meta description, so results are usable without a follow-up
@@ -1303,6 +1306,15 @@ tools:
   #   use: deerflow.community.sofya.tools:web_fetch_tool
   #   # api_key: $SOFYA_API_KEY
 
+  # Web fetch tool (uses SpecStream, requires SPECSTREAM_API_KEY)
+  # Returns the page as markdown. Also reads PDF, Word and Excel files.
+  # NOTE: Only one web_fetch provider can be active at a time.
+  # Comment out the Jina AI web_fetch entry above before enabling this one.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.specstream.tools:web_fetch_tool
+  #   # api_key: $SPECSTREAM_API_KEY
+
   # Web fetch tool (uses Unbrowse, requires UNBROWSE_API_KEY)
   # Returns the page as markdown. Fetches over plain HTTP when that is enough and
   # falls back to a hosted cloud browser for pages that need JavaScript.
@@ -1403,9 +1415,8 @@ tools:
 
 tool_search:
   enabled: false
-  # When tool_search is enabled, PR1 MCP routing metadata can auto-promote
-  # matching deferred MCP tool schemas before a model call. This is the maximum
-  # number of matched schemas promoted per model call. Valid range: 1..5.
+  # Legacy compatibility setting (1..5). Routing keywords are advisory only;
+  # deferred schemas are exposed by explicit tool_search selection.
   auto_promote_top_k: 3
 
 # ============================================================================
@@ -1422,10 +1433,10 @@ tool_search:
 #
 # The same middleware also elides the `content` argument of successful
 # write_file calls from model-bound requests once the same path was read or
-# modified again later (issue #5328): the file on disk is then the source of
-# truth, and the read-before-write gate forces a read_file before the next
-# modification anyway, so the historical copy only costs context. Stored
-# history, receipts, and the run journal keep the original arguments.
+# modified again later (issue #5328). This optimization is opt-in because a
+# later superseding action rewrites an earlier model-request prefix, reducing
+# provider prompt-cache reuse (#7319). Stored history, receipts, and the run
+# journal keep the original arguments when it is enabled.
 
 tool_output:
   enabled: true
@@ -1444,10 +1455,11 @@ tool_output:
   # tool_overrides:
   #   web_search: 8000
   #   bash: 20000
-  # Replace a successful write_file call's `content` with a short placeholder
-  # pointing at read_file once a later successful read_file / write_file /
-  # str_replace of the same path exists. Only the model-bound request changes.
-  elide_superseded_writes: true
+  # Opt in to replacing a successful write_file call's `content` with a short
+  # placeholder pointing at read_file once a later successful read_file /
+  # write_file / str_replace of the same path exists. Only the model-bound
+  # request changes, but doing so rewrites an earlier prompt prefix.
+  elide_superseded_writes: false
   # Only elide content at least this many characters long (a character count,
   # not tokens: CJK text costs ~3-4x more per character than ASCII). 0 elides
   # every non-empty content.
@@ -1602,6 +1614,22 @@ read_before_write:
   # 0 elides every non-empty payload.
   elide_min_chars: 2000
 
+# Optional pre-write syntax validation and targeted error remediation guard.
+# When enabled (write_verify_syntax: true), intercepts str_replace to validate
+# spliced .py (ast.parse) and .json (json.loads) syntax before disk I/O.
+# Also classifies tool error outputs (ModuleNotFoundError, SyntaxError,
+# FileNotFoundError, etc.) and injects actionable remediation hints directly into
+# tool results.
+harness_guard:
+  enabled: true
+  write_verify_syntax: false
+  block_on_syntax_error: true
+  targeted_hints_enabled: true
+  max_repeated_error_signatures: 2
+  detect_alternating_loops: true
+  max_loop_history: 20
+  max_tracked_scopes: 1000
+
 # ============================================================================
 # Projects
 # ============================================================================
@@ -1627,13 +1655,13 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
-  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # Best-effort per-document LLM summaries on the shelf (default on). When
   # enabled, each newly uploaded/promoted document gets a one-line generated
   # description rendered into the injected <documents> index and returned by
   # the documents API. Generation failures leave the summary empty and never
   # affect uploads. Rendering of already-stored summaries stays on even when
   # generation is disabled.
-  summaries_enabled: false
+  summaries_enabled: true
   # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
   summary_max_bytes: 256
   # Optional model override for summary generation; unset uses the default
@@ -1845,6 +1873,7 @@ sandbox:
 #   # An explicit value is allowed but must be at least max_running + 1.
 #   # environment:
 #   #   MAX_SHELL_SESSIONS: "13"  # Example for subagent_runtime.max_running: 12
+#   #   AIO_BASH_MAX_SESSIONS: "50"  # Separate Bash pool; excess env calls wait (cancellable)
 #   #   NODE_ENV: production
 #   #   DEBUG: "false"
 #   #   API_KEY: $MY_API_KEY        # Reads from host's MY_API_KEY env var
@@ -1983,6 +2012,7 @@ sandbox:
 #   # request_timeout: 30             # finite positive management API request timeout seconds
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
@@ -2044,6 +2074,8 @@ subagent_runtime:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
+#       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: false)
+#       # reasoning_effort: medium # Use an effort value or alias supported by this model
 #       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
@@ -2071,11 +2103,15 @@ subagent_runtime:
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
+#   #     thinking_enabled: true   # Enable thinking/reasoning (default: false)
+#   #     reasoning_effort: medium  # Use an effort value or alias supported by this model
 #   #     max_turns: 80
 #   #     timeout_seconds: 600
 #
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
+#   # Unset thinking requests false; the selected model's required-thinking policy
+#   # and effort defaults/aliases still apply. Parent thinking settings are not inherited.
 #   # The model name must match a name defined in the `models:` section above.
 
 # Durable native-subagent batches. Disabled by default because enabling it can
@@ -2111,6 +2147,35 @@ verification:
   receipts_render_mode: "delegation_only"
   judge_enabled: false
   judge_model_name: null
+
+# ============================================================================
+# HITL tool approval
+# ============================================================================
+# Pause high-risk tool calls for human approval before execution.
+# enabled=false (default) leaves all behavior unchanged.
+# The deployment policy covers writes and unknown tools, including MCP.
+# non_interactive: deny | allow is a legacy Ask-mode root-run override.
+# Auto uncertainty still denies unattended execution. Interactive children
+# wait through the parent-owned approval channel within their execution deadline.
+# Approval is not authorization: read_before_write, guardrails, and sandbox
+# authorization still apply after approval ("approve to try executing").
+hitl_approval:
+  enabled: false
+  tools: []  # Extra tools to review, including otherwise trusted read tools.
+  default_mode: ask  # ask | auto | full; independent of reasoning mode
+  allowed_modes: [ask, auto]  # Operator ceiling for client selections.
+  review_unknown_tools: true  # Includes extension, personal and platform MCP tools.
+  allow_tools: []
+  deny_tools: []  # Mandatory in every mode.
+  always_ask_tools: []  # Cannot use automatic review or thread grants.
+  reviewer_model: null  # Existing model profile; null reuses the execution model.
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
+  non_interactive: deny
+  # Maximum matching tool calls in one approval batch; 0 disables the count limit.
+  max_actions: 32
 
 # ============================================================================
 # ACP Agents Configuration
@@ -2273,7 +2338,7 @@ summarization:
   # Set to null to skip trimming (not recommended for very long conversations)
   trim_tokens_to_summarize: 15564
 
-  # Custom summary prompt template (null = use default LangChain prompt)
+  # Custom summary prompt template (null = use DeerFlow's built-in prompt)
   # The prompt should guide the model to extract important context
   summary_prompt: null
 
@@ -2791,6 +2856,16 @@ run_events:
   backend: memory
   max_trace_content: 10240
   track_token_usage: true
+  # With a fencing-capable SQL RunStore and DB event store:
+  # off: host-authorized writes still check Run incarnation, epoch and state;
+  #      stale Journal flushes after takeover or deletion may be rejected.
+  # strict: additionally checks raw SQL and unaware legacy writers via the
+  #         database trigger after an offline cutover.
+  # Restart-required; strict requires database.backend: postgres and backend: db.
+  # Stop every Gateway, activate the database policy, then restart all with the
+  # matching cutover ID. See docs/guide/configuration.md for the offline cutover.
+  producer_fencing: "off"
+  # producer_cutover_id: deployment-2026-10-27
 
 # ============================================================================
 # Agent Storage Configuration
@@ -2990,6 +3065,13 @@ run_ownership:
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
+#   legacy_end_scan_enabled: true  # restart-required Redis compatibility scan.
+#                                # First END scans all retained payloads while true.
+#                                # Set false only after all old writers stop and
+#                                # every legacy buffer expires or is removed.
+#                                # With TTL disabled, remove old buffers explicitly.
+#                                # Restart all Gateways together; false uses only
+#                                # the tail for O(1) END detection.
 #   producer_lease_recovery_enabled: false  # restart-required activation gate.
 #                                # First roll this binary to every Gateway and
 #                                # drain pre-upgrade runs; then enable on every
@@ -3033,8 +3115,10 @@ run_ownership:
 #   # Security: keep this enabled unless you intentionally want legacy open-bot behavior.
 #   # Disabling it lets unbound external IM users create DeerFlow threads/runs.
 #   require_bound_identity: true
-#   # Language of scheduled-task IM notices (en-US or zh-CN) for owners without
-#   # a web UI language preference (e.g. auth disabled). Restart-required.
+#   # Language (en-US or zh-CN) of DeerFlow's own IM texts: scheduled-task
+#   # notices and the /connect and /goal replies. Used for owners without a web
+#   # UI language preference (e.g. auth disabled) and for replies with no known
+#   # owner (an invalid connect code). Restart-required.
 #   notification_locale: en-US
 #
 #   telegram:
@@ -3119,8 +3203,6 @@ run_ownership:
 #   # Optional: default mobile/session settings for all IM channels
 #   session:
 #     assistant_id: lead_agent  # or a custom agent name; custom agents route via lead_agent + agent_name
-#     config:
-#       recursion_limit: 100
 #     context:
 #       thinking_enabled: true
 #       is_plan_mode: false

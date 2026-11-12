@@ -6,8 +6,9 @@ import json
 import httpx
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 
-from deerflow.models.vllm_provider import VllmChatModel
+from deerflow.models.vllm_provider import VllmChatModel, count_tokens_with_replayed_reasoning
 
 
 def _make_model(*, cumulative_stream_usage: bool = False) -> VllmChatModel:
@@ -60,6 +61,23 @@ def _assert_usage(message, *, input_tokens: int, output_tokens: int, total_token
     assert message.usage_metadata["input_tokens"] == input_tokens
     assert message.usage_metadata["output_tokens"] == output_tokens
     assert message.usage_metadata["total_tokens"] == total_tokens
+
+
+def test_count_tokens_with_replayed_reasoning_preserves_content_blocks():
+    blocks = [
+        {"type": "text", "text": "Checked the source."},
+        {"type": "text", "text": "The output matches."},
+    ]
+    reasoning = "Compare each output field with its source."
+    message = AIMessage(content=blocks, additional_kwargs={"reasoning": reasoning})
+    original = message.model_copy(deep=True)
+
+    count = count_tokens_with_replayed_reasoning([message], token_counter=count_tokens_approximately)
+
+    assert count == count_tokens_approximately([AIMessage(content=[*blocks, reasoning])])
+    assert count > count_tokens_approximately([original])
+    assert count > count_tokens_approximately([AIMessage(content=[reasoning])])
+    assert message == original
 
 
 def test_vllm_provider_restores_reasoning_in_request_payload():

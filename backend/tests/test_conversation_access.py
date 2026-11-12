@@ -148,6 +148,31 @@ def test_reader_pages_visible_text_and_keeps_source_unchanged():
     asyncio.run(exercise())
 
 
+def test_reader_skips_malformed_optional_metadata_without_losing_the_page(caplog):
+    async def exercise():
+        prepare, events, threads, manager, _ = _setup()
+        await threads.create("source", user_id="alice")
+        await _put(events, "valid before")
+        malformed = await events.put(
+            thread_id="source",
+            run_id="run-2",
+            category="message",
+            event_type="llm.ai.response",
+            content={"type": "ai", "id": "malformed", "content": "valid after", "additional_kwargs": "legacy"},
+            metadata=["legacy metadata"],
+        )
+        reader, _ = prepare(["source"])
+        with caplog.at_level("WARNING", logger="app.gateway.conversation_access"):
+            page = json.loads(await reader(thread_id="source", cursor=None, limit=20))
+        assert page["status"] == "ok"
+        assert [message["text"] for message in page["messages"]] == ["valid before", "valid after"]
+        assert malformed is not None
+        assert any("thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
+        assert any("additional_kwargs" in record.message and "thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
+
+    asyncio.run(exercise())
+
+
 def test_wrong_owner_missing_and_unlisted_targets_are_denied_before_content_read():
     async def exercise():
         prepare, events, threads, _, _ = _setup()
@@ -190,7 +215,7 @@ def test_missing_transcript_is_reported_without_checkpoint_reconstruction():
 
 
 def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
-    from test_gateway_services import _make_start_run_persistence_context
+    from test_gateway_services import _make_start_run_persistence_context, _seed_generic_resume_checkpoint
 
     from app.gateway import services
     from deerflow.config.app_config import reset_app_config, set_app_config
@@ -220,12 +245,18 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         second = await services.start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": 'Quoted text: "read source"'}]}), "later", request)
         await second.task
         assert captured[1]["ctx"].conversation_reader is None
+        await _seed_generic_resume_checkpoint(request.app.state.checkpointer, "resume")
         resumed = await services.start_run(RunCreateRequest(command={"resume": "source"}), "resume", request)
         await resumed.task
         assert captured[2]["ctx"].conversation_reader is None
         empty = await services.start_run(RunCreateRequest(input={"messages": None}, conversation_references=["source"]), "empty-input", request)
         await empty.task
         assert callable(captured[3]["ctx"].conversation_reader)
+        static_resume = await services.start_run(RunCreateRequest(input=None, conversation_references=["source"]), "static-resume", request)
+        await static_resume.task
+        assert callable(captured[4]["ctx"].conversation_reader)
+        assert captured[4]["graph_input"] is None
+        assert static_resume.kwargs["input"] is None
         with pytest.raises(HTTPException) as invalid:
             await services.start_run(RunCreateRequest(input={"messages": "bad input"}, conversation_references=["source"]), "invalid-input", request)
         assert invalid.value.status_code == 422

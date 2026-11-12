@@ -4,16 +4,58 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from types import MappingProxyType
 
 from deerflow_extension_api.auth import resolve_principal
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from app.gateway.deps import require_admin_user
+from deerflow.extensions import get_runtime_diagnostics
 from deerflow.extensions.browser_assets import LoadedBrowserAssets, valid_asset_path
 from deerflow.extensions.plugin_tools import plugin_settings
 
 router = APIRouter(prefix="/api/plugins", tags=["plugins"])
 logger = logging.getLogger(__name__)
+
+_DIAGNOSTIC_SOURCE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", re.ASCII)
+
+
+def _diagnostic_summary(message: str) -> str:
+    # Never scrub and return arbitrary exception text: secrets have no fixed format.
+    summaries = (
+        (
+            (
+                "could not resolve extension entry point:",
+                "extension entry point is not callable:",
+                "could not inspect extension-api version marker:",
+                "extension declares invalid extension-api version marker",
+                "extension requires extension-api ",
+            ),
+            "Extension loading failed.",
+        ),
+        (("install() failed:",), "Extension registration failed."),
+        (("router ",), "Extension router could not be mounted."),
+        (("service start()",), "Extension service could not start."),
+        (("service stop()",), "Extension service could not stop."),
+    )
+    summary = next((summary for prefixes, summary in summaries if isinstance(message, str) and message.startswith(prefixes)), "Extension reported a diagnostic.")
+    return f"{summary} See Gateway logs for details."
+
+
+@router.get("/diagnostics")
+async def plugin_diagnostics(request: Request, response: Response) -> list[dict[str, str]]:
+    """Read a safe snapshot of this Gateway process's retained diagnostics."""
+    await require_admin_user(request, detail="Only administrators can read plugin diagnostics.")
+    response.headers["Cache-Control"] = "private, no-store"
+    return [
+        {
+            "source": item.source if isinstance(item.source, str) and len(item.source) <= 256 and _DIAGNOSTIC_SOURCE.fullmatch(item.source) else "[redacted]",
+            "level": item.level if isinstance(item.level, str) and item.level in {"debug", "info", "warning", "error"} else "unknown",
+            "summary": _diagnostic_summary(item.message),
+        }
+        for item in get_runtime_diagnostics()
+    ]
 
 
 def _principal(request):
@@ -28,6 +70,7 @@ async def list_plugins(request: Request, response: Response):
     principal = _principal(request)
     response.headers["Cache-Control"] = "private, no-store"
     entries = []
+    documentation = dict(request.app.state.extensions.documentation)
     for source, plugin in request.app.state.extensions.plugins:
         settings = plugin_settings(source, plugin)
         module = plugin.frontend
@@ -51,8 +94,36 @@ async def list_plugins(request: Request, response: Response):
                 "transport": transport,
                 "settings": {key: settings[key] for key in public},
                 "backend_actions": [action.name for action in plugin.backend],
+                "model_tools": [tool.name for tool in plugin.tools],
+                "documentation": documentation.get(source) if documentation.get(source, {}).get("id") == plugin.namespace else None,
             }
         )
+    registered_sources = {source for source, _ in request.app.state.extensions.plugins}
+    known_ids = {entry["namespace"] for entry in entries}
+    for source, page in request.app.state.extensions.documentation:
+        if source in registered_sources or page["id"] in known_ids:
+            continue
+        locales = page["locales"]
+        copy = next((value for tag, value in locales.items() if tag.lower() == "en-us"), None)
+        if copy is None:
+            copy = next((value for tag, value in locales.items() if tag.partition("-")[0] == "en"), next(iter(locales.values())))
+        entries.append(
+            {
+                "namespace": page["id"],
+                "title": copy["title"],
+                "description": copy["description"],
+                "viewer_id": principal.user_id,
+                "module": None,
+                "entry": None,
+                "transport": None,
+                "settings": {"enabled": True},
+                "backend_actions": [],
+                "model_tools": [],
+                "documentation": page,
+                "runtime_only": True,
+            }
+        )
+        known_ids.add(page["id"])
     return entries
 
 

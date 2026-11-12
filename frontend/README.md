@@ -68,6 +68,11 @@ pnpm build
 pnpm start
 ```
 
+Production builds recreate `public/_pagefind/` from the current documentation,
+with separate English and Chinese indexes. The index step replaces its generated
+output directory to prevent old assets accumulating. Mobile docs search results scroll inside
+the menu and close it after selection, including the section already open.
+
 ## Site Map
 
 ```

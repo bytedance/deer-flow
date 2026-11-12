@@ -12,6 +12,33 @@ from deerflow_extension_api.plugins import ActionContext, ToolContext
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
 
+@pytest.mark.parametrize("host_version", ["0.2.10", "0.2.11"])
+def test_team_artifact_extension_requires_a_host_with_artifact_contracts(tmp_path, monkeypatch, host_version):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams"))
+    monkeypatch.setattr("deerflow.extensions.loader.API_VERSION", host_version)
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, "storage_path": str(tmp_path / "teams.sqlite")})])
+
+    if host_version == "0.2.10":
+        assert not loaded.plugins
+        assert len(diagnostics) == 1
+        assert "requires extension-api 0.2.11, host provides 0.2.10" in diagnostics[0].message
+    else:
+        assert not diagnostics
+        assert len(loaded.plugins) == 1
+
+
+def test_team_artifact_package_dependency_rejects_the_pre_artifact_api():
+    import tomllib
+
+    from packaging.requirements import Requirement
+
+    project = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams/pyproject.toml"
+    dependencies = tomllib.loads(project.read_text())["project"]["dependencies"]
+    requirement = next(Requirement(value) for value in dependencies if Requirement(value).name == "deerflow-extension-api")
+    assert "0.2.10" not in requirement.specifier
+    assert "0.2.11" in requirement.specifier
+
+
 class Runs:
     """Controllable host: records real admissions and separate thread states."""
 
@@ -20,6 +47,35 @@ class Runs:
         self.runs = {}
         self.starts = []
         self.denied = False
+        self.files = {}
+        self.imports = []
+
+    async def validate_artifact_source(self, *, thread_id, run_id, idempotency_key):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        run = self.runs.get(run_id)
+        if run is None or run.thread_id != thread_id or run.status != "running" or run_id != idempotency_key:
+            raise AgentRunError(422, "Register files during the executing team run")
+
+    async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        if (thread_id, path) not in self.files:
+            raise AgentRunError(422, "File unavailable")
+        if expected_checkpoint_id is not None and (await self.get_state(thread_id=thread_id))["checkpoint_id"] != expected_checkpoint_id:
+            raise AgentRunError(412, "Producing checkpoint changed")
+        return self.files[thread_id, path]
+
+    async def import_artifact(self, *, thread_id, filename, content):
+        import hashlib
+
+        if self.denied:
+            raise AgentRunError(403, "revoked")
+        digest = hashlib.sha256(content).hexdigest()
+        path = "/mnt/user-data/uploads/" + digest[:16] + "-" + filename
+        self.files[thread_id, path] = content
+        self.imports.append((thread_id, path, content))
+        return {"path": path, "filename": path.rsplit("/", 1)[-1], "sha256": digest, "size": len(content)}
 
     def for_plugin(self, namespace):
         return self
@@ -31,15 +87,22 @@ class Runs:
     async def get_state(self, *, thread_id):
         if self.denied or thread_id not in self.threads:
             raise AgentRunError(403, "unavailable")
-        return self.threads[thread_id]
+        state = self.threads[thread_id]
+        return {**state, "checkpoint_id": str(len(state["values"]["messages"]))}
 
-    async def start(self, *, thread_id, input, idempotency_key):
+    async def start(self, *, thread_id, input, idempotency_key, artifact_imports=None):
         if self.denied:
             raise AgentRunError(403, "revoked")
         if idempotency_key in self.runs:
             return self.runs[idempotency_key]
         if any(r.thread_id == thread_id and r.status == "running" for r in self.runs.values()):
             raise AgentRunError(409, "busy")
+        if artifact_imports:
+            import hashlib
+
+            for item in artifact_imports:
+                if hashlib.sha256(self.files.get((thread_id, item["path"]), b"")).hexdigest() != item["sha256"]:
+                    raise AgentRunError(422, "Attached artifact copy changed; inspect the team artifacts")
         self.starts.append((thread_id, input))
         self.threads[thread_id]["values"]["messages"].extend(input["messages"])
         run = AgentRun(thread_id, idempotency_key, "running")
@@ -84,12 +147,571 @@ def plugin(tmp_path, monkeypatch):
 
 def context(runs, owner="alice", thread=None):
     if thread:
-        return ToolContext(ExtensionPrincipal(owner), {"enabled": True}, thread, agent_runs=runs)
+        run_id = next((r.run_id for r in getattr(runs, "runs", {}).values() if r.thread_id == thread and r.status == "running"), None)
+        return ToolContext(ExtensionPrincipal(owner), {"enabled": True}, thread, agent_runs=runs, run_id=run_id)
     return ActionContext(ExtensionPrincipal(owner), {"enabled": True}, agent_runs=runs)
 
 
 async def create(actions, runs):
     return await actions["create"]({"request_id": "team-one", "name": "Release", "goal": "Check release readiness", "members": [{"name": "Research", "agent": "researcher"}, {"name": "Review", "agent": "reviewer"}]}, context(runs))
+
+
+def state_payload(team, **overrides):
+    return {"team_id": team["id"], "request_id": "cost-plan", "kind": "plan", "title": "Cost review", "content": "Research gathers quotes; Review checks operating costs.", **overrides}
+
+
+def artifact_tools(loaded):
+    return {tool.name: tool.handler for _, declaration in loaded.plugins for tool in declaration.tools}
+
+
+async def producing_task(plugin):
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    author, reviewer = team["members"]
+    job = await actions["send"]({"team_id": team["id"], "member_id": author["id"], "text": "Produce the report", "request_id": "produce"}, context(runs))
+    await service.tick()
+    return loaded, actions, service, runs, team, author, reviewer, job
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_capture_and_binary_handoff_use_the_exact_retained_version(plugin):
+    import hashlib
+
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    source = "/mnt/user-data/outputs/report.pdf"
+    content = b"%PDF-1.7\n\x00\xff first version"
+    runs.files[author["thread_id"], source] = content
+    args = {"team_id": team["id"], "request_id": "report-v1", "name": "Release report", "path": source}
+    published = await tools["register_team_artifact"](args, context(runs, thread=author["thread_id"]))
+    entry = published["artifact"]
+    reference = {"artifact_id": entry["artifact_id"], "version": entry["version"]}
+    assert entry["status"] == "pending"
+    assert entry["source"]["job_id"] == job["id"]
+    target = await tools["send_member"]({"team_id": team["id"], "member_id": reviewer["id"], "text": "Review this exact report", "request_id": "review-report", "artifacts": [reference]}, context(runs, thread=author["thread_id"]))
+    await service.tick()
+    assert len(runs.starts) == 1
+    runs.finish(job["id"])
+    await service.tick()
+    retained = (await tools["list_team_artifacts"]({"team_id": team["id"]}, context(runs, thread=reviewer["thread_id"])))["artifacts"][0]
+    assert retained["status"] == "ready"
+    assert retained["sha256"] == hashlib.sha256(content).hexdigest()
+    assert retained["source"]["run_id"] == job["id"]
+    runs.files[author["thread_id"], source] = b"later edit must not replace the published version"
+    await service.tick()
+    assert any(thread == reviewer["thread_id"] for thread, _ in runs.starts)
+    copied_thread, copied_path, copied = next(row for row in runs.imports if row[0] == reviewer["thread_id"])
+    assert copied == content
+    request = json.loads(runs.starts[-1][1]["messages"][0]["content"].split("\n", 1)[1])
+    assert request["artifacts"][0]["path"] == copied_path
+    assert request["artifacts"][0]["sha256"] == retained["sha256"]
+    assert (await tools["register_team_artifact"](args, context(runs, thread=author["thread_id"])))["artifact"] == retained
+    result = await actions["get"]({"team_id": team["id"], "details": True}, context(runs))
+    assert next(j for j in result["jobs"] if j["id"] == target["id"])["artifacts"] == [reference]
+    assert "_request" not in json.dumps(result)
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_versions_survive_restart_and_source_removal(plugin):
+    import base64
+
+    loaded, actions, service, runs, team, author, reviewer, first = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    source = "/mnt/user-data/outputs/report.txt"
+    runs.files[author["thread_id"], source] = b"first"
+    args = {"team_id": team["id"], "request_id": "v1", "name": "Report", "path": source}
+    old = (await tools["register_team_artifact"](args, context(runs, thread=author["thread_id"])))["artifact"]
+    runs.finish(first["id"])
+    await service.tick()
+    second = await actions["send"]({"team_id": team["id"], "member_id": author["id"], "text": "Revise report", "request_id": "revise"}, context(runs))
+    await service.tick()
+    runs.files[author["thread_id"], source] = b"second"
+    newer = (await tools["register_team_artifact"]({**args, "request_id": "v2", "artifact_id": old["artifact_id"]}, context(runs, thread=author["thread_id"])))["artifact"]
+    assert newer["version"] == 2
+    runs.finish(second["id"])
+    await service.tick()
+    runs.files.clear()
+    service.handles.clear()
+    for version, expected in ((1, b"first"), (2, b"second")):
+        read = await tools["read_team_artifact"]({"team_id": team["id"], "artifact_id": old["artifact_id"], "version": version}, context(None, thread=reviewer["thread_id"]))
+        assert base64.b64decode(read["content_base64"]) == expected
+    assert not service.handles
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["register_team_artifact", "list_team_artifacts", "read_team_artifact"])
+@pytest.mark.parametrize("owner,thread_kind", [("mallory", "member"), ("alice", "outside"), ("alice", "missing")])
+async def test_team_artifact_tools_require_owner_and_current_member(plugin, method, owner, thread_kind):
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    registration = {"team_id": team["id"], "request_id": "source", "name": "Report", "path": "/mnt/user-data/outputs/report.txt"}
+    entry = (await tools["register_team_artifact"](registration, context(runs, thread=author["thread_id"])))["artifact"]
+    if method == "read_team_artifact":
+        runs.files[author["thread_id"], registration["path"]] = b"private snapshot"
+        runs.finish(job["id"])
+        await service.tick()
+    payload = {
+        "register_team_artifact": {**registration, "request_id": "unauthorized"},
+        "list_team_artifacts": {"team_id": team["id"]},
+        "read_team_artifact": {"team_id": team["id"], "artifact_id": entry["artifact_id"], "version": 1},
+    }[method]
+    thread = {"member": author["thread_id"], "outside": "unrelated-thread", "missing": None}[thread_kind]
+    before = await service.db("get", "alice", team["id"])
+    with pytest.raises(ValueError):
+        await tools[method](payload, context(runs, owner=owner, thread=thread))
+    assert await service.db("get", "alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/etc/passwd", "/mnt/user-data/uploads/private.txt", "/mnt/user-data/outputs/../secret.txt", "/mnt/user-data/outputs/", "/mnt/user-data/outputs/report\n.txt"])
+async def test_team_artifact_registration_rejects_unsafe_paths_without_mutation(plugin, path):
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    before = await service.db("get", "alice", team["id"])
+    with pytest.raises(ValueError):
+        await artifact_tools(loaded)["register_team_artifact"]({"team_id": team["id"], "request_id": "v1", "name": "Report", "path": path}, context(runs, thread=author["thread_id"]))
+    assert await service.db("get", "alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end", ["cancel", "missing"])
+async def test_team_artifact_unavailable_source_fails_dependent_without_admission(plugin, end):
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    entry = (await tools["register_team_artifact"]({"team_id": team["id"], "request_id": "v1", "name": "Report", "path": "/mnt/user-data/outputs/report.txt"}, context(runs, thread=author["thread_id"])))["artifact"]
+    reference = {"artifact_id": entry["artifact_id"], "version": 1}
+    target = await tools["send_member"]({"team_id": team["id"], "member_id": reviewer["id"], "text": "Review", "request_id": "review", "artifacts": [reference]}, context(runs, thread=author["thread_id"]))
+    if end == "cancel":
+        await actions["cancel"]({"team_id": team["id"], "job_id": job["id"]}, context(runs))
+    else:
+        runs.finish(job["id"])
+    for _ in range(3):
+        await service.tick()
+    result = await actions["get"]({"team_id": team["id"], "details": True}, context(runs))
+    assert result["artifacts"][0]["status"] == "failed"
+    assert next(j for j in result["jobs"] if j["id"] == target["id"])["status"] == "failed"
+    assert all(thread != reviewer["thread_id"] for thread, _ in runs.starts)
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_import_retries_after_lost_ack_with_retained_bytes(plugin, monkeypatch):
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    source = "/mnt/user-data/outputs/report.txt"
+    runs.files[author["thread_id"], source] = b"retained"
+    entry = (await tools["register_team_artifact"]({"team_id": team["id"], "request_id": "v1", "name": "Report", "path": source}, context(runs, thread=author["thread_id"])))["artifact"]
+    runs.finish(job["id"])
+    await service.tick()
+    original_import = runs.import_artifact
+    lost = True
+
+    async def lose_ack(**kwargs):
+        nonlocal lost
+        result = await original_import(**kwargs)
+        if lost:
+            lost = False
+            raise TimeoutError("acknowledgement lost")
+        return result
+
+    monkeypatch.setattr(runs, "import_artifact", lose_ack)
+    await actions["send"]({"team_id": team["id"], "member_id": reviewer["id"], "text": "Review", "request_id": "review", "artifacts": [{"artifact_id": entry["artifact_id"], "version": 1}]}, context(runs))
+    await service.tick()
+    assert len(runs.starts) == 1
+    service.handles.clear()
+    await actions["connect"]({"team_id": team["id"]}, context(runs))
+    await service.tick()
+    assert len(runs.starts) == 2
+    assert runs.imports[0] == runs.imports[1]
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_retry_conflicts_bounds_and_deletion(plugin, monkeypatch):
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    args = {"team_id": team["id"], "request_id": "v1", "name": "Report", "path": "/mnt/user-data/outputs/report.txt"}
+    entry = (await tools["register_team_artifact"](args, context(runs, thread=author["thread_id"])))["artifact"]
+    with pytest.raises(ValueError, match="Request ID"):
+        await tools["register_team_artifact"]({**args, "path": "/mnt/user-data/outputs/other.txt"}, context(runs, thread=author["thread_id"]))
+    for index in range(1, 4):
+        await tools["register_team_artifact"]({**args, "request_id": f"extra-{index}"}, context(runs, thread=author["thread_id"]))
+    with pytest.raises(ValueError, match="limit"):
+        await tools["register_team_artifact"]({**args, "request_id": "overflow"}, context(runs, thread=author["thread_id"]))
+    runs.files[author["thread_id"], args["path"]] = b"saved"
+    runs.finish(job["id"])
+    await service.tick()
+    await actions["delete"]({"team_id": team["id"]}, context(runs))
+    with pytest.raises(ValueError):
+        await service.db("artifact", "alice", team["id"], entry["artifact_id"], 1)
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_storage_budget_rolls_back_and_versions_are_immutable(plugin, monkeypatch):
+    import sqlite3
+
+    import deerflow_extension_agent_teams.artifacts as artifacts
+
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    monkeypatch.setattr(artifacts, "OWNER_BYTES", 5)
+    tools = artifact_tools(loaded)
+    for index in (1, 2):
+        path = f"/mnt/user-data/outputs/report-{index}.txt"
+        runs.files[author["thread_id"], path] = b"1234"
+        await tools["register_team_artifact"]({"team_id": team["id"], "request_id": f"file-{index}", "name": "Report", "path": path}, context(runs, thread=author["thread_id"]))
+    runs.finish(job["id"])
+    await service.tick()
+    entries = (await tools["list_team_artifacts"]({"team_id": team["id"]}, context(runs, thread=reviewer["thread_id"])))["artifacts"]
+    assert [entry["status"] for entry in entries] == ["ready", "failed"]
+    assert "storage limit" in entries[1]["error"]
+    with sqlite3.connect(service.store.path) as db:
+        assert db.execute("SELECT sum(length(content)) FROM team_artifact_versions").fetchone()[0] == 4
+        with pytest.raises(sqlite3.IntegrityError, match="cannot be overwritten"):
+            db.execute("UPDATE team_artifact_versions SET content=?", (b"replacement",))
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_chunk_reads_are_bounded_and_keep_empty_and_binary_files(plugin):
+    import base64
+
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = artifact_tools(loaded)
+    content = bytes(range(256)) * 100
+    for index, data in enumerate((b"", content)):
+        path = f"/mnt/user-data/outputs/{index}.bin"
+        runs.files[author["thread_id"], path] = data
+        await tools["register_team_artifact"]({"team_id": team["id"], "request_id": str(index), "name": '"\\\n' * 25, "path": path}, context(runs, thread=author["thread_id"]))
+    runs.finish(job["id"])
+    await service.tick()
+    entries = await tools["list_team_artifacts"]({"team_id": team["id"], "limit": 1}, context(runs, thread=reviewer["thread_id"]))
+    assert entries["next_offset"] == 1
+    second = await tools["list_team_artifacts"]({"team_id": team["id"], "offset": 1}, context(runs, thread=reviewer["thread_id"]))
+    for entry, expected in ((entries["artifacts"][0], b""), (second["artifacts"][0], content)):
+        data = b""
+        offset = 0
+        while offset is not None:
+            page = await tools["read_team_artifact"]({"team_id": team["id"], "artifact_id": entry["artifact_id"], "version": 1, "offset": offset}, context(None, thread=reviewer["thread_id"]))
+            assert len(json.dumps(page, ensure_ascii=False).encode()) <= 24000
+            data += base64.b64decode(page["content_base64"])
+            offset = page["next_offset"]
+        assert data == expected
+
+
+@pytest.mark.asyncio
+async def test_team_artifact_registration_and_retrieval_use_native_tool_node(plugin):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    loaded, actions, service, runs, team, author, reviewer, job = await producing_task(plugin)
+    tools = [tool for tool in build_plugin_tools(loaded) if any(name in tool.name for name in ("register_team_artifact", "list_team_artifacts", "read_team_artifact"))]
+    assert len(tools) == 3
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+
+    async def invoke(name, payload, thread):
+        tool = next(tool for tool in tools if name in tool.name)
+        execution = {"thread_id": thread, "run_id": context(runs, thread=thread).run_id, "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs}
+        result = await compiled.ainvoke({"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": payload, "id": name}])]}, context=execution)
+        return next(message for message in result["messages"] if message.type == "tool")
+
+    path = "/mnt/user-data/outputs/report.txt"
+    runs.files[author["thread_id"], path] = b"native file evidence"
+    publication = await invoke("register_team_artifact", {"team_id": team["id"], "request_id": "native-file", "name": "Report", "path": path}, author["thread_id"])
+    assert json.loads(publication.content)["artifact"]["status"] == "pending"
+    runs.finish(job["id"])
+    await service.tick()
+    listing = await invoke("list_team_artifacts", {"team_id": team["id"]}, reviewer["thread_id"])
+    entry = json.loads(listing.content)["artifacts"][0]
+    answer = await invoke("read_team_artifact", {"team_id": team["id"], "artifact_id": entry["artifact_id"], "version": 1}, reviewer["thread_id"])
+    assert json.loads(answer.content)["content_base64"] == "bmF0aXZlIGZpbGUgZXZpZGVuY2U="
+    denied = await invoke("read_team_artifact", {"team_id": team["id"], "artifact_id": entry["artifact_id"], "version": 1}, "outside")
+    assert "bmF0aXZlIGZpbGUgZXZpZGVuY2U=" not in denied.content
+
+
+def state_update(team, entry, **overrides):
+    return {"team_id": team["id"], "entry_id": entry["id"], "expected_revision": entry["revision"], "title": entry["title"], "content": "Include the annual operating costs.", "status": "active", **overrides}
+
+
+@pytest.mark.asyncio
+async def test_public_state_is_shared_persistent_and_independent_of_recent_history(plugin):
+    from deerflow_extension_agent_teams.service import Teams
+
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    author, reader = team["members"]
+    tools = {tool.name: tool.handler for _, p in loaded.plugins for tool in p.tools}
+    published = await tools["publish_team_state"](state_payload(team), context(runs, thread=author["thread_id"]))
+    entry = published["entry"]
+    assert entry["revision"] == published["revision"] == 1
+    assert entry["created_by"] == entry["updated_by"] == author["id"]
+    assert entry["source"] == {"thread_id": author["thread_id"], "job_id": None}
+    assert entry["created_at"] == entry["updated_at"]
+    assert (await tools["read_team_state"]({"team_id": team["id"]}, context(runs, thread=reader["thread_id"])))["entries"] == [entry]
+    # Rotate all shared history out. Public state must still reach a real admission.
+    await service.db("change", "alice", team["id"], lambda t: t.update(messages=[]))
+    await actions["send"]({"team_id": team["id"], "member_id": reader["id"], "text": "Check the plan", "request_id": "check-state"}, context(runs))
+    await service.tick()
+    message = runs.starts[-1][1]["messages"][0]
+    assert message["role"] == "user"
+    supplied = json.loads(message["content"].split("\n", 1)[1])
+    assert supplied["public_state"]["entries"] == [entry]
+    assert supplied["goal"] == team["goal"]
+    reopened = Teams(service.store.path)
+    before = service.store.get("alice", team["id"])
+    assert await reopened.read_state({"team_id": team["id"]}, context(None, thread=reader["thread_id"])) == {"team_id": team["id"], "revision": 1, "entries": [entry]}
+    assert service.store.get("alice", team["id"]) == before
+    assert not reopened.handles
+    assert (await actions["get"]({"team_id": team["id"]}, context(runs)))["public_state"]["entries"] == [entry]
+
+
+@pytest.mark.asyncio
+async def test_public_state_updates_are_atomic_attributed_and_replay_safe(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    author, reviewer = team["members"]
+    a, b = (context(runs, thread=m["thread_id"]) for m in (author, reviewer))
+    published = await service.publish_state(state_payload(team), a)
+    entry = published["entry"]
+    requests = [state_update(team, entry, content=value) for value in ("Quote A", "Quote B")]
+    results = await asyncio.gather(*(service.update_state(payload, b) for payload in requests))
+    assert sorted(r["updated"] for r in results) == [False, True]
+    winner = next(r for r in results if r["updated"])
+    conflict = next(r for r in results if not r["updated"])
+    assert conflict["conflict"] is True and conflict["entry"] == winner["entry"]
+    updated = winner["entry"]
+    assert updated["revision"] == 2 and updated["created_by"] == author["id"] and updated["updated_by"] == reviewer["id"]
+    replay = await service.update_state(next(p for p in requests if p["content"] == updated["content"]), b)
+    assert replay["updated"] is True and replay["entry"] == updated and replay["revision"] == 2
+    # Publication retries remain deduplicated after someone updates the entry.
+    assert (await service.publish_state(state_payload(team), a))["entry"] == updated
+    assert len((await service.read_state({"team_id": team["id"]}, b))["entries"]) == 1
+    with pytest.raises(ValueError):
+        await service.publish_state(state_payload(team, content="Different original publication"), a)
+    archived = await service.update_state(state_update(team, updated, content=updated["content"], status="archived"), b)
+    assert archived["entry"]["revision"] == 3
+    assert not (await service.read_state({"team_id": team["id"]}, a))["entries"]
+    assert not (await service.read_context({"team_id": team["id"]}, a))["public_state"]["entries"]
+    assert (await service.read_state({"team_id": team["id"], "include_archived": True}, a))["entries"] == [archived["entry"]]
+    with pytest.raises(ValueError):
+        await service.update_state(state_update(team, updated, entry_id="missing"), b)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["publish_state", "read_state", "update_state"])
+@pytest.mark.parametrize("owner,thread", [("bob", "member"), ("alice", "outside"), ("alice", None)])
+async def test_public_state_requires_owner_and_member_thread_on_every_operation(plugin, method, owner, thread):
+    from deerflow_extension_api.plugins import ToolContext
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    published = await service.publish_state(state_payload(team), context(runs, thread=member["thread_id"]))
+    payload = {"publish_state": state_payload(team, request_id="new"), "read_state": {"team_id": team["id"]}, "update_state": state_update(team, published["entry"])}[method]
+    before = service.store.get("alice", team["id"])
+    with pytest.raises(ValueError):
+        await getattr(service, method)(payload, ToolContext(ExtensionPrincipal(owner), {}, member["thread_id"] if thread == "member" else thread))
+    assert service.store.get("alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_public_state_queries_and_entry_sources_do_not_expose_internal_data(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    caller = context(runs, thread=member["thread_id"])
+    job = await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Find quotes", "request_id": "source"}, context(runs))
+    await service.tick()
+    first = (await service.publish_state(state_payload(team, kind="finding"), caller))["entry"]
+    assert first["source"]["job_id"] == job["id"]
+    second = (await service.publish_state(state_payload(team, request_id="question", kind="question", title="Unquoted maintenance", content="Need OPERATING quote"), caller))["entry"]
+    assert (await service.read_state({"team_id": team["id"], "kind": "question", "query": "operating"}, caller))["entries"] == [second]
+    assert (await service.read_state({"team_id": team["id"], "entry_id": first["id"]}, caller))["entries"] == [first]
+    assert not (await service.read_state({"team_id": team["id"], "query": "absent"}, caller))["entries"]
+    stored = service.store.get("alice", team["id"])
+    assert "_publish" in json.dumps(stored)
+    public = json.dumps([await service.read_context({"team_id": team["id"]}, caller), await service.read_state({"team_id": team["id"]}, caller), await service.get({"team_id": team["id"]}, context(runs))])
+    assert "_publish" not in public and "_update" not in public
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{"kind": "unknown"}, {"content": ""}, {"title": "T" * 81}, {"content": "😀" * 501}, {"content": "\ud800"}, {"created_by": "spoof"}, {"source": {"thread_id": "foreign"}}])
+async def test_public_state_rejects_invalid_publications_without_mutation(plugin, extra):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    before = service.store.get("alice", team["id"])
+    with pytest.raises(ValueError):
+        await service.publish_state(state_payload(team, **extra), context(runs, thread=team["members"][0]["thread_id"]))
+    assert service.store.get("alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_public_state_bounds_whole_json_and_combined_context_including_escaping(plugin):
+    from deerflow_extension_agent_teams.service import shared
+
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    caller = context(runs, thread=team["members"][0]["thread_id"])
+    count = 0
+    for i in range(20):
+        before = service.store.get("alice", team["id"])
+        try:
+            await service.publish_state(state_payload(team, request_id=str(i), content='\\"' * 500), caller)
+        except ValueError:
+            assert service.store.get("alice", team["id"]) == before
+            break
+        count += 1
+    assert 0 < count < 20
+    result = await service.read_state({"team_id": team["id"]}, caller)
+    assert len(json.dumps(result, ensure_ascii=False).encode()) <= 16000
+    rejected_update = False
+    for entry in result["entries"]:
+        before = service.store.get("alice", team["id"])
+        try:
+            await service.update_state(state_update(team, entry, content="\0" * 1000), caller)
+        except ValueError:
+            assert service.store.get("alice", team["id"]) == before
+            rejected_update = True
+            break
+    assert rejected_update
+    result = await service.read_state({"team_id": team["id"]}, caller)
+    await service.db("change", "alice", team["id"], lambda t: t.update(messages=[{"job_id": str(i), "member_id": None, "kind": "completed", "text": '"\\' * 3000} for i in range(8)]))
+    combined = shared(service.store.get("alice", team["id"]))
+    assert combined["public_state"]["entries"] == result["entries"]
+    assert len(combined["messages"]) < 8 and len(json.dumps(combined, ensure_ascii=False).encode()) <= 24000
+    # Small entries hit the independent entry-count limit, not the byte budget.
+    other = await actions["create"]({"request_id": "count-cap", "name": "Count", "goal": "Count state", "members": [{"name": "A", "agent": "researcher"}, {"name": "B", "agent": "reviewer"}]}, context(runs))
+    other_caller = context(runs, thread=other["members"][0]["thread_id"])
+    for i in range(20):
+        await service.publish_state(state_payload(other, request_id=str(i), title="P", content="x"), other_caller)
+    with pytest.raises(ValueError):
+        await service.publish_state(state_payload(other, request_id="overflow", content="x"), other_caller)
+
+
+@pytest.mark.asyncio
+async def test_public_state_respects_combined_context_budget_for_large_goal_and_roster(plugin):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await actions["create"]({"request_id": "escaped-envelope", "name": "Escaped", "goal": "\0" * 2000, "members": [{"name": str(i) + "\0" * 79, "agent": "\0" * 128} for i in range(8)]}, context(runs))
+    caller = context(runs, thread=team["members"][0]["thread_id"])
+    before = service.store.get("alice", team["id"])
+    assert len(json.dumps(await service.read_context({"team_id": team["id"]}, caller), ensure_ascii=False).encode()) <= 24000
+    with pytest.raises(ValueError):
+        await service.publish_state(state_payload(team, content="\0" * 1000), caller)
+    assert service.store.get("alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_public_state_is_refreshed_for_new_turns_but_never_rewrites_frozen_input(plugin, monkeypatch):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    author, reader = team["members"]
+    caller = context(runs, thread=author["thread_id"])
+    entry = (await service.publish_state(state_payload(team), caller))["entry"]
+    payload = {"team_id": team["id"], "member_id": reader["id"], "text": "Check the plan", "request_id": "frozen-state"}
+    await actions["send"](payload, context(runs))
+    real_start = runs.start
+
+    async def lost_ack(**kwargs):
+        await real_start(**kwargs)
+        raise TimeoutError
+
+    monkeypatch.setattr(runs, "start", lost_ack)
+    await service.tick()
+    first_input = json.dumps(runs.starts[0][1])
+    await service.update_state(state_update(team, entry, content="The updated plan"), caller)
+    monkeypatch.setattr(runs, "start", real_start)
+    await service.tick()
+    assert len(runs.starts) == 1 and json.dumps(runs.starts[0][1]) == first_input
+    assert (await service.read_context({"team_id": team["id"]}, caller))["public_state"]["entries"][0]["content"] == "The updated plan"
+    # The completed request's later receipt is prepared with fresh state.
+    peer = await service.send({**payload, "request_id": "peer-state"}, caller)
+    runs.finish(next(iter(runs.runs)))
+    await service.tick()
+    await service.tick()
+    runs.finish(peer["id"])
+    await service.tick()
+    await service.tick()
+    receipt_input = runs.starts[-1][1]["messages"][0]["content"]
+    assert runs.starts[-1][0] == author["thread_id"]
+    assert json.loads(receipt_input.split("\n", 1)[1])["public_state"]["entries"][0]["content"] == "The updated plan"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{"expected_revision": True}, {"expected_revision": 0}, {"status": "verified"}, {"title": ""}, {"content": "😀" * 501}, {"content": "\ud800"}, {"kind": "finding"}, {"updated_by": "spoof"}])
+async def test_public_state_rejects_invalid_updates_without_mutation(plugin, extra):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    caller = context(runs, thread=team["members"][0]["thread_id"])
+    entry = (await service.publish_state(state_payload(team), caller))["entry"]
+    before = service.store.get("alice", team["id"])
+    with pytest.raises(ValueError):
+        await service.update_state(state_update(team, entry, **extra), caller)
+    assert service.store.get("alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{"include_archived": 1}, {"kind": "unknown"}, {"query": ""}, {"owner": "bob"}])
+async def test_public_state_rejects_invalid_reads_without_mutation(plugin, extra):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    before = service.store.get("alice", team["id"])
+    with pytest.raises(ValueError):
+        await service.read_state({"team_id": team["id"], **extra}, context(runs, thread=team["members"][0]["thread_id"]))
+    assert service.store.get("alice", team["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_public_state_real_tool_node_publication_query_and_revision_update(plugin):
+    from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.extensions.plugin_tools import build_plugin_tools
+
+    loaded, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    author, reviewer = team["members"]
+    tools = [tool for tool in build_plugin_tools(loaded) if any(name in tool.name for name in ("publish_team_state", "read_team_state", "update_team_state"))]
+    assert len(tools) == 3
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", ToolNode(tools))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+
+    async def invoke(name, payload, thread):
+        tool = next(tool for tool in tools if name in tool.name)
+        result = await compiled.ainvoke(
+            {"messages": [AIMessage(content="", tool_calls=[{"name": tool.name, "args": payload, "id": "state-call"}])]},
+            context={"thread_id": thread, "user_id": "alice", AGENT_RUNS_CONTEXT_KEY: runs},
+        )
+        return next(message for message in result["messages"] if message.type == "tool")
+
+    publication = await invoke("publish_team_state", state_payload(team, kind="objective", content="核验成本，保留来源。"), author["thread_id"])
+    entry = json.loads(publication.content)["entry"]
+    queried = await invoke("read_team_state", {"team_id": team["id"], "entry_id": entry["id"]}, reviewer["thread_id"])
+    assert json.loads(queried.content)["entries"] == [entry]
+    updated = await invoke("update_team_state", state_update(team, entry), reviewer["thread_id"])
+    assert json.loads(updated.content)["entry"]["updated_by"] == reviewer["id"]
+    denied = await invoke("publish_team_state", state_payload(team, request_id="outside"), "outside")
+    assert denied.status == "error"
+    assert len((await service.read_state({"team_id": team["id"]}, context(runs, thread=author["thread_id"])))["entries"]) == 1
 
 
 @pytest.mark.asyncio
@@ -365,6 +987,28 @@ async def test_externally_advanced_state_is_never_misattributed(plugin):
     view = await actions["get"]({"team_id": team["id"]}, context(runs))
     assert view["jobs"][0]["status"] == "failed"
     assert "Unrelated result" not in str(view["messages"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verified", [False, True])
+async def test_same_run_steer_requires_host_input_record_before_result_attribution(plugin, verified):
+    _, actions, service = plugin
+    runs = Runs()
+    team = await create(actions, runs)
+    member = team["members"][0]
+    job = await actions["send"]({"team_id": team["id"], "member_id": member["id"], "text": "Check", "request_id": "steer"}, context(runs))
+    await service.tick()
+    messages = runs.threads[member["thread_id"]]["values"]["messages"]
+    messages.append({"type": "human", "id": "steered__user", "content": "Include the appendix", "additional_kwargs": {"run_id": job["id"], "run_input_id": "direct"}})
+
+    async def list_inputs(**kwargs):
+        return {"items": [{"id": "direct", "message_id": "steered", "mode": "steer", "status": "applied", "target_run_id": job["id"]}] if verified else []}
+
+    runs.list_inputs = list_inputs
+    runs.finish(job["id"], "Appendix checked.")
+    await service.tick()
+    view = await actions["get"]({"team_id": team["id"]}, context(runs))
+    assert view["jobs"][0]["status"] == ("completed" if verified else "failed")
 
 
 @pytest.mark.asyncio
@@ -2006,3 +2650,48 @@ async def test_history_cancelled_results_are_unavailable_before_and_after_admiss
     assert legacy["result"] == unavailable
     filtered = await service.search_results({"team_id": team["id"], "query": notice}, caller)
     assert filtered["items"] == []
+
+
+def test_shared_state_budget_rejection_rolls_back_in_memory_mutations(plugin):
+    from deerflow_extension_agent_teams import shared_state
+
+    team = {
+        "id": "team_test",
+        "goal": "Goal",
+        "members": [{"id": "m1", "name": "Agent 1", "agent": "a1", "thread_id": "t1"}],
+        "jobs": [{"id": "j1", "thread_id": "t1", "status": "running", "input": {}}],
+    }
+    caller = SimpleNamespace(thread_id="t1")
+    for i in range(12):
+        shared_state.publish(team, {"team_id": "team_test", "request_id": f"req_{i}", "kind": "objective", "title": f"T{i}", "content": "A" * 950}, caller)
+    assert len(team["public_state"]["entries"]) == 12
+    assert team["public_state"]["revision"] == 12
+
+    with pytest.raises(ValueError, match="16,000 UTF-8 JSON bytes"):
+        shared_state.publish(team, {"team_id": "team_test", "request_id": "req_overflow", "kind": "objective", "title": "T_overflow", "content": "A" * 950}, caller)
+    assert len(team["public_state"]["entries"]) == 12
+    assert team["public_state"]["revision"] == 12
+
+    # Subsequent publish on the same dict succeeds after the rejection
+    res_pub = shared_state.publish(team, {"team_id": "team_test", "request_id": "req_small", "kind": "objective", "title": "T_small", "content": "small"}, caller)
+    assert res_pub["revision"] == 13
+    assert len(team["public_state"]["entries"]) == 13
+
+    entry_0 = team["public_state"]["entries"][0]
+    rev_before = entry_0["revision"]
+    title_before = entry_0["title"]
+    team["goal"] = "G" * 30000
+    update_payload = {"team_id": "team_test", "entry_id": entry_0["id"], "expected_revision": rev_before, "title": "New", "content": "New", "status": "active"}
+    with pytest.raises(ValueError, match="shared context budget"):
+        shared_state.update(team, update_payload, caller)
+    assert entry_0["title"] == title_before
+    assert entry_0["revision"] == rev_before
+    assert team["public_state"]["revision"] == 13
+
+    # Retrying the exact same update succeeds after resetting team["goal"]
+    team["goal"] = "Goal"
+    res_update = shared_state.update(team, update_payload, caller)
+    assert res_update["updated"] is True
+    assert res_update["conflict"] is False
+    assert entry_0["title"] == "New"
+    assert entry_0["revision"] == rev_before + 1

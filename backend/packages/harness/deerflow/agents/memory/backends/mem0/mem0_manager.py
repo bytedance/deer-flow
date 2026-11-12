@@ -62,6 +62,22 @@ def _record_error(record: dict[str, Any], message: str) -> Mem0APIError:
     return Mem0APIError(f"{message} (record id={record_id})")
 
 
+def _deduplicate_context_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep first occurrences, reporting unusable remote IDs as read failures."""
+    seen: set[Any] = set()
+    unique: list[dict[str, Any]] = []
+    for record in records:
+        record_id = record.get("id")
+        try:
+            if record_id in seen:
+                continue
+            seen.add(record_id)
+        except TypeError:
+            raise _record_error(record, "mem0 memory field id must be a scalar") from None
+        unique.append(record)
+    return unique
+
+
 def _to_fact(record: dict[str, Any]) -> dict[str, Any]:
     """Map a mem0 record to the backend-neutral fact shape consumed by the
     host (agents/memory/tools.py): id/content/category/confidence/createdAt/
@@ -230,22 +246,19 @@ class Mem0Manager(MemoryManager):
         top_k = self._config.top_k
         records = self._read_or_fallback(
             [],
-            lambda: self._client.list_memories(
-                filters=filters,
-                page_size=min(top_k, 200),
-                max_items=top_k,
+            lambda: _deduplicate_context_records(
+                self._client.list_memories(
+                    filters=filters,
+                    page_size=min(top_k, 200),
+                    max_items=top_k,
+                )
             ),
         )
         budget = self._config.max_injection_chars
-        seen: set[str] = set()
         lines: list[str] = []
         used = 0
         shortest_line: int | None = None
         for record in records:
-            rid = record.get("id")
-            if rid in seen:
-                continue
-            seen.add(rid)
             text = str(record.get("memory") or "").strip()
             if not text:
                 continue

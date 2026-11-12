@@ -64,6 +64,7 @@ from app.gateway.routers import (
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
+from deerflow.sandbox.sandbox_provider import hold_sandbox_shutdown_ownership
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 from deerflow.utils.file_io import await_drained
@@ -623,7 +624,17 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
+    # Claim sandbox shutdown before any startup step can build a provider: a
+    # provider built on the event-loop thread would otherwise install SIGTERM/
+    # SIGINT handlers that destroy every sandbox before uvicorn starts the run
+    # drain. `_runtime_with_mcp_pool_shutdown` closes the provider afterwards.
+    with hold_sandbox_shutdown_ownership():
+        async with _gateway_lifespan(app):
+            yield
 
+
+@asynccontextmanager
+async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Load config and check necessary environment variables at startup.
     # `startup_config` is a local snapshot used only for one-shot bootstrap
     # work (logging level, langgraph_runtime engines, channels). Request-time
@@ -912,11 +923,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if subagent_batches_config.enabled and batch_repo is None:
             raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
         if batch_repo is not None:
+            from app.subagent_batches.continuation import BatchContinuations
+
+            continuations = BatchContinuations(app)
+            app.state.batch_continuations = continuations
             batch_service = SubagentBatchService(
                 repository=batch_repo,
                 config=subagent_batches_config,
                 runtime_config=subagent_runtime_config,
                 extensions=getattr(app.state, "extensions", None),
+                prepare_continuation=continuations.prepare,
+                dispatch_continuation=continuations.dispatch,
+                cancel_continuation=continuations.cancel,
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:

@@ -94,7 +94,10 @@ def observe_provider(provider):
         if trace is None:
             return await acquire(*args, **kwargs)
         trace.mark("acquire_started")
-        entry = {"started": time.monotonic(), "sandbox_id": None}
+        # Record tool-request precedence as event state: coarse monotonic clocks
+        # (Windows) can timestamp a genuine prewarm acquire inside the same tick
+        # as the tool request, which a strict `<` comparison misclassifies.
+        entry = {"started": time.monotonic(), "sandbox_id": None, "precedes_tool_request": not trace.tool_requested.is_set()}
         trace.acquisitions.append(entry)
         try:
             sid = await acquire(*args, **kwargs)
@@ -220,8 +223,7 @@ async def run_case(provider, app_config, *, case: str, prewarm: bool, model_dela
     tool_valid = len(tool_messages) == 1 and str(tool_messages[0].content).strip() == COMMAND_MARKER
     owner = sandbox_lease_owner(context)
     lease_remaining = owner is not None and get_sandbox_lease_manager(provider).binding_for(owner) is not None
-    requested = trace.timestamps.get("tool_requested", float("inf"))
-    speculative = [entry for entry in trace.acquisitions if entry["started"] < requested and entry["sandbox_id"] is not None]
+    speculative = [entry for entry in trace.acquisitions if entry["precedes_tool_request"] and entry["sandbox_id"] is not None]
 
     def duration(start: str, end: str) -> float | None:
         stamps = trace.timestamps

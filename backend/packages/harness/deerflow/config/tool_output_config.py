@@ -27,11 +27,12 @@ class ToolOutputConfig(BaseModel):
     preview + file reference.  If disk persistence is unavailable the
     output falls back to head+tail truncation.
 
-    The same middleware also budgets the other bulky side of a tool call in
+    The same middleware can also budget the other bulky side of a tool call in
     model-bound requests: the ``content`` argument of a successful
     ``write_file`` call, once a later read or write of the same path has
-    made the historical copy redundant with the file on disk
-    (``elide_superseded_writes``; issue #5328).
+    made the historical copy redundant with the file on disk. This behavior is
+    opt-in through ``elide_superseded_writes`` because it rewrites an earlier
+    request prefix (issues #5328 and #7319).
     """
 
     enabled: bool = Field(
@@ -97,13 +98,14 @@ class ToolOutputConfig(BaseModel):
         description="Per-tool externalize_min_chars overrides. Keys are tool names, values are char thresholds. Use 0 to disable externalization for a specific tool.",
     )
     elide_superseded_writes: bool = Field(
-        default=True,
+        default=False,
         description=(
-            "Replace the content argument of a successful write_file call with a short placeholder in model-bound "
+            "Opt in to replacing the content argument of a successful write_file call with a short placeholder in model-bound "
             "requests once the same path was read or modified again later in the conversation. After a successful "
             "write the file on disk is the source of truth, and the read-before-write gate forces a read_file before "
-            "the next modification, so the historical copy is redundant with that read. Only the request copy "
-            "changes: stored message history, receipts, and the run journal keep the original arguments."
+            "the next modification, so the historical copy is redundant with that read. This is disabled by default "
+            "because enabling it rewrites an earlier model-request prefix when a later action supersedes the write. "
+            "Only the request copy changes: stored message history, receipts, and the run journal keep the original arguments."
         ),
     )
     superseded_write_min_chars: _OutputLimit = Field(

@@ -165,7 +165,9 @@ async def _scan_static_candidate_or_raise(name: str, updates: dict[str, str], sk
             for relative_path, content in updates.items():
                 target = skill_dir / relative_path
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(content, encoding="utf-8")
+                # Match the bytes skill storage publishes, including on Windows.
+                # Default text mode would rewrite LF before the scanner reads it.
+                target.write_text(content, encoding="utf-8", newline="")
             return enforce_static_scan(skill_dir, skill_name=name)
 
     try:
@@ -232,7 +234,10 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
-    name = SkillStorage.validate_skill_name(name)
+    # ``create`` also refuses a name that cannot become a directory component
+    # (Windows reserved device names); edits and deletes stay permissive so a
+    # skill an older release created still works.
+    name = SkillStorage.validate_skill_name(name, for_creation=action == "create")
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)

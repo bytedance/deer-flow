@@ -339,3 +339,79 @@ def test_legacy_fallback_assistant_is_removed_before_deepseek_replay():
 
     assert payload["messages"] == base_payload["messages"]
     assert not any(message.get("role") == "assistant" for message in payload["messages"])
+
+
+# ---------------------------------------------------------------------------
+# cache_write_tokens preservation (#7426)
+# ---------------------------------------------------------------------------
+
+
+def _chat_completion_response():
+    from openai.types import CompletionUsage
+    from openai.types.chat import ChatCompletion, ChatCompletionMessage
+    from openai.types.chat.chat_completion import Choice
+
+    return ChatCompletion(
+        id="chatcmpl-cache-write",
+        choices=[
+            Choice(
+                finish_reason="stop",
+                index=0,
+                message=ChatCompletionMessage(role="assistant", content="ok"),
+            )
+        ],
+        created=1761200000,
+        model="kimi-k3.1-pro",
+        object="chat.completion",
+        usage=CompletionUsage(
+            prompt_tokens=373,
+            completion_tokens=112,
+            total_tokens=485,
+            prompt_tokens_details={"cached_tokens": 100, "cache_write_tokens": 256},
+            completion_tokens_details={"reasoning_tokens": 90},
+        ),
+    )
+
+
+def test_cache_write_tokens_survive_the_conversion():
+    """Moonshot reports ``prompt_tokens_details.cache_write_tokens``; the locked
+    langchain-openai 1.2.1 conversion drops it, so the patch layer must restore
+    it as ``input_token_details["cache_creation"]`` (#7426)."""
+    model = _make_model()
+    result = model._create_chat_result(_chat_completion_response())
+
+    usage = result.generations[0].message.usage_metadata
+    assert usage["input_tokens"] == 373
+    assert usage["output_tokens"] == 112
+    assert usage["input_token_details"]["cache_read"] == 100
+    assert usage["input_token_details"]["cache_creation"] == 256
+    assert usage["output_token_details"]["reasoning"] == 90
+
+
+def test_cache_write_tokens_survive_streaming_conversion():
+    """Streamed runs (web UI `messages-tuple`) go through
+    `_convert_chunk_to_generation_chunk`, which must also restore
+    `cache_creation` (#7426)."""
+    from langchain_core.messages import ChatMessageChunk
+
+    model = _make_model()
+    chunk = {
+        "id": "chatcmpl-cache-write",
+        "object": "chat.completion.chunk",
+        "created": 1761200000,
+        "model": "kimi-k3.1-pro",
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+        "usage": {
+            "prompt_tokens": 373,
+            "completion_tokens": 112,
+            "total_tokens": 485,
+            "prompt_tokens_details": {"cached_tokens": 100, "cache_write_tokens": 256},
+            "completion_tokens_details": {"reasoning_tokens": 90},
+        },
+    }
+    generation = model._convert_chunk_to_generation_chunk(chunk, ChatMessageChunk, None)
+
+    usage = generation.message.usage_metadata
+    assert usage["input_tokens"] == 373
+    assert usage["input_token_details"]["cache_read"] == 100
+    assert usage["input_token_details"]["cache_creation"] == 256

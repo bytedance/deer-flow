@@ -88,8 +88,7 @@ async def test_oidc_authorization_url_preserves_endpoint_query(endpoint_query, w
         assert parsed.query.startswith(endpoint_query[1:] + "&")
 
 
-@pytest.mark.asyncio
-async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypatch):
+async def _start_oidc_login(monkeypatch, provider, path="/api/v1/auth/oauth/keycloak"):
     from types import SimpleNamespace
 
     import httpx
@@ -101,7 +100,6 @@ async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypat
     from app.gateway.routers import auth as auth_router
 
     service = OIDCService()
-    provider = _provider_config(authorization_endpoint="https://issuer.example.com/auth?prompt=login")
     config = SimpleNamespace(auth=SimpleNamespace(oidc=SimpleNamespace(enabled=True, providers={"keycloak": provider})))
     monkeypatch.setattr(app_config_module, "get_app_config", lambda: config)
     monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: service)
@@ -125,9 +123,17 @@ async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypat
     app.include_router(auth_router.router)
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://app.example.com") as client:
-            response = await client.get("/api/v1/auth/oauth/keycloak", follow_redirects=False)
+            return await client.get(path, follow_redirects=False)
     finally:
         await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypatch):
+    from app.gateway.auth import oidc_state
+
+    provider = _provider_config(authorization_endpoint="https://issuer.example.com/auth?prompt=login")
+    response = await _start_oidc_login(monkeypatch, provider)
 
     assert response.status_code == 302
     query = parse_qs(urlsplit(response.headers["location"]).query)
@@ -140,6 +146,29 @@ async def test_oidc_login_redirect_preserves_configured_endpoint_query(monkeypat
     assert query["state"] == [state.state]
     assert query["nonce"] == [state.nonce]
     assert query["code_challenge"] == [oidc_state.compute_code_challenge(state.code_verifier)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "next_query,expected",
+    [
+        ("%2Fworkspace%2Fchats%2Fabc-123", "/workspace/chats/abc-123"),
+        # Browsers delete tab, LF and CR before parsing the callback's next, so
+        # each of these would land on //evil.example.
+        ("%2F%0A%2F%2Fevil.example", "/workspace"),
+        ("%2F%09%2F%2Fevil.example", "/workspace"),
+        ("%2F%0D%2F%2Fevil.example", "/workspace"),
+    ],
+)
+async def test_oidc_login_stores_only_a_safe_next_path(monkeypatch, next_query, expected):
+    from app.gateway.auth import oidc_state
+
+    response = await _start_oidc_login(monkeypatch, _provider_config(), path=f"/api/v1/auth/oauth/keycloak?next={next_query}")
+
+    assert response.status_code == 302
+    state = oidc_state._verify_state_signed(response.cookies["df_oidc_state_keycloak"])
+    assert state is not None
+    assert state.next_path == expected
 
 
 @pytest.mark.asyncio

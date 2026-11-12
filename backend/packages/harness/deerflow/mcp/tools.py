@@ -510,7 +510,7 @@ def _convert_call_tool_result(
     from langchain_core.messages import ToolMessage
     from langchain_core.messages.content import create_file_block, create_image_block, create_text_block
     from langchain_core.tools import ToolException
-    from mcp.types import EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
+    from mcp.types import AudioContent, EmbeddedResource, ImageContent, ResourceLink, TextContent, TextResourceContents
 
     # Pass ToolMessage through directly (interceptor short-circuit).
     if isinstance(call_tool_result, ToolMessage):
@@ -554,6 +554,8 @@ def _convert_call_tool_result(
             lc_content.append(create_text_block(text=_resolve_text(item.text)))
         elif isinstance(item, ImageContent):
             lc_content.append(create_image_block(base64=item.data, mime_type=item.mimeType))
+        elif isinstance(item, AudioContent):
+            raise NotImplementedError(f"AudioContent conversion to LangChain content blocks is not yet supported. Received audio with mime type: {item.mimeType}")
         elif isinstance(item, ResourceLink):
             mime = item.mimeType or None
             url = _resolve_link_url(str(item.uri))
@@ -602,7 +604,17 @@ def _convert_call_tool_result(
                 if mime and mime.startswith("image/"):
                     lc_content.append(create_image_block(base64=res.blob, mime_type=mime))
                 else:
-                    lc_content.append(create_file_block(base64=res.blob, mime_type=mime))
+                    # ``BlobResourceContents.mimeType`` is optional in the MCP spec, but
+                    # langchain-core refuses a base64 block without one. Degrade to a
+                    # generic binary type instead of raising, so the rest of the result —
+                    # including the text blocks the server returned — survives. The
+                    # sibling ``ResourceLink`` branch already degrades the same way.
+                    lc_content.append(
+                        create_file_block(
+                            base64=res.blob,
+                            mime_type=mime or "application/octet-stream",
+                        )
+                    )
             else:
                 lc_content.append(create_text_block(text=str(res)))
         else:
@@ -681,15 +693,15 @@ def _make_session_pool_tool(
     effective_domain = binding.domain if binding is not None else ownership_domain
 
     async def call_with_persistent_session(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> Any:
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        thread_incarnation = runtime_thread_incarnation(runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
         scope_key = mcp_session_scope_key(
             user_id=user_id,
             thread_id=thread_id,
@@ -808,7 +820,7 @@ def _make_session_pool_tool(
                 name=original_name,
                 args=arguments,
                 server_name=server_name,
-                runtime=runtime,
+                runtime=deerflow_runtime,
             )
             call_tool_result = await handler(request)
         else:
@@ -875,16 +887,16 @@ def _make_background_submit_tool(
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
     async def submit_in_background(
-        runtime: Runtime | None = None,
+        deerflow_runtime: Runtime | None = None,
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
-        thread_id = _extract_thread_id(runtime)
-        user_id = resolve_runtime_user_id(runtime)
-        thread_incarnation = runtime_thread_incarnation(runtime)
-        context = runtime.context if runtime is not None and runtime.context else {}
+        thread_id = _extract_thread_id(deerflow_runtime)
+        user_id = resolve_runtime_user_id(deerflow_runtime)
+        thread_incarnation = runtime_thread_incarnation(deerflow_runtime)
+        context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
-        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+        tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -1002,8 +1014,52 @@ def _flatten_server_tool_groups(
     enabled_order: Collection[str],
     groups: Mapping[str, ServerDiscoveryResult],
 ) -> list[BaseTool]:
-    """Flatten grouped results in enabled-server declaration order."""
-    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
+    """Flatten grouped results in enabled-server declaration order.
+
+    A tool whose bound name duplicates an earlier one is dropped with a
+    warning naming the server whose tool survived. Server prefixes do not
+    make bound names unique across servers (server ``a`` exposing ``b_x`` and
+    server ``a_b`` exposing ``x`` both bind ``a_b_x``), and a duplicate name
+    would reach the model as two same-named declarations, where the provider
+    silently keeps only one. The surviving server is stable only while its
+    discovery keeps succeeding: when the winner's discovery fails, its group
+    is absent from both this flatten and the cache initializer's reuse path,
+    so the later duplicate becomes served again and the implementation behind
+    a bound name can alternate across cache generations with transient server
+    health.
+
+    The string checks below only cover a directly constructed
+    ``ServerDiscoveryResult`` in tests: production tools always pass through
+    ``_wrap_discovered_server_tools``, which guarantees a validated non-empty
+    string name before a group can exist.
+    """
+    flattened: list[BaseTool] = []
+    serving_server: dict[str, str] = {}
+    dropped = 0
+    for name in enabled_order:
+        if name not in groups:
+            continue
+        for tool in groups[name].tools:
+            bound_name = getattr(tool, "name", None)
+            if isinstance(bound_name, str) and bound_name in serving_server:
+                logger.warning(
+                    "Dropping MCP tool %r from server '%s': its bound name is already served by server '%s'; publishing both would hand the model two same-named declarations.",
+                    bound_name,
+                    name,
+                    serving_server[bound_name],
+                )
+                dropped += 1
+                continue
+            if isinstance(bound_name, str):
+                serving_server[bound_name] = name
+            flattened.append(tool)
+    if dropped:
+        logger.info(
+            "Publishing %d MCP tool(s) after dropping %d duplicate bound name(s)",
+            len(flattened),
+            dropped,
+        )
+    return flattened
 
 
 def _load_mcp_adapter_symbols() -> tuple[Any, Any] | None:
@@ -1225,6 +1281,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 

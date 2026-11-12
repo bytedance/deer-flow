@@ -1,5 +1,6 @@
 """Bounded, owner-scoped plugin data. No host persistence imports."""
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -22,6 +23,9 @@ class Store:
             # Serialize schema discovery and backfill with concurrent writers.
             db.execute("BEGIN IMMEDIATE")
             db.execute("CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, owner TEXT NOT NULL, data TEXT NOT NULL, has_pending_jobs INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE IF NOT EXISTS team_artifact_versions (owner TEXT NOT NULL, team_id TEXT NOT NULL, version_id TEXT NOT NULL, content BLOB NOT NULL, PRIMARY KEY(team_id, version_id))")
+            db.execute("CREATE INDEX IF NOT EXISTS team_artifact_owner ON team_artifact_versions(owner)")
+            db.execute("CREATE TRIGGER IF NOT EXISTS team_artifacts_immutable BEFORE UPDATE ON team_artifact_versions BEGIN SELECT RAISE(ABORT, 'Artifact snapshots cannot be overwritten'); END")
             if "has_pending_jobs" not in {row[1] for row in db.execute("PRAGMA table_info(teams)")}:
                 db.execute("ALTER TABLE teams ADD COLUMN has_pending_jobs INTEGER NOT NULL DEFAULT 0")
                 rows = db.execute("SELECT id, data FROM teams").fetchall()
@@ -73,4 +77,40 @@ class Store:
 
     def delete(self, owner, team_id):
         with closing(self.connection()) as db, db:
+            db.execute("DELETE FROM team_artifact_versions WHERE owner=? AND team_id=?", (owner, team_id))
             db.execute("DELETE FROM teams WHERE owner=? AND id=?", (owner, team_id))
+
+    def capture_artifact(self, owner, team_id, version_id, content, run_id):
+        from .artifacts import MAX_BYTES, OWNER_BYTES
+
+        if not isinstance(content, bytes) or len(content) > MAX_BYTES:
+            raise ValueError("Artifact must contain at most 2 MiB")
+        with closing(self.connection()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT data FROM teams WHERE owner=? AND id=?", (owner, team_id)).fetchone()
+            if row is None:
+                raise ValueError("Team unavailable")
+            team = json.loads(row[0])
+            entry = next(entry for entry in team["artifacts"] if entry["id"] == version_id)
+            if entry["status"] != "pending":
+                return
+            retained = db.execute("SELECT coalesce(sum(length(content)),0) FROM team_artifact_versions WHERE owner=?", (owner,)).fetchone()[0]
+            if retained + len(content) > OWNER_BYTES:
+                raise ValueError("Owner artifact storage limit reached (64 MiB)")
+            db.execute("INSERT INTO team_artifact_versions VALUES (?,?,?,?)", (owner, team_id, version_id, content))
+            entry.update(status="ready", sha256=hashlib.sha256(content).hexdigest(), size=len(content))
+            entry["source"]["run_id"] = run_id
+            db.execute("UPDATE teams SET data=? WHERE owner=? AND id=?", (json.dumps(team), owner, team_id))
+
+    def artifact(self, owner, team_id, artifact_id, version):
+        from .artifacts import lookup
+
+        team = self.get(owner, team_id)
+        entry = lookup(team, {"artifact_id": artifact_id, "version": version})
+        if entry["status"] != "ready":
+            raise ValueError("Artifact version is not ready")
+        with closing(self.connection()) as db:
+            row = db.execute("SELECT content FROM team_artifact_versions WHERE owner=? AND team_id=? AND version_id=?", (owner, team_id, entry["id"])).fetchone()
+        if row is None or hashlib.sha256(row[0]).hexdigest() != entry["sha256"]:
+            raise ValueError("Artifact snapshot unavailable")
+        return entry, row[0]

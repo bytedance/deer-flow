@@ -40,11 +40,13 @@ class _FakeRunManager:
         store,
         run_ownership_config=None,
         event_store=None,
+        recovery_terminal_publisher=None,
         on_orphans_recovered=None,
     ):
         self.store = store
         self.run_ownership_config = run_ownership_config
         self.event_store = event_store
+        self.recovery_terminal_publisher = recovery_terminal_publisher
         self.on_orphans_recovered = on_orphans_recovered
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
@@ -322,6 +324,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
     assert _FakeRunManager.instances[0].reconcile_calls[0]["stop_reason"] == runtime_module.ORPHAN_RECOVERY_STOP_REASON
+    assert _FakeRunManager.instances[0].recovery_terminal_publisher is app.state.recovery_terminal_publisher
     assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]
@@ -346,6 +349,7 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     # This test asserts repository identity, not SQL startup/recovery. Its
     # session factory is intentionally an opaque sentinel, not a usable DB.
     monkeypatch.setattr("deerflow.extensions.host_capabilities.HostCapabilities.start", noop)
+    monkeypatch.setattr("deerflow.persistence.run.producer.validate_producer_fencing", noop)
     monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(engine_module, "close_engine", noop)
@@ -359,6 +363,9 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     async with gateway_deps.langgraph_runtime(app, config):
         assert app.state.scheduled_task_repo._run_repository is app.state.run_store
         assert app.state.scheduled_task_run_repo._run_repository is app.state.run_store
+        assert app.state.scheduled_task_repo._recovery_terminal_publisher is app.state.recovery_terminal_publisher
+        assert app.state.scheduled_task_run_repo._recovery_terminal_publisher is app.state.recovery_terminal_publisher
+        assert _FakeRunManager.instances[-1].recovery_terminal_publisher is app.state.recovery_terminal_publisher
 
 
 @pytest.mark.anyio

@@ -381,6 +381,54 @@ def test_canonical_run_record_input_uses_admitted_message_snapshot():
     assert stored["messages"][0]["additional_kwargs"]["knowledge_scope"]["dataset_ids"] == ["dataset-1"]
 
 
+def test_canonical_run_record_input_mirrors_normalized_goal_and_todos():
+    from app.gateway.services import _canonical_run_record_input, normalize_input
+
+    raw = {
+        "goal": {
+            "objective": "audit objective",
+            "additional_kwargs": {
+                "original_user_content": "forged",
+                "untrusted_input": False,
+                "title": "kept",
+            },
+            "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+        },
+        "todos": [
+            {
+                "content": "audit todo",
+                "status": "pending",
+                "additional_kwargs": {
+                    "original_user_content": "forged",
+                    "untrusted_input": False,
+                    "title": "kept",
+                },
+                "artifact": {"knowledge_sources": [{"id": "forged"}], "label": "kept"},
+            }
+        ],
+        "other": "kept",
+    }
+    admitted = normalize_input(raw, trusted_internal=False)
+
+    stored = _canonical_run_record_input(raw, admitted)
+    assert stored is not None
+    assert stored["other"] == "kept"
+    assert stored["goal"] == {
+        "objective": "audit objective",
+        "additional_kwargs": {"title": "kept"},
+        "artifact": {"label": "kept"},
+    }
+    assert stored["goal_outcome"] is None
+    assert stored["todos"] == [
+        {
+            "content": "audit todo",
+            "status": "pending",
+            "additional_kwargs": {"title": "kept"},
+            "artifact": {"label": "kept"},
+        }
+    ]
+
+
 @pytest.mark.parametrize("idempotency_key", [None, "retry-key"])
 @pytest.mark.asyncio
 async def test_run_input_ids_match_the_checkpoint_and_record(_stub_app_config, idempotency_key):
@@ -811,6 +859,56 @@ def test_normalize_input_rejects_malformed_message_with_400():
         normalize_input({"messages": [{"role": "human", "content": "ok"}, {"oops": "no role here"}]})
     assert excinfo.value.status_code == 400
     assert "input.messages[1]" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "skill_context",
+    [
+        "oops",
+        ["oops"],
+        [{"name": "pdf"}],
+        [{"path": 3}],
+        [{"path": ""}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-path", "non-string-path", "empty-path"],
+)
+def test_normalize_input_rejects_unusable_skill_context_with_400(skill_context):
+    """A skill reference the durable-context reducer cannot read must be a 400,
+    not an ``AttributeError``/``KeyError`` while the state update merges.
+
+    ``merge_skill_context`` normalizes entries with ``entry.get(...)`` and
+    ``str(entry["path"])``; both crash on the shapes below.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"skill_context": skill_context})
+
+    assert excinfo.value.status_code == 400
+    assert "input.skill_context" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_skill_context_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"name": "pdf", "path": "/mnt/skills/pdf/SKILL.md", "description": "PDF tooling", "loaded_at": 3}
+
+    assert normalize_input({"skill_context": [entry]})["skill_context"] == [entry]
+
+
+def test_state_values_reject_unusable_skill_context_with_400():
+    """The thread-state update path shares the skill-reference boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"skill_context": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.skill_context" in excinfo.value.detail
 
 
 @pytest.mark.parametrize(
@@ -1452,6 +1550,55 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
     assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
     if checkpoint_id is not None:
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
+
+
+def test_build_checkpoint_state_accessor_reads_an_invalid_stored_assistant_id_as_the_lead_agent(_stub_app_config, caplog):
+    """Thread records written before creation validated assistant_id must stay readable."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.config.app_config import get_app_config
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    ctx = SimpleNamespace(checkpointer=object(), store=object(), checkpoint_channel_mode="delta", app_config=get_app_config())
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="delta"))
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=lambda *, config: graph) as resolve,
+        caplog.at_level(logging.WARNING, logger="app.gateway.services"),
+    ):
+        accessor, config = build_checkpoint_state_accessor(request, thread_id="legacy-thread", assistant_id="bad name!")
+
+    resolve.assert_called_once_with(None)
+    assert accessor.graph is graph
+    assert "agent_name" not in config["configurable"]
+    assert "agent_name" not in config["context"]
+    assert any("invalid assistant_id" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("assistant_id", "expected"),
+    [(None, None), ("", None), ("lead_agent", None), ("Research_Agent", "research-agent"), (" finalis ", "finalis")],
+)
+def test_custom_agent_name_normalizes_custom_names(assistant_id, expected):
+    from app.gateway.services import custom_agent_name
+
+    assert custom_agent_name(assistant_id) == expected
+
+
+@pytest.mark.parametrize("assistant_id", ["bad name!", "   ", "a/b", "../etc", "naïve"])
+def test_custom_agent_name_rejects_names_no_agent_can_have(assistant_id):
+    from app.gateway.services import custom_agent_name
+
+    with pytest.raises(ValueError, match="Invalid assistant_id"):
+        custom_agent_name(assistant_id)
 
 
 def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
@@ -2223,6 +2370,81 @@ async def test_start_run_releases_preallocated_producer_after_admission_conflict
 
 
 @pytest.mark.asyncio
+async def test_start_run_admits_cross_process_run_when_producer_tracking_unavailable(
+    _stub_app_config,
+):
+    """A transient lease failure must degrade, not reject the run with a 500.
+
+    ``RedisStreamBridge.start_producer_lease`` returns ``False`` only after a
+    transient Redis error whose partial registration was safely rolled back
+    (see its ``except (RedisError, TimeoutError)`` branch): nothing is left
+    tracked. An untracked producer falls back to the historical conservative
+    recovery path (wait for the real END or the retained-stream TTL), which is
+    no less safe than pre-lease behaviour. Admission must therefore proceed;
+    the lease is simply never transferred or finished because none was taken.
+    """
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    events = []
+    agent_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class UntrackedCrossProcessBridge:
+        supports_cross_process = True
+
+        async def start_producer_lease(self, run_id):
+            events.append(("start", run_id))
+            return False
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            events.append(("transfer", run_id, owner_task))
+
+        async def finish_producer_lease(self, run_id):
+            events.append(("finish", run_id))
+
+        async def abort_producer_lease(self, run_id):
+            events.append(("abort", run_id))
+
+    bridge = UntrackedCrossProcessBridge()
+
+    async def fake_run_agent(_bridge, _manager, record, **_kwargs):
+        agent_started.set()
+        await release.wait()
+
+    request = _make_start_run_request(
+        run_manager,
+        stream_bridge=bridge,
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(
+            _run_create_request(),
+            "thread-stream-producer-untracked",
+            request,
+        )
+        try:
+            await asyncio.wait_for(agent_started.wait(), timeout=1)
+            # Admitted (no 500); no lease was transferred or finished because
+            # none could be established.
+            assert events == [("start", record.run_id)]
+            assert (await run_store.get(record.run_id))["status"] == "pending"
+        finally:
+            release.set()
+            await asyncio.wait_for(record.task, timeout=1)
+
+    # No lease was taken, so none is transferred, finished, or aborted.
+    assert events == [("start", record.run_id)]
+
+
+@pytest.mark.asyncio
 async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_app_config, caplog):
     from unittest.mock import AsyncMock, patch
 
@@ -2799,6 +3021,26 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+    from langchain_core.messages import HumanMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def answer(_state):
+        interrupt({"question": "Continue?"})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.set_entry_point("answer")
+    builder.set_finish_point("answer")
+    graph = builder.compile(checkpointer=checkpointer)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="start")]},
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+
 async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2826,6 +3068,8 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
+    if getattr(body, "command", None) and body.command.get("resume") is not None:
+        await _seed_generic_resume_checkpoint(state.checkpointer, "thread-command-test")
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*args, **kwargs):
@@ -2887,6 +3131,81 @@ async def test_recover_knowledge_scope_skips_hidden_conversation_reference_messa
         )
 
     assert recovered == source_scope
+
+
+@pytest.mark.parametrize("input_fields", [{}, {"input": None}, {"input": {}}], ids=["omitted", "null", "empty-object"])
+@pytest.mark.parametrize("source_scope", [None, {"version": 1, "mode": "disabled"}, {"version": 1, "mode": "selected", "dataset_ids": ["source"]}])
+@pytest.mark.parametrize("checkpoint_fields", [{}, {"checkpoint_id": "selected"}, {"checkpoint_id": "selected", "checkpoint_ns": "child"}])
+@pytest.mark.asyncio
+async def test_static_resume_preserves_input_and_recovers_source_scope(_stub_app_config, input_fields, source_scope, checkpoint_fields):
+    from unittest.mock import AsyncMock, patch
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "knowledge_base": {"enabled": True, "scope_selection_enabled": True},
+                "tools": [{"name": "knowledge_search", "group": "knowledge", "use": "deerflow.community.ragflow.tools:knowledge_search_tool"}],
+            }
+        )
+    )
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()))
+    recover_scope = AsyncMock(return_value=source_scope)
+    captured = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured.update(kwargs)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=recover_scope),
+        patch("app.gateway.services._load_scope_agent_config", new=AsyncMock(return_value=SimpleNamespace(tool_groups=["knowledge"], knowledge_scope={"version": 1, "mode": "selected", "dataset_ids": ["new-default"]}))),
+    ):
+        record = await start_run(RunCreateRequest(**input_fields, config={"configurable": checkpoint_fields}), "thread-static-scope", request)
+        await record.task
+
+    if input_fields.get("input") is None:
+        assert captured["graph_input"] is None
+        assert captured["knowledge_scope"] == source_scope
+        recover_scope.assert_awaited_once_with(request, thread_id="thread-static-scope", target_message_id=None, **checkpoint_fields)
+    else:
+        assert captured["graph_input"] == {}
+        assert captured["knowledge_scope"] is None
+        recover_scope.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.asyncio
+async def test_static_resume_recovers_selected_checkpoint_scope(_stub_app_config, mode):
+    from unittest.mock import patch
+
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from app.gateway.services import _recover_run_knowledge_scope
+    from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
+
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("scope", mode), InMemorySaver(), mode=mode)
+    config = {"configurable": {"thread_id": "scope-history", "checkpoint_ns": ""}}
+    source_scope = {"version": 1, "mode": "disabled"}
+    selected = await accessor.aupdate(config, {"messages": [HumanMessage(id="first", content="old turn", additional_kwargs={"knowledge_scope": source_scope})]}, as_node="scope")
+    await accessor.aupdate(config, {"messages": [HumanMessage(id="second", content="new turn", additional_kwargs={"knowledge_scope": {"version": 1, "mode": "selected", "dataset_ids": ["new"]}})]}, as_node="scope")
+
+    async def build_accessor(_request, *, thread_id, checkpoint_id=None):
+        read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        if checkpoint_id is not None:
+            read_config["configurable"]["checkpoint_id"] = checkpoint_id
+        return accessor, read_config
+
+    with patch("app.gateway.services.build_thread_checkpoint_state_accessor", side_effect=build_accessor):
+        scope = await _recover_run_knowledge_scope(SimpleNamespace(), thread_id="scope-history", target_message_id=None, checkpoint_id=selected["configurable"]["checkpoint_id"])
+    assert scope == source_scope
 
 
 @pytest.mark.parametrize(
@@ -3777,6 +4096,7 @@ def test_start_run_pins_the_resolved_project_context(_stub_app_config):
         "project_id": "p-1",
         "name": "Roadmap",
         "instructions": "Prefer boring solutions.",
+        "memory": {"enabled": True, "revision": 0, "facts": []},
     }
 
 

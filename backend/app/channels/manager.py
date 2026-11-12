@@ -32,6 +32,7 @@ from app.channels.capabilities import CHANNEL_CAPABILITIES
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.connection_identity import lookup_thread_id
 from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
+from app.channels.goal_status import goal_reply_text, goal_status_text, is_active_goal_state
 from app.channels.message_bus import (
     HUMAN_INPUT_REQUEST_METADATA_KEY,
     HUMAN_INPUT_RESPONSE_METADATA_KEY,
@@ -44,6 +45,7 @@ from app.channels.message_bus import (
     ResolvedAttachment,
     cleanup_inbound_files,
 )
+from app.channels.reply_locale import ReplyLocaleResolver
 from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
 from app.channels.store import ChannelStore
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
@@ -67,6 +69,7 @@ from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.trace_context import ensure_trace_context
 from deerflow.uploads.manager import apply_upload_sandbox_permits
 from deerflow.utils.file_io import await_drained
+from deerflow.utils.http_policy import control_plane_trust_env
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -87,12 +90,13 @@ IN_PROCESS_CACHE_MAX_ENTRIES = 4096
 MAX_CHANNEL_AGENT_LIST_ITEMS = 50
 MAX_CHANNEL_AGENT_DESCRIPTION_CHARS = 120
 
-# Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
-# This is independent of subagent depth: a `task()` dispatch runs the whole
-# subagent inside ONE lead tools-node step, and subagents enforce their own
-# limit via `subagents.max_turns` (see SubagentExecutor). Do not conflate this
-# 100 with the general-purpose subagent's max_turns.
-DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
+# No lead-agent recursion budget here: like Gateway API runs, IM runs get
+# the Gateway's configured top-level ``recursion_limit`` (clamped by
+# ``max_recursion_limit``) unless a session ``config.recursion_limit`` sets
+# one. The budget counts lead-graph super-steps only: a `task()` dispatch runs
+# the whole subagent inside ONE lead tools-node step, and subagents enforce
+# their own limit via `subagents.max_turns` (see SubagentExecutor).
+DEFAULT_RUN_CONFIG: dict[str, Any] = {}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "thinking_enabled": True,
     "is_plan_mode": False,
@@ -296,6 +300,59 @@ _WECOM_MEDIA_COS_APPIDS = frozenset({"1258476243"})
 _WECOM_MEDIA_COS_HOST_RE = re.compile(r"^ww-aibot-img-(?P<appid>\d+)\.cos\.[a-z0-9-]+\.myqcloud\.com$")
 
 _METADATA_DROP_KEYS = frozenset({"raw_message", "ref_msg"})
+
+
+def _make_gateway_client(gateway_url: str) -> httpx.AsyncClient:
+    """Build the short-lived client for Gateway control-plane calls.
+
+    A loopback Gateway must bypass ``HTTP_PROXY``, while an external one keeps
+    the environment proxy. The policy itself lives in
+    :mod:`deerflow.utils.http_policy` so this module never imports the sandbox
+    provider stack.
+    """
+    return httpx.AsyncClient(trust_env=control_plane_trust_env(gateway_url))
+
+
+# Mirrors the client ``langgraph_sdk.get_client()`` builds, so the loopback path
+# below differs from it only in ``trust_env``.
+_LANGGRAPH_SDK_RETRIES = 5
+_LANGGRAPH_SDK_TIMEOUT = httpx.Timeout(connect=5, read=300, write=300, pool=5)
+
+
+def _make_langgraph_client(base_url: str, headers: Mapping[str, str]) -> Any:
+    """Build the ``langgraph_sdk`` async client used for channel run submission.
+
+    ``get_client()`` always builds ``httpx.AsyncHTTPTransport(retries=5)`` on an
+    ``httpx.AsyncClient`` that keeps ``trust_env`` at its default ``True`` and
+    exposes neither ``transport`` nor ``trust_env``, so a loopback Gateway would
+    still be sent through ``HTTP_PROXY``: control-plane calls are fixed but
+    ``runs.wait`` keeps hitting the proxy-generated error of #7876. Loopback and
+    private Gateways therefore get an explicit ``trust_env=False`` client handed
+    to the SDK; external Gateways keep the stock ``get_client()`` path.
+    """
+    from langgraph_sdk import __version__ as sdk_version
+    from langgraph_sdk import get_client
+
+    if control_plane_trust_env(base_url):
+        return get_client(url=base_url, headers=dict(headers))
+
+    try:  # langgraph-sdk keeps the async client in a private package since 0.3
+        from langgraph_sdk._async import LangGraphClient
+    except ImportError:  # older releases expose it directly on ``langgraph_sdk.client``
+        from langgraph_sdk.client import LangGraphClient
+
+    # ``get_client`` also folds an ``LANGGRAPH_API_KEY`` env var into the SDK
+    # headers; a control-plane Gateway authenticates with the internal auth
+    # headers above, so only those are forwarded here.
+    return LangGraphClient(
+        httpx.AsyncClient(
+            base_url=base_url,
+            transport=httpx.AsyncHTTPTransport(retries=_LANGGRAPH_SDK_RETRIES),
+            timeout=_LANGGRAPH_SDK_TIMEOUT,
+            headers={"User-Agent": f"langgraph-sdk-py/{sdk_version}", **headers},
+            trust_env=False,
+        )
+    )
 
 
 def _slim_metadata(meta: dict[str, Any]) -> dict[str, Any]:
@@ -564,6 +621,28 @@ def _is_admitted_run_conflict(exc: BaseException | None) -> bool:
     return isinstance(exc, ConflictError) and any(detail in str(exc) for detail in _ADMITTED_RUN_CONFLICT_DETAILS)
 
 
+# The Gateway names a run that stopped at its step limit after LangGraph's
+# GraphRecursionError, in its stream error frame and its /wait error. The
+# message says the run stopped and lists the outputs it never presented.
+_STEP_LIMIT_ERROR_NAME = "GraphRecursionError"
+
+
+def _step_limit_text(error: Any) -> str | None:
+    """The message of a step-limit stream error frame or ``/wait`` error, else ``None``.
+
+    The SDK raises a ``/wait`` error envelope as ``Exception("<name>: <message>")``.
+    """
+    if isinstance(error, BaseException):
+        name, _, message = str(error).partition(": ")
+    elif isinstance(error, dict):
+        name, message = error.get("name"), error.get("message")
+    else:
+        return None
+    if name != _STEP_LIMIT_ERROR_NAME or not isinstance(message, str) or not message.strip():
+        return None
+    return message.strip()
+
+
 def _is_run_status_result(result: Any) -> bool:
     """A ``/wait`` response carrying run status instead of thread state.
 
@@ -574,7 +653,7 @@ def _is_run_status_result(result: Any) -> bool:
     return isinstance(result, dict) and "messages" not in result and isinstance(result.get("status"), str)
 
 
-def _turn_of_message(values: Any, message_id: str) -> dict[str, Any] | None:
+def _turn_of_message(values: Any, message_id: str, *, thread_id: str | None = None) -> dict[str, Any] | None:
     """Thread *values* cut after the turn that answered human message *message_id*.
 
     The cut ends before the next visible human message, so the response, artifact
@@ -586,7 +665,7 @@ def _turn_of_message(values: Any, message_id: str) -> dict[str, Any] | None:
     for index, message in enumerate(messages):
         if isinstance(message, dict) and message.get("type") == "human" and message.get("id") == message_id:
             end = next(
-                (later for later in range(index + 1, len(messages)) if isinstance(messages[later], dict) and messages[later].get("type") == "human" and not _is_hidden_human_control_message(messages[later])),
+                (later for later in range(index + 1, len(messages)) if isinstance(messages[later], dict) and messages[later].get("type") == "human" and not _is_hidden_human_control_message(messages[later], thread_id=thread_id)),
                 len(messages),
             )
             return {**values, "messages": messages[:end]}
@@ -785,7 +864,7 @@ def _apply_explicit_model_choice(
         carrier["model_name"] = model_name
 
 
-def _extract_response_text(result: dict | list) -> str:
+def _extract_response_text(result: dict | list, *, thread_id: str | None = None) -> str:
     """Extract the last AI message text from a LangGraph runs.wait result.
 
     ``runs.wait`` returns the final state dict which contains a ``messages``
@@ -812,7 +891,7 @@ def _extract_response_text(result: dict | list) -> str:
 
         # Stop at the last human message — anything before it is a previous turn
         if msg_type == "human":
-            if _is_hidden_human_control_message(msg):
+            if _is_hidden_human_control_message(msg, thread_id=thread_id):
                 continue
             break
 
@@ -1121,7 +1200,7 @@ def _accumulate_stream_text(
     return buffers[message_id], message_id
 
 
-def _extract_artifacts(result: dict | list) -> list[str]:
+def _extract_artifacts(result: dict | list, *, thread_id: str | None = None) -> list[str]:
     """Extract artifact paths from the last AI response cycle only.
 
     Instead of reading the full accumulated ``artifacts`` state (which contains
@@ -1142,7 +1221,7 @@ def _extract_artifacts(result: dict | list) -> list[str]:
             continue
         # Stop at the last human message — anything before it is a previous turn
         if msg.get("type") == "human":
-            if _is_hidden_human_control_message(msg):
+            if _is_hidden_human_control_message(msg, thread_id=thread_id):
                 continue
             break
         # Look for AI messages with present_files tool calls
@@ -1156,13 +1235,20 @@ def _extract_artifacts(result: dict | list) -> list[str]:
     return artifacts
 
 
-def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:
+def _is_hidden_human_control_message(msg: Mapping[str, Any], *, thread_id: str | None = None) -> bool:
     """Distinguish internal control messages from real hidden user answers."""
     if msg.get("type") != "human":
         return False
 
     additional_kwargs = msg.get("additional_kwargs")
     if not isinstance(additional_kwargs, Mapping):
+        if additional_kwargs is not None:
+            logger.warning(
+                "Ignoring malformed message additional_kwargs for thread %s at row seq %s: expected a mapping, got %s",
+                thread_id or msg.get("thread_id", "<unknown>"),
+                msg.get("seq", "<unknown>"),
+                type(additional_kwargs).__name__,
+            )
         return False
 
     return additional_kwargs.get("hide_from_ui") is True and read_human_input_response(additional_kwargs) is None
@@ -1391,7 +1477,11 @@ def _prepare_artifact_delivery(
     *,
     user_id: str | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
-    """Resolve attachments and append filename fallbacks to the text response."""
+    """Resolve attachments and append filename fallbacks to the text response.
+
+    Blocking: every artifact is resolved through ``realpath`` and checked with
+    ``stat``, so the async reply paths call this through ``asyncio.to_thread``.
+    """
     attachments: list[ResolvedAttachment] = []
     if not artifacts:
         return response_text, attachments
@@ -1565,6 +1655,7 @@ class ChannelManager:
         require_bound_identity: bool = False,
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
+        reply_locale: ReplyLocaleResolver | None = None,
     ) -> None:
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
             raise ValueError("max_concurrency must be a positive integer")
@@ -1581,6 +1672,9 @@ class ChannelManager:
         self._channel_sessions = dict(channel_sessions or {})
         self._connection_repo = connection_repo
         self._require_bound_identity = require_bound_identity
+        # Language of the /goal replies; ChannelService passes the owner-aware
+        # resolver, and a directly built manager replies in en-US.
+        self._reply_locale = reply_locale or ReplyLocaleResolver()
         # Zero-arg accessor for the FastAPI app's StreamBridge singleton,
         # threaded in from app.py's lifespan via start_channel_service() ->
         # ChannelService.__init__ (mirrors how ScheduledTaskService gets a
@@ -2190,7 +2284,7 @@ class ChannelManager:
             if isinstance(override, int) and override > 0:
                 run_config["recursion_limit"] = override
             else:
-                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 100), policy.default_recursion_limit)
+                run_config["recursion_limit"] = max(run_config.get("recursion_limit", 0), policy.default_recursion_limit)
 
         return assistant_id, run_config, run_context
 
@@ -2278,11 +2372,9 @@ class ChannelManager:
     def _get_client(self):
         """Return the ``langgraph_sdk`` async client, creating it on first use."""
         if self._client is None:
-            from langgraph_sdk import get_client
-
-            self._client = get_client(
-                url=self._langgraph_url,
-                headers={**create_internal_auth_headers(), **self._csrf_headers()},
+            self._client = _make_langgraph_client(
+                self._langgraph_url,
+                {**create_internal_auth_headers(), **self._csrf_headers()},
             )
         return self._client
 
@@ -3407,6 +3499,13 @@ class ChannelManager:
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
+            if step_limit_text := _step_limit_text(exc):
+                logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
+                await self._send_error(msg, step_limit_text)
+                # The run ended, as after a terminal error frame: release the key
+                # only after the reply, so a redelivery cannot overtake it.
+                await self._release_inbound_dedupe_key(msg)
+                return
             if recovery := await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id):
                 await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, recovery.text)
@@ -3422,9 +3521,9 @@ class ChannelManager:
                 return
             result = await self._admitted_turn(client, msg, thread_id) or result
 
-        response_text = _extract_response_text(result)
+        response_text = _extract_response_text(result, thread_id=thread_id)
         pending_clarification = _has_current_turn_clarification(result)
-        artifacts = _extract_artifacts(result)
+        artifacts = _extract_artifacts(result, thread_id=thread_id)
 
         logger.info(
             "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
@@ -3436,7 +3535,7 @@ class ChannelManager:
         # Reuse the storage owner cached at the top of _handle_chat so uploads and
         # artifact delivery always resolve to the same bucket, even if a future
         # channel.receive_file returns a rewritten InboundMessage.
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+        response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
 
         if not response_text:
             if attachments:
@@ -3477,7 +3576,7 @@ class ChannelManager:
         except Exception:
             logger.warning("[Manager] failed to read thread state for an admitted run: thread_id=%s", thread_id, exc_info=True)
             return None
-        return _turn_of_message(state.get("values") if isinstance(state, dict) else None, message_id)
+        return _turn_of_message(state.get("values") if isinstance(state, dict) else None, message_id, thread_id=thread_id)
 
     async def _handle_streaming_chat(
         self,
@@ -3501,6 +3600,7 @@ class ChannelManager:
         last_published_len = 0
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        step_limit_text: str | None = None
         replay_gap = False
         pin_recovery_text: str | None = None
         pinned_model_value = run_context.get("model_name")
@@ -3544,6 +3644,7 @@ class ChannelManager:
                     # The v1 SDK yields backend errors as frames, not exceptions.
                     # Keep draining the stream and use the existing failure path.
                     stream_error = _RunFailedFrame("Agent run failed.")
+                    step_limit_text = _step_limit_text(error_data)
                 elif event == "gap":
                     # A reused run whose events are no longer replayable.
                     replay_gap = True
@@ -3552,7 +3653,7 @@ class ChannelManager:
                     # Clarification text is only in the values snapshot;
                     # publish it so the user sees the question mid-stream.
                     if _has_current_turn_clarification(data):
-                        clarification_text = _extract_response_text(data)
+                        clarification_text = _extract_response_text(data, thread_id=thread_id)
                         if clarification_text and clarification_text != latest_text:
                             latest_text = clarification_text
 
@@ -3602,13 +3703,17 @@ class ChannelManager:
             if replay_gap and last_values is None and not latest_text and stream_error is None:
                 last_values = await self._admitted_turn(client, msg, thread_id)
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
-            response_text = _extract_response_text(result)
+            response_text = _extract_response_text(result, thread_id=thread_id)
             pending_clarification = _has_current_turn_clarification(result)
-            artifacts = _extract_artifacts(result)
+            artifacts = _extract_artifacts(result, thread_id=thread_id)
             # Reuse the storage owner resolved by _handle_chat so artifact delivery
             # matches the upload bucket and we avoid re-running _safe_user_id_for_run
             # (and its possible filesystem touch) on the streaming-error path.
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts, user_id=storage_user_id)
+            response_text, attachments = await asyncio.to_thread(_prepare_artifact_delivery, thread_id, response_text, artifacts, user_id=storage_user_id)
+            if step_limit_text:
+                # The last text is mid-task narration: say the run stopped, in
+                # place of the generic failure, so the user knows to continue.
+                response_text = f"{response_text}\n\n{step_limit_text}" if response_text else step_limit_text
 
             if not response_text:
                 if attachments:
@@ -3978,6 +4083,23 @@ class ChannelManager:
             self._remember_thread_model(thread_id, name)
         return f"Model '{name}' selected. It applies to this conversation from the next message."
 
+    @staticmethod
+    def _is_goal_in_flight_error(error: Exception) -> bool:
+        """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
+        if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
+            return False
+        detail = {
+            "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
+            "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
+        }.get(error.request.method)
+        if detail is None:
+            return False
+        try:
+            body = error.response.json()
+        except ValueError:
+            return False
+        return isinstance(body, Mapping) and body.get("detail") == detail
+
     async def _goal_request(
         self,
         method: str,
@@ -3986,7 +4108,7 @@ class ChannelManager:
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient() as http:
+        async with _make_gateway_client(self._gateway_url) as http:
             request = getattr(http, method.lower())
             kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
@@ -3995,39 +4117,79 @@ class ChannelManager:
             response.raise_for_status()
             return response.json() or {}
 
+    async def _goal_reply(self, msg: InboundMessage, key: str) -> str:
+        """A fixed ``/goal`` reply in the owner's language."""
+        return goal_reply_text(key, await self._reply_locale.locale_for(_effective_owner_user_id(msg)))
+
+    async def _goal_status_reply(self, msg: InboundMessage, thread_id: str | None, *, headers: dict[str, str]) -> str:
+        """``/goal`` with no argument: the goal's state, why it stopped, or that it was met."""
+        locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+        if not thread_id:
+            return goal_reply_text("none", locale)
+        try:
+            goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
+            active = is_active_goal_state(goal)
+            # A met goal is cleared; its goal_outcome record stays in the thread
+            # state until the next goal change.
+            outcome = None if active else await self._goal_outcome(msg, thread_id)
+        except Exception:
+            logger.exception("Failed to fetch goal from gateway")
+            return goal_reply_text("fetch_failed", locale)
+        running = active and await self._thread_run_in_flight(msg, thread_id)
+        return goal_status_text(goal, outcome, running=running, locale=locale)
+
+    async def _thread_run_in_flight(self, msg: InboundMessage, thread_id: str) -> bool:
+        """Whether the thread's newest run is pending or running; False when unreadable."""
+        try:
+            page = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/runs/page?limit=1", msg=msg)
+        except Exception:
+            logger.warning("[Manager] failed to read the newest run for /goal: thread_id=%s", thread_id, exc_info=True)
+            return False
+        runs = page.get("data") if isinstance(page, Mapping) else None
+        newest = runs[0] if isinstance(runs, list) and runs else None
+        return isinstance(newest, Mapping) and newest.get("status") in ("pending", "running")
+
+    async def _goal_outcome(self, msg: InboundMessage, thread_id: str) -> Any:
+        """The thread's ``goal_outcome`` (its latest met goal), or None. Raises when unreadable."""
+        try:
+            state = await self._fetch_gateway_json(f"/api/threads/{quote(thread_id, safe='')}/state", msg=msg)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None  # no checkpoint yet, so no goal was ever met here
+            raise
+        values = state.get("values") if isinstance(state, Mapping) else None
+        return values.get("goal_outcome") if isinstance(values, Mapping) else None
+
     async def _handle_goal_command(self, msg: InboundMessage, args: str) -> str | None:
         command = parse_goal_command(args)
         thread_id = await self._lookup_thread_id(msg)
         headers = _owner_headers(msg) or create_internal_auth_headers()
 
         if command.kind == "status":
-            if not thread_id:
-                return "No active goal."
-            try:
-                goal = (await self._goal_request("get", thread_id, headers=headers)).get("goal")
-            except Exception:
-                logger.exception("Failed to fetch goal from gateway")
-                return "Failed to fetch goal information."
-            return f"Goal: {goal.get('objective')}" if goal else "No active goal."
+            return await self._goal_status_reply(msg, thread_id, headers=headers)
 
         if command.kind == "clear":
             if not thread_id:
-                return "Goal cleared."
+                return await self._goal_reply(msg, "cleared")
             try:
                 await self._goal_request("delete", thread_id, headers=headers)
-            except Exception:
+            except Exception as exc:
+                if self._is_goal_in_flight_error(exc):
+                    return await self._goal_reply(msg, "busy")
                 logger.exception("Failed to clear goal through gateway")
-                return "Failed to clear goal."
-            return "Goal cleared."
+                return await self._goal_reply(msg, "clear_failed")
+            return await self._goal_reply(msg, "cleared")
 
         if not thread_id:
             thread_id, _ = await self._create_first_thread(self._get_client(), msg)
 
         try:
             await self._goal_request("put", thread_id, headers=headers, json={"objective": command.objective})
-        except Exception:
+        except Exception as exc:
+            if self._is_goal_in_flight_error(exc):
+                return await self._goal_reply(msg, "busy")
             logger.exception("Failed to set goal through gateway")
-            return "Failed to set goal."
+            return await self._goal_reply(msg, "set_failed")
 
         from dataclasses import replace as _dc_replace
 
@@ -4042,7 +4204,7 @@ class ChannelManager:
         replies should catch and degrade (see ``_fetch_gateway``).
         """
         headers = _owner_headers(msg) if msg is not None else None
-        async with httpx.AsyncClient() as http:
+        async with _make_gateway_client(self._gateway_url) as http:
             resp = await http.get(
                 f"{self._gateway_url}{path}",
                 timeout=10,

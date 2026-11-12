@@ -10,6 +10,22 @@ const settings = {
 } as unknown as LocalSettings["context"];
 
 describe("buildRunContext", () => {
+  it("uses the current UI locale instead of stale saved or caller context", () => {
+    const stale = { ...settings, locale: "en-US" };
+    const context = buildRunContext({
+      settings: stale,
+      threadId: "t-1",
+      locale: "zh-CN",
+      extraContext: { locale: "en-US" },
+    });
+    expect(context.locale).toBe("zh-CN");
+    expect(stale.locale).toBe("en-US");
+    expect(
+      buildRunContext({ settings: stale, threadId: "t-1", locale: "en-US" })
+        .locale,
+    ).toBe("en-US");
+  });
+
   it("applies a one-turn model without mutating saved context", () => {
     const before = { ...settings };
     const current = buildRunContext({

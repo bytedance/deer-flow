@@ -15,7 +15,8 @@ const shared = {
   output: {
     // Streamdown imports KaTeX CSS as a side effect. Bundle these packages so
     // Rsbuild processes that CSS import instead of Node trying to load it.
-    bundleDependencies: ["streamdown", "katex"],
+    // Nextra's client icons also use extensionless imports that need bundling.
+    bundleDependencies: ["streamdown", "katex", "nextra"],
   },
 };
 

@@ -1,11 +1,19 @@
 import type { Translations } from "@/core/i18n/locales/types";
 
+import { localizeDocumentation } from "./documentation";
 import type { LoadedContribution } from "./registry";
 
 // Discovery metadata only: catalog entries never enter the runtime module loader.
 export const extensionCatalog = [
   {
+    key: "officePreview",
+    package: "deerflow-extension-office-preview",
+    namespace: "office-preview",
+    icon: "file-text",
+  },
+  {
     key: "agentTeams",
+    icon: "users",
     package: "deerflow-extension-agent-teams",
     namespace: "community.agent-teams",
   },
@@ -55,6 +63,16 @@ export const extensionCatalog = [
     package: "deerflow-extension-knowledge-management",
     namespace: "knowledge-management",
   },
+  {
+    key: "knowledgePlatform",
+    package: "deerflow-extension-knowledge-platform",
+    namespace: "knowledge-platform",
+  },
+  {
+    key: "knowledgeCenter",
+    package: "deerflow-extension-knowledge-center",
+    namespace: "knowledge-center",
+  },
   { key: "lightrag", package: "deerflow-extension-lightrag", namespace: null },
   { key: "weknora", package: "deerflow-extension-weknora", namespace: null },
   { key: "example", package: "deerflow-extension-example", namespace: null },
@@ -68,11 +86,14 @@ export interface ExtensionCatalogEntry {
   guide?: string;
   icon?: string;
   loaded?: LoadedContribution;
+  gettingStarted?: { title: string; description: string }[];
+  requirements?: string[];
 }
 
 export function extensionDirectory(
   loaded: LoadedContribution[],
   copy: Translations["extensions"]["catalog"],
+  locale = "en-US",
 ): ExtensionCatalogEntry[] {
   const entries: ExtensionCatalogEntry[] = extensionCatalog.map((item) => ({
     id: item.namespace ?? `catalog/${item.key}`,
@@ -86,11 +107,26 @@ export function extensionDirectory(
     extensionCatalog.map((item) => item.namespace),
   );
   for (const entry of loaded) {
+    const page =
+      entry.documentation?.id === entry.namespace
+        ? entry.documentation
+        : undefined;
+    const existing = entries.find((item) => item.id === entry.namespace);
+    if (existing) {
+      existing.loaded = entry;
+      if (page)
+        Object.assign(existing, localizeDocumentation(page, locale), {
+          guide: page.docs_url ?? existing.guide,
+        });
+      continue;
+    }
     if (known.has(entry.namespace)) continue;
     entries.push({
       id: entry.namespace,
       title: entry.title,
       description: entry.description,
+      ...(page ? localizeDocumentation(page, locale) : {}),
+      guide: page?.docs_url,
       loaded: entry,
     });
   }

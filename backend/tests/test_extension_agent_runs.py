@@ -1,5 +1,6 @@
 """Host-bound run control: authorization, lifecycle and ordinary admission."""
 
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -209,6 +210,61 @@ async def test_real_run_lifecycle_and_automatic_followup(runtime):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
+async def test_team_artifact_import_is_authorized_idempotent_and_confined(runtime):
+    import asyncio
+    import hashlib
+
+    from deerflow.config.paths import get_paths
+
+    runs, state, request, entered, _ = runtime
+    runs = runs.for_plugin("artifact-fixture")
+    thread = await runs.create_thread(thread_id="artifact-recipient")
+    content = b"%PDF-1.7\n\x00\xff immutable source"
+    imported = await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content)
+    assert imported["sha256"] == hashlib.sha256(content).hexdigest()
+    assert imported["size"] == len(content)
+    target = get_paths().sandbox_uploads_dir(thread, user_id=str(request.state.user.id)) / imported["filename"]
+    assert await asyncio.to_thread(target.read_bytes) == content
+    assert await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content) == imported
+    assert len(await asyncio.to_thread(lambda: list(target.parent.iterdir()))) == 1
+    await asyncio.to_thread(target.write_bytes, b"recipient edited its copy")
+    with pytest.raises(AgentRunError) as changed:
+        await runs.import_artifact(thread_id=thread, filename="report.pdf", content=content)
+    assert changed.value.status_code == 422
+    assert await asyncio.to_thread(target.read_bytes) == b"recipient edited its copy"
+    run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "wait"}]})
+    await asyncio.wait_for(entered.wait(), 5)
+    with pytest.raises(AgentRunError) as busy:
+        await runs.import_artifact(thread_id=thread, filename="other.pdf", content=content)
+    assert busy.value.status_code == 409
+    with pytest.raises(AgentRunError) as capture_busy:
+        await runs.read_artifact(thread_id=thread, path="/mnt/user-data/outputs/report.pdf")
+    assert capture_busy.value.status_code == 409
+    await runs.cancel(thread_id=thread, run_id=run.run_id)
+    await runs.wait(thread_id=thread, run_id=run.run_id, timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="Descriptor-confined artifact imports require POSIX")
+async def test_team_artifact_import_rechecks_permission_owner_and_payload(runtime, monkeypatch):
+    runs, state, request, _, _ = runtime
+    thread = await runs.create_thread(thread_id="artifact-recipient")
+    runs = runs.for_plugin("artifact-fixture")
+    for filename, content in (("../escape.txt", b"x"), ("/etc/passwd", b"x"), ("bad\nname.txt", b"x"), ("report.pdf", b"x" * (2 * 1024 * 1024 + 1))):
+        with pytest.raises(AgentRunError) as invalid:
+            await runs.import_artifact(thread_id=thread, filename=filename, content=content)
+        assert invalid.value.status_code == 422
+    with pytest.raises(AgentRunError) as missing:
+        await runs.import_artifact(thread_id="unknown-thread", filename="report.txt", content=b"x")
+    assert missing.value.status_code == 404
+    monkeypatch.setattr("app.gateway.extension_agent_runs.resolve_route_permissions", AsyncMock(return_value=["threads:read"]))
+    with pytest.raises(AgentRunError) as denied:
+        await runs.import_artifact(thread_id=thread, filename="report.txt", content=b"x")
+    assert denied.value.status_code == 403
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("launcher", ["scheduled", "mcp"])
 async def test_internal_launchers_work_with_installed_host_without_delegation(runtime, launcher, monkeypatch):
     from app.gateway.services import launch_mcp_task_notification_run, launch_scheduled_thread_run
@@ -304,7 +360,7 @@ async def test_real_interrupt_resume_conflict_and_cancel(runtime):
     runs, _, _, entered, _ = runtime
     thread = await runs.create_thread(thread_id="interrupt-test")
     first = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "approve"}]})
-    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "success"
+    assert (await runs.wait(thread_id=thread, run_id=first.run_id, timeout=5)).status == "waiting_for_input"
     assert (await runs.get_state(thread_id=thread))["next"] == ["answer"]
     resumed = await runs.resume(thread_id=thread, resume="yes")
     assert (await runs.wait(thread_id=thread, run_id=resumed.run_id, timeout=5)).status == "success"
@@ -340,6 +396,15 @@ async def test_foreign_thread_and_forged_privileged_input_are_rejected(runtime):
     assert rejected.value.status_code == 400
     with pytest.raises(AgentRunError):
         await runs.start(thread_id=thread, input={}, context={"agent_name": "different"})
+
+
+@pytest.mark.asyncio
+async def test_create_thread_rejects_an_assistant_id_that_names_no_agent(runtime):
+    runs, state, _, _, _ = runtime
+    with pytest.raises(AgentRunError) as rejected:
+        await runs.create_thread(assistant_id="bad name!", thread_id="invalid-agent")
+    assert rejected.value.status_code == 422
+    assert await state.thread_store.get("invalid-agent", user_id=None) is None
 
 
 @pytest.mark.asyncio
@@ -445,6 +510,68 @@ async def test_evidence_persistence_failure_prevents_execution(runtime, monkeypa
     assert not handles
     with pytest.raises(AgentRunError, match="unavailable"):
         await runs.configuration_evidence(thread_id=thread, run_id=run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_peer_takeover_during_assembly_is_not_undone_by_evidence(runtime, monkeypatch, tmp_path):
+    """A peer reclaims the run while this worker assembles; evidence must not revive the row."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+    from test_run_repository import _cleanup, _make_repo
+
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+    runs, state, _, _, handles = runtime
+    repository = await _make_repo(tmp_path)
+    state.run_store = repository
+    await state.run_manager.shutdown()
+    ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=1)
+    state.run_manager = RunManager(store=repository, run_ownership_config=ownership, worker_id="worker-a")
+    peer = RunManager(store=repository, run_ownership_config=ownership, worker_id="worker-b")
+    loop = asyncio.get_running_loop()
+    taken_over = []
+
+    async def peer_takeover():
+        # The peer sees an expired lease (clock skew or a stalled owner) that
+        # the owning worker still believes is live.
+        async with repository._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.thread_id == thread).values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1)))
+            await session.commit()
+        taken_over.extend(await peer.reconcile_orphaned_inflight_runs(error="reclaimed by worker-b", stop_reason="orphan_recovered"))
+
+    import app.gateway.services as services
+
+    assemble = services.resolve_agent_factory("lead_agent")
+
+    def factory_with_takeover(*, config):
+        asyncio.run_coroutine_threadsafe(peer_takeover(), loop).result(timeout=5)
+        return assemble(config=config)
+
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda _: factory_with_takeover)
+    try:
+        thread = await runs.create_thread(thread_id="takeover-during-assembly")
+        run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "must not run"}]})
+        record = await state.run_manager.get(run.run_id)
+        await asyncio.wait({record.task}, timeout=5)
+        assert [record.run_id for record in taken_over] == [run.run_id]
+        row = await repository.get(run.run_id, user_id=None)
+        assert row["status"] == "error"
+        assert row["error"] == "reclaimed by worker-b"
+        assert row["stop_reason"] == "orphan_recovered"
+        assert EVIDENCE_KEY not in row["metadata"]
+        assert record.ownership_lost
+        assert not handles
+        # The owner's renewal stays rejected, so the peer's outcome is final.
+        await state.run_manager._renew_leases()
+        assert (await repository.get(run.run_id, user_id=None))["status"] == "error"
+    finally:
+        await state.run_manager.shutdown()
+        await _cleanup()
 
 
 @pytest.mark.asyncio

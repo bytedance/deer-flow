@@ -23,6 +23,9 @@ class LLMProvider:
     # capability (e.g. MiniMax M3 supports vision but M2.7 is text-only). The
     # provider-level extra_config holds the default (default_model) capability.
     model_vision_overrides: dict[str, bool] = field(default_factory=dict)
+    # Per-model extra_config keys to leave out for models whose API rejects
+    # them (e.g. Claude Sonnet 5.5 rejects budget_tokens and thinking disabled).
+    model_omitted_config: dict[str, tuple[str, ...]] = field(default_factory=dict)
     auth_hint: str | None = None
     base_url_prompt: str | None = None
     model_prompt: str | None = None
@@ -38,6 +41,8 @@ class LLMProvider:
         config = dict(self.extra_config)
         if model_name in self.model_vision_overrides:
             config["supports_vision"] = self.model_vision_overrides[model_name]
+        for key in self.model_omitted_config.get(model_name, ()):
+            config.pop(key, None)
         return config
 
 
@@ -256,10 +261,10 @@ LLM_PROVIDERS: list[LLMProvider] = [
     LLMProvider(
         name="anthropic",
         display_name="Anthropic",
-        description="Claude Sonnet 4 with extended thinking",
+        description="Claude Sonnet 5.5 with thinking",
         use="langchain_anthropic:ChatAnthropic",
-        models=["claude-sonnet-4-20250514", "claude-opus-4-5", "claude-sonnet-4-5"],
-        default_model="claude-sonnet-4-20250514",
+        models=["claude-sonnet-5-5", "claude-opus-4-5", "claude-sonnet-4-5"],
+        default_model="claude-sonnet-5-5",
         env_var="ANTHROPIC_API_KEY",
         package="langchain-anthropic",
         extra_config={
@@ -269,6 +274,8 @@ LLM_PROVIDERS: list[LLMProvider] = [
             "supports_vision": True,
             **ANTHROPIC_THINKING_CONFIG,
         },
+        # Sonnet 5.5 thinks by default and rejects budget_tokens and thinking disabled.
+        model_omitted_config={"claude-sonnet-5-5": ("when_thinking_enabled", "when_thinking_disabled")},
     ),
     LLMProvider(
         name="deepseek",
@@ -727,6 +734,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var=None,
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Answers from the live web with a source for each result, API key required",
+        use="deerflow.community.specstream.tools:web_search_tool",
+        env_var="SPECSTREAM_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -804,5 +819,13 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         env_var=None,
         tool_name="web_fetch",
         extra_config={"base_url": "http://localhost:11235", "timeout": 30},
+    ),
+    WebProvider(
+        name="specstream",
+        display_name="SpecStream",
+        description="Page text as markdown, also PDF, Word and Excel, API key required",
+        use="deerflow.community.specstream.tools:web_fetch_tool",
+        env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
     ),
 ]

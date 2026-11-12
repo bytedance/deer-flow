@@ -16,6 +16,7 @@ from deerflow.persistence.managed_subagents.base import (
     ManagedSubagentStore,
     normalize_managed_subagent_name,
 )
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 _write_lock = threading.RLock()
@@ -48,12 +49,16 @@ class FileManagedSubagentStore(ManagedSubagentStore):
         return sorted(definitions, key=lambda item: item.name)
 
     def create(self, definition: ManagedSubagentDefinition) -> None:
+        normalize_managed_subagent_name(definition.name, for_creation=True)
         path = get_paths().managed_subagent_file(definition.name)
         with _write_lock:
             if path.exists():
                 raise ManagedSubagentExistsError(f"Managed subagent '{definition.name}' already exists")
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write(path, definition)
+            try:
+                self._atomic_write(path, definition, overwrite=False)
+            except FileExistsError as exc:
+                raise ManagedSubagentExistsError(f"Managed subagent '{definition.name}' already exists") from exc
 
     def update(self, definition: ManagedSubagentDefinition) -> None:
         path = get_paths().managed_subagent_file(definition.name)
@@ -84,17 +89,24 @@ class FileManagedSubagentStore(ManagedSubagentStore):
         return tuple(signature)
 
     @staticmethod
-    def _atomic_write(path: Path, definition: ManagedSubagentDefinition) -> None:
+    def _atomic_write(path: Path, definition: ManagedSubagentDefinition, *, overwrite: bool = True) -> None:
         payload = definition.model_dump_json(indent=2) + "\n"
         tmp_path: Path | None = None
         try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as handle:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, suffix=".tmp", delete=False) as handle:
+                # Record the staged path before writing: a failing ``write``/``fsync``
+                # must still reach the cleanup below, or the temp file leaks silently.
+                tmp_path = Path(handle.name)
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-                tmp_path = Path(handle.name)
-            os.replace(tmp_path, path)
-            tmp_path = None
+            if overwrite:
+                os.replace(tmp_path, path)
+                tmp_path = None
+            else:
+                # Claim the name without replacing a peer's complete definition.
+                # The process-local RLock cannot serialize independent workers.
+                os.link(tmp_path, path)
         finally:
             if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+                cleanup_failed_atomic_write(tmp_path)

@@ -50,7 +50,10 @@ export type SaveModelRequest = {
 async function request<T>(
   suffix: string,
   method: string,
-  body?: SaveModelRequest,
+  body?:
+    | SaveModelRequest
+    | ModelConnection
+    | { connection: ModelConnection; model: string },
   signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(
@@ -111,3 +114,30 @@ export function modelDraft(model?: ManagedModel): ModelDraft {
     max_tokens: model?.max_tokens ?? null,
   };
 }
+
+export type ModelConnection = {
+  provider: string;
+  base_url?: string;
+  api_key?: string;
+  saved_model_name?: string;
+  expected_revision?: string;
+};
+export type CatalogModel = { id: string; configured: boolean };
+export const discoverModels = (body: ModelConnection, signal?: AbortSignal) =>
+  request<{ models: CatalogModel[]; truncated: boolean }>(
+    "/discover",
+    "POST",
+    body,
+    signal,
+  );
+export type ImportResult =
+  | { status: "saved" | "existing"; model: ManagedModel }
+  | {
+      status: "failed";
+      message: Awaited<ReturnType<typeof testManagedModel>>["message"];
+    };
+export const importCatalogModel = (
+  connection: ModelConnection,
+  model: string,
+  signal?: AbortSignal,
+) => request<ImportResult>("/import", "POST", { connection, model }, signal);

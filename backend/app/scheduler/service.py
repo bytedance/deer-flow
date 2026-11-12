@@ -29,7 +29,7 @@ from deerflow.persistence.user.model import UserPreferenceRow
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.runtime.run_origin import origin_kind_of
 from deerflow.scheduler.host_notes import RUN_ERROR_DELETED_WHILE_QUEUED, RUN_ERROR_INTERRUPTED, RUN_ERROR_LEASE_LOST, RUN_ERROR_PAUSED_WHILE_QUEUED, RUN_ERROR_QUEUE_TIMEOUT, RUN_ERROR_RESTARTED
-from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
+from deerflow.scheduler.schedules import pauses_unschedulable, should_advance_schedule_cursor, stored_next_run_at
 from deerflow.scheduler.stop_rule import launch_prompt
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -450,10 +450,15 @@ class ScheduledTaskService:
             else:
                 await self._reconcile_active_state(now=now)
         else:
-            await self._task_run_repo.recover_expired_launch_claims(
-                error=_LEASE_RECOVERY_ERROR,
-                now=now,
-            )
+            try:
+                await self._task_run_repo.recover_expired_launch_claims(
+                    error=_LEASE_RECOVERY_ERROR,
+                    now=now,
+                )
+            except Exception:
+                # Like the reconciliation below: a failed recovery pass must
+                # not keep every other due task from being admitted.
+                logger.exception("Failed to recover expired scheduled launch claims")
             try:
                 finalized = await self._task_repo.reconcile_terminal_runs(now=now)
                 if finalized:
@@ -475,7 +480,17 @@ class ScheduledTaskService:
             limit=self._max_concurrent_runs,
         )
         for task in claimed:
-            await self.dispatch_task(task, now=now, trigger="scheduled")
+            try:
+                await self.dispatch_task(task, now=now, trigger="scheduled")
+            except Exception:
+                # A per-record failure inside one task's dispatch must not abort
+                # the rest of this poll's claimed batch: every claimed task
+                # already holds a lease, and the next tick would skip them the
+                # same way. Claim-level store failures stay loud above the loop.
+                logger.exception(
+                    "Scheduled task %s: dispatch failed; continuing with the claimed batch",
+                    task.get("id"),
+                )
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:
@@ -530,21 +545,38 @@ class ScheduledTaskService:
         *,
         trigger: str,
         now: datetime,
-    ) -> datetime | str | None:
+    ) -> tuple[datetime | str | None, str | None]:
         """Keep a recurring task's cadence when a manual trial launches.
 
         A manual run is an extra trial and must not consume the task's next
         scheduled occurrence. One-time tasks retain their existing boundary
         semantics, so only recurring manual launches keep the stored value.
+        The second value is why a stored schedule no longer computes; the
+        launch bookkeeping then pauses the task instead of raising out of the
+        poll (see ``_unschedulable_outcome``).
         """
         if not should_advance_schedule_cursor(task["schedule_type"], trigger=trigger):
-            return task.get("next_run_at")
-        return next_run_at(
+            return task.get("next_run_at"), None
+        return stored_next_run_at(
             task["schedule_type"],
             task["schedule_spec"],
             task["timezone"],
             now=now,
         )
+
+    @staticmethod
+    def _unschedulable_outcome(
+        task: dict[str, Any],
+        *,
+        status: str,
+        last_error: str | None,
+        schedule_error: str | None,
+    ) -> tuple[str, str | None]:
+        """The status and ``last_error`` to write, pausing an unschedulable task."""
+        if not pauses_unschedulable(task["schedule_type"], status, schedule_error):
+            return status, last_error
+        logger.warning("Paused scheduled task %s: %s", task["id"], schedule_error)
+        return "paused", schedule_error
 
     async def dispatch_task(
         self,
@@ -570,15 +602,21 @@ class ScheduledTaskService:
             # surface as HTTP 500 on manual trigger and, in the poller, abort
             # the rest of the claimed batch every cycle while the task itself
             # is never marked with last_error.
-            task_status = self._task_status_for_failure(task, trigger=trigger)
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_failure(task, trigger=trigger),
+                last_error=str(exc),
+                schedule_error=schedule_error,
+            )
             await self._task_repo.update_after_launch(
                 task["id"],
                 status=task_status,
-                next_run_at=self._next_run_at_after_launch(task, trigger=trigger, now=now),
+                next_run_at=next_at,
                 last_run_at=now,
                 last_run_id=None,
                 last_thread_id=execution_thread_id,
-                last_error=str(exc),
+                last_error=last_error,
                 increment_run_count=False,
                 expected_lease_owner=expected_lease_owner,
             )
@@ -645,6 +683,10 @@ class ScheduledTaskService:
             "task_id": task["id"],
             "thread_id": execution_thread_id,
             "trigger": trigger,
+            # Freeze the admitted occurrence time in the synthetic row: the
+            # provenance below must be identical if this launch is retried at a
+            # later now, or start_run's idempotency key sees a different request.
+            "scheduled_for": now,
         }
         return await self._attempt_queued_run(task, queued, now=now)
 
@@ -732,8 +774,13 @@ class ScheduledTaskService:
             launch_succeeded = True
             launched_run_id = result["run_id"]
             launched_thread_id = result["thread_id"]
-            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
-            task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
+            next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+            task_status, last_error = self._unschedulable_outcome(
+                task,
+                status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                last_error=None,
+                schedule_error=schedule_error,
+            )
             await self._record_launched_run(
                 task_run_id=task_run_id,
                 task_id=task["id"],
@@ -747,7 +794,7 @@ class ScheduledTaskService:
                 last_run_at=now,
                 last_run_id=launched_run_id,
                 last_thread_id=launched_thread_id,
-                last_error=None,
+                last_error=last_error,
                 increment_run_count=True,
                 task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
@@ -770,8 +817,6 @@ class ScheduledTaskService:
                 )
                 return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
-            next_at = self._next_run_at_after_launch(task, trigger=trigger, now=now)
-
             if launch_succeeded:
                 # _launch_run succeeded, so a run is live even though
                 # post-launch bookkeeping raised. Keep the task-run row
@@ -782,7 +827,13 @@ class ScheduledTaskService:
                 # if the DB is still down the row stays "queued" -- still
                 # active, still holding the slot -- so we log and still report
                 # the run as launched so callers know a run is in flight.
-                task_status = self._task_status_for_launch(task, trigger=trigger, next_at=next_at)
+                next_at, schedule_error = self._next_run_at_after_launch(task, trigger=trigger, now=now)
+                task_status, last_error = self._unschedulable_outcome(
+                    task,
+                    status=self._task_status_for_launch(task, trigger=trigger, next_at=next_at),
+                    last_error=None,
+                    schedule_error=schedule_error,
+                )
                 try:
                     await self._record_launched_run(
                         task_run_id=task_run_id,
@@ -812,7 +863,7 @@ class ScheduledTaskService:
                         # on a task whose run is actively running; the real
                         # terminal outcome is written by handle_run_completion.
                         # The transient itself is logged above.
-                        last_error=None,
+                        last_error=last_error,
                         increment_run_count=True,
                         task_run_id=task_run_id,
                         protect_terminal=True,
@@ -863,8 +914,10 @@ class ScheduledTaskService:
         one the run row shows once the launch is accounted.
         """
         trigger = queued["trigger"]
-        scheduled_for = _as_utc(queued.get("scheduled_for")) if trigger == "scheduled" else None
-        scheduled_for = scheduled_for or now
+        # Use the occurrence's admitted time for every trigger. A manual trial
+        # retried by the queue drain must reproduce the first request's origin;
+        # falling back to the retry clock changes start_run's idempotent input.
+        scheduled_for = _as_utc(queued.get("scheduled_for")) or now
         run_number = None
         number_lookup = getattr(self._task_run_repo, "run_number", None)
         if trigger == "scheduled" and callable(number_lookup):

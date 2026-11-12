@@ -43,6 +43,8 @@ Every route requires all of:
 
 This initial authorization mode is **explicit administrator resource grants with service credentials**. It does not claim upstream user impersonation, general organization RBAC, Agent-delegated writes, or platform-space authorization. Existing WeKnora retrieval `user_ids` confer no management rights. The management grants do not grant retrieval access. Client-provided user, Agent, tenant and space fields are rejected. Future multi-user/space management must supply a separately reviewed authorization implementation; do not remove the administrator floor to imply those capabilities exist.
 
+To retain the registered `knowledge-management` namespace for space-routed authorization while disabling these direct routes, set `enabled: true` and `routes_enabled: false`. In that mode no Provider factory is instantiated; the platform extension supplies its own operator-configured Provider. The default `routes_enabled: true` preserves existing installations.
+
 ## HTTP contract, version 1
 
 All routes have this prefix:

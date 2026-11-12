@@ -188,6 +188,27 @@ const STOOD_DOWN = [
     note: "The report is unfinished.",
   },
   {
+    name: "a step-limit stop",
+    objective: "Write the report in six parts",
+    goal: {
+      continuation_count: 0,
+      // The host writes this reason itself; it is not the checker's note.
+      last_evaluation: {
+        satisfied: false,
+        blocker: "run_failed",
+        reason: "The run reached its step limit before finishing.",
+        stand_down_reason: "recursion_capped",
+      },
+    },
+    reply: [
+      { type: "ai", id: "goal-ai", content: "Writing part 3 of the report." },
+    ],
+    chip: "Stopped",
+    detail:
+      "The run reached its step limit before finishing. Send a new message to continue; your goal stays active.",
+    note: null,
+  },
+  {
     name: "a goal that used every automatic follow-up",
     objective: "Make every test in the suite pass",
     goal: {
