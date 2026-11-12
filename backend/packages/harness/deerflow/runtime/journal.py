@@ -329,6 +329,11 @@ class RunJournal(BaseCallbackHandler):
         self.thread_id = thread_id
         self._evidence_owner_id = user_id if isinstance(event_store, DbRunEventStore) else AUTO
         self._store: RunEventStore | None = event_store
+        from deerflow.runtime.events.producer import current_producer
+
+        # Callback threads may have an empty Context. Keep the host admission
+        # captured at construction; never infer a replacement from event data.
+        self._event_producer = current_producer()
         self._closed = False
         self._accepting_evidence = True
         self._producer_lock = threading.Lock()
@@ -898,6 +903,18 @@ class RunJournal(BaseCallbackHandler):
             self._current_tool_result_ids.pop(tool_call_id, None)
             self._terminal_task_results.discard(tool_call_id)
 
+    def adopt_resumed_tool_calls(self, calls: Mapping[str, str]) -> None:
+        """Own lead-agent calls an earlier Run paused and this Run resolves.
+
+        A HITL resume answers calls the paused Run dispatched. An approved call
+        executes here and reaches ``on_tool_end``, but a rejection is written by
+        the middleware without any tool callback, so final-output
+        reconciliation must treat these calls as this Run's to persist it.
+        """
+        for tool_call_id, name in calls.items():
+            if isinstance(tool_call_id, str) and tool_call_id:
+                self._current_run_tool_call_names[tool_call_id] = str(name or "")
+
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
         # Tool callbacks run before the graph reducer assigns missing ids.
         # Assign on the returned object so the feed and checkpoint share the
@@ -1216,7 +1233,10 @@ class RunJournal(BaseCallbackHandler):
         store = self._store
         if store is None:
             return
-        store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
+        from deerflow.runtime.events.producer import producer_scope
+
+        with producer_scope(self._event_producer):
+            store_task: asyncio.Task[None] = asyncio.ensure_future(store.put_batch(batch))
         try:
             await asyncio.shield(store_task)
         except asyncio.CancelledError:

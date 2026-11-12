@@ -46,6 +46,7 @@ def _origin_kind(operation_kind: str, metadata: Any) -> str | None:
 
 
 class RunRepository(RunStore):
+    supports_event_producer_fencing = True
     supports_run_inputs = True
 
     async def mutate_run_inputs(self, run_id, change, *, user_id=None, owner_worker_id=None):
@@ -232,11 +233,15 @@ class RunRepository(RunStore):
             values["change_seq"] = await self._next_change_seq(session)
             row = await session.get(RunRow, run_id)
             if row is None:
-                session.add(RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", **values))
+                row = RunRow(run_id=run_id, created_at=created, evidence_seal_state="pending", run_incarnation=uuid4().hex, producer_epoch=uuid4().hex, producer_state="open", **values)
+                session.add(row)
             else:
                 for key, value in values.items():
                     setattr(row, key, value)
+            await session.flush()
+            admitted = self._row_to_dict(row)
             await session.commit()
+            return admitted
 
     async def seal_evidence(self, run_id: str, *, owner_worker_id: str, receipt) -> bool:
         """Persist a completed drain and changed-run position in one fenced transaction."""
@@ -254,7 +259,7 @@ class RunRepository(RunStore):
                     RunRow.owner_worker_id == owner_worker_id,
                     or_(RunRow.lease_expires_at.is_(None), RunRow.lease_expires_at > datetime.now(UTC)),
                     RunRow.evidence_retention_revision == receipt.retention_revision,
-                    RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+                    RunRow.status.in_(("success", "error", "timeout", "interrupted", "waiting_for_input")),
                     RunRow.evidence_seal_state == "pending",
                 )
                 .values(evidence_seal_state="sealed", evidence_revision=uuid4().hex, evidence_upper_seq=receipt.upper_event_seq, evidence_event_count=receipt.event_count, change_seq=change_seq)
@@ -472,6 +477,40 @@ class RunRepository(RunStore):
                 if status == "success":
                     conditions.append(RunRow.cancel_action.is_(None))
             result = await session.execute(update(RunRow).where(*conditions).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def answer_approval(self, run_id, *, metadata, answered_updated_at, expected_request_id=None) -> bool:
+        async with self._sf() as session:
+            values = {
+                "status": "success",
+                "metadata_json": self._safe_json(metadata) or {},
+                "updated_at": datetime.fromisoformat(answered_updated_at),
+                "change_seq": await self._next_change_seq(session),
+            }
+            conditions = [RunRow.run_id == run_id, RunRow.status == "waiting_for_input"]
+            if expected_request_id is not None:
+                conditions.append(RunRow.metadata_json["hitl_approval"]["request_id"].as_string() == expected_request_id)
+            result = await session.execute(update(RunRow).where(*conditions).values(**values))
+            await session.commit()
+            return result.rowcount != 0
+
+    async def restore_approval(self, run_id, *, metadata, expected_updated_at) -> bool:
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status == "success",
+                    RunRow.updated_at == datetime.fromisoformat(expected_updated_at),
+                )
+                .values(
+                    status="waiting_for_input",
+                    metadata_json=self._safe_json(metadata) or {},
+                    updated_at=datetime.now(UTC),
+                    change_seq=await self._next_change_seq(session),
+                )
+            )
             await session.commit()
             return result.rowcount != 0
 
@@ -953,6 +992,29 @@ class RunRepository(RunStore):
                 cancel_action=cancel_action,
             )
 
+    async def merge_owned_metadata(self, run_id: str, metadata: dict[str, Any], *, owner_worker_id: str) -> bool:
+        """Merge metadata keys only while this owner holds a live lease on an active row."""
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            await self._lock_owned_row(session, run_id)
+            current = await session.scalar(select(RunRow.metadata_json).where(RunRow.run_id == run_id))
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                    self._live_lease_predicate(session),
+                )
+                .values(
+                    metadata_json={**(current or {}), **(self._safe_json(metadata) or {})},
+                    updated_at=datetime.now(UTC),
+                    change_seq=change_seq,
+                )
+            )
+            await session.commit()
+            return result.rowcount != 0
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -964,6 +1026,8 @@ class RunRepository(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         values: dict[str, Any] = {
             "status": "error",
+            "producer_state": "revoked",
+            "producer_epoch": uuid4().hex,
             "error": error,
             "evidence_seal_state": "partial",
             "evidence_seal_error": "Worker lease expired without a completed journal seal.",
@@ -1001,7 +1065,7 @@ class RunRepository(RunStore):
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
         predicates = (
             RunRow.operation_kind == "run",
-            RunRow.status.in_(("success", "error", "timeout", "interrupted")),
+            RunRow.status.in_(("success", "error", "timeout", "interrupted", "waiting_for_input")),
             RunRow.evidence_seal_state == "pending",
             RunRow.created_at <= before_dt,
             _lease_expired_or_null(RunRow.lease_expires_at, cutoff),
@@ -1062,7 +1126,7 @@ class RunRepository(RunStore):
         operation_kind: str = "run",
         multitask_strategy: str = "reject",
         assistant_id: str | None = None,
-        user_id: str | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
         model_name: str | None = None,
         metadata: dict[str, Any] | None = None,
         kwargs: dict[str, Any] | None = None,
@@ -1089,7 +1153,7 @@ class RunRepository(RunStore):
         """
         from deerflow.runtime.runs.manager import ConflictError
 
-        resolved_user_id = resolve_user_id(user_id or AUTO, method_name="RunRepository.create_thread_operation_atomic")
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.create_thread_operation_atomic")
         now = datetime.now(UTC)
         created = datetime.fromisoformat(created_at) if created_at else now
         lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
@@ -1097,6 +1161,9 @@ class RunRepository(RunStore):
 
         values = {
             "thread_id": thread_id,
+            "run_incarnation": uuid4().hex,
+            "producer_epoch": uuid4().hex,
+            "producer_state": "open",
             "evidence_origin": evidence_origin,
             "evidence_agent_id": evidence_agent_id,
             "evidence_seal_state": "pending",
@@ -1169,14 +1236,20 @@ class RunRepository(RunStore):
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                     row.status = "interrupted"
                     row.error = "Cancelled by newer run"
+                    if row.owner_worker_id != owner_worker_id:
+                        row.producer_state = "revoked"
+                        row.producer_epoch = uuid4().hex
                     row.owner_worker_id = owner_worker_id
                     row.updated_at = now
                     row.change_seq = change_seq
                     claimed.append(self._row_to_dict(row))
 
             values["change_seq"] = change_seq
-            session.add(RunRow(run_id=run_id, **values))
+            new_row = RunRow(run_id=run_id, **values)
+            session.add(new_row)
             try:
+                await session.flush()
+                admitted = self._row_to_dict(new_row)
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -1186,5 +1259,4 @@ class RunRepository(RunStore):
                         raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
                 raise
 
-            new_row = await session.get(RunRow, run_id)
-            return self._row_to_dict(new_row), claimed
+            return admitted, claimed

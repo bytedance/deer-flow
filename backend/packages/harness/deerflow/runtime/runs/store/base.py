@@ -267,6 +267,27 @@ class RunStore(abc.ABC):
         """
         pass
 
+    async def answer_approval(
+        self,
+        run_id: str,
+        *,
+        metadata: dict[str, Any],
+        answered_updated_at: str,
+        expected_request_id: str | None = None,
+    ) -> bool:
+        """Atomically answer one ``waiting_for_input`` run.
+
+        Implementations must condition the write on the row still being paused,
+        remove the consumed approval through *metadata*, and return ``True`` only
+        for the single winning transition. When supplied, *expected_request_id*
+        fences the transition to the exact validated pause. Legacy stores fail closed.
+        """
+        raise NotImplementedError("Store must implement atomic approval answering")
+
+    async def restore_approval(self, run_id: str, *, metadata: dict[str, Any], expected_updated_at: str) -> bool:
+        """Restore only the answered transition stamped with *expected_updated_at*."""
+        raise NotImplementedError("Store must implement conditional approval restoration")
+
     @abc.abstractmethod
     async def start_run(self, run_id: str) -> bool:
         """Atomically transition a pending run to running.
@@ -417,6 +438,23 @@ class RunStore(abc.ABC):
         return the winning action, or ``None`` when no active row matched.
         """
         raise NotImplementedError
+
+    async def merge_owned_metadata(
+        self,
+        run_id: str,
+        metadata: dict[str, Any],
+        *,
+        owner_worker_id: str,
+    ) -> bool:
+        """Merge top-level keys into an active run's metadata under a live owner lease.
+
+        Atomically require ``owner_worker_id``, an unexpired lease and a
+        ``pending``/``running`` row; change no other field. Return True only
+        after the write commits. False means a peer took over, the lease
+        expired or the run is no longer active. Legacy stores cannot enforce
+        these conditions and fail closed instead of writing a full snapshot.
+        """
+        raise NotImplementedError("Store must implement owner/lease-fenced metadata merge")
 
     async def finalize_if_not_cancelled(
         self,

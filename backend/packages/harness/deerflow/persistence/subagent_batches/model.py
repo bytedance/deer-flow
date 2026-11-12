@@ -26,6 +26,9 @@ class SubagentBatchRow(Base):
     max_running_items: Mapped[int] = mapped_column(Integer)
     max_attempts: Mapped[int] = mapped_column(Integer)
     execution_spec: Mapped[dict[str, Any]] = mapped_column(JSON)
+    continuation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    continuation_status: Mapped[str | None] = mapped_column(String(24), nullable=True, index=True)
+    continuation_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -72,3 +75,12 @@ class SubagentBatchItemRow(Base):
         UniqueConstraint("batch_id", "position", name="uq_subagent_batch_items_position"),
         Index("ix_subagent_batch_items_claim", "status", "lease_expires_at", "batch_id"),
     )
+
+
+class SubagentBatchDependencyRow(Base):
+    __tablename__ = "subagent_batch_dependencies"
+
+    item_id: Mapped[str] = mapped_column(ForeignKey("subagent_batch_items.id", ondelete="CASCADE"), primary_key=True)
+    prerequisite_id: Mapped[str] = mapped_column(ForeignKey("subagent_batch_items.id", ondelete="CASCADE"), primary_key=True)
+
+    __table_args__ = (Index("ix_subagent_batch_dependencies_prerequisite", "prerequisite_id"),)

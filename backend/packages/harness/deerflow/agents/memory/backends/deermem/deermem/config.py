@@ -299,6 +299,8 @@ class DeerMemConfig(BaseModel):
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
     # ── Extraction quality callback (post-invoke observability) ─────────
+    project_memory: Any = Field(default=None, exclude=True, description="Optional host hook preparing a separate project fact pool for the same extraction call.")
+
     extraction_callback: Any = Field(
         default=None,
         description=(
@@ -336,7 +338,11 @@ class DeerMemConfig(BaseModel):
     # ── Message processing (externalized patterns / prompts) ──
     patterns_dir: str | None = Field(
         default=None,
-        description=("Directory with correction.yaml / reinforcement.yaml overriding the bundled signal-detection patterns. None (default) = bundled core/message_patterns/. When set explicitly, both files must exist."),
+        description=(
+            "Directory with {signal}.yaml files overriding bundled signal-detection patterns "
+            "(correction, reinforcement, preference, identity, goal, decision). None (default) "
+            "= bundled core/message_patterns/. When set explicitly, every signal file must exist."
+        ),
     )
     prompts_dir: str | None = Field(
         default=None,

@@ -3,10 +3,16 @@ import type { Message } from "@langchain/langgraph-sdk";
 import type { Translations } from "@/core/i18n";
 import type { AgentThread } from "@/core/threads/types";
 
+import type { ExtensionDocumentation } from "./documentation";
+
 export type ExtensionSettings = Readonly<
   Record<string, boolean | number | string>
 >;
 export type SurfaceSlot = "page";
+export type ExtensionRequestOptions = Pick<
+  RequestInit,
+  "method" | "headers" | "body" | "signal"
+>;
 export type SurfaceContext = {
   namespace: string;
   locale: string;
@@ -14,6 +20,11 @@ export type SurfaceContext = {
   threadId?: string;
   signal: AbortSignal;
   callBackend: FrontendServices["callBackend"];
+  /** Authenticated HTTP to contributed /api/extensions/ routes. Routes own authorization. */
+  requestBackend?: (
+    path: string,
+    options?: ExtensionRequestOptions,
+  ) => Promise<Response>;
   /** Host resolves current thread ownership before navigating; unavailable on older hosts. */
   openConversation?: (threadId: string) => Promise<void>;
 };
@@ -40,6 +51,9 @@ export type FrontendContribution = {
   description: string;
   settings: ExtensionSettings;
   backend_actions?: string[];
+  model_tools?: string[];
+  documentation?: ExtensionDocumentation;
+  runtime_only?: boolean;
 };
 export type ConversationActionContext = {
   thread: AgentThread;

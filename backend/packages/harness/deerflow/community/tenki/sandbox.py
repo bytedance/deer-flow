@@ -221,6 +221,10 @@ class TenkiSandbox(Sandbox):
                 raise PermissionError(f"Access denied: path traversal detected in '{path}'")
         return normalized
 
+    @property
+    def artifact_root(self) -> str:
+        return self._home_dir
+
     def _resolve_path(self, path: str) -> str:
         """Map DeerFlow virtual paths into the writable sandbox home dir.
 

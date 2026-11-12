@@ -66,11 +66,13 @@ from app.gateway.services import (
     wait_for_run_completion,
 )
 from app.gateway.sse_headers import sse_response_headers
+from app.gateway.tool_approvals import ApprovalResponseBody, answer_approval, list_approvals, revoke_approval_grants
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
 from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import get_paths, make_safe_user_id
+from deerflow.constants import DELIVERY_PRESENTATION_TOOL_NAMES
 from deerflow.runtime import CancelOutcome, ConflictError, RunRecord, RunStatus, ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
@@ -83,6 +85,24 @@ from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["runs"])
+
+
+@router.get("/{thread_id}/tool-approvals")
+@require_permission("threads", "read", owner_check=True, require_existing=True)
+async def get_tool_approvals(thread_id: ThreadId, request: Request):
+    return await list_approvals(thread_id, request)
+
+
+@router.post("/{thread_id}/runs/{run_id}/tool-approvals/{request_id}")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def submit_tool_approval(thread_id: ThreadId, run_id: str, request_id: str, body: ApprovalResponseBody, request: Request):
+    return await answer_approval(thread_id, run_id, request_id, body, request)
+
+
+@router.delete("/{thread_id}/tool-approvals/grants")
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def revoke_tool_approval_grants(thread_id: ThreadId, request: Request):
+    return await revoke_approval_grants(thread_id, request)
 
 
 @router.post("/{thread_id}/runs/{run_id}/inputs")
@@ -1801,8 +1821,15 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     content = events[0].get("content")
     by_tool = content.get("by_tool") if isinstance(content, dict) else None
-    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
-    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+    if not isinstance(by_tool, dict):
+        raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+    presented: list[str] = []
+    for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES:
+        paths = by_tool.get(tool_name, [])
+        if not isinstance(paths, list):
+            raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
+        presented.extend(paths)
+    if not presented or any(not isinstance(path, str) for path in presented):
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     return presented
 
@@ -1920,12 +1947,18 @@ async def list_run_events(
     user_id = await _run_scope_user_id(request, thread_id)
     event_store = get_run_event_store(request)
     if event_types:
-        types = event_types.split(",")
+        # Split on commas and normalise each entry: the value goes straight into
+        # a SQL ``IN``, so a padded entry ("message, tool") would silently match
+        # nothing and return a 200 with a truncated audit trail. Blank entries
+        # carry no intent and are dropped; a filter that reduces to nothing is
+        # the same as no filter, matching the empty-string case above.
+        types = [name for entry in event_types.split(",") if (name := entry.strip())]
         if len(types) > MAX_EVENT_TYPE_FILTERS:
             raise HTTPException(
                 status_code=422,
                 detail=f"event_types accepts at most {MAX_EVENT_TYPE_FILTERS} values",
             )
+        types = types or None
     else:
         types = None
     events = await event_store.list_events(

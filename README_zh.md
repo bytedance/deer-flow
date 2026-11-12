@@ -109,7 +109,7 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 管理员可在 **设置 → 模型 → 添加模型** 中选择厂商，仅填写 **API Key** 和
 **模型 ID**。后端预置 OpenAI、Anthropic、DeepSeek、百炼/通义千问、火山/豆包、
-Moonshot/Kimi、智谱/Z.AI 和 MiniMax 的端点、认证与适配器，地域和 Coding Plan
+Moonshot/Kimi、智谱/Z.AI、MiniMax 和阶跃星辰（StepFun）的端点、认证与适配器，地域和 Coding Plan
 使用明确区分的选项。模型 ID 不受内置枚举限制；内部名称自动生成且保持稳定。
 新模型默认启用，保存后自动刷新聊天及 Agent 的模型选择器，无需重启 Gateway。
 
@@ -716,6 +716,18 @@ DeerFlow 2.0 不再是一个需要你自己拼装的 framework。它是一个开
 
 ## 核心特性
 
+### Token 用量统计
+
+点击侧边栏的 **Token 用量**（`/workspace/usage`），查看近 7/30 天的用量、
+每日输入/输出 Token、各模型的缓存命中输入 Token，以及支持失败筛选和分页的
+运行记录。运行记录包含所有日期，不受图表所选周期限制。
+
+此功能需要 `runs:read` 权限和 SQLite 或 PostgreSQL 数据库，静态演示不提供统计。
+数据来自已持久化的服务商用量；运行过程中或服务商未返回用量时可能不完整，不能
+作为服务商账单。缓存命中 Token 已包含在输入 Token 中。每日分桶使用浏览器当前
+UTC 偏移，并按运行的创建日期归属。页面复用现有 `/api/console` 接口，保留服务端
+价格配置及可选的费用、币种字段。
+
 ### Skills 与 Tools
 
 Skills 是 DeerFlow 能做“几乎任何事”的关键。
@@ -845,6 +857,11 @@ Web UI 会在输入框上方展示当前激活的 goal，说明自动续跑为�
 在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
 
 ### Sub-Agents
+
+显式后台 `batch_task` 可用 `depends_on` 声明同批条目的前置关系，前置工作完成后即可继续，
+无需等待无关任务。用户已要求后续汇总或交付时，可用可选的 `continuation` 登记一次主 Agent 接续；
+启用 Goal 时仍由 Goal 负责续跑。执行、取消、授权和恢复范围见
+[批次依赖与完成接续说明](backend/docs/BATCH_CONTINUATION.md)。
 
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 

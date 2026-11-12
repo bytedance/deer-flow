@@ -1,27 +1,24 @@
-# Browser Automation
+# Browser automation (`deerflow/community/browser_automation/`)
 
-### Browser Egress Resolution
+```bash
+cd backend && python -m pytest tests -q -k "browser"
+```
 
-SOCKS DNS runs on the private Playwright loop. Use a dedicated bounded executor
-so timed-out lookups cannot starve that loop's request guard. Retain permits until
-threads exit, including after loop shutdown; reject at capacity and propagate
-ContextVars. Keep the Gateway and browser loops separate in starvation tests.
-See `backend/tests/test_browser_egress.py`.
-
-### Browser Progress Screenshots
-
-Hidden per-action browser progress frames use JPEG at quality 80 to keep their
-storage and transfer cost bounded relative to lossless PNG. The explicit
-`browser_screenshot` tool remains PNG because it creates a user-requested
-artifact. New automatic capture entry points must reuse the shared progress
-encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
-drift. `browser_screenshot` never replaces an `outputs/` file: it hard-links
-onto the first free `-N` name.
-
-### Session Lifecycle
-
-Contexts own cookies and origin storage: retain a live context after page
-closure; rebuild only when the browser disconnects or the context is gone.
-Reset `_request_guard_bound` / `_page_listener_bound` only on context replacement.
-Await `bring_to_front()` before `_set_active_page()` during managed-page
-recovery; CDP sessions preserve user focus and intentionally skip the request guard.
+- **SOCKS DNS runs on a dedicated bounded executor.** The lookups belong to the
+  private Playwright loop, and a timed-out lookup must not starve that loop's
+  request guard. Keep a permit until its thread exits, reject at capacity and
+  propagate ContextVars. Starvation tests keep the Gateway loop and the browser
+  loop separate.
+- **Automatic progress frames are JPEG, and `browser_screenshot` is PNG.**
+  Progress frames are hidden and frequent, so their cost is bounded. The
+  screenshot tool creates an artifact the user asked for. A new automatic capture
+  path reuses the shared progress encoding in `tools.py`, so the bytes and the
+  file suffix cannot drift.
+- **`browser_screenshot` never replaces a file in `outputs/`.** It takes the
+  first free numbered name.
+- **A context owns cookies and origin storage.** Keep a live context after its
+  page closes. Rebuild only when the browser disconnects or the context is gone,
+  and reset the listener flags only then.
+- **During managed-page recovery, bring the page to the front before you mark it
+  active.** A CDP session keeps the user's focus and skips the request guard on
+  purpose.

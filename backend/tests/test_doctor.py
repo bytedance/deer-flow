@@ -640,6 +640,22 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SOFYA_API_KEY" in (result.fix or "")
 
+    def test_specstream_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SPECSTREAM_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.specstream.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "specstream" in result.detail
+
+    def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.specstream.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SPECSTREAM_API_KEY" in (result.fix or "")
+
     def test_serper_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-key")
         cfg = tmp_path / "config.yaml"
@@ -768,6 +784,14 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "warn"
         assert "SOFYA_API_KEY" in (result.fix or "")
+
+    def test_specstream_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SPECSTREAM_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.specstream.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "warn"
+        assert "SPECSTREAM_API_KEY" in (result.fix or "")
 
     def test_unbrowse_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("UNBROWSE_API_KEY", "test-key")

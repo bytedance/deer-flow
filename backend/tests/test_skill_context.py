@@ -221,6 +221,98 @@ class TestExtractSkills:
         out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
         assert [e["name"] for e in out] == ["a", "b"]
 
+    def test_same_tool_call_id_reused_by_a_later_read_keeps_both_skills(self):
+        msgs = [
+            _ai_read("call_0", "/mnt/skills/public/a/SKILL.md"),
+            ToolMessage(
+                content="A",
+                tool_call_id="call_0",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", "A"),
+            ),
+            _ai_read("call_0", "/mnt/skills/custom/b/SKILL.md"),
+            ToolMessage(
+                content="B",
+                tool_call_id="call_0",
+                id="tm2",
+                additional_kwargs=_skill_metadata("/mnt/skills/custom/b/SKILL.md", "B"),
+            ),
+        ]
+
+        out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert [e["name"] for e in out] == ["a", "b"]
+        assert [e["path"] for e in out] == [
+            "/mnt/skills/public/a/SKILL.md",
+            "/mnt/skills/custom/b/SKILL.md",
+        ]
+
+    def test_same_tool_call_id_reused_does_not_warn_for_the_earlier_read(self, caplog):
+        msgs = [
+            _ai_read("call_0", "/mnt/skills/public/a/SKILL.md"),
+            ToolMessage(
+                content="A",
+                tool_call_id="call_0",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", "A"),
+            ),
+            _ai_read("call_0", "/mnt/skills/custom/b/SKILL.md"),
+            ToolMessage(
+                content="B",
+                tool_call_id="call_0",
+                id="tm2",
+                additional_kwargs=_skill_metadata("/mnt/skills/custom/b/SKILL.md", "B"),
+            ),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert len(out) == 2
+        assert "mismatched skill read metadata" not in caplog.text
+
+    def test_tool_result_whose_call_is_only_in_an_earlier_response_is_skipped(self, caplog):
+        # A tool-call-less AIMessage between the read and its late result must
+        # still close the response: the result cannot pair across it.
+        msgs = [
+            _ai_read("call_0", "/mnt/skills/public/a/SKILL.md"),
+            AIMessage(content="thinking"),
+            ToolMessage(
+                content="A",
+                tool_call_id="call_0",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", "A"),
+            ),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert out == []
+        assert "mismatched skill read metadata" not in caplog.text
+        assert "missing skill read metadata" not in caplog.text
+
+    def test_missing_metadata_warning_points_at_the_later_reads_path(self, caplog):
+        msgs = [
+            _ai_read("call_0", "/mnt/skills/public/a/SKILL.md"),
+            ToolMessage(
+                content="A",
+                tool_call_id="call_0",
+                id="tm1",
+                additional_kwargs=_skill_metadata("/mnt/skills/public/a/SKILL.md", "A"),
+            ),
+            _ai_read("call_0", "/mnt/skills/custom/b/SKILL.md"),
+            ToolMessage(content="B", tool_call_id="call_0", id="tm2"),
+        ]
+
+        with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.skill_context"):
+            out = extract_skills(msgs, skills_root=_ROOT, read_tool_names=_READ)
+
+        assert [e["name"] for e in out] == ["a"]
+        assert "missing skill read metadata" in caplog.text
+        assert "/mnt/skills/custom/b/SKILL.md" in caplog.text
+        assert "/mnt/skills/public/a/SKILL.md" not in caplog.text
+
     def test_extract_skills_prefers_metadata_only_when_path_matches_read_call(self):
         msgs = [
             _ai_read("r1", "/mnt/skills/public/data-analysis/SKILL.md"),

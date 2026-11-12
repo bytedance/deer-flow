@@ -8,14 +8,20 @@ from collections.abc import Hashable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from deerflow.utils.host_paths import windows_incompatible_segment
+
 REQUIRED_DISALLOWED_TOOLS = frozenset({"task", "ask_clarification", "present_files"})
 MANAGED_SUBAGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 
-def normalize_managed_subagent_name(value: str) -> str:
+def normalize_managed_subagent_name(value: str, *, for_creation: bool = False) -> str:
     """Validate and normalize a managed subagent natural key."""
     if not isinstance(value, str) or not MANAGED_SUBAGENT_NAME_PATTERN.fullmatch(value):
         raise ValueError(f"Invalid managed subagent name {value!r}. Must match {MANAGED_SUBAGENT_NAME_PATTERN.pattern}")
+    if for_creation:
+        reason = windows_incompatible_segment(value)
+        if reason is not None:
+            raise ValueError(f"Invalid managed subagent name {value!r}: {reason}")
     return value.lower()
 
 
