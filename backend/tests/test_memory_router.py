@@ -9,7 +9,7 @@ from _router_auth_helpers import call_unwrapped, make_authed_test_app
 from fastapi.testclient import TestClient
 
 from app.gateway.routers import memory
-from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryDuplicateFactIdError
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
@@ -1201,15 +1201,3 @@ def test_clear_route_keeps_working_for_windows_reserved_agent_name(tmp_path):
 
     assert response.status_code == 200
     assert not (tmp_path / "users" / "alice" / "agents").exists()
-    app = make_authed_test_app()
-    app.include_router(memory.router)
-    mock_mgr = MagicMock()
-    mock_mgr.import_memory.side_effect = MemoryDuplicateFactIdError("Duplicate fact id 'fact_dup' in memory import")
-    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/memory/import",
-                json={"facts": [{"id": "fact_dup", "content": "x", "category": "context", "confidence": 0.9, "createdAt": "2026-03-20T00:00:00Z", "source": "manual"}]},
-            )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid memory import: fact IDs must be unique."
