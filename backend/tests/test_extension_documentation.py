@@ -184,7 +184,9 @@ def test_bundled_documentation_snapshot_is_current():
     root = Path(__file__).resolve().parents[2]
     script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
     assert script["DESTINATION"].read_text(encoding="utf-8") == script["render"]()
-    assert len(json.loads(script["render"]())) == 15
+    pages = json.loads(script["render"]())
+    assert len(pages) == 16
+    assert pages["deerflow-extension-office-preview"]["id"] == "office-preview"
 
 
 @pytest.mark.parametrize("collision", [False, True])

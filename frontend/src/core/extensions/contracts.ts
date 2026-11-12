@@ -105,6 +105,27 @@ export type MentionProvider = {
   ) => Promise<readonly { id: string; label: string; description?: string }[]>;
 };
 
+/** Optional file renderer. The host owns the URL, authorization and byte limit. */
+export type ArtifactPreviewContext = {
+  filename: string;
+  locale: string;
+  signal: AbortSignal;
+  readFile: () => Promise<ArrayBuffer>;
+  onError: () => void;
+  /** Available after readFile; scoped to viewer, file bytes and renderer. In-memory only. */
+  getReadingState?: () => unknown;
+  saveReadingState?: (state: unknown) => void;
+};
+export type ArtifactPreviewRenderer = {
+  id: string;
+  /** Lowercase extensions without a dot; exact matches only. */
+  extensions: string[];
+  mount: (
+    root: HTMLElement,
+    context: ArtifactPreviewContext,
+  ) => { dispose: () => void };
+};
+
 /** Browser package API v1. Modules are installed by trusted deployment operators. */
 export interface FrontendExtension {
   apiVersion: 1;
@@ -112,6 +133,7 @@ export interface FrontendExtension {
   icon?: string;
   surfaces?: PluginSurface[];
   mentionProviders?: MentionProvider[];
+  artifactPreviews?: ArtifactPreviewRenderer[];
   conversationActions?: (
     t: Translations,
     locale?: string,

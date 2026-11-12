@@ -383,6 +383,15 @@ Every pull request triggers the following CI workflows:
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
+The browser E2E and full-stack replay jobs use the official Playwright image,
+which includes Chromium and its system libraries. When upgrading the locked
+Playwright version, update the image tags in both browser workflows to match.
+Each job launches Chromium before running tests; auth recovery tests run only
+after that browser readiness check succeeds.
+These containers use uv-managed Python instead of the host's Python tool cache,
+so the interpreter's OpenSSL libraries match its runtime. Backend dependency
+setup also verifies SSL and SQLite imports before launching fixture gateways.
+
 ### Test and diagnostics notes
 
 Backend `make test` runs four duration-balanced shards concurrently and reports
