@@ -380,7 +380,7 @@ export function MessageList({
     request: HumanInputRequest,
     response: HumanInputResponse,
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
-  approvalRequests?: HitlApprovalRequest[];
+  approvalRequests?: readonly HitlApprovalRequest[];
   approvalMetadataLoading?: boolean;
   approvalMetadataError?: boolean;
   onReloadApprovalMetadata?: () => unknown;
@@ -1762,7 +1762,7 @@ export function MessageList({
           />
           {approvalRequests.map((request) => (
             <ToolApprovalCard
-              disabled={thread.isLoading}
+              disabled={thread.isLoading && request.transport !== "live"}
               key={request.request_id}
               request={request}
               onSubmit={onSubmitApproval}

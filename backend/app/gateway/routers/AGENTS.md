@@ -38,6 +38,8 @@ make test-blocking-io                            # after adding any file, config
 - **Imports create, they do not overwrite.** Agent and skill imports are scoped to
   the caller and return 409 on a name collision. Exports leave out credentials,
   memory, conversations and installation bindings.
+- **Memory backup imports** replace the selected facts and require an explicit
+  `facts` array. Omitting it returns 422. An empty array clears that bucket.
 - **Outbound requests from a route** (model discovery, connection tests) have a
   time limit and a size limit, do not follow redirects, and return redacted
   provider errors.

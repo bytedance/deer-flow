@@ -299,6 +299,8 @@ class DeerMemConfig(BaseModel):
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
     # ── Extraction quality callback (post-invoke observability) ─────────
+    project_memory: Any = Field(default=None, exclude=True, description="Optional host hook preparing a separate project fact pool for the same extraction call.")
+
     extraction_callback: Any = Field(
         default=None,
         description=(

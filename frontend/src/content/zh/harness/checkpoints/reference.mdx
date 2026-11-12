@@ -36,7 +36,7 @@ import { Callout } from "nextra/components";
 | `context_usage` | `backend/app/gateway/context_usage.py` |
 | `example` | `config.example.yaml` |
 
-缺陷表引用的固定依赖集为 `langgraph 1.2.9`、`langgraph-checkpoint 4.2.0`、`langgraph-checkpoint-postgres 3.1.2`。
+缺陷表引用的锁定依赖集为 `langgraph 1.2.14`、`langgraph-checkpoint 4.3.0`、`langgraph-checkpoint-postgres 3.1.3`。
 
 ## 配置键
 
@@ -288,7 +288,7 @@ wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识�
 - `test_delta_channel_state.py::test_production_message_forms_keep_assigned_ids_across_delta_replay`
 - `test_delta_channel_state.py::test_delta_normalization_compiles_stable_channel_without_mutating_middleware`
 
-`test_long_chain_history_survives_pagination` 与 `test_parallel_superstep_replay_matches_live_write_order` 断言的是正确契约，在固定依赖仍带缺陷时触发 skip；依赖升级后它们会成为实际门禁。
+`test_long_chain_history_survives_pagination` 与 `test_parallel_superstep_replay_matches_live_write_order` 无条件断言正确的回放契约；任一上游缺陷复现时都会直接失败。
 
 ### 历史缓存
 
@@ -351,14 +351,14 @@ wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识�
 
 ## 上游缺陷固定表
 
-状态对应固定依赖集（`langgraph 1.2.9`、`langgraph-checkpoint 4.2.0`、`langgraph-checkpoint-postgres 3.1.2`）。每条本地测试断言的都是正确契约，缺陷存在期间触发 skip，因此后续依赖升级会把它变成实际门禁；有缺陷的行为从不被当作正确行为断言。
+状态对应锁定依赖集（`langgraph 1.2.14`、`langgraph-checkpoint 4.3.0`、`langgraph-checkpoint-postgres 3.1.3`）。已修复的回放缺陷都有无条件回归门禁；仍未修复的缺陷保留文档所述的本地处理。
 
 | 编号 | 种类 / 状态 | 触发场景 | 本地应对 | 固定版本 | 证据 |
 | --- | --- | --- | --- | --- | --- |
 | `#4380` | DeerFlow issue；已在本地打补丁 | 向空的 Union 类型 `BinaryOperatorAggregate` 通道做替换式写入会把 `Overwrite` 包装器持久化；下一次读取以 `TypeError: 'Overwrite' object is not subscriptable` 崩溃 | `checkpoint_patches.py` 中的探针守卫补丁；补丁测试；`test_threads_router.py` 中的分支/状态更新锚点 | `langgraph 1.2.9` | `checkpoint_patches:91-107`、`backend/tests/test_checkpoint_patches.py:31-95` |
-| `#8526`（修复上游 `#8384`），以及 postgres `#8535` | 上游 langgraph PR；2026-08-07 合并；`langgraph-checkpoint` 4.2.0 修复 | 线程从 `BinaryOperatorAggregate` 切换到 `DeltaChannel` 后，迁移后的第一次写入能从实时 `invoke` 返回值中看到，却从之后每次读取中消失；postgres 侧在没有 seed 时走到根并重放全部内容 | 删除本地 `InMemorySaver` 补丁；依赖下限 `langgraph-checkpoint>=4.2.0,<5.0`；回归门禁 `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`；禁止再引入版本守卫式 saver 补丁 | `langgraph-checkpoint 4.2.0` | `checkpoint_patches:11-17`、`backend/packages/harness/pyproject.toml:49-56`、`CHANGELOG.md:3040-3048` |
-| `#8382` | 上游 langgraph issue；**open**；修复 PR `#8544` 未合并，无发布版本 | 并行 super-step 写入的 delta 重放顺序与实时执行顺序不一致：实时 `invoke` 返回按路径排序的 `[a..h]`，`get_state` 重放为 `[f,b,g,h,a,c,d,e]`（纯置换）；在 memory、sqlite、postgres 上均可复现 | 触发 skip 并点名该 issue；`test_delta_channel_checkpointers.py::test_parallel_superstep_replay_matches_live_write_order` | `langgraph-checkpoint 4.2.0` | `test_delta_channel_checkpointers.py:419,440-460` |
-| `#8448` | 上游 langgraph issue；**open**；修复 PR `#8556` 未合并 | 目标检查点不在第一页分页结果中时，`PostgresSaver.get_delta_channel_history` 会永久污染游标，导致老检查点物化为空；只有 Postgres 会对 stage-1 扫描分页 | memory/sqlite 上断言保持生效（与 `InMemorySaver` 预言机做差分）；Postgres 触发 skip；`test_delta_channel_checkpointers.py::test_long_chain_history_survives_pagination` | `langgraph-checkpoint-postgres 3.1.2` | `test_delta_channel_checkpointers.py:459` |
+| `#8526`（修复上游 `#8384`），以及 postgres `#8535` | 上游 langgraph PR；2026-08-07 合并；`langgraph-checkpoint` 4.2.0 修复 | 线程从 `BinaryOperatorAggregate` 切换到 `DeltaChannel` 后，迁移后的第一次写入能从实时 `invoke` 返回值中看到，却从之后每次读取中消失；postgres 侧在没有 seed 时走到根并重放全部内容 | 删除本地 `InMemorySaver` 补丁；依赖下限 `langgraph-checkpoint>=4.3.0,<5.0`；回归门禁 `test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`；禁止再引入版本守卫式 saver 补丁 | `langgraph-checkpoint 4.3.0` | `checkpoint_patches:11-17`、`backend/packages/harness/pyproject.toml:50-54`、`CHANGELOG.md:3040-3048` |
+| `#8382` | 上游 langgraph issue；已由 PR `#8544` 在 `langgraph-checkpoint` 4.3.0 中修复 | 并行 super-step 写入的 delta 重放顺序与实时执行顺序不一致：实时 `invoke` 返回按路径排序的 `[a..h]`，受影响版本则会重放为 `[f,b,g,h,a,c,d,e]` 一类的纯置换；在 memory、sqlite、postgres 上均可复现 | 依赖下限 `langgraph-checkpoint>=4.3.0,<5.0`；无条件回归门禁 `test_delta_channel_checkpointers.py::test_parallel_superstep_replay_matches_live_write_order` | `langgraph-checkpoint 4.3.0` | `test_delta_channel_checkpointers.py:427-443` |
+| `#8448` | 上游 langgraph issue；已由 PR `#8556` 在 `langgraph-checkpoint-postgres` 3.1.3 中修复 | 目标检查点不在第一页分页结果中时，`PostgresSaver.get_delta_channel_history` 会永久污染游标，导致老检查点物化为空；只有 Postgres 会对 stage-1 扫描分页 | 依赖下限 `langgraph-checkpoint-postgres>=3.1.3,<3.2`；无条件回归门禁 `test_delta_channel_checkpointers.py::test_long_chain_history_survives_pagination`，与 `InMemorySaver` 预言机对照 | `langgraph-checkpoint-postgres 3.1.3` | `test_delta_channel_checkpointers.py:392-408` |
 | `#8548` | 上游 langgraph PR；**open**；修复上游 `#8443`，相关 issue `#8551` 仍在等它 | 不把被放弃的分支重放进 `DeltaChannel` 分叉 | 未合并期间本地线性化不能移除：保留 `_linearize_delta_checkpoint_resume` | `langgraph 1.2.9` | `worker:2267-2279`、`test_run_worker_delta_resume.py::test_linearizes_a_delta_resume_onto_the_head` |
 | `#4458` | DeerFlow issue；分叉缺陷对用户可见的症状 | 在分叉线程中重新生成后，重载时旧助手消息会与新回答并排复活；在 postgres、sqlite 与内存 saver 上均可复现，且当种子行共用一个 run id 时还会破坏分支历史 | 线性化加按轮次播种的 run id；`test_run_worker_delta_resume.py::test_regenerating_in_a_branched_thread_does_not_resurrect_the_old_answer` | `langgraph 1.2.9` | `worker:2267-2289`、`test_run_worker_delta_resume.py:204` |
 | `#4189` 第 3 项 | DeerFlow 设计讨论 | 检查点行的保留与删除；哪些内容可以被删除 | `backend/docs/checkpoint-retention-contract.md`、`backend/tests/test_checkpoint_retention_contract.py`、`backend/app/gateway/checkpoint_retention.py`；目前没有接入生产触发点 | — | `checkpoint_retention.py:1-40`、`backend/docs/checkpoint-retention-contract.md:31-77` |

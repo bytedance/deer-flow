@@ -142,8 +142,7 @@ const ChatBoxContent: React.FC<ChatBoxProps> = ({
   const browserViewOpen = browserEnabled && (browserView?.open ?? false);
 
   const [autoSelectFirstArtifact, setAutoSelectFirstArtifact] = useState(true);
-  // A reopened thread's values carry no `artifacts` (see
-  // collectThreadArtifactPaths); recover them from its present_files calls.
+  // A reopened thread can recover artifacts from its tool history.
   const stateArtifacts = thread.values.artifacts;
   const threadArtifactPaths = useMemo(
     () =>

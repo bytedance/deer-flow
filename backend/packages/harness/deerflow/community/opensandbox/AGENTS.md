@@ -6,6 +6,10 @@ General sandbox rules are in the [sandbox guide](../../sandbox/AGENTS.md).
 cd backend && python -m pytest tests -q -k "opensandbox"
 ```
 
+Validate `use_server_proxy` and `secure_access` at provider startup. Accept
+booleans, default missing or null values to `false`, and reject strings and
+other types before creating an SDK connection.
+
 ## Command deadlines
 
 - **Only a `CommandExecError` with `context deadline exceeded` and no numeric

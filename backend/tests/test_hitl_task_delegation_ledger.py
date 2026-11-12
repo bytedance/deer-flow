@@ -20,8 +20,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
-from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.approvals.middleware import ToolApprovalMiddleware
+from deerflow.config.app_config import AppConfig
+from deerflow.config.hitl_approval_config import HitlApprovalConfig
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
@@ -48,12 +50,14 @@ def _build_graph(responses: list[AIMessage], executed: list[str]):
             additional_kwargs=make_subagent_additional_kwargs("completed", result=f"result of {description}"),
         )
 
-    # Production order: HITL is inserted first, so its after_model runs last,
-    # after DurableContext has captured the dispatch.
+    # Production order: approval gates the tool call before execution, so the
+    # ledger has already captured the dispatch by the time the interrupt lands.
+    policy = HitlApprovalConfig(enabled=True, tools=["task"])
+    app_config = AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy)
     return create_agent(
         model=ScriptedModel(messages=iter(responses)),
         tools=[task],
-        middleware=[HitlApprovalMiddleware(tool_names={"task"}), DurableContextMiddleware()],
+        middleware=[ToolApprovalMiddleware(policy, app_config=app_config), DurableContextMiddleware()],
         state_schema=ThreadState,
         checkpointer=InMemorySaver(),
     )
