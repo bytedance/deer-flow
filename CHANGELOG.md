@@ -55,14 +55,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **subagents:** The `task` tool's inherit-model fallback resolved the app
-  config with a synchronous `get_app_config()` call inside the async tool
-  body. `get_app_config()` stats and hashes the config files and revalidates
-  the extensions config on every call, so that fallback stalled the streaming
-  event loop for the duration of the disk IO and the config lock wait. It now
-  dispatches through the assembly pool like every other config resolution in
-  this tool. ([#8134])
-  
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -16319,4 +16311,3 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
-[#8134]: https://github.com/bytedance/deer-flow/pull/8134
