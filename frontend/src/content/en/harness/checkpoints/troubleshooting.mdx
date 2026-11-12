@@ -149,29 +149,17 @@ The upstream fix is PR [#8548](https://github.com/langchain-ai/langgraph/pull/85
 
 **Symptom**: on a parallel fan-out that writes one delta channel in a single super-step, the live run returns writes in path order but `get_state` / resume replays them in a different order.
 
-**Cause**: pinned upstream defect ([langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382)), open, fix PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) unmerged, no released version. Delta replay orders writes by hashed `(task_id, idx)` instead of the path order `apply_writes` used live, so same-superstep writes are permuted. Present in `langgraph-checkpoint 4.2.0`; reproduced on memory, SQLite, and Postgres.
+**Cause**: upstream defect [langgraph #8382](https://github.com/langchain-ai/langgraph/issues/8382), fixed by PR [#8544](https://github.com/langchain-ai/langgraph/pull/8544) in `langgraph-checkpoint` 4.3.0. Affected versions order delta replay writes by hashed `(task_id, idx)` instead of the path order `apply_writes` uses live, permuting same-superstep writes on memory, SQLite, and Postgres.
 
-**Fix**: none locally. DeerFlow's test asserts the correct contract and trigger-skips while the defect is present, naming the issue:
-
-```
-upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes
-```
-
-If ordering within one super-step matters to your consumer, avoid fanning parallel writes into a single delta channel.
+**Fix**: use `langgraph-checkpoint>=4.3.0,<5.0`. DeerFlow's dependency floor excludes affected versions, and `test_parallel_superstep_replay_matches_live_write_order` unconditionally asserts that replay matches live write order.
 
 ### Postgres hydrates old checkpoints empty
 
 **Symptom**: on Postgres, an older delta checkpoint materializes empty while a recent one is fine.
 
-**Cause**: pinned upstream defect ([langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448)), open, fix PR #8556 unmerged. `PostgresSaver.get_delta_channel_history` permanently poisons its walk cursor when the target checkpoint is not in the first pagination page: the unpatched cursor is derived from a not-yet-loaded parent and parks at `None` for good, so old checkpoints hydrate empty. Only Postgres pages its stage-1 scan. Present in `langgraph-checkpoint-postgres 3.1.2`.
+**Cause**: upstream defect [langgraph #8448](https://github.com/langchain-ai/langgraph/issues/8448), fixed by PR #8556 in `langgraph-checkpoint-postgres` 3.1.3. In affected versions, `PostgresSaver.get_delta_channel_history` derives its walk cursor from a not-yet-loaded parent when the target checkpoint is beyond the first pagination page; the cursor then remains `None`, so old checkpoints hydrate empty.
 
-**Fix**: none locally; the Postgres case trigger-skips, naming the issue:
-
-```
-upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty
-```
-
-Cadence bounds replay depth, so a smaller `snapshot_frequency` keeps the walk shorter; that is the only lever this repository exposes, not a fix for the cursor bug.
+**Fix**: use `langgraph-checkpoint-postgres>=3.1.3,<3.2`. DeerFlow's dependency floor excludes affected versions, and `test_long_chain_history_survives_pagination` unconditionally checks every materialized checkpoint against an `InMemorySaver` oracle.
 
 ## Cache
 
