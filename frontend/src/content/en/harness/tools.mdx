@@ -127,7 +127,7 @@ Community tools connect the agent to external services. Each `tools:` entry in `
 
 ### Web search
 
-<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo (default)", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Olostep", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -233,6 +233,16 @@ Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.olostep.tools:web_search_tool
+    api_key: $OLOSTEP_API_KEY
+```
+Results carry a title, URL and description. `max_results` is capped at 25. Each search costs 5 credits. Requires an [Olostep](https://www.olostep.com) API key ([get one](https://www.olostep.com/dashboard/api-keys)). Also supports `web_fetch`.
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.sofya.tools:web_search_tool
     api_key: $SOFYA_API_KEY
 ```
@@ -270,7 +280,7 @@ No extra dependency required.
 
 ### Web fetch (page content extraction)
 
-<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Olostep", "Sofya", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -328,6 +338,16 @@ tools:
     use: deerflow.community.groundroute.tools:web_fetch_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.olostep.tools:web_fetch_tool
+    api_key: $OLOSTEP_API_KEY
+```
+Scrapes the page on Olostep's side and returns it as Markdown. Requires an [Olostep](https://www.olostep.com) API key.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Olostep", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -227,6 +227,16 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
 tools:
   - name: web_search
     group: web
+    use: deerflow.community.olostep.tools:web_search_tool
+    api_key: $OLOSTEP_API_KEY
+```
+搜索结果包含标题、URL 和描述。`max_results` 上限为 25。每次搜索消耗 5 个 credits。需要 [Olostep](https://www.olostep.com) API Key（[获取](https://www.olostep.com/dashboard/api-keys)）。同时支持 `web_fetch`。
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
     use: deerflow.community.sofya.tools:web_search_tool
     api_key: $SOFYA_API_KEY
 ```
@@ -261,7 +271,7 @@ API Key 可选，可在 [You.com](https://you.com/platform) 获取。
 
 ### 网页内容抓取
 
-<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "Unbrowse"]}>
+<Tabs items={["Jina AI（默认）", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Olostep", "Sofya", "SpecStream", "Unbrowse"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -318,6 +328,16 @@ tools:
     use: deerflow.community.groundroute.tools:web_fetch_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.olostep.tools:web_fetch_tool
+    api_key: $OLOSTEP_API_KEY
+```
+由 Olostep 抓取页面并以 Markdown 形式返回。需要 [Olostep](https://www.olostep.com) API Key。
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

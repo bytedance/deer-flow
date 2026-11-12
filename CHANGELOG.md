@@ -11,6 +11,10 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **community:** New Olostep `web_search` and `web_fetch` provider. Search
+  returns a title, URL and description per result (`max_results` capped at 25),
+  and fetch returns the scraped page as markdown. Requires `OLOSTEP_API_KEY`.
+
 - **summarization:** The built-in compaction prompt guides the summarizer to
   preserve active user requirements, literal approval phrases, action conditions,
   and explicit revisions. Explicit `summarization.summary_prompt` configurations
