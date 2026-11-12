@@ -54,5 +54,8 @@ default suite needs no network and no API key.
   environment matches the lock.
 - **Guard POSIX-only test markers with `os.name`.** Windows collects the same
   files.
+- **Tool approvals need addressable calls.** Strip missing, empty and duplicate
+  tool-call IDs before creating a pause or a tool result. See the
+  [run interaction policy](docs/RUN_INTERACTION_POLICY.md#hitl-tool-approval).
 - **Add a schema change with `make migrate-rev MSG="..."`** and follow the
   migrations guide.

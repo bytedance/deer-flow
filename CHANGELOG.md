@@ -11,20 +11,29 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **summarization:** The built-in compaction prompt guides the summarizer to
+  preserve active user requirements, literal approval phrases, action conditions,
+  and explicit revisions. Explicit `summarization.summary_prompt` configurations
+  continue to take precedence. ([#8114](https://github.com/bytedance/deer-flow/pull/8114))
+
 - **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
   display source line numbers when the result contains 1–40 lines and the
   labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
 
-- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
-  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
-  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
-  approval card with per-field argument summaries. Approve executes the call,
-  reject returns the reason to the model without executing. IM channels,
-  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
-  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
-  support always reject matching calls regardless of that setting.
-  `hitl_approval.max_actions` configures the approval-batch count limit
-  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
+- **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
+  reasoning mode. Auto uses a separate tool-free review call with an existing
+  model profile; uncertain or high-risk operations require a human. Cards show
+  complete arguments and support approve, reject, edit and exact-operation chat
+  grants with revocation. Root approvals survive restart through checkpoints;
+  interactive subagents wait through an owner-scoped channel with cancellation
+  and expiry. Mandatory deployment rules and account permissions apply in every
+  mode. Personal/platform MCP connections, policy and arguments bind approvals.
+  Disabled by default; see the configuration guide. `config_version` 66.
 
 - **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
   access for authenticated users, without maintaining a per-user allowlist.
@@ -55,6 +64,13 @@ This section accumulates work toward the **2.3.0** milestone
   running and its session cannot be closed, preventing late writes after warm
   reuse. Commands confirmed to have terminated remain reusable.
 
+- **channels:** A WeCom group command that follows the bot mention now runs as a
+  command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
+  the classifier required a bare leading `/`, so `/new` and `/status` sent in a
+  group became chat turns. Leading mentions are skipped for the command lookup
+  only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
+  and DingTalk handling. ([#8118])
+  
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -104,6 +120,9 @@ This section accumulates work toward the **2.3.0** milestone
   database error. The 409 points callers at `PUT` on the same route, which
   updates the existing feedback. ([#8064])
   
+- **frontend:** Reopening a conversation restores successfully handed-off shared
+  artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
@@ -242,6 +261,13 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8151])
+
+- **memory:** Importing a backup without a `facts` array now returns HTTP 422
+  and preserves saved memory. An explicit empty array still clears the selected
+  fact bucket. ([#8131])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
@@ -16302,4 +16328,8 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151

@@ -30,7 +30,8 @@ error even when the referenced sandbox is cached.
 When host Bash is enabled for Local Execution, DeerFlow starts OS detection with `uname -s`, then uses `sw_vers` on Darwin. On Linux, it reads host system files such as `/etc/os-release` only when the active sandbox policy permits it. Host filesystem path checks still apply; after a blocked path, the agent is directed to use a permitted command-only probe or virtual path instead of repeating the rejected command.
 
 For Docker development and production, service startup follows the configured
-sandbox mode. With `AioSandboxProvider`, an omitted `provisioner_url`, an empty
+sandbox mode, including when the `sandbox:` header or `use` field has a trailing
+YAML comment. With `AioSandboxProvider`, an omitted `provisioner_url`, an empty
 string (`""` or `''`), or YAML null (`null`, `~`, or a blank value), including
 trailing comments, selects `aio`: `provisioner` is not started and the Docker
 socket overlay is enabled. This grants the gateway host root-equivalent Docker
@@ -362,6 +363,9 @@ discard the whole snapshot or suppress detection of other produced outputs.
 This remains a best-effort scan, not an atomic filesystem snapshot.
 
 `present_shared_artifact` publishes another conversation's persisted output using `origin_thread_id + path + sha256`. Same-user, runtime-home-confined reads and writes reject path traversal, symlinks and changed content; an existing destination with different content is retained, while identical concurrent handoffs succeed. Successful handoffs count as run delivery and archive receipts. The current POSIX implementation does not acquire a source sandbox or cross user boundaries.
+
+When you reopen the destination conversation, the Artifacts sidebar restores
+files from confirmed handoffs.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. Long artifact lists scroll within the panel on desktop and in the mobile drawer, keeping every file reachable. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. A delayed background read cannot replace a successfully saved revision in the editor; cancelled preview and full-file reads also abort their HTTP requests. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names. Unknown file types, including names such as `constructor` and `__proto__`, retain the download fallback.
 
