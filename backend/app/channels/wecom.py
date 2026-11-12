@@ -9,7 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast
 
 from app.channels.base import Channel, ChannelUnavailable, attachment_delivery_text
-from app.channels.commands import is_known_channel_command
+from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
     InboundMessage,
@@ -583,7 +583,22 @@ class WeComChannel(Channel):
             if handled:
                 return
 
-        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(text) else InboundMessageType.CHAT
+        # WeCom group chats deliver "@bot /new" with the mention left in the text
+        # (Slack/Discord strip their own bot mention upstream). Skip a leading
+        # mention only for the command path so ordinary chat keeps any @mentions
+        # intact for the agent; the stripped form also flows into the inbound so
+        # ChannelManager._handle_command parses the bare command. Mirrors
+        # DingTalkChannel / FeishuChannel.
+        #
+        # This drops *any* leading mention, not only the bot's: WeCom text
+        # mentions carry display names, so the frame's `aibotid` cannot be
+        # matched against them and "@alice /status" is indistinguishable from
+        # "@bot /status". Feishu and DingTalk accept the same tradeoff;
+        # test_member_mention_before_a_command_also_classifies pins it.
+        command_text = strip_leading_mentions(text)
+        inbound_type = InboundMessageType.COMMAND if is_known_channel_command(command_text) else InboundMessageType.CHAT
+        if inbound_type is InboundMessageType.COMMAND:
+            text = command_text
         inbound_metadata: dict[str, Any] = {
             "aibotid": body.get("aibotid"),
             "chattype": body.get("chattype"),
