@@ -21,7 +21,9 @@ from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.runtime.runs.input_control import ChildInputGate, RunInputControl
 from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY
+from deerflow.utils.messages import message_content_to_text
 
 
 def test_input_control_reaches_the_factory_only_from_the_worker():
@@ -496,6 +498,10 @@ async def test_graph_applies_input_before_long_tool_finishes_and_confirms_durabl
         release.set()
         result = await asyncio.wait_for(run, 5)
         assert result["applied_run_inputs"] == {"run_id": "run", "ids": ["extra"]}
+        assert any(isinstance(message, ToolMessage) and message.additional_kwargs.get("subagent_pending") for message in result["messages"])
+        snapshot = ParentContextSnapshot.from_state(result)
+        assert snapshot is not None
+        assert "Long operation completed" in message_content_to_text(snapshot.to_message().content)
         # Summaries can remove message text; the independent graph receipt
         # still proves it was applied before the store acknowledgement.
         ids = [m.id for m in result["messages"] if m.additional_kwargs.get("run_input_id")]

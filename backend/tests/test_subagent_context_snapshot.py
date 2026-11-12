@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.subagents.context_snapshot import ParentContextSnapshot
-from deerflow.utils.messages import message_content_to_text
+from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME, message_content_to_text
 
 
 @pytest.mark.parametrize("dispatch_id", ["dispatch", "earlier-delegation"])
@@ -361,7 +361,7 @@ def test_snapshot_keeps_a_steered_subagent_report_the_parent_already_has():
         HumanMessage(content="Delegate to general-purpose", id="user-1"),
         AIMessage(content="", tool_calls=[call], id="ai-1"),
         ToolMessage(content="The subagent result is pending and will arrive in this Run. The user has sent an updated requirement.", tool_call_id="call-1", name="task", id="pending-1", additional_kwargs={"subagent_pending": True}),
-        HumanMessage(content=report, name="subagent-result", id="run-input-result-run-1-call-1", additional_kwargs={"hide_from_ui": True, "untrusted_input": True}),
+        HumanMessage(content=report, name=SUBAGENT_RESULT_MESSAGE_NAME, id="run-input-result-run-1-call-1", additional_kwargs={"hide_from_ui": True, "untrusted_input": True}),
         HumanMessage(content="Ask the reviewer to compare the quotes", id="user-2"),
     ]
 

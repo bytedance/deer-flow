@@ -18,6 +18,9 @@ make test-blocking-io
 Batch and result-reader tests run against SQLite and, when `TEST_POSTGRES_URI` is
 set, against an isolated PostgreSQL schema. They need no paid model.
 
+Run input delivery and parent context snapshots share `SUBAGENT_RESULT_MESSAGE_NAME`
+from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
+
 ## Terminal state
 
 - **The first terminal write wins.** Cancellation, timeout and completion race.
