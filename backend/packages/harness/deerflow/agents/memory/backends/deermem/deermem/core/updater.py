@@ -44,9 +44,6 @@ class DuplicateFactIdError(ValueError):
     """A backup contains more than one entry for a fact ID."""
 
 
-
-
-
 # Thread pool for offloading sync memory updates when called from an async
 # context.  Unlike the previous asyncio.run() approach, this runs *sync*
 # model.invoke() calls — no event loop is created, so the langchain async

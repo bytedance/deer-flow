@@ -2115,7 +2115,6 @@ def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path)
     it is skipped from the prepared writes) - the updater gate alone does not
     exercise this path."""
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig, FileMemoryStorage
-    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
 
     config = DeerMemConfig(storage_path=str(tmp_path / "storage-guard"), retrieval_adapter="")
     storage = FileMemoryStorage(config)
