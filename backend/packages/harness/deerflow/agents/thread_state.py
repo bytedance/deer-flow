@@ -214,38 +214,81 @@ class DelegationEntry(TypedDict):
     # provenance as receipt_verdict.
     acceptance_verdict: NotRequired[dict]
     created_at: str
+    # The AIMessage that issued the call. Tool-call ids are unique per response,
+    # so a provider can reuse one in a later response of the same run; this keeps
+    # each dispatch its own entry. Absent on entries written before it existed.
+    dispatch_message_id: NotRequired[str]
+
+
+type DelegationKey = tuple[str | None, str, str | None]
+
+
+def delegation_key(entry: Mapping[str, Any]) -> DelegationKey:
+    """Identify one delegation: ``(run_id, tool-call id, dispatch message id)``.
+
+    DurableContext uses this key too. The cap's ``_delegation_id`` reads the
+    same fields from entries; keep the two in step.
+    """
+    return entry.get("run_id") or None, entry["id"], entry.get("dispatch_message_id") or None
+
+
+def find_delegation_key(keys: Sequence[DelegationKey], key: DelegationKey) -> DelegationKey | None:
+    """Return the key in ``keys`` that an entry identified by ``key`` updates, or None.
+
+    An exact match wins. Otherwise an entry without a run id updates the most
+    recent entry with its call id, as updates did before run-scoped
+    identities; an entry without a dispatch id updates the most recent entry
+    of its run with that call id; and a dispatch-scoped entry adopts the most
+    recent entry of its run and call id that predates dispatch ids. Two
+    different dispatches never match each other.
+    """
+    if key in keys:
+        return key
+    run_id, entry_id, dispatch_id = key
+    for prior in reversed(keys):
+        if prior[1] != entry_id:
+            continue
+        if run_id is None:
+            return prior
+        if prior[0] == run_id and (dispatch_id is None or prior[2] is None):
+            return prior
+    return None
 
 
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
-    - append entries, replacing the same (run_id, tool-call id) with the latest
-      version while preserving first-seen order. Provider ids can repeat in
-      later runs of the same thread.
+    - append entries, replacing the same delegation (see ``find_delegation_key``)
+      with the latest version while preserving first-seen order. Provider ids
+      can repeat in later runs of the same thread and in later responses of
+      the same run.
     - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
 
-    by_key: dict[tuple[str | None, str], DelegationEntry] = {}
-    order: list[tuple[str | None, str]] = []
+    by_key: dict[DelegationKey, DelegationEntry] = {}
+    order: list[DelegationKey] = []
     for entry in [*(existing or []), *new]:
-        entry_id = entry["id"]
-        key = (entry.get("run_id") or None, entry_id)
-        if key[0] is None:
-            # Legacy updates without run_id still update the most recent
-            # matching entry, as they did before run-scoped identities.
-            key = next((prior for prior in reversed(order) if prior[1] == entry_id), key)
-        previous = by_key.get(key)
-        if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
-            continue
-        if key not in by_key:
+        target = find_delegation_key(order, delegation_key(entry))
+        previous = by_key.get(target) if target is not None else None
+        if previous is None:
+            key = delegation_key(entry)
             order.append(key)
-        elif previous.get("created_at"):
-            entry = {**entry, "created_at": previous["created_at"]}
-            if previous.get("run_id") and not entry.get("run_id"):
-                entry["run_id"] = previous["run_id"]
+            by_key[key] = entry
+            continue
+        if previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
+            continue
+        inherited = {field: previous[field] for field in ("created_at", "run_id", "dispatch_message_id") if previous.get(field) and (field == "created_at" or not entry.get(field))}
+        if inherited:
+            entry = {**entry, **inherited}
+        key = delegation_key(entry)
+        if key != target:
+            # A legacy entry gained its dispatch id: re-key it in place so a
+            # later dispatch reusing the call id starts its own entry.
+            order[order.index(target)] = key
+            del by_key[target]
         by_key[key] = entry
     merged = [by_key[key] for key in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:

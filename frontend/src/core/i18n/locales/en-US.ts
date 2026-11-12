@@ -9,6 +9,8 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
@@ -93,82 +95,62 @@ export const enUS: Translations = {
     catalogHint:
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
+    detail: {
+      guide: "Read the guide",
+      gettingStarted: "Get started",
+      requirements: "Before you start",
+      loaded: "Loaded",
+      loadedHint:
+        "This extension is loaded. Follow the usage instructions to get started.",
+      tools: "Registered tools",
+      pages: "Workspace pages",
+      management: "Usage & management",
+      readyHint:
+        "Your administrator has enabled this extension. It is ready to use.",
+      disabledHint:
+        "This extension is disabled. Ask your administrator to enable it.",
+      failedHint:
+        "The extension page could not load. Refresh extensions to try again.",
+      noPageHint:
+        "This extension has no standalone page. Check the guide for how to use it in conversations or tasks.",
+      guideHint:
+        "Read the guide to explore what this extension adds to DeerFlow and how to use it.",
+      technicalDetails: "Technical details",
+      package: "Package",
+      namespace: "Extension ID",
+      refresh: "Refresh extensions",
+      refreshHint:
+        "Refresh the page after your administrator updates an extension.",
+    },
     catalog: {
-      workflows: {
-        title: "Script workflows",
-        description:
-          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
-      },
-      reportSections: {
-        title: "Sectioned long-form writing",
-        description:
-          "Write long reports section by section and assemble them into a downloadable Markdown document.",
-      },
-      agentTeams: {
-        title: "Agent teams",
-        description:
-          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
-      },
-      bookmarks: {
-        title: "Bookmarks",
-        description:
-          "Save useful answers and find and organize your own bookmarks on a dedicated page.",
-      },
-      context: {
-        title: "Context pruning",
-        description:
-          "Shorten older read-only tool results while preserving recent messages and native summaries.",
-      },
-      classify: {
-        title: "Text classification",
-        description:
-          "Label a list of texts with supplied categories using the deployment-configured classification service.",
-      },
-      screening: {
-        title: "Content risk warnings",
-        description:
-          "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
-      },
-      example: {
-        title: "Extension development example",
-        description:
-          "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
-      },
-      retrieval: {
-        title: "Local retrieval example",
-        description:
-          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
-      },
-      lightrag: {
-        title: "LightRAG",
-        description:
-          "Retrieve documents and entity relations from LightRAG with shared source citations.",
-      },
-      knowledgePlatform: {
-        title: "Knowledge spaces and connections",
-        description:
-          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
-      },
-      knowledgeCenter: {
-        title: "Knowledge center",
-        description:
-          "Browse authorized spaces, import files, URLs and text, and inspect document processing. Requires the separately configured knowledge platform and management extensions.",
-      },
-      knowledgeManagement: {
-        title: "Knowledge ingestion and processing",
-        description:
-          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
-      },
-      weknora: {
-        title: "WeKnora knowledge retrieval",
-        description:
-          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
-      },
-      knowledge: {
-        title: "Knowledge scope example",
-        description:
-          "Search sample documents within selected knowledge bases or files and inspect source citations.",
-      },
+      officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      context: bundledCopy("deerflow-extension-jev-context", "en-US"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
+      workflows: bundledCopy("deerflow-extension-workflows", "en-US"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "en-US",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "en-US"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "en-US"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "en-US",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "en-US",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
+      example: bundledCopy("deerflow-extension-example", "en-US"),
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
@@ -400,6 +382,13 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "Preparing download…",
+    retryDownload: "Retry download",
+    downloadFailed: "Download failed. Try again.",
+    downloadRequested: "Sent to browser downloads",
+    retry: "Retry preview",
+    unavailable:
+      "Preview is unavailable for this format. Download the original file to view it.",
     loadingPreview: "Preparing preview...",
     resourcesUnavailable:
       "Some preview resources could not be loaded. View the source or download the files for the complete content.",
@@ -878,8 +867,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {
@@ -1929,6 +1928,25 @@ export const enUS: Translations = {
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
     approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
       title: "Tool approval required",
       description:
         "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
@@ -1957,6 +1975,20 @@ export const enUS: Translations = {
 
   // Subtasks
   uploads: {
+    status: {
+      pending: "Ready to send",
+      uploading: "Uploading…",
+      uploaded: "Uploaded",
+      failed: "Upload failed",
+      cancelled: "Cancelled",
+    },
+    cancelUpload: "Cancel upload",
+    retryUpload: "Retry upload",
+    notReady:
+      "Attachments are not ready. Retry failed files or remove them, then send again.",
+    attachment: "Attachment",
+    image: "Image",
+    removeAttachment: (filename) => `Remove attachment: ${filename}`,
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>

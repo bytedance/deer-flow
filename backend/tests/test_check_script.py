@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -192,3 +194,54 @@ def test_check_preserves_unicode_pnpm_error(tmp_path, monkeypatch, host_encoding
 def test_check_replaces_invalid_tool_output_bytes():
     script = _load_script(CHECK_SCRIPT_PATH, "check_invalid_tool_bytes")
     assert script.run_command([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'v22.0.0\\xff')"]) == "v22.0.0\ufffd"
+
+
+@pytest.fixture
+def check_checkout(tmp_path: Path) -> Path:
+    checkout = tmp_path / "checkout"
+    scripts_dir = checkout / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (checkout / "frontend").mkdir()
+    for name in ("check.py", "pnpm.py"):
+        shutil.copyfile(REPO_ROOT / "scripts" / name, scripts_dir / name)
+    return checkout
+
+
+def _run_check(checkout: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    env = {name: value for name, value in os.environ.items() if not name.startswith("DEER_FLOW_") and name not in {"PYTHONPATH", "PYTHONHOME"}}
+    return subprocess.run(
+        [sys.executable, str(checkout / "scripts" / "check.py"), *args],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+        timeout=120,
+    )
+
+
+def test_help_prints_usage_without_running_the_check(check_checkout: Path):
+    result = _run_check(check_checkout, "--help")
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+    assert "Checking Required Dependencies" not in result.stdout
+
+
+def test_unknown_flag_exits_2_with_usage_error(check_checkout: Path):
+    result = _run_check(check_checkout, "--verbos")
+
+    assert result.returncode == 2
+    assert "unrecognized arguments: --verbos" in result.stderr
+    assert "Checking Required Dependencies" not in result.stdout
+
+
+def test_no_arguments_still_runs_the_check(check_checkout: Path):
+    result = _run_check(check_checkout)
+
+    # The disposable checkout inherits this host's toolchain, so the probes may
+    # pass or fail; either exit code must still come with the normal report.
+    assert result.returncode in (0, 1), result.stderr
+    assert "Checking Required Dependencies" in result.stdout

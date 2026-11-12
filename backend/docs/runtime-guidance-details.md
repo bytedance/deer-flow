@@ -343,7 +343,7 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
-- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override, so the dependency floor plus the full → delta migration contract test are the gate — never re-add a version-guarded saver patch.
+- `checkpoint_patches.py` (package root) — the one remaining patch: `BinaryOperatorAggregate` unwrapping an `Overwrite` first write into an empty channel (#4380; probe-guarded). The `InMemorySaver` delta-history patch is gone: `langgraph-checkpoint` 4.2.0 fixed that write loss upstream (#8526) while keeping its override. The 4.3.0 floor also keeps same-superstep replay in live task-path order; SQLite 3.1.2 and Postgres 3.1.3 carry the matching saver behavior, including paged Postgres ancestor walks. Dependency floors plus the migration, ordering and pagination contract tests are the gates — never re-add version-guarded saver patches or defect-triggered skips.
 - `agents/thread_state.py` — `ThreadState`/`DeltaThreadState`, `delta_messages_field` / `DELTA_MESSAGES_FIELD` (`DeltaChannel` at the configured `snapshot_frequency`, default 10), schema adaptation helpers
 - `runtime/context_compaction.py` — compaction via accessor + mutation graph (reference consumer). Runs stamp their effective agent into server-owned checkpoint metadata; manual compaction uses that binding—not request `agent_name`—for memory policy and bucket. Missing/invalid legacy bindings and unreadable agent configs fail closed by skipping the optional flush while compaction may continue with the default model; a missing pre-binding checkpoint emits a warning so the skipped write is observable.
 - `runtime/checkpoint_cache/` + `runtime/checkpointer/cached_saver.py` — delta-mode checkpoint history cache; checkpoint state reads MUST go through `CheckpointStateAccessor`, and the checkpointer may be a `CachedHistorySaver` wrapper — never rely on concrete saver types
@@ -365,7 +365,14 @@ while its replacement awaits a Store result. Preserve terminal-attribution and
 cancellation compensation below; changing lock granularity does not grant a new
 worker authority over a durable row.
 
-Assembly evidence persists a full row snapshot. Serialize that write with the
+With heartbeat enabled, assembly evidence is merged into the row's metadata
+through `RunStore.merge_owned_metadata()`, which requires this Worker's live
+lease on a `pending`/`running` row and writes no other field. A full snapshot
+would also rewrite status, owner, lease and error, reviving a row a peer already
+reclaimed. A rejection fences the run and fails assembly before execution; a
+locally fenced run is refused before any write, and a Store without the method
+fails closed instead of falling back to `put()`. Without heartbeat, evidence
+still persists a full row snapshot. Serialize either write with the
 same run's lease renewal and local acknowledgment, so it cannot restore an old
 lease after renewal. Lock order is thread gate, then snapshot gate, then the
 short registry lock. Renewal uses only the snapshot gate and must release it
