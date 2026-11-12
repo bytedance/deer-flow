@@ -16,6 +16,7 @@ to be extracted is still fed: loss is the one direction this path cannot take.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -246,6 +247,54 @@ def test_remembered_conversations_are_bounded_like_the_watermark_cache() -> None
     updater.update_memory(first, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True)
 
     assert llm.invoke_count == 3
+
+
+def test_a_snapshot_that_reads_a_record_keeps_it_from_eviction() -> None:
+    """A read is a use, as in the watermark cache: a full cache must not evict
+    the record that has just saved a call."""
+    llm = _RecordingLLM()
+    updater = _updater(llm, watermark_max_keys=2)
+    first = _turn("one")
+    updater.update_memory(first, thread_id="t1", agent_name="a", user_id="u")
+    updater.update_memory(_turn("two"), thread_id="t2", agent_name="a", user_id="u")
+
+    # Skipped in full: nothing is fed, so nothing is recorded again for t1.
+    updater.update_memory(first, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True)
+    assert llm.invoke_count == 2
+    updater.update_memory(_turn("three"), thread_id="t3", agent_name="a", user_id="u")
+
+    assert list(updater._extracted_messages) == [("t1", "u", "a"), ("t3", "u", "a")]
+    updater.update_memory(first, thread_id="t1", agent_name="a", user_id="u", bypass_watermark=True)
+    assert llm.invoke_count == 3
+
+
+@pytest.mark.parametrize(
+    ("extracted", "expected"),
+    [
+        (2, "Memory snapshot: feeding 2 of 4 messages, 2 already extracted (thread=t1)"),
+        (4, "Memory snapshot: feeding 0 of 4 messages, 4 already extracted (thread=t1)"),
+    ],
+)
+def test_a_filtered_snapshot_logs_how_much_it_skipped(caplog: pytest.LogCaptureFixture, extracted: int, expected: str) -> None:
+    """The saving has to be visible at the default log level, also when only
+    part of the snapshot was skipped."""
+    updater = _updater(_RecordingLLM())
+    conversation = _turn("one") + _turn("two")
+    updater.update_memory(conversation[:extracted], **SCOPE)
+
+    with caplog.at_level(logging.INFO, logger=updater_module.logger.name):
+        updater.update_memory(conversation, **SCOPE, bypass_watermark=True)
+
+    assert expected in caplog.messages
+
+
+def test_a_snapshot_that_skips_nothing_logs_no_saving(caplog: pytest.LogCaptureFixture) -> None:
+    updater = _updater(_RecordingLLM())
+
+    with caplog.at_level(logging.INFO, logger=updater_module.logger.name):
+        updater.update_memory(_turn("one"), **SCOPE, bypass_watermark=True)
+
+    assert not [message for message in caplog.messages if message.startswith("Memory snapshot:")]
 
 
 PREFERENCE = "My favorite beverage is oolong tea."

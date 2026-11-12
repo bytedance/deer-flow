@@ -1889,6 +1889,9 @@ class MemoryUpdater:
         record = self._extracted_messages.get(key)
         if not record:
             return messages
+        # A read is a use, as in ``_watermark_get``: a snapshot skipped in full
+        # records nothing, and must not leave this key the next one evicted.
+        self._extracted_messages.move_to_end(key)
         return [message for message in messages if _extracted_message_key(message) not in record]
 
     def _do_update_memory_sync_impl(
@@ -1938,6 +1941,15 @@ class MemoryUpdater:
                 # Emergency flush: extract the carried subset, minus the messages
                 # an earlier extraction already consumed.
                 feed_messages = self._not_yet_extracted(watermark_key, messages)
+                skipped = len(messages) - len(feed_messages)
+                if skipped:
+                    logger.info(
+                        "Memory snapshot: feeding %d of %d messages, %d already extracted (thread=%s)",
+                        len(feed_messages),
+                        len(messages),
+                        skipped,
+                        thread_id,
+                    )
             else:
                 feed_messages = self._feed_after_watermark(watermark_key, messages)
             if not feed_messages:
