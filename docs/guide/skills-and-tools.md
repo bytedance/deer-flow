@@ -1,16 +1,20 @@
 # Skills & Tools
 
-**Human approval for high-risk tools**: Set `hitl_approval.enabled: true` and
-list tools such as `write_file`, `str_replace`, or `bash` in `config.yaml` to
-pause matching calls before execution. The Web UI shows an approval card for
-each action; approval attempts execution under the existing guardrails and
-sandbox authorization, while rejection returns the reason to the agent without
-running the tool. Non-interactive runs follow `hitl_approval.non_interactive`;
-subagents and runtimes without resume support always fail closed.
+**Runtime tool approvals**: Enable `hitl_approval.enabled` to offer Ask and Auto
+independently of reasoning mode. Operators can also enable Full access in
+`hitl_approval.allowed_modes`. Ask presents the complete operation before
+execution. Auto makes a separate, tool-free review call using
+an existing model profile and requests human approval when risk or authorization
+is uncertain. Full skips individual reviews within the operator's policy.
+Mandatory guardrails and account permissions apply in every mode.
 
-Pending approvals do not expire and block new runs on the same thread until
-resolved. Long argument values may be truncated in the display, but approval
-executes the original complete arguments. The feature is disabled by default.
+Approval cards support allow, reject, edited arguments, and exact-operation chat
+grants that can be revoked from Tool permissions. Root approvals survive restart
+through checkpoints. A delegated call waits in its original execution; stopping
+its run, timing out, or restarting the worker invalidates that child approval.
+Unattended runs cannot wait for a human. The feature is disabled by default.
+Missing, empty or duplicate tool-call IDs are rejected before execution so an
+unanswerable approval cannot block the chat.
 See [HITL Tool Approval](../../backend/docs/CONFIGURATION.md#hitl-tool-approval) for
 configuration and safety semantics.
 

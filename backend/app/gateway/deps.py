@@ -865,6 +865,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
+        from deerflow.approvals.store import ApprovalStore
+
+        app.state.approval_store = ApprovalStore(sf)
 
         # The login throttle store is resolved once per process from the startup
         # snapshot and the engine above (auth.local.throttle_storage is
@@ -1288,6 +1291,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
+        approval_store=getattr(request.app.state, "approval_store", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
