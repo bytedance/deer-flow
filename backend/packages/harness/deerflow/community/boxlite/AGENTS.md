@@ -1,19 +1,16 @@
-# BoxLite provider
+# BoxLite provider (`deerflow/community/boxlite/`)
 
-- `provider.py` owns one private asyncio loop. Fresh and startup-recovered boxes
-  must execute, collect output, wait, and stop on that loop, including calls from
-  arbitrary synchronous tool workers. Do not use the greenlet sync SDK or
-  `asyncio.run()` for recovered handles.
-- Startup recovery is get-only: list DeerFlow-prefixed names and look them up
-  through the async runtime. Skip missing entries. `SimpleBox(reuse_existing=True)`
-  uses `get_or_create` and can create a VM, so it is not a get-only attach API.
-- The recovered-box adapter translates argv and environment to native lists,
-  forwards `user`, `cwd`, and `timeout_secs`, drains stdout/stderr concurrently,
-  and waits for completion before returning the public SDK `ExecResult`.
-  Preserve `SimpleBox.exec` semantics for bytes, partial stream failures, and
-  failed waits (`exit_code=-1`).
-- Keep SDK imports lazy: ordinary harness installs do not include BoxLite.
-  Provider unit tests run without it. The installed-SDK contract tests in
-  `backend/tests/test_boxlite_recovery_sdk.py` replace only the native runtime
-  boundary and require the optional extra on a supported SDK platform; they
-  must not depend on external audit files or a live hypervisor.
+- **The provider owns one private asyncio loop.** New boxes and boxes recovered
+  at startup execute, collect output, wait and stop on that loop, also when a
+  synchronous tool worker calls. Do not use the greenlet sync SDK or
+  `asyncio.run()` for a recovered handle.
+- **Startup recovery only looks up existing boxes.** It lists the
+  DeerFlow-prefixed names and skips missing entries.
+  `SimpleBox(reuse_existing=True)` can create a VM, so it is not an attach API.
+- **The recovered-box adapter keeps the semantics of `SimpleBox.exec`** for
+  bytes, partial stream failures and failed waits. It drains stdout and stderr
+  concurrently and waits for completion before it returns.
+- **Keep SDK imports lazy.** A normal harness install does not include BoxLite,
+  and the provider unit tests run without it. The installed-SDK contract tests
+  replace only the native runtime boundary. They need the optional extra, and
+  they do not need a live hypervisor.

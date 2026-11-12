@@ -383,6 +383,32 @@ Every pull request triggers the following CI workflows:
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
+### Test and diagnostics notes
+
+Backend `make test` runs four duration-balanced shards concurrently and reports
+failure if any shard fails. Use `make test TEST_JOBS=1` to run the shards sequentially.
+It excludes live external-API and blocking-I/O coverage.
+Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
+Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
+This command requires a valid root `config.yaml` and API credentials.
+It can incur API costs and create local sandboxes, artifacts, or files.
+Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+Backend blocking-IO diagnostics are available from the repository root with
+`make detect-blocking-io`: it statically scans backend business code for
+blocking IO that may run on the backend event loop, prints a concise summary,
+and writes complete JSON findings to `.deer-flow/blocking-io-findings.json`.
+The JSON includes compact review records with `priority`, `location`,
+`blocking_call`, `event_loop_exposure`, `reason`, and `code`.
+Gateway artifact serving now forces active web content types (`text/html` and XML documents such as `.xml`, `.xhtml`, and `.svg`) to download as attachments instead of inline rendering, reducing XSS risk for generated artifacts.
+
+Frontend route asset budgets can be checked with `cd frontend && pnpm
+perf:check`. The command measures `/login` from a normal production build, then
+performs a production static-demo build for the fixture-backed workspace routes.
+It measures the unique JavaScript and CSS referenced by representative routes
+and writes the detailed result to `.next/performance-results.json`.
+
 ## Code Style
 
 - **Backend (Python)**: We use `ruff` for linting and formatting. Run `make format` before committing.
