@@ -36,6 +36,8 @@ def coerce_file_size(value: Any) -> int | None:
         return value if value >= 0 else None
     if isinstance(value, float) and value.is_integer() and value >= 0:
         return int(value)
-    if isinstance(value, str) and value.strip().isdigit():
+    # isdecimal(), not isdigit(): isdigit() also accepts superscript and
+    # circled digits that int() rejects.
+    if isinstance(value, str) and value.strip().isdecimal():
         return int(value.strip())
     return None
