@@ -55,9 +55,9 @@ PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 FEISHU_STOP_TIMEOUT_SECONDS = 5
 FEISHU_WS_CLOSE_TIMEOUT_SECONDS = 2
 _PENDING_CARD_METADATA_KEY = "_feishu_pending_card_id"
-# Number of trailing ``[file]`` placeholders that came from a post's top-level
-# ``files`` array; ``receive_file`` fills those from the end of the text.
+# Number of attachments from a post's top-level ``files`` array.
 _POST_FILES_COUNT_METADATA_KEY = "_feishu_post_files_count"
+_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY = "_feishu_defer_post_file_placeholders"
 # Channel-store deadlines. ``_on_message`` runs on lark-oapi's private event loop,
 # which also carries the SDK's websocket reads, pongs and its 120s ping loop:
 # every second the bridge blocks that loop is a second the connection cannot
@@ -244,6 +244,12 @@ def _split_card_text(text: str) -> list[str]:
 
 def _is_feishu_command(text: str) -> bool:
     return is_known_channel_command(text)
+
+
+def _append_post_file_placeholders(text: str, count: int) -> str:
+    paragraphs = [text] if text else []
+    paragraphs.extend(["[file]"] * count)
+    return "\n\n".join(paragraphs)
 
 
 class FeishuChannel(Channel):
@@ -814,6 +820,7 @@ class FeishuChannel(Channel):
             return msg
         text = msg.text
         post_file_count = msg.metadata.pop(_POST_FILES_COUNT_METADATA_KEY, 0)
+        defer_post_file_placeholders = msg.metadata.pop(_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY, False)
         if not isinstance(post_file_count, int) or post_file_count < 0:
             post_file_count = 0
         search_from = 0
@@ -842,6 +849,10 @@ class FeishuChannel(Channel):
         # attachment's path. Inline rich-text attachments keep the historical
         # left-to-right matching below; that path is deliberately unchanged.
         post_file_count = min(post_file_count, len(downloaded))
+        if defer_post_file_placeholders is True:
+            # A command such as /goal has now entered the chat path. Add the
+            # generated slots to the chat text after its arguments were parsed.
+            text = _append_post_file_placeholders(text, post_file_count)
         suffix_end = len(text)
         for placeholder, virtual_path in reversed(downloaded[len(downloaded) - post_file_count :] if post_file_count else []):
             idx = text.rfind(placeholder, 0, suffix_end)
@@ -1778,6 +1789,8 @@ class FeishuChannel(Channel):
                 metadata[SOURCE_PREVIEW_METADATA_KEY] = source_preview
             if parsed.post_file_count:
                 metadata[_POST_FILES_COUNT_METADATA_KEY] = parsed.post_file_count
+                if parsed.msg_type == InboundMessageType.COMMAND:
+                    metadata[_DEFER_POST_FILE_PLACEHOLDERS_METADATA_KEY] = True
             if routing.clarification_card_id:
                 metadata[_PENDING_CARD_METADATA_KEY] = routing.clarification_card_id
 
@@ -2118,12 +2131,9 @@ class FeishuChannel(Channel):
 
         # Feishu desktop attaches files to a message as a post whose rich-text
         # body holds the caption and whose top-level ``files`` array holds the
-        # attachments. The body may be empty. Append one placeholder per
-        # downloadable attachment so ``receive_file`` can substitute the
-        # uploaded virtual paths in order; folders are not downloadable files,
-        # and an attachment already present as a rich-text element is not
-        # downloaded twice. ``post_file_count`` marks how many of the trailing
-        # placeholders came from this array so they can be filled from the end.
+        # attachments. The body may be empty. Keep these attachments last so
+        # ``receive_file`` can match their placeholders from the end. Skip
+        # folders and attachments already represented by a rich-text element.
         attachments = content.get("files") if isinstance(content, dict) else None
         if not isinstance(attachments, list):
             attachments = []
@@ -2138,7 +2148,6 @@ class FeishuChannel(Channel):
                 continue
             files_list.append({"file_key": file_key})
             post_file_count += 1
-            text = f"{text}\n\n[file]" if text else "[file]"
 
         logger.info(
             "[Feishu] parsed message: chat_id=%s, msg_id=%s, root_id=%s, parent_id=%s, thread_id=%s, chat_type=%s, sender=%s, text_len=%d",
@@ -2208,6 +2217,8 @@ class FeishuChannel(Channel):
             if _is_feishu_command(command_text):
                 parsed.msg_type = InboundMessageType.COMMAND
                 parsed.text = command_text
+            elif parsed.post_file_count:
+                parsed.text = _append_post_file_placeholders(text, parsed.post_file_count)
 
             # topic_id determines which LangGraph thread the message maps to.
             # P2P chats: topic_id=None so all messages share one thread (like Telegram DMs).

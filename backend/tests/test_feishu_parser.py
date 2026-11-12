@@ -19,6 +19,7 @@ from app.channels.message_bus import (
     PENDING_CLARIFICATION_METADATA_KEY,
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
+    InboundMessageType,
     MessageBus,
     OutboundMessage,
 )
@@ -1256,6 +1257,76 @@ def test_feishu_post_with_text_and_top_level_files_extracts_attachments():
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["text"] == "帮我核对这两张发票和采购订单，看看有没有差异。\n\n[file]\n\n[file]\n\n[file]"
         assert mock_make_inbound.call_args[1]["files"] == [{"file_key": "file_inv_a"}, {"file_key": "file_inv_b"}, {"file_key": "file_po"}]
+
+
+@pytest.mark.parametrize("code", ["bind-code", None])
+def test_feishu_post_connect_reads_only_the_caption(monkeypatch, code):
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test", "connection_repo": object()})
+    channel._main_loop = MagicMock()
+    bind = MagicMock()
+    submit = MagicMock(return_value=True)
+    monkeypatch.setattr(channel, "_bind_connection_from_connect_code", bind)
+    monkeypatch.setattr(channel, "_submit_threadsafe_coroutine", submit)
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", MagicMock())
+    caption = f"@_user_1 /connect {code}" if code else "@_user_1 /connect"
+    event = _make_post_event({"content": [[{"tag": "text", "text": caption}]], "files": [{"file_key": "file_a"}]})
+
+    channel._on_message(event)
+
+    if code:
+        bind.assert_called_once()
+        assert bind.call_args.kwargs["code"] == code
+        submit.assert_called_once()
+    else:
+        bind.assert_not_called()
+        submit.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("argument", "operation"), [("clear", "delete"), ("compare [file]", "put")])
+async def test_feishu_post_goal_parses_caption_before_loading_files(tmp_path, monkeypatch, argument, operation):
+    from app.channels.manager import ChannelManager
+
+    bus = MessageBus()
+    channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
+    schedule = MagicMock()
+    monkeypatch.setattr(channel, "_schedule_prepare_inbound", schedule)
+    event = _make_post_event(
+        {
+            "content": [[{"tag": "at", "text": "@_user_1"}, {"tag": "text", "text": f"/goal {argument}"}]],
+            "files": [{"file_key": "file_a"}, {"file_key": "file_b"}],
+        }
+    )
+    channel._on_message(event)
+    schedule.assert_called_once()
+    inbound = schedule.call_args.args[1]
+    assert inbound.msg_type == InboundMessageType.COMMAND
+
+    manager = ChannelManager(bus, JsonChannelStore(tmp_path / "bindings.json"))
+    goal_request = AsyncMock()
+    monkeypatch.setattr(manager, "_goal_request", goal_request)
+    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(return_value="thread_1"))
+    download = AsyncMock(side_effect=["/mnt/user-data/uploads/A.csv", "/mnt/user-data/uploads/B.csv"])
+    monkeypatch.setattr(channel, "_receive_single_file", download)
+
+    async def handle_chat(msg, **kwargs):
+        assert msg.text == argument
+        result = await channel.receive_file(msg, "thread_1")
+        assert result.text == f"{argument}\n\n/mnt/user-data/uploads/A.csv\n\n/mnt/user-data/uploads/B.csv"
+
+    chat = AsyncMock(side_effect=handle_chat)
+    monkeypatch.setattr(manager, "_handle_chat", chat)
+    await manager._handle_command(inbound)
+
+    goal_request.assert_awaited_once()
+    assert goal_request.await_args.args[:2] == (operation, "thread_1")
+    if operation == "put":
+        assert goal_request.await_args.kwargs["json"] == {"objective": argument}
+        chat.assert_awaited_once()
+        assert download.await_count == 2
+    else:
+        chat.assert_not_awaited()
+        download.assert_not_awaited()
 
 
 def test_feishu_files_only_post_is_not_treated_as_empty():
