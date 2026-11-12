@@ -1077,6 +1077,9 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    approval_runtime = parent_context.get("__tool_approval_runtime")
+    if approval_runtime is not None:
+        executor_kwargs["approval_runtime"] = approval_runtime.child()
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:

@@ -175,7 +175,7 @@ class DeerMem(MemoryManager):
         ``model_post_init`` (shared with direct construction).
         """
         config_dict = dict(backend_config or {})
-        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback", "judge"):
+        for key in ("should_keep_hidden_message", "trace_context_manager", "extraction_callback", "judge", "project_memory"):
             if key not in config_dict and key in host_hooks:
                 config_dict[key] = host_hooks[key]
         if "host_llm" not in config_dict:

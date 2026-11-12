@@ -1372,6 +1372,14 @@ shared (`100.64.0.0/10`, used by CGNAT and Tailscale), other non-global, or
 cloud-metadata addresses; set `allow_private_addresses: true` only when you
 intentionally point the tool at an internal target.
 
+Each Browserless tool entry reads its request timeout from `timeout_s`, with
+`timeout` as an alias when `timeout_s` is absent. The default is 30 seconds.
+Zero, negative, and non-finite values fall back to the default with a warning.
+Strings that cannot be parsed as numbers also trigger this fallback. HTTPX can
+time out immediately for non-positive values. It raises an error for NaN and
+applies no deadline for positive infinity. Browserless preserves positive finite
+values in seconds, including very large values.
+
 Both `web_fetch` (Browserless provider) and `web_capture` need a running
 Browserless instance. You can point `base_url` at [Browserless Cloud](https://www.browserless.io/)
 (set `BROWSERLESS_TOKEN`) or run one locally with Docker:
@@ -1638,6 +1646,7 @@ sandbox:
    request_timeout: 30                # management request timeout seconds
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
+   secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1645,6 +1654,10 @@ sandbox:
    environment:
       PYTHONUNBUFFERED: "1"
 ```
+
+`use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
+values default to `false`. Quoted values such as `"false"` cause a provider
+startup error.
 
 Install the optional SDK before selecting this provider:
 
@@ -1973,7 +1986,7 @@ while WSL resolves it to `/mnt/d/data/report.csv`. WSL-native files can instead
 use `/home/alice/...`. Native Windows paths can use forward slashes as above,
 or single-quoted backslashes (`'D:\data'`). Plain, unquoted YAML scalars also keep
 backslashes literal; only double-quoted scalars interpret backslash escapes.
-These are path examples; the [local development prerequisites](../../README.md#option-2-local-development)
+These are path examples; the [local development prerequisites](../../docs/guide/deployment.md#option-2-local-development)
 still apply, including the documented WSL limitations of the startup scripts.
 
 **Gateway in Docker:** both bundled Compose files mount the repository's
@@ -2257,48 +2270,88 @@ task.
 
 ## HITL Tool Approval
 
-`hitl_approval` pauses high-risk tool calls for human approval before execution.
-It is disabled by default; enabling it without a tool list changes nothing.
+Set `hitl_approval.enabled: true` to gate bound tools immediately before execution.
+The default is disabled for existing installations. When enabled, unknown tools,
+file writes, shell commands, and both personal and deployment MCP tools are
+reviewed. Concrete host read/navigation tools can run directly; an MCP server's
+read-only annotation never grants permission.
 
 ```yaml
 hitl_approval:
   enabled: true
-  tools: [write_file, str_replace, bash]
-  non_interactive: deny  # deny | allow
-  max_actions: 32  # 0 disables the approval-batch count limit
+  default_mode: ask
+  allowed_modes: [ask, auto]
+  review_unknown_tools: true
+  tools: []
+  allow_tools: []
+  deny_tools: []
+  always_ask_tools: []
+  reviewer_model: null
+  reviewer_timeout_seconds: 30
+  reviewer_max_input_bytes: 65536
+  max_payload_bytes: 524288
+  child_approval_timeout_seconds: 300
+  non_interactive: deny
+  max_actions: 32
 ```
 
-- `enabled`: master switch. `false` leaves all behavior unchanged.
-- `tools`: host-owned high-risk list edited by the operator. Unknown names log
-  a warning at assembly (a typo would otherwise silently disable approval).
-- `non_interactive`: behavior for IM channels, GitHub runs, scheduled tasks,
-  and other non-interactive entry points. `deny` rejects the call with an
-  error ToolMessage; `allow` executes it directly. Subagents and runtimes
-  assembled without resume support always reject matching calls regardless of
-  this setting.
-- `max_actions`: maximum matching tool calls in one approval batch. Batches
-  above the limit are rejected without executing any call; `0` disables this
-  count limit. The approval payload size limit still applies.
+| Mode | Behavior |
+| --- | --- |
+| `ask` | Present an approval card for operations requiring review. |
+| `auto` | Independently assess the concrete operation against user intent. Allow low/medium-risk authorized operations; ask for uncertainty or high risk; deny critical violations. |
+| `full` | Skip individual approvals within mandatory deployment and account restrictions. |
 
-Approval is **not** authorization. `read_before_write`, guardrails, and sandbox
-authorization still apply after approval — "approve to try executing", not
-"approve to guarantee execution". Approval requires a resume-capable entry:
-the Web UI and SDK support it. IM channels, GitHub runs, and scheduled tasks
-follow `non_interactive`; subagents and runtimes without resume support always
-fail closed.
+Clients select `context.tool_approval_mode` per run from the operator's `allowed_modes`.
+The default ceiling permits Ask and Auto. Full requires explicitly adding `full`
+to that operator-owned list; the client selection is not persisted server-side
+and cannot extend the ceiling.
+This setting is separate from Flash/Thinking/Pro/Ultra. `deny_tools` blocks in
+every mode. `always_ask_tools` requires a human in every mode and cannot receive
+a chat grant. Uninspectable tool implementations cannot receive chat grants.
+Implementation fingerprints include both execution callables and their callable
+adapters, so changing an asynchronous implementation requires fresh approval. `allow_tools` is an explicit operator exception. `tools` adds
+otherwise routine tools to review; disabling `review_unknown_tools` restores a
+selected-tool policy. These are trusted deployment settings, never model output.
 
-Argument summaries are display-only. Fields other than `path`, `command`, `url`,
-`old_str`, and `new_str` are truncated when they exceed the display budget; the
-summary includes a `chars omitted` marker. Approving executes the original,
-complete arguments, including content hidden by that marker. The payload-size
-limit bounds the approval summary, not the tool arguments.
+Auto uses a separate, tool-free model invocation. `reviewer_model` names an
+existing configured profile; null reuses the effective execution profile. No new
+provider or credentials are required. Review input contains original user intent,
+tool identity/schema, and complete arguments, treating tool material as untrusted
+data. Reviewer callbacks cannot enter the Agent message stream; the host records
+its token usage. Each review adds model latency and usage. Invalid output,
+timeout, provider failure, or oversized input requests human approval. In an
+unattended run these outcomes deny execution. Model review supplements the host's
+rules and sandbox; it is not a security isolation boundary.
 
-Pending approvals do not expire. While the thread remains paused at the current
-checkpoint, its approval stays resumable and blocks new runs on that thread,
-including scheduled runs, until every action is approved or rejected. Operators
-must resolve stale approvals explicitly. Disabling HITL while paused still
-allows the all-reject response as a safe escape hatch; other configuration
-changes fail closed.
+Cards show complete arguments and support approve, reject with a reason, edit
+and approve, or allow the exact operation for this chat. Edits are validated
+against the public tool schema and rerun through mandatory authorization. Injected
+runtime fields cannot be edited. Grants bind owner, thread incarnation, tool
+implementation/schema/connection, arguments, and policy. A changed MCP connection
+requires fresh approval. Revoke grants from the Tool permissions menu. SQL-backed
+deployments persist grants; memory-only deployments keep them for the process.
+
+Root pauses use native checkpoints and block fresh runs until resolved. Native
+parallel interrupts resume by their individual IDs; decisions cannot approve a
+stale proposal. Root pauses have no time expiry; policy/tool changes fail closed,
+and disabling the feature still permits the existing all-reject escape hatch.
+The full card must fit `max_payload_bytes`; oversized cards deny execution rather
+than hiding part of the operation. `max_actions` bounds calls in a model turn;
+zero removes that count limit.
+
+Delegated calls use an owner-scoped live approval endpoint and suspend the original
+child invocation. The wait expires after `child_approval_timeout_seconds`, or the
+child's execution deadline if earlier. Cancellation, lost run ownership and worker
+restart invalidate pending child approvals; they do not replay the delegated task.
+The UI polls pending child cards while the parent is active. Authenticated session
+ownership is required to answer these cards. Requests and audit records are deleted
+with their thread. Scheduled, webhook and other unattended origins cannot open a
+human wait. The legacy `non_interactive: allow` explicitly bypasses Ask for those
+root runs; it never overrides mandatory deny/ask rules, Auto uncertainty, or an
+unresumable child.
+
+Approval permits an execution attempt. Guardrails, read-before-write rules,
+sandbox restrictions and tool-account authorization still run afterward.
 
 
 ## Best Practices

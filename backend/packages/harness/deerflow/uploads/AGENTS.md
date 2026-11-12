@@ -1,60 +1,59 @@
-# Uploads
+# Uploads (`deerflow/uploads/`)
 
-`manager.py::list_files_in_dir` returns a best-effort snapshot under concurrent
-cleanup. Entry stat races (`ENOENT`, `ENOTDIR`, `ELOOP`) are skipped with debug
-logging. Directory removal or replacement by a non-directory during scanning
-returns entries already collected and logs the directory path and retained
-entry count at debug level. Permission and other operational errors propagate.
+Saves uploaded files into the thread's upload directory, converts documents to
+Markdown companions, and lists files for the agent. The route, the directory
+layout and the limits: [file upload](../../../../docs/FILE_UPLOAD.md). Atomic
+write helpers are in the [utils guide](../utils/AGENTS.md).
 
-Keep both entry and directory race coverage in
-`backend/tests/test_uploads_manager.py`.
+## Verify
 
-Staging cleanup is best-effort: warn with the directory and exception on scan
-errors, keep its files and continue elsewhere. A vanished directory stays quiet.
+```bash
+cd backend
+python -m pytest tests -q -k "upload"
+make test-blocking-io
+```
 
-Embedded first-time uploads use `publish_upload_copy` for suffix retries from the
-normalized original name, for originals and companions. With `snapshot_path`,
-capture the opened source once before retries and retain its original `fstat`
-metadata; every attempt reads the held private capture. Collision copies share
-this capture helper and publish complete staged copies under the next free name.
-Validate the requested destination before seeding copy suffixes from a directory
-snapshot, so unsafe links still fail and known collisions do not stage twice.
-Atomic no-replace links remain the concurrency boundary; retry after a lost claim.
-Never copy snapshot permission bits onto the saved upload.
-Close the caller's descriptor after capture and finish conversion workers before
-removing captures. Never reopen the caller/sandbox upload path for conversion.
-Original names already present in the initial snapshot also take a free suffix;
-never truncate an earlier upload. Default open/write helpers claim with O_EXCL
-and retry suffixes, while explicit `exclusive=True` preserves exact-name
-FileExistsError so callers can own their retry policy. Converted
-Markdown always uses no-replace publication, including across upload calls, and
-registers the actual saved name. An existing basename does not establish companion
-ownership. Apply source timestamps after new-file publication so cleanup cannot sweep an in-flight copy
-of an old source. New final names must expose complete copies.
+## Publication
 
-No-replace publication binds pre-link staging and post-link destination checks to
-the open staging descriptor. Use a no-follow hard link where supported; fallback
-identity checks narrow but do not eliminate the link-time race. Reject substituted
-regular files and symlinks, and remove a mismatched publication before reporting
-failure. Cleanup errors are logged without masking success or the original error.
-Keep publication/fallback coverage in `backend/tests/test_upload_copy_publication.py`
-and capture-through-collision cases in `backend/tests/test_client_upload_snapshot.py`.
+- **A new name never replaces an existing upload.** The atomic no-replace link is
+  the concurrency boundary. After a lost claim, retry with the next suffix. A
+  name that already existed in the first directory snapshot takes a suffix too.
+- **A final name exposes a complete copy.** Stage first, then publish.
+- **Capture the opened source once, before the retries.** Every attempt reads that
+  private capture. Do not reopen the caller's path or the sandbox path, which can
+  have changed.
+- **Do not copy the permission bits of a snapshot onto the saved upload.**
+- **Apply the source timestamps after publication**, so cleanup cannot sweep an
+  in-flight copy of an old source.
+- **Bind the checks before and after the link to the open staging descriptor.**
+  Use a no-follow hard link where the platform supports one. The fallback
+  identity check narrows the link-time race and does not remove it.
+- **Validate the requested destination before you derive suffixes** from a
+  directory snapshot, so an unsafe link still fails.
+- **Finish conversion workers before you remove a capture.**
+- **A staged `.part` file with more than one link is a published alias** and is
+  removed at any age. A lone young `.part` file can be in flight on another
+  replica and is kept.
 
-`companions.py::register_companion` publishes its ownership record through
-`utils.atomic_write.cleanup_failed_atomic_write`. Do not restore a bare
-`finally: os.unlink(staged)`: when `json.dump` or `os.replace` failed, a failing
-unlink replaced that primary error, and the old `with os.fdopen(fd, ...)` leaked
-the descriptor whenever `fdopen` itself failed. Pass the raw descriptor only
-until `fdopen` succeeds, and keep cleanup best-effort so a leftover staged
-record is reported rather than becoming the caller's error. Coverage:
-`backend/tests/test_atomic_cleanup_preserves_primary_error.py`.
+## Companions
 
-Companion ownership validates both source and Markdown device, inode, size,
-mtime and ctime. Legacy three-field source identities and four-field Markdown
-identities fail closed with distinct debug diagnostics; never backfill their
-missing timestamps on read. Re-upload/re-convert to register a fresh association.
-Keep legacy rejection, unchanged record bytes, and explicit re-registration
-coverage in `backend/tests/test_upload_companions.py`.
-These metadata checks detect ordinary edits; they do not guarantee content
-integrity against a sandbox writer that can restore timestamps. Content hashing
-is a separate enhancement.
+- **An existing file name does not prove companion ownership.** Ownership is the
+  recorded identity of the source and of the Markdown file.
+- **A legacy identity record fails closed.** Do not backfill missing timestamps on
+  read; a new upload or conversion registers a new association.
+- **The identity check detects ordinary edits only.** A sandbox writer can restore
+  timestamps, so it is not a content-integrity guarantee.
+- **Publish the ownership record with `cleanup_failed_atomic_write`.** A bare
+  `os.unlink` in `finally` replaces the primary error when the unlink fails.
+
+## Listing and cleanup
+
+- **A listing is a best-effort snapshot under concurrent cleanup.** Skip an entry
+  that vanished during the scan, and let permission and other operational errors
+  propagate.
+- **Staging cleanup continues after a scan error**, with a warning. A directory
+  that vanished is not an error.
+- **Filesystem work in handlers goes through `utils.file_io.run_file_io`**, which
+  keeps the request context.
+- **Scan a heading's closing markers linearly.** Do not run an unanchored
+  whitespace regex on a heading of unbounded length.
