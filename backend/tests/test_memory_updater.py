@@ -24,7 +24,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.updater import (
     _normalize_memory_update_fact,
     _parse_memory_update_response,
 )
-from deerflow.agents.memory.manager import LangfuseMemoryCallbacks, MemoryDuplicateFactIdError
+from deerflow.agents.memory.manager import LangfuseMemoryCallbacks
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
@@ -2066,6 +2066,7 @@ def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path, 
     on entry order because unchanged entries were skipped from the write map.
     The seeded snapshot must survive the rejection in both orders."""
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
 
     for order in ("unchanged-first", "edited-first"):
         config = DeerMemConfig(storage_path=str(tmp_path / order), retrieval_adapter="")
@@ -2080,7 +2081,7 @@ def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path, 
 
         snapshot_after_seed = updater.get_memory_data(agent_name=agent_name)
 
-        with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
+        with pytest.raises(DuplicateFactIdError, match="Duplicate fact id"):
             updater.import_memory_data(_make_memory(facts=facts), agent_name=agent_name)
 
         # The rejection must not have touched the seeded snapshot: compare
@@ -2093,6 +2094,8 @@ def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) 
     """Capacity selection runs before the storage guard and can drop one of two
     same-id entries, hiding the duplicate - validation must happen first
     (Copilot review on #8153)."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
+
     config = DeerMemConfig(storage_path=str(tmp_path / "over-capacity"), retrieval_adapter="", max_facts=10)
     storage = FileMemoryStorage(config)
     updater = MemoryUpdater(config, storage)
@@ -2102,7 +2105,7 @@ def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) 
     facts.append(_fact("second copy", "fact_dup", revision=1))
     assert len(facts) > 10  # over capacity
 
-    with pytest.raises(MemoryDuplicateFactIdError, match="Duplicate fact id"):
+    with pytest.raises(DuplicateFactIdError, match="Duplicate fact id"):
         updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
 
 
@@ -2112,6 +2115,7 @@ def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path)
     it is skipped from the prepared writes) - the updater gate alone does not
     exercise this path."""
     from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig, FileMemoryStorage
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
 
     config = DeerMemConfig(storage_path=str(tmp_path / "storage-guard"), retrieval_adapter="")
     storage = FileMemoryStorage(config)

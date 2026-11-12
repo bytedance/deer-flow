@@ -253,6 +253,35 @@ def test_import_requires_explicit_facts_to_replace_saved_memory(tmp_path, agent_
         manager.close()
 
 
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("changed_first", [False, True])
+def test_import_reports_duplicate_fact_ids_without_replacing_memory(tmp_path, agent_name: str | None, changed_first: bool) -> None:
+    app = make_authed_test_app()
+    app.include_router(memory.router)
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path), "token_counting": "char"})
+    params = {"agent_name": agent_name} if agent_name else {}
+    try:
+        with (
+            patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+            patch("app.gateway.routers.memory.get_effective_user_id", return_value="alice"),
+            TestClient(app) as client,
+        ):
+            created = client.post("/api/memory/facts", params=params, json={"content": "Keep PostgreSQL"})
+            assert created.status_code == 200
+            before = client.get("/api/memory/export", params=params).json()
+            original = before["facts"][0]
+            changed = {**original, "content": "Use SQLite instead"}
+            facts = [changed, original] if changed_first else [original, changed]
+
+            response = client.post("/api/memory/import", params=params, json={**before, "facts": facts})
+
+            assert response.status_code == 400
+            assert response.json()["detail"] == "Invalid memory import: fact IDs must be unique."
+            assert client.get("/api/memory/export", params=params).json() == before
+    finally:
+        manager.close()
+
+
 def test_import_memory_route_preserves_source_error() -> None:
     app = make_authed_test_app()
     app.include_router(memory.router)
@@ -1190,4 +1219,4 @@ def test_import_memory_route_names_duplicate_fact_id_in_detail() -> None:
                 json={"facts": [{"id": "fact_dup", "content": "x", "category": "context", "confidence": 0.9, "createdAt": "2026-03-20T00:00:00Z", "source": "manual"}]},
             )
     assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid memory import: Duplicate fact id 'fact_dup' in memory import"
+    assert response.json()["detail"] == "Invalid memory import: fact IDs must be unique."
