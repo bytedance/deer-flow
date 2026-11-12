@@ -5,6 +5,10 @@ counter, including the omission marker and retained facts. Mixed-language text
 does not rely on an average character/token ratio; the existing guaranteed-fact
 allowance remains unchanged.
 
+Automatic DeerMem summary updates accept only nonempty strings. An invalid
+summary value preserves the existing section and its timestamp while valid facts
+and other summaries in the same extraction response can still be saved.
+
 Settings > Appearance > Language also supplies the preferred language for replies
 and new automatic DeerMem facts and summary updates on subsequent chat turns and
 replays. Explicit user language requests take precedence. Existing memories are
