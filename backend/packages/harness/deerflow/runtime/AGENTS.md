@@ -42,6 +42,10 @@ make test-blocking-io
   effective schema. It preserves mode gates, parentage and pending writes.
 - **Delta resume and rollback rewrite the current head.** They do not fork.
   Reject a missing tuple or pending sends before the first write.
+- **Graph writes follow the active run lease.** `RunOwnedSaver` checks each write.
+  PostgreSQL writes lock the run row in the same transaction as the checkpoint.
+  Keep the source saver lock while this transaction uses its connection.
+  The run row and checkpoint tables must use the same PostgreSQL schema.
 
 ## Admission and terminal commit
 

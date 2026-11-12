@@ -1033,6 +1033,10 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+    if checkpointer is not None and run_manager.heartbeat_enabled:
+        from deerflow.runtime.checkpointer.run_owned_saver import RunOwnedSaver
+
+        checkpointer = RunOwnedSaver(checkpointer, run_manager, record)
 
     from deerflow_extension_api import ExtensionData, TaskInfo
 
