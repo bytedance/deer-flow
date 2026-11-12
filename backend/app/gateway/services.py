@@ -2502,7 +2502,7 @@ async def start_run(
         from deerflow.approvals.policy import resolve_mode
 
         try:
-            resolve_mode(get_app_config().hitl_approval, config.get("context") or {})
+            resolve_mode(app_config.hitl_approval, config.get("context") or {})
         except (ValueError, TypeError) as exc:
             raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
