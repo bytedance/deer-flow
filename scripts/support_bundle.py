@@ -279,6 +279,14 @@ def _expand_launcher_variables(value: str, environment: dict[str, str]) -> str:
     return re.sub(r"\\\$|\$\$|\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))", replace, value)
 
 
+def _expand_launcher_user(value: str, environment: dict[str, str]) -> str:
+    """Expand ``~`` using HOME from the parsed dotenv scope."""
+    if value == "~" or value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
+        home = environment.get("HOME", os.path.expanduser("~"))
+        return home + value[1:]
+    return os.path.expanduser(value)
+
+
 def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
     """Resolve launcher-relative runtime paths without exporting .env secrets."""
     env_file = project_root / ".env"
@@ -304,7 +312,7 @@ def _thread_data_roots(project_root: Path) -> list[tuple[Path, str]]:
                     value = binding.value
                     if quote != "'":
                         if quote != '"':
-                            value = os.path.expanduser(value)
+                            value = _expand_launcher_user(value, environment)
                         value = _expand_launcher_variables(value, environment)
                     environment[binding.key] = value
                     if binding.key in names:

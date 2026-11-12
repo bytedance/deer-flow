@@ -89,6 +89,14 @@ def _expand_references(value: str, environment: Mapping[str, str]) -> str:
     return _REFERENCE.sub(replace, value)
 
 
+def _expand_user(value: str, environment: Mapping[str, str]) -> str:
+    """Expand ``~`` using the HOME value parsed from the same dotenv file."""
+    if value == "~" or value.startswith("~/") or (os.name == "nt" and value.startswith("~\\")):
+        home = environment.get("HOME", os.path.expanduser("~"))
+        return home + value[1:]
+    return os.path.expanduser(value)
+
+
 def parse_dotenv(text: str, environment: Mapping[str, str]) -> list[tuple[str, str]]:
     """Return the `(name, value)` assignments in `text`, in file order."""
     scope = dict(environment)
@@ -138,7 +146,7 @@ def parse_dotenv(text: str, environment: Mapping[str, str]) -> list[tuple[str, s
             continue
         if quote != "'":
             if quote != '"':
-                value = os.path.expanduser(value)
+                value = _expand_user(value, scope)
             value = _expand_references(value, scope)
         scope[key] = value
         assignments.append((key, value))

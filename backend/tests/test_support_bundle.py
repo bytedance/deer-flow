@@ -1075,6 +1075,23 @@ def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, va
     assert str(user_home) not in json.dumps(summary)
 
 
+def test_dotenv_tilde_uses_home_declared_earlier(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    dotenv_home = tmp_path / "dotenv-home"
+    (project / ".env").write_text(
+        f"HOME={dotenv_home}\nDEER_FLOW_HOME=~/runtime-data\n",
+        encoding="utf-8",
+    )
+    home = dotenv_home / "runtime-data"
+    (home / "threads" / "tilde-home" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home"))
+
+    summary = support_bundle.collect_thread_summary(project, "tilde-home")
+
+    assert summary["found"] is True
+
+
 @pytest.mark.parametrize("dotenv_home", ["", "stale-data"])
 def test_dotenv_empty_home_also_overrides_shell(tmp_path, monkeypatch, dotenv_home):
     project = tmp_path / "checkout"
