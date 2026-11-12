@@ -58,6 +58,13 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **subagents:** Ordinary `task` calls deliver progress and terminal results
+  through publication notifications instead of five-second polling. The waiting
+  deadline stays fixed, and result delivery does not wait for background cleanup.
+  ([#8169](https://github.com/bytedance/deer-flow/pull/8169))
+
 ### Fixed
 
 - **channels:** A WeCom group command that follows the bot mention now runs as a

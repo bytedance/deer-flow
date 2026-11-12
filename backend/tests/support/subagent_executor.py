@@ -1,4 +1,4 @@
-"""Import the real subagent executor behind the suite's cycle-breaking doubles."""
+"""Shared result doubles and isolated imports for subagent executor tests."""
 
 import importlib
 import sys
@@ -18,6 +18,13 @@ _MOCKED_MODULE_NAMES = [
     "deerflow.models",
     "deerflow.skills.storage",
 ]
+
+
+class CompletedResult(SimpleNamespace):
+    """An already-completed result for tests without a running producer."""
+
+    def snapshot(self, after_message_index=0):
+        return SimpleNamespace(**vars(self), revision=0, message_start_index=0, message_count=len(self.ai_messages))
 
 
 def default_subagent_app_config():
