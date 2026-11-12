@@ -10,10 +10,15 @@ with a null value, so chaining ``.get``/``.strip`` on it raised
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
-from app.channels.message_bus import MessageBus
+import pytest
+
+from app.channels.message_bus import InboundMessageType, MessageBus
 from app.channels.wecom import WeComChannel
 
 
@@ -70,3 +75,100 @@ class TestOnWsTextQuoteParsing:
         }
         _run(ch._on_ws_text(frame))
         ch._publish_ws_inbound.assert_called_once_with(frame, "T\nQuote message: Q")
+
+
+class TestGroupMentionBeforeCommand:
+    """WeCom keeps the bot mention in group text, so "@bot /new" has to be
+    classified as a command and reach the dispatcher without the mention.
+
+    Feishu (#4229) and DingTalk (#4724) already strip a leading mention on the
+    command path; ordinary chat must keep its mentions so the agent still sees
+    who was addressed.
+    """
+
+    @staticmethod
+    def _stub_aibot(monkeypatch: pytest.MonkeyPatch) -> None:
+        """Make ``_publish_ws_inbound`` run without the optional WeCom SDK."""
+        sdk = types.ModuleType("aibot")
+        sdk.generate_req_id = lambda prefix="": f"{prefix}-test"
+        monkeypatch.setitem(sys.modules, "aibot", sdk)
+
+    @staticmethod
+    def _live_channel() -> tuple[WeComChannel, MessageBus]:
+        bus = MessageBus()
+        channel = WeComChannel(bus=bus, config={})
+        channel._ws_client = SimpleNamespace(
+            reply=AsyncMock(),
+            reply_stream=AsyncMock(),
+            send_message=AsyncMock(),
+        )
+        return channel, bus
+
+    @staticmethod
+    def _group_frame(text: str) -> dict[str, Any]:
+        return {
+            "body": {
+                "msgid": "msg-mention",
+                "aibotid": "bot-1",
+                "chatid": "wr-team",
+                "chattype": "group",
+                "from": {"userid": "alice"},
+                "msgtype": "text",
+                "text": {"content": text},
+            }
+        }
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("@RobotA /new", "/new"),
+            ("@RobotA @_user_2 /status", "/status"),
+        ],
+    )
+    def test_leading_mention_before_command_is_stripped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        text: str,
+        expected: str,
+    ) -> None:
+        self._stub_aibot(monkeypatch)
+        channel, bus = self._live_channel()
+
+        _run(channel._on_ws_text(self._group_frame(text)))
+
+        inbound = bus.get_inbound_nowait()
+        assert inbound.msg_type is InboundMessageType.COMMAND
+        assert inbound.text == expected
+
+    def test_plain_chat_keeps_its_mention(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._stub_aibot(monkeypatch)
+        channel, bus = self._live_channel()
+
+        _run(channel._on_ws_text(self._group_frame("@RobotA hello there")))
+
+        inbound = bus.get_inbound_nowait()
+        assert inbound.msg_type is InboundMessageType.CHAT
+        assert inbound.text == "@RobotA hello there"
+
+    def test_member_mention_before_a_command_also_classifies(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Accepted tradeoff: a member's mention looks the same as the bot's.
+
+        WeCom text mentions are display names, so the frame's ``aibotid`` cannot
+        be matched against them; ``@alice /status`` is therefore classified as
+        the ``/status`` command, exactly as Feishu and DingTalk behave. Pinned
+        here so a future change to mention matching shows up in review.
+        """
+        self._stub_aibot(monkeypatch)
+        channel, bus = self._live_channel()
+
+        _run(channel._on_ws_text(self._group_frame("@alice /status")))
+
+        inbound = bus.get_inbound_nowait()
+        assert inbound.msg_type is InboundMessageType.COMMAND
+        assert inbound.text == "/status"
