@@ -26,6 +26,10 @@
 
 ### 修复
 
+- **通道：** WeCom 群聊中 `@机器人 /new` 这类带提及的命令现在按命令执行。WeCom 会把提及保留在
+  正文里，而命令识别要求裸的前导 `/`，于是群里的 `/new`、`/status` 被当成聊天轮次。现在仅在命令
+  识别时跳过前导提及；普通聊天保留提及，`/connect` 行为不变。与飞书、钉钉的处理一致。([#8118])
+  
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
   `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
   （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
@@ -12866,4 +12870,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
