@@ -76,6 +76,10 @@ make install
 make dev
 ```
 
+Run `make doctor` after setting model credentials. It reports obvious placeholder
+API keys as incomplete configuration; replace them with real keys before testing
+model calls.
+
 Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
