@@ -45,7 +45,7 @@ class RunOwnedSaver(BaseCheckpointSaver):
     async def _assert_owned(self, config: RunnableConfig) -> None:
         if config.get("configurable", {}).get("thread_id") != self._record.thread_id:
             raise CheckpointOwnershipLostError("Checkpoint thread differs from the owned run")
-        if not await self._run_manager.owns_active_admission(self._record):
+        if not await self._run_manager.owns_active_admission(self._record, reason="Checkpoint write lost its active run lease."):
             raise CheckpointOwnershipLostError("Run lost checkpoint write ownership")
 
     @asynccontextmanager
@@ -77,7 +77,13 @@ class RunOwnedSaver(BaseCheckpointSaver):
                 WHERE run_id = %s AND thread_id = %s AND owner_worker_id = %s
                   AND run_incarnation IS NOT DISTINCT FROM %s
                   AND producer_epoch IS NOT DISTINCT FROM %s
-                  AND status IN ('pending', 'running')
+                  AND (
+                    status IN ('pending', 'running')
+                    OR (
+                      status = 'interrupted' AND cancel_action = 'rollback'
+                      AND operation_kind = 'run' AND %s
+                    )
+                  )
                   AND lease_expires_at > clock_timestamp()
                 """,
                 (
@@ -86,6 +92,7 @@ class RunOwnedSaver(BaseCheckpointSaver):
                     self._record.owner_worker_id,
                     self._record.run_incarnation,
                     self._record.producer_epoch,
+                    self._record.rollback_finalization_pending and not self._record.ownership_lost,
                 ),
             )
             if await cursor.fetchone() is None:

@@ -47,6 +47,11 @@ make test-blocking-io
   Keep the source saver lock while this transaction uses its connection.
   Check lease expiry with `clock_timestamp()` after the run row lock.
   The run row and checkpoint tables must use the same PostgreSQL URL and schema.
+- **Finish run writes before terminal commit.** Keep the run row active through
+  duration writes. Rollback may write after `interrupted` only for the matching
+  rollback request and live lease. Goal cleanup and interrupted titles use a new
+  `checkpoint_write` reservation after terminal commit. Fence those writes with
+  the reservation's run identity.
 
 ## Admission and terminal commit
 

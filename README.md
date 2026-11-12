@@ -137,7 +137,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
 - [Changelog](CHANGELOG.md) - Release notes
 
-With PostgreSQL run heartbeats, a legacy `checkpointer` override must match the database URL and schema.
+Run heartbeats require PostgreSQL for both runs and checkpoints. A legacy `checkpointer` override must match the database URL and schema. The Gateway rejects other storage combinations at startup.
 
 ## ⚠️ Security Notice
 

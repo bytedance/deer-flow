@@ -280,12 +280,10 @@ def _validate_checkpoint_lease_storage(config: AppConfig) -> None:
     if ownership is None or not ownership.heartbeat_enabled:
         return
     checkpointer = getattr(config, "checkpointer", None)
-    if checkpointer is None:
-        return
     database = config.database
     if database.backend != "postgres":
-        if checkpointer.type == "postgres":
-            raise SystemExit("PostgreSQL checkpoint lease fencing requires database.backend='postgres'.")
+        raise SystemExit("PostgreSQL checkpoint lease fencing requires database.backend='postgres'.")
+    if checkpointer is None:
         return
     if checkpointer.type != "postgres":
         raise SystemExit("PostgreSQL checkpoint lease fencing requires checkpointer.type='postgres'.")
@@ -304,7 +302,10 @@ def _validate_checkpoint_lease_storage(config: AppConfig) -> None:
             raise SystemExit("PostgreSQL checkpoint lease fencing requires valid database URLs.") from None
         if url.drivername not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"}:
             raise SystemExit("PostgreSQL checkpoint lease fencing requires PostgreSQL database URLs.")
-        return url.set(drivername="postgresql")
+        return (
+            url.set(drivername="postgresql", port=url.port or 5432, query={}),
+            tuple(sorted(url.query.items())),
+        )
 
     if identity(checkpointer.connection_string) != identity(database.postgres_url):
         raise SystemExit("PostgreSQL checkpoint lease fencing requires one database URL for database and checkpointer.")

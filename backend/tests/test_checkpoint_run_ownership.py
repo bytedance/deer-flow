@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy import text, update
@@ -21,10 +22,11 @@ from deerflow.persistence.postgres_schema import dsn_with_search_path
 from deerflow.persistence.postgres_url import normalize_asyncpg_url
 from deerflow.persistence.run.model import CompletedRunSnapshotRow, RunChangeClockRow, RunProducerPolicyRow, RunRow
 from deerflow.persistence.run.sql import RunRepository
-from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, goal
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 from deerflow.runtime.checkpointer.run_owned_saver import CheckpointOwnershipLostError, RunOwnedSaver
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.runs.worker import RunContext, _clear_completed_goal, _GoalCompletionCandidate, run_agent
 
 
 class _State(TypedDict):
@@ -207,7 +209,7 @@ async def _exercise_takeover(saver, *, detect_local_loss: bool) -> None:
             assert not old_run.ownership_lost
 
         release.set()
-        await asyncio.wait_for(old_run.task, 5)
+        await asyncio.wait_for(asyncio.gather(old_run.task, return_exceptions=True), 5)
         after = await checkpointer.aget_tuple(config)
         assert after is not None
         assert after.checkpoint["id"] == before.checkpoint["id"]
@@ -337,3 +339,235 @@ async def test_rollback_checkpoint_delete_requires_active_lease(saver) -> None:
     after = await checkpointer.aget_tuple(config)
     assert after is not None
     assert after.checkpoint["id"] == preserved.checkpoint["id"]
+
+
+@pytest.mark.anyio
+async def test_real_rollback_restores_checkpoint_after_interrupted_status(saver) -> None:
+    checkpointer = saver.checkpointer
+    manager = RunManager(
+        store=saver.store,
+        worker_id="rollback-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-real-rollback-" + uuid4().hex, user_id="alice")
+    config = {"configurable": {"thread_id": run.thread_id}}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def baseline(state: _State) -> _State:
+        return {"value": "before"}
+
+    async def blocked(state: _State) -> _State:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+        return {"value": "during"}
+
+    await _graph(checkpointer, baseline).ainvoke({"value": "before"}, config=config)
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    run.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            run,
+            ctx=RunContext(checkpointer=checkpointer, event_store=None),
+            agent_factory=lambda **kwargs: _graph(checkpointer, blocked),
+            graph_input={"value": "during"},
+            config=config,
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await manager.cancel(run.run_id, action="rollback")
+        row = await saver.store.get(run.run_id, user_id="alice")
+        assert row["status"] == "interrupted"
+        assert row["cancel_action"] == "rollback"
+        release.set()
+        await asyncio.wait_for(asyncio.shield(run.task), 5)
+        final = await checkpointer.aget_tuple(config)
+        assert final is not None
+        assert final.checkpoint["channel_values"]["value"] == "before"
+        assert (await saver.store.get(run.run_id, user_id="alice"))["status"] == "error"
+    finally:
+        release.set()
+        if not run.task.done():
+            run.task.cancel()
+        await asyncio.gather(run.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_duration_write_precedes_terminal_without_event_store(saver, monkeypatch) -> None:
+    import deerflow.runtime.runs.worker as worker_module
+
+    manager = RunManager(
+        store=saver.store,
+        worker_id="duration-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-duration-" + uuid4().hex, user_id="alice")
+    config = {"configurable": {"thread_id": run.thread_id}}
+    original = worker_module._persist_run_duration
+    observed = []
+
+    async def checked_duration(**kwargs):
+        row = await saver.store.get(run.run_id, user_id="alice")
+        observed.append(row["status"])
+        await original(**kwargs)
+
+    monkeypatch.setattr(worker_module, "_persist_run_duration", checked_duration)
+
+    async def node(state: _State) -> _State:
+        return {"value": "done"}
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    run.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            run,
+            ctx=RunContext(checkpointer=saver.checkpointer, event_store=None),
+            agent_factory=lambda **kwargs: _graph(saver.checkpointer, node),
+            graph_input={"value": "done"},
+            config=config,
+        )
+    )
+    await asyncio.wait_for(asyncio.shield(run.task), 5)
+    checkpoint = await saver.checkpointer.aget_tuple(config)
+    assert checkpoint is not None
+    row = await saver.store.get(run.run_id, user_id="alice")
+    assert row["status"] == "success", row
+    assert observed == ["running"]
+    assert checkpoint.metadata.get("run_durations", {}).get(run.run_id) is not None
+
+
+@pytest.mark.anyio
+async def test_completed_goal_uses_new_operation_after_terminal(saver) -> None:
+    if saver.schema is None:
+        pytest.skip("This test needs PostgreSQL")
+    manager = RunManager(
+        store=saver.store,
+        worker_id="goal-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-goal-cleanup-" + uuid4().hex, user_id="alice")
+    expected_goal = goal.build_goal_state("Complete the task")
+    await goal.write_thread_goal(saver.checkpointer, run.thread_id, expected_goal, create_if_missing=True)
+    await manager.set_status(run.run_id, RunStatus.running)
+    await manager.set_status(run.run_id, RunStatus.success)
+    run.finalizing = True
+    assert (await saver.store.get(run.run_id, user_id="alice"))["status"] == "success"
+    candidate = _GoalCompletionCandidate(
+        goal=expected_goal,
+        conversation_signature=goal.visible_conversation_signature([]),
+        evaluation={"satisfied": True, "blocker": "none", "reason": "Complete"},
+    )
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("goal_evaluator", "full"), saver.checkpointer, mode="full")
+    bridge = SimpleNamespace(publish=AsyncMock())
+    await _clear_completed_goal(
+        candidate=candidate,
+        record=run,
+        run_manager=manager,
+        bridge=bridge,
+        accessor=accessor,
+        checkpointer=saver.checkpointer,
+    )
+    assert await goal.read_thread_goal(saver.checkpointer, run.thread_id) is None
+    bridge.publish.assert_awaited()
+
+
+@pytest.mark.anyio
+async def test_interrupted_title_uses_new_operation_after_terminal(saver) -> None:
+    if saver.schema is None:
+        pytest.skip("This test needs PostgreSQL")
+    manager = RunManager(
+        store=saver.store,
+        worker_id="title-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-interrupted-title-" + uuid4().hex, user_id="alice")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked(state: _State) -> _State:
+        entered.set()
+        await release.wait()
+        return {"value": "interrupted"}
+
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    run.task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            run,
+            ctx=RunContext(checkpointer=saver.checkpointer, event_store=None),
+            agent_factory=lambda **kwargs: _graph(saver.checkpointer, blocked),
+            graph_input={"value": "started", "messages": [HumanMessage(content="Name this interrupted task")]},
+            config={"configurable": {"thread_id": run.thread_id}},
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await manager.cancel(run.run_id, action="interrupt")
+        await asyncio.wait_for(asyncio.shield(run.task), 5)
+        checkpoint = await saver.checkpointer.aget_tuple({"configurable": {"thread_id": run.thread_id}})
+        assert checkpoint is not None
+        assert (await saver.store.get(run.run_id, user_id="alice"))["status"] == "interrupted"
+        assert checkpoint.checkpoint["channel_values"].get("title")
+    finally:
+        release.set()
+        if not run.task.done():
+            run.task.cancel()
+        await asyncio.gather(run.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_checkpoint_lease_loss_reports_checkpoint_context() -> None:
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="diagnostic-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-reason-" + uuid4().hex, user_id="alice")
+    await manager.set_status(run.run_id, RunStatus.running)
+    store._runs[run.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    owned = RunOwnedSaver(InMemorySaver(), manager, run)
+    with pytest.raises(CheckpointOwnershipLostError):
+        await owned.aput({"configurable": {"thread_id": run.thread_id}}, {}, {}, {})
+    assert run.ownership_lost
+    assert run.error == "Checkpoint write lost its active run lease."
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("local_pending", "cancel_action"), [(False, "rollback"), (True, "interrupt")])
+async def test_interrupted_checkpoint_write_requires_rollback_authority(saver, local_pending, cancel_action) -> None:
+    if saver.schema is None:
+        pytest.skip("This test needs PostgreSQL")
+    manager = RunManager(
+        store=saver.store,
+        worker_id="rollback-check-owner",
+        run_ownership_config=RunOwnershipConfig(lease_seconds=30, grace_seconds=1, heartbeat_enabled=True),
+    )
+    run = await manager.create_or_reject("checkpoint-rollback-authority-" + uuid4().hex, user_id="alice")
+    await manager.set_status(run.run_id, RunStatus.running)
+    config = {"configurable": {"thread_id": run.thread_id}}
+
+    async def node(state: _State) -> _State:
+        return state
+
+    await _graph(saver.checkpointer, node).ainvoke({"value": "preserve"}, config=config)
+    before = await saver.checkpointer.aget_tuple(config)
+    assert before is not None
+    async with saver.session_factory() as session:
+        await session.execute(update(RunRow).where(RunRow.run_id == run.run_id).values(status="interrupted", cancel_action=cancel_action))
+        await session.commit()
+    run.rollback_finalization_pending = local_pending
+    stale = dict(before.checkpoint)
+    stale["id"] = str(uuid4())
+    with pytest.raises(CheckpointOwnershipLostError):
+        await RunOwnedSaver(saver.checkpointer, manager, run).aput(before.config, stale, before.metadata, {})
+    after = await saver.checkpointer.aget_tuple(config)
+    assert after is not None
+    assert after.checkpoint["id"] == before.checkpoint["id"]

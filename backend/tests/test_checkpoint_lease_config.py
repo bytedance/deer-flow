@@ -49,3 +49,45 @@ def test_mismatched_lease_storage_fails_before_startup(changes, reason) -> None:
 def test_lease_storage_check_is_inert_without_heartbeat() -> None:
     config = _config(checkpoint_schema="other", heartbeat=False)
     _validate_checkpoint_lease_storage(config)
+
+
+@pytest.mark.parametrize("checkpoint_type", ["memory", "sqlite"])
+def test_heartbeat_rejects_non_atomic_checkpoint_storage(checkpoint_type) -> None:
+    config = _config(database_backend="sqlite", checkpoint_type=checkpoint_type)
+    with pytest.raises(SystemExit, match="PostgreSQL"):
+        _validate_checkpoint_lease_storage(config)
+
+
+def test_heartbeat_rejects_inferred_sqlite_checkpoint_storage() -> None:
+    config = _config(database_backend="sqlite")
+    config.checkpointer = None
+    with pytest.raises(SystemExit, match="PostgreSQL"):
+        _validate_checkpoint_lease_storage(config)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_url",
+    [
+        "postgresql+psycopg://user:pass@localhost/app",
+        "postgresql://user:pass@localhost:5432/app",
+        "postgresql://user:pass@localhost/app?application_name=worker&sslmode=require",
+    ],
+)
+def test_equivalent_checkpoint_urls_pass(checkpoint_url) -> None:
+    database_url = "postgresql://user:pass@localhost:5432/app"
+    if "?" in checkpoint_url:
+        database_url += "?sslmode=require&application_name=worker"
+    _validate_checkpoint_lease_storage(_config(database_url=database_url, checkpoint_url=checkpoint_url))
+
+
+@pytest.mark.parametrize(
+    "checkpoint_url",
+    [
+        "postgresql://user:pass@127.0.0.1/app",
+        "postgresql://other:pass@localhost/app",
+        "postgresql://user:pass@localhost/app?sslmode=disable",
+    ],
+)
+def test_distinct_checkpoint_urls_fail(checkpoint_url) -> None:
+    with pytest.raises(SystemExit, match="database URL"):
+        _validate_checkpoint_lease_storage(_config(checkpoint_url=checkpoint_url))
