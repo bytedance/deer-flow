@@ -60,6 +60,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
+  adapter capped image uploads at 2 MB — the voice limit in the same protocol —
+  so a larger chart was skipped before upload and the turn arrived without it.
+  The cap now matches the platform's 10 MB for images; the 20 MB file limit is
+  unchanged. ([#8174])
+
 - **threads:** Deleting a conversation on Windows no longer fails with
   `Failed to delete local thread data.` when the workspace holds a file whose
   path exceeds `MAX_PATH`. The thread directory is now resolved through the
@@ -16341,3 +16347,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
+[#8174]: https://github.com/bytedance/deer-flow/pull/8174
