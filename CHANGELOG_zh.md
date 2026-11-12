@@ -26,6 +26,15 @@
 
 ### 修复
 
+- **通道：** WeCom 群聊中 `@机器人 /new` 这类带提及的命令现在按命令执行。WeCom 会把提及保留在
+  正文里，而命令识别要求裸的前导 `/`，于是群里的 `/new`、`/status` 被当成聊天轮次。现在仅在命令
+  识别时跳过前导提及；普通聊天保留提及，`/connect` 行为不变。与飞书、钉钉的处理一致。([#8118])
+  
+- **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
+  `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
+  （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
+  ([#8126])
+
 - **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
   接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
   行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
@@ -371,13 +380,12 @@
   选择器缺失、是目录或不可读时会在调用 Docker 之前直接失败，而文件删除后
   `make down` 仍能停止整个栈；不设置或为空的选择器保持可选的仓库根 `.env`
   默认值。([#6522])
-- **HITL：** 可选的高风险工具调用人工审批。`hitl_approval.tools`（由宿主管理）通过
-  LangGraph `interrupt()` 暂停匹配的调用，运行进入 `waiting_for_input`，Web UI 展示
-  带逐字段参数摘要的审批卡片。批准后执行调用；拒绝则不执行，并将原因返回给模型。
-  IM 渠道、GitHub 运行和定时任务遵循 `hitl_approval.non_interactive`（默认 `deny`，
-  可选 `allow`）。子代理及不支持 resume 的运行环境无论该设置如何，始终拒绝匹配的
-  调用。`hitl_approval.max_actions` 配置审批批次的调用数量上限（默认 32，0 表示关闭）。
-  默认关闭；`config_version` 65。
+- **HITL：** 新增独立于推理模式的 Ask、Auto、Full 工具权限模式。Auto 通过单独的
+  无工具模型调用审核具体操作，默认复用现有模型配置；不确定或高风险操作转人工审批。
+  卡片展示完整参数，支持批准、拒绝、修改参数及可撤销的会话精确授权。主代理审批通过
+  checkpoint 支持重启恢复；交互式子代理通过属主限定的通道等待，并处理取消和过期。
+  所有模式均保留部署规则和账户权限，个人/平台 MCP 连接、参数和策略均参与授权绑定。
+  默认关闭；`config_version` 66。
 
 - **MCP：** 按未变更的服务器缓存完成包装的工具，仅在绑定对账后重新发现缺失或配置
   发生变化的服务器。将成功但未发现工具的结果与发现失败分开保存，并保留代际、共享
@@ -12862,3 +12870,5 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126

@@ -1659,7 +1659,6 @@ class RunManager:
                 # terminal transition. Durability remains gated separately below.
                 self._acknowledge_terminal(record, outcome, staged_revision)
                 record.terminal_status_persisted = self._store is None
-            payload = self._store_put_payload(record)
 
         async def restore_local_record() -> None:
             if record.store_only:
@@ -1675,8 +1674,8 @@ class RunManager:
                     record.terminal_status_persisted = previous_terminal_persisted
                     record.terminal_commit_pending = previous_terminal_commit_pending
 
-        persisted_snapshots: list[dict[str, Any] | None] = []
         answered_updated_at = record.updated_at
+        answered_payload = self._store_put_payload(record)
         try:
             if self._store is not None:
                 answered = await self._call_store_with_retry(
@@ -1685,37 +1684,33 @@ class RunManager:
                     lambda: self._store.answer_approval(
                         record.run_id,
                         metadata=metadata,
-                        answered_updated_at=record.updated_at,
+                        answered_updated_at=answered_updated_at,
                         expected_request_id=expected_request_id,
                     ),
                 )
                 if not answered:
                     await restore_local_record()
                     return None
-            persisted = (
-                True
-                if record.store_only
-                else await self._persist_snapshot_with_reconciliation(
-                    record.run_id,
-                    payload,
-                    on_persisted=persisted_snapshots.append,
-                )
-            )
+            # The fenced answer CAS atomically persists every field changed by
+            # this transition: status, approval metadata, and updated_at. A
+            # subsequent full-row put is redundant and could fail after the
+            # durable pause has already been consumed, or overwrite a peer.
         except Exception as exc:
             await restore_local_record()
             raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered") from exc
         except BaseException:
             await restore_local_record()
             raise
-        if not persisted:
-            await restore_local_record()
-            raise RunStartupError(f"Failed to mark approval run {record.run_id} as answered")
         if not record.store_only:
             async with self._lock:
                 if self._runs.get(record.run_id) is record and record.terminal_status_revision == staged_revision and record.terminal_commit_proof == outcome:
-                    record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else persisted
-        if persisted_snapshots and persisted_snapshots[-1] is not None:
-            answered_updated_at = persisted_snapshots[-1]["updated_at"]
+                    record.terminal_status_persisted = self._has_final_terminal_ack(record) if self.heartbeat_enabled and self._store is not None else True
+        # Reconcile a worker update made during the CAS, without replaying the
+        # older answered snapshot. The approval answer itself is already durable.
+        async with self._lock:
+            latest_payload = self._store_put_payload(record)
+        if not record.store_only and latest_payload != answered_payload:
+            await self._persist_snapshot_with_reconciliation(record.run_id, latest_payload)
         return ApprovalAnswerHandle(
             run_id=record.run_id,
             original_metadata=previous_metadata,

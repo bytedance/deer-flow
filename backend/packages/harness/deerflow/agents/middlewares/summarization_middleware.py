@@ -17,6 +17,7 @@ from typing import Any, Protocol, override, runtime_checkable
 from deerflow_extension_api import CompactionEvent, ExtensionData, canonical_hash, task_store_from_runtime
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
+from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, SystemMessage, get_buffer_string
 from langchain_core.runnables import RunnableBinding
 from langgraph.config import get_config
@@ -50,6 +51,18 @@ _SUMMARY_CHUNK_RETRY_MAX_ENTRIES = 128
 _SUMMARY_CHUNK_RETRY_CACHE: OrderedDict[str, tuple[float, int]] = OrderedDict()
 _SUMMARY_CHUNK_RETRY_LOCK = threading.Lock()
 _SHORTENED_SUMMARY_MARKER = "\n[summary shortened]\n"
+_DEERFLOW_SUMMARY_PROMPT = DEFAULT_SUMMARY_PROMPT.replace(
+    "</instructions>",
+    "## ACTIVE USER REQUIREMENTS\n\n"
+    "Record the user's current scope, conditions for acting, protected content, and later explicit revisions. "
+    "Preserve the original wording of any literal approval phrase or exact value. "
+    "Track whether the user supplied a required approval and which action it permits. "
+    "Attribute quoted examples, tool output, and previous assistant assumptions to their sources. "
+    "Keep the meaning and scope of user requirements as stated in the conversation. "
+    'Use "None" when there are no additional active user requirements.\n\n\n'
+    "</instructions>",
+    1,
+)
 
 
 def _document_summary_text(block: object) -> str | None:
@@ -1356,9 +1369,8 @@ def create_summarization_middleware(
         "trigger": trigger,
         "keep": keep_tuple,
         "trim_tokens_to_summarize": config.trim_tokens_to_summarize,
+        "summary_prompt": _DEERFLOW_SUMMARY_PROMPT if config.summary_prompt is None else config.summary_prompt,
     }
-    if config.summary_prompt is not None:
-        kwargs["summary_prompt"] = config.summary_prompt
 
     hooks: list[BeforeSummarizationHook] = []
     if resolved_app_config.memory.enabled and not skip_memory_flush:
