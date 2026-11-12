@@ -263,3 +263,22 @@ When Gateway workers share file storage, concurrent managed-subagent creates for
 Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
+
+## Tool restrictions
+
+Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations.
+
+Framework-generated discovery helpers (`tool_search` and `describe_skill`) are
+an exception to these name-level allowlists and denylists. Adding either name to
+`disallowed_tools` does not remove the generated helper. Each helper's catalog
+remains limited to admitted tools or skills.
+
+Before creating the agent graph, a final check verifies the explicit tool list
+and middleware declarations against the subagent's name policy. A tool added
+after the earlier filtering passes stops the build if it violates that policy.
+The error identifies whether the tool is listed in `disallowed_tools` or missing
+from the `tools` allowlist, so the corresponding configuration can be corrected.
+Discovery exemptions apply only to the actual framework-generated helper
+instances; an ordinary tool with the same name still follows the name policy.
+
+Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.

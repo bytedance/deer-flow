@@ -98,6 +98,14 @@ This section accumulates work toward the **2.3.0** milestone
   only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
   and DingTalk handling. ([#8118])
   
+- **subagents:** Apply tool allowlists and denylists to middleware-declared
+  tools even when global authorization is disabled, including the default
+  denial of `task`. Restricted subagents reject non-Sequence declarations
+  explicitly, and invalid declarations report middleware-specific configuration
+  guidance. Final graph assembly checks both explicit and middleware tools;
+  framework-generated discovery helpers retain their filtered catalogs.
+  ([#8136](https://github.com/bytedance/deer-flow/pull/8136))
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
