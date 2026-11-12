@@ -20,6 +20,11 @@ This section accumulates work toward the **2.3.0** milestone
   display source line numbers when the result contains 1–40 lines and the
   labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
 
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
 - **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
   reasoning mode. Auto uses a separate tool-free review call with an existing
   model profile; uncertain or high-risk operations require a human. Cards show
@@ -55,6 +60,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **channels:** A WeCom group command that follows the bot mention now runs as a
+  command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
+  the classifier required a bare leading `/`, so `/new` and `/status` sent in a
+  group became chat turns. Leading mentions are skipped for the command lookup
+  only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
+  and DingTalk handling. ([#8118])
+  
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -16323,5 +16335,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
