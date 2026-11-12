@@ -68,6 +68,17 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
+  exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
+  declarations reached the model and the provider silently kept only one.
+  Duplicate bound names are now dropped with a warning naming the surviving
+  server, in enabled-server declaration order. Note the surviving server is
+  stable only while its discovery keeps succeeding: if the winner's discovery
+  fails transiently, the later duplicate becomes served again, so the
+  implementation behind a bound name can alternate across cache generations
+  with server health.
+  ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
+  
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.
