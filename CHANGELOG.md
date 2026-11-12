@@ -20,6 +20,11 @@ This section accumulates work toward the **2.3.0** milestone
   display source line numbers when the result contains 1–40 lines and the
   labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
 
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
 - **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
   reasoning mode. Auto uses a separate tool-free review call with an existing
   model profile; uncertain or high-risk operations require a human. Cards show
@@ -53,6 +58,14 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
+  could reorder parallel writes during replay or lose paged ancestor history.
+  The ordering and Postgres pagination contracts now fail on regression instead
+  of skipping. ([#8139])
+
 ### Fixed
 
 - **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
@@ -66,6 +79,18 @@ This section accumulates work toward the **2.3.0** milestone
   with server health.
   ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
   
+- **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
+  adapter capped image uploads at 2 MB — the voice limit in the same protocol —
+  so a larger chart was skipped before upload and the turn arrived without it.
+  The cap now matches the platform's 10 MB for images; the 20 MB file limit is
+  unchanged. ([#8174])
+
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
 - **channels:** A WeCom group command that follows the bot mention now runs as a
   command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
   the classifier required a bare leading `/`, so `/new` and `/status` sent in a
@@ -90,6 +115,12 @@ This section accumulates work toward the **2.3.0** milestone
   active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
   the run before executing it. Custom `RunStore` implementations used with
   heartbeats must implement that method. ([#8046])
+
+- **subagents:** Concurrent creates for the same managed-subagent name in shared
+  file storage now preserve the winning definition and return HTTP 409 to the
+  losing request instead of reporting two successes and overwriting one definition.
+  Gateway startup also probes hard-link support and warns if the storage volume
+  cannot support managed subagent creation. ([#8132](https://github.com/bytedance/deer-flow/pull/8132))
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
@@ -193,6 +224,16 @@ This section accumulates work toward the **2.3.0** milestone
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
   
+- **models:** A Claude model using a Claude Code OAuth token no longer fails
+  every request once the request carries `betas`. The OAuth betas
+  (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
+  header, and the SDK sends a request's `betas` as that header instead, so a
+  configured `betas` list (even `[]`), per-call `betas`, or a server tool for
+  which langchain-anthropic adds a beta left them out and Anthropic rejected
+  the token. The OAuth betas now lead any request `betas` and any
+  `anthropic-beta` in `extra_headers`.
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
@@ -263,6 +304,9 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8151])
+
 - **memory:** Importing a backup without a `facts` array now returns HTTP 422
   and preserves saved memory. An explicit empty array still clears the selected
   fact bucket. ([#8131])
@@ -388,6 +432,19 @@ This section accumulates work toward the **2.3.0** milestone
   `config.yaml`, then `extensions_config.json` — so a config edit landing just
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
+
+- **community:** The shared SSRF guard now returns its documented `Error: ...`
+  rejection for malformed URLs instead of raising `ValueError`.
+  `validate_public_http_url` and `validate_delegated_backend_url` called
+  `urlparse()` unguarded, so an authority it rejects, such as the unmatched
+  IPv6 bracket in `http://[::1/api`, escaped to the caller. That surfaced as an
+  unhandled 500 from the personal MCP router and as generic exception text in
+  the crawl4ai and fastCRW `web_fetch` tools. Both validators now reject any
+  malformed authority before the scheme check and the private-address escape
+  hatches, including a raw bracket in userinfo, which RFC 3986 forbids and
+  Python versions disagree on. This is a fail-closed contract fix plus
+  version-drift hardening: no host reachable through a well-formed URL becomes
+  blocked. ([#8079])
 
 ## [2.2.0] — 2026-10-29
 
@@ -16327,6 +16384,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151
+[#8174]: https://github.com/bytedance/deer-flow/pull/8174

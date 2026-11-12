@@ -750,7 +750,8 @@ class DynamicContextMiddleware(AgentMiddleware):
         original = list(getattr(request, "messages", None) or [])
         messages = [message for message in original if not is_project_context_message(message)]
         snapshot = pinned_project_snapshot(runtime)
-        project_block = render_project_block(snapshot)
+        include_memory = self._memory_enabled and (self._app_config is None or (self._app_config.memory.enabled and self._app_config.memory.injection_enabled))
+        project_block = render_project_block(snapshot, include_memory=include_memory)
         if project_block is None:
             if len(messages) == len(original):
                 return request, None, None
