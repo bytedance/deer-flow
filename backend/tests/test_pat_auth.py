@@ -606,6 +606,11 @@ def test_pat_projects_policy_admits_exactly_the_mounted_routes():
         ("GET", "/api/projects/p1/archive"),
         ("GET", "/api/projects/p1/restore"),
         ("POST", "/api/projects/p1/threads"),
+        ("POST", "/api/projects/p1/memory"),
+        ("PUT", "/api/projects/p1/memory"),
+        ("GET", "/api/projects/p1/memory/f1"),
+        ("PATCH", "/api/projects/p1/memory/f1"),
+        ("GET", "/api/projects/p1/memory/f1/promote"),
         # Document-shelf neighbors that must stay default-denied: the bare
         # item read, collection deletes, wrong-method variants of the
         # Slice C routes, and the Slice D trash routes.

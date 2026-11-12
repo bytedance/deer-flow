@@ -90,6 +90,9 @@ async def resolve_project_context(thread_store: Any, project_repo: Any, thread_i
             "name": str(row.get("name") or ""),
             "instructions": str(row.get("instructions") or ""),
         }
+        from deerflow.projects.memory import memory_state
+
+        snapshot["memory"] = memory_state(row.get("memory"))
         if document_repo is not None:
             max_entries = _projects_config().shelf_index_max_entries
             rows, total = await document_repo.shelf_snapshot(snapshot["project_id"], limit=max_entries + 1)
@@ -130,7 +133,7 @@ def _escape_attribute(value: str) -> str:
     return value.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def render_project_block(snapshot: Mapping[str, Any] | None) -> str | None:
+def render_project_block(snapshot: Mapping[str, Any] | None, *, include_memory: bool = True) -> str | None:
     """Render the ``<project>`` block for the pinned snapshot, or ``None``.
 
     ``None`` means the run is unassigned and no block is delivered. Empty
@@ -148,9 +151,11 @@ def render_project_block(snapshot: Mapping[str, Any] | None) -> str | None:
     name = str(snapshot.get("name") or "")
     instructions = neutralize_untrusted_tags(str(snapshot.get("instructions") or "")).strip()
     open_tag = f'<project id="{_escape_attribute(project_id)}" name="{_escape_attribute(name)}">'
-    if instructions:
-        return f"{open_tag}\n{instructions}\n</project>"
-    return f"{open_tag}\n</project>"
+    from deerflow.projects.memory import render_memory
+
+    memory = render_memory(snapshot.get("memory") or {}) if include_memory else ""
+    body = "\n\n".join(part for part in (instructions, memory) if part)
+    return f"{open_tag}\n{body}\n</project>" if body else f"{open_tag}\n</project>"
 
 
 # Actionable overflow note for a truncated shelf index (§10.10): names the
