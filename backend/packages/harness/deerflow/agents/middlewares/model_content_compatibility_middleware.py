@@ -133,6 +133,11 @@ def _accepts_http_file_urls(request: ModelRequest) -> bool:
     if isinstance(model, BaseChatOpenAI):
         # Match the adapter's routing decision, including implicit Responses
         # parameters and tools bound by the agent after this middleware.
+        # Mirrors langchain-openai 1.2.1's BaseChatOpenAI._get_request_payload:
+        # merge _default_params with bound kwargs, then call _use_responses_api.
+        # These are private APIs: on upgrades, recheck payload/routing parity
+        # and rerun test_openai_file_url_matches_request_serializer to avoid
+        # dropping supported files or passing file URLs to Chat Completions.
         payload = {**model._default_params, **request.model_settings}
         if request.tools:
             payload["tools"] = [convert_to_openai_tool(tool) for tool in request.tools]
