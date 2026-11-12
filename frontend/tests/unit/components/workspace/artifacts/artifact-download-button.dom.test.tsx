@@ -61,11 +61,14 @@ it("blocks duplicate clicks while preparing, shows retry on error and downloads 
   ).toBe(true);
   await act(async () => reject(new Error("offline")));
   fireEvent.click(screen.getByRole("button", { name: /Retry download/ }));
-  await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
-  expect(create).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole("status").textContent).toBe(
-    enUS.artifactPreview.downloadRequested,
+  // Wait for React to commit the status after the browser download is triggered.
+  await waitFor(() =>
+    expect(screen.getByRole("status").textContent).toBe(
+      enUS.artifactPreview.downloadRequested,
+    ),
   );
+  expect(click).toHaveBeenCalledTimes(1);
+  expect(create).toHaveBeenCalledTimes(1);
   view.unmount();
   expect(revoke).toHaveBeenCalledWith("blob:report");
 });
