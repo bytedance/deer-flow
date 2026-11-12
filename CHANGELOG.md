@@ -13,7 +13,7 @@ This section accumulates work toward the **2.3.0** milestone
 ### Added
 - **community:** New Olostep `web_search` and `web_fetch` provider. Search
   returns a title, URL and description per result (`max_results` capped at 25),
-  and fetch returns the scraped page as markdown. Requires `OLOSTEP_API_KEY`.
+  and fetch returns the scraped page as markdown. Requires `OLOSTEP_API_KEY`. ([#8195](https://github.com/bytedance/deer-flow/pull/8195))
 
 - **summarization:** The built-in compaction prompt guides the summarizer to
   preserve active user requirements, literal approval phrases, action conditions,
