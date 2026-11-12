@@ -955,6 +955,7 @@ class SubagentExecutor:
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
         tool_progress_recorder: Any | None = None,
+        approval_runtime: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
@@ -1075,6 +1076,7 @@ class SubagentExecutor:
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
         self.tool_progress_recorder = tool_progress_recorder
+        self.approval_runtime = approval_runtime
 
         self._base_tools = _filter_tools(
             tools,
@@ -1265,7 +1267,7 @@ class SubagentExecutor:
         # bypassing approval; disabled configuration remains a no-op.
         from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 
-        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False)
+        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False, model_name=self.model_name)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1928,6 +1930,9 @@ class SubagentExecutor:
             if self.knowledge_scope is not None:
                 context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
+            if self.approval_runtime is not None:
+                context["__tool_approval_runtime"] = self.approval_runtime
+                context["tool_approval_mode"] = self.approval_runtime.mode
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
