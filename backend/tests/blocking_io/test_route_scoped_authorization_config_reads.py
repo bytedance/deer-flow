@@ -54,7 +54,7 @@ authorization:
           models:
             allow: ["allowed"]
           skills:
-            allow: ["academic-paper-review"]
+            allow: ["visible-skill"]
           sandbox:
             allow: false
 """
@@ -63,9 +63,15 @@ _USER = SimpleNamespace(id="user-123", system_role="user", oauth_provider=None, 
 
 
 def _write_configs(directory: Path) -> tuple[Path, Path]:
+    # A self-contained public catalog: one skill the policy allows, one it hides.
+    skills_root = directory / "skills"
+    for name in ("visible-skill", "hidden-skill"):
+        skill_dir = skills_root / "public" / name
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Route authorization anchor skill\n---\n\n# {name}\n", encoding="utf-8")
     config_path = directory / "config.yaml"
     extensions_path = directory / "extensions_config.json"
-    config_path.write_text(_CONFIG_YAML, encoding="utf-8")
+    config_path.write_text(_CONFIG_YAML + f"skills:\n  path: {json.dumps(str(skills_root))}\n", encoding="utf-8")
     extensions_path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
     return config_path, extensions_path
 
@@ -127,7 +133,7 @@ async def test_skill_list_reads_authorization_off_the_loop(client: httpx.AsyncCl
     response = await client.get("/api/skills")
 
     assert response.status_code == 200
-    assert [skill["name"] for skill in response.json()["skills"]] == ["academic-paper-review"]
+    assert [skill["name"] for skill in response.json()["skills"]] == ["visible-skill"]
 
 
 async def test_suggestions_read_model_authorization_off_the_loop(client: httpx.AsyncClient) -> None:
