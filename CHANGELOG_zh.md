@@ -73,6 +73,15 @@
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
   之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
   在修复计划之前，恢复该任务会提示具体问题。([#7993])
+
+- **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
+  都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
+  `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
+  `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
+  的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
+  请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -143,6 +152,11 @@
   批次的重试路由返回 409，包括 SQLite 上取消在重试进行中提交的情况；工作区也不再
   为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
   ([#7792])
+
+- **网关：** 运行指定的自定义智能体不存在或名称无效时，现在会明确说明原因。此前向一个
+  自定义智能体已被删除的对话发消息，或传入格式错误的 `agent_name`，即使与知识库范围无关，
+  也会返回 422 和 "knowledge_scope assistant configuration could not be resolved"。现在
+  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。([#8087])
 
 - **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
   空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
@@ -12880,6 +12894,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139

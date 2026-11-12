@@ -72,6 +72,17 @@ This section accumulates work toward the **2.3.0** milestone
   different global pnpm is on `PATH`, falling back to Corepack or reporting an
   actionable mismatch before installation. ([#8183](https://github.com/bytedance/deer-flow/pull/8183))
 
+- **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
+  exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
+  declarations reached the model and the provider silently kept only one.
+  Duplicate bound names are now dropped with a warning naming the surviving
+  server, in enabled-server declaration order. Note the surviving server is
+  stable only while its discovery keeps succeeding: if the winner's discovery
+  fails transiently, the later duplicate becomes served again, so the
+  implementation behind a bound name can alternate across cache generations
+  with server health.
+  ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
+  
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.
@@ -91,6 +102,14 @@ This section accumulates work toward the **2.3.0** milestone
   only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
   and DingTalk handling. ([#8118])
   
+- **subagents:** Apply tool allowlists and denylists to middleware-declared
+  tools even when global authorization is disabled, including the default
+  denial of `task`. Restricted subagents reject non-Sequence declarations
+  explicitly, and invalid declarations report middleware-specific configuration
+  guidance. Final graph assembly checks both explicit and middleware tools;
+  framework-generated discovery helpers retain their filtered catalogs.
+  ([#8136](https://github.com/bytedance/deer-flow/pull/8136))
+
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
   deployment you are using. On `localhost` and `127.0.0.1`, the default
   `make dev` and Docker addresses, it copied a link to the hosted demo
@@ -217,6 +236,16 @@ This section accumulates work toward the **2.3.0** milestone
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
   
+- **models:** A Claude model using a Claude Code OAuth token no longer fails
+  every request once the request carries `betas`. The OAuth betas
+  (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
+  header, and the SDK sends a request's `betas` as that header instead, so a
+  configured `betas` list (even `[]`), per-call `betas`, or a server tool for
+  which langchain-anthropic adds a beta left them out and Anthropic rejected
+  the token. The OAuth betas now lead any request `betas` and any
+  `anthropic-beta` in `extra_headers`.
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
@@ -364,6 +393,13 @@ This section accumulates work toward the **2.3.0** milestone
   the retry is in flight on SQLite, and the workspace no longer offers Retry
   there. Retrying in a completed, failed, running or paused batch is
   unchanged. ([#7792])
+
+- **gateway:** A run that names a missing or invalid custom agent now says so.
+  Messaging a chat whose custom agent was deleted, or passing a malformed
+  `agent_name`, returned the 422 detail "knowledge_scope assistant configuration
+  could not be resolved" even when no knowledge scope was involved. The 422 now
+  reports `Agent '<name>' not found`, an invalid `agent_name`, or an agent
+  config that could not be loaded. ([#8087])
 
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
@@ -16368,6 +16404,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
