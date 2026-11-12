@@ -71,6 +71,10 @@ jobs:
     name: Layer 2 — full-stack render (no API key)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # Match the locked Playwright runtime so the image supplies its browsers.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
@@ -97,9 +101,13 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
-      - name: Install Playwright Chromium
+      - name: Verify Playwright Chromium
         working-directory: frontend
-        run: npx playwright install chromium --with-deps
+        run: >-
+          node --input-type=module -e
+          'import { chromium } from "@playwright/test";
+          const browser = await chromium.launch();
+          await browser.close();'
       - name: Full-stack replay render (DOM assertions are the gate)
         working-directory: frontend
         run: pnpm exec playwright test -c playwright.real-backend.config.ts

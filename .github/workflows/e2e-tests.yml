@@ -43,6 +43,11 @@ jobs:
   e2e-tests:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
+    # Keep the image version aligned with frontend/pnpm-lock.yaml. Browsers and
+    # OS libraries are installed together, without per-shard CDN downloads.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -90,9 +95,14 @@ jobs:
         working-directory: examples/deerflow-extension-office-preview
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Install Playwright Chromium
+      - name: Verify Playwright Chromium
         working-directory: frontend
-        run: npx playwright install chromium --with-deps
+        id: chromium
+        run: >-
+          node --input-type=module -e
+          'import { chromium } from "@playwright/test";
+          const browser = await chromium.launch();
+          await browser.close();'
 
       - name: Run E2E tests
         working-directory: frontend
@@ -108,7 +118,7 @@ jobs:
 
       - name: Run auth recovery E2E tests
         # Keep auth coverage unsharded and run it even if the first shard fails.
-        if: ${{ !cancelled() && matrix.shard == 1 }}
+        if: ${{ !cancelled() && matrix.shard == 1 && steps.chromium.outcome == 'success' }}
         working-directory: frontend
         run: >-
           pnpm exec playwright test -c playwright.auth.config.ts
