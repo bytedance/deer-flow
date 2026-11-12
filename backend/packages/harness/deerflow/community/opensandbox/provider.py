@@ -114,8 +114,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _load_config(self) -> dict[str, Any]:
         sandbox_config = get_app_config().sandbox
 
-        def option(name: str, default: Any = None) -> Any:
-            return getattr(sandbox_config, name, default)
+        def option(name: str) -> Any:
+            return getattr(sandbox_config, name, None)
+
+        def bool_option(name: str) -> bool:
+            value = option(name)
+            if value is None:
+                return False
+            if not isinstance(value, bool):
+                raise ValueError(f"sandbox.{name} must be true or false")
+            return value
 
         api_key = option("api_key")
         domain = option("domain")
@@ -138,18 +146,13 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             raise ValueError("sandbox.sandbox_timeout must be non-negative") from exc
         if not math.isfinite(sandbox_timeout) or sandbox_timeout < 0:
             raise ValueError("sandbox.sandbox_timeout must be non-negative")
-        secure_access = option("secure_access", False)
-        if secure_access is None:
-            secure_access = False
-        if not isinstance(secure_access, bool):
-            raise ValueError("sandbox.secure_access must be true or false")
         return {
             "api_key": api_key,
             "domain": domain,
             "protocol": protocol,
             "request_timeout": self._positive_float("request_timeout", option("request_timeout"), DEFAULT_REQUEST_TIMEOUT),
-            "use_server_proxy": bool(option("use_server_proxy", False)),
-            "secure_access": secure_access,
+            "use_server_proxy": bool_option("use_server_proxy"),
+            "secure_access": bool_option("secure_access"),
             "image": option("image") or DEFAULT_IMAGE,
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,

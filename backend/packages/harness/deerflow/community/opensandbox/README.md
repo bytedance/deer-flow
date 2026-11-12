@@ -36,6 +36,10 @@ sandbox:
 reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
 
+Use unquoted `true` or `false` for `use_server_proxy` and `secure_access`.
+Omitted and `null` values default to `false`. Quoted booleans and other
+non-boolean values cause a provider startup error.
+
 `secure_access: true` creates each sandbox with OpenSandbox
 [Secure Access](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/secure-access.md):
 the ingress gateway, and the server proxy, then reject endpoint requests that

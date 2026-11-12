@@ -1655,6 +1655,10 @@ sandbox:
       PYTHONUNBUFFERED: "1"
 ```
 
+`use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
+values default to `false`. Quoted values such as `"false"` cause a provider
+startup error.
+
 Install the optional SDK before selecting this provider:
 
 ```bash

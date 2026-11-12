@@ -405,6 +405,26 @@ def test_provider_rejects_non_boolean_secure_access(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize(
+    ("configured", "expected"),
+    [({}, False), ({"use_server_proxy": None}, False), ({"use_server_proxy": False}, False), ({"use_server_proxy": True}, True)],
+)
+def test_create_forwards_use_server_proxy(monkeypatch: pytest.MonkeyPatch, configured: dict[str, Any], expected: bool) -> None:
+    provider, sdk = _install(monkeypatch, config=configured)
+
+    try:
+        provider.acquire("thread-1", user_id="user-1")
+        assert sdk.create_calls[0]["connection_config"].kwargs["use_server_proxy"] is expected
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.parametrize("value", ["true", "false", 1, 0])
+def test_provider_rejects_non_boolean_use_server_proxy(monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+    with pytest.raises(ValueError, match=r"sandbox\.use_server_proxy must be true or false"):
+        _install(monkeypatch, config={"use_server_proxy": value})
+
+
+@pytest.mark.parametrize(
     ("config_key", "value", "message"),
     [
         ("request_timeout", float("nan"), "sandbox.request_timeout must be positive"),
