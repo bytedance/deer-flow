@@ -4,6 +4,7 @@ In order to set this up, follow instructions at:
 https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ class InfoQuestClient:
         self.search_time_range = search_time_range
         self.image_search_time_range = image_search_time_range
         self.image_size = image_size
-        self.api_key_set = bool(os.getenv("INFOQUEST_API_KEY"))
+        self.api_key_set = resolve_api_key(os.getenv("INFOQUEST_API_KEY")) is not None
         if logger.isEnabledFor(logging.DEBUG):
             config_details = (
                 f"\n📋 Configuration Details:\n"
@@ -79,7 +81,7 @@ class InfoQuestClient:
 
         logger.debug("Sending crawl request to InfoQuest API")
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, follow_redirects=True) as client:
                 response = await client.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data, timeout=_REQUEST_TIMEOUT_SECONDS)
 
             # Check if status code is not 200
@@ -146,8 +148,9 @@ class InfoQuestClient:
         }
 
         # Add API key if available
-        if os.getenv("INFOQUEST_API_KEY"):
-            headers["Authorization"] = f"Bearer {os.getenv('INFOQUEST_API_KEY')}"
+        api_key = resolve_api_key(os.getenv("INFOQUEST_API_KEY"))
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
             logger.debug("API key added to request headers")
         else:
             logger.warning("InfoQuest API key is not set. Provide your own key for authentication.")
@@ -196,7 +199,7 @@ class InfoQuestClient:
         if site != "":
             params["site"] = site
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with await asyncio.to_thread(httpx.AsyncClient, follow_redirects=True) as client:
             response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 
@@ -440,7 +443,7 @@ class InfoQuestClient:
         elif self.image_size:
             logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
 
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with await asyncio.to_thread(httpx.AsyncClient, follow_redirects=True) as client:
             response = await client.post("https://search.infoquest.bytepluses.com", headers=headers, json=params, timeout=_REQUEST_TIMEOUT_SECONDS)
         response.raise_for_status()
 

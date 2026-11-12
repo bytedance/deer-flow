@@ -15,4 +15,6 @@ def with_memory_locale(messages: list, context: object) -> list:
         # Stamp every queued copy: filtering and the extraction watermark may
         # leave only an assistant tail. Never write this marker to graph state.
         captured.append(message.model_copy(update={"additional_kwargs": kwargs}) if kwargs != message.additional_kwargs else message)
-    return captured
+    from deerflow.projects.memory import with_project_memory
+
+    return with_project_memory(captured, context)

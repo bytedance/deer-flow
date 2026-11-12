@@ -116,7 +116,7 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
+covered by a path attributed by the journal to `present_files` or `present_shared_artifact`; presenting only
 an unrelated pre-existing path does not satisfy delivery. Receipts for such
 runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
 `stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
@@ -365,7 +365,14 @@ while its replacement awaits a Store result. Preserve terminal-attribution and
 cancellation compensation below; changing lock granularity does not grant a new
 worker authority over a durable row.
 
-Assembly evidence persists a full row snapshot. Serialize that write with the
+With heartbeat enabled, assembly evidence is merged into the row's metadata
+through `RunStore.merge_owned_metadata()`, which requires this Worker's live
+lease on a `pending`/`running` row and writes no other field. A full snapshot
+would also rewrite status, owner, lease and error, reviving a row a peer already
+reclaimed. A rejection fences the run and fails assembly before execution; a
+locally fenced run is refused before any write, and a Store without the method
+fails closed instead of falling back to `put()`. Without heartbeat, evidence
+still persists a full row snapshot. Serialize either write with the
 same run's lease renewal and local acknowledgment, so it cannot restore an old
 lease after renewal. Lock order is thread gate, then snapshot gate, then the
 short registry lock. Renewal uses only the snapshot gate and must release it

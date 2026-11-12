@@ -15,6 +15,7 @@ from deerflow.persistence.managed_subagents import (
     ManagedSubagentExistsError,
     make_managed_subagent_store,
 )
+from deerflow.persistence.managed_subagents.base import normalize_managed_subagent_name
 from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
 from deerflow.persistence.managed_subagents.sql import SqlManagedSubagentStore
@@ -158,3 +159,26 @@ def test_store_factory_rejects_memory_database():
     )
     with pytest.raises(ValueError, match="sqlite.*postgres"):
         make_managed_subagent_store(config)
+
+
+@pytest.mark.parametrize("name", ["nul", "NUL", "Nul", "con", "prn", "aux", "com1", "lpt9"])
+def test_normalize_managed_subagent_name_rejects_windows_reserved_names(name: str):
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        normalize_managed_subagent_name(name, for_creation=True)
+
+
+@pytest.mark.parametrize("name", ["nul", "con", "com1"])
+def test_normalize_managed_subagent_name_allows_reserved_names_on_read(name: str):
+    assert normalize_managed_subagent_name(name) == name.lower()
+
+
+@pytest.mark.parametrize("name", ["planner", "code-reviewer-2", "researcher"])
+def test_normalize_managed_subagent_name_accepts_valid_names(name: str):
+    assert normalize_managed_subagent_name(name, for_creation=True) == name
+
+
+@pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])
+def test_store_rejects_windows_reserved_device_names(request, store_fixture):
+    store = request.getfixturevalue(store_fixture)
+    with pytest.raises(ValueError, match="reserved Windows device name"):
+        store.create(_definition("nul"))

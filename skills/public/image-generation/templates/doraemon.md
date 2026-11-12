@@ -1,5 +1,7 @@
 # Doraemon 8-Panel Comic Generator
 
+This is an optional example for a requested Doraemon comic. The eight-panel layout and characters are defaults only for this example; the user's requested subject, panel count and composition take precedence.
+
 ## Workflow
 
 1. Extract story context (theme, gadget, conflict, punchline)
