@@ -297,6 +297,25 @@ def test_a_snapshot_that_skips_nothing_logs_no_saving(caplog: pytest.LogCaptureF
     assert not [message for message in caplog.messages if message.startswith("Memory snapshot:")]
 
 
+def test_a_snapshot_does_not_replay_a_batch_whose_project_write_failed() -> None:
+    """Project memory consumes a batch whose project write failed after the user
+    pool committed and does not retry it. Compaction must not replay it either."""
+
+    def failing_apply(updates: dict[str, Any], min_confidence: float) -> int:
+        raise RuntimeError("database unavailable")
+
+    project = {"instruction": "project instruction", "context": "project context", "apply": failing_apply}
+    llm = _RecordingLLM()
+    updater = _updater(llm, project_memory=lambda messages, thread_id, user_id: project)
+    conversation = _turn("one")
+    assert updater.update_memory(conversation, **SCOPE) is True
+    assert llm.invoke_count == 1
+
+    assert updater.update_memory(conversation, **SCOPE, bypass_watermark=True) is True
+
+    assert llm.invoke_count == 1
+
+
 PREFERENCE = "My favorite beverage is oolong tea."
 
 
