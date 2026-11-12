@@ -643,7 +643,7 @@ def _normalize_input_messages(
 
 #: State channels only the server writes. ``goal_outcome`` is the "goal met"
 #: record that clearing a satisfied goal writes; a caller copy would forge one.
-SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
+SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs", "durable_context_snapshot"})
 
 #: The ``write_todos`` status contract the todo middleware renders.
 _TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})

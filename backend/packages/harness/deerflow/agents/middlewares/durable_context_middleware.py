@@ -12,10 +12,10 @@ slot on every call (#7320). A per-call rewrite made consecutive requests
 diverge at the block, so a provider that only reuses a cached prompt when the
 new request starts with the entire previous request stopped hitting its prefix
 cache as soon as a tool batch touched the artifact registry. The block after
-the system prompt is therefore a frozen snapshot — rendered once into
-``durable_context_snapshot``, re-sent byte-identical — and every later change
-is one new hidden message appended after the latest turn that supersedes the
-fields it restates. Consecutive model requests then share the whole previous
+the system prompt is therefore a frozen snapshot rendered once into
+``durable_context_snapshot``. Its projection is byte-stable under an unchanged
+PII policy. Later changes are hidden messages appended after the latest turn,
+superseding the fields they restate. Consecutive model requests then share the whole previous
 request as a prefix. Updates never re-key an existing message: the identity,
 injection-guard and artifact-occurrence consumers key on message ids, and the
 tool-message ordering contract forbids inserting between an assistant tool-call
@@ -45,8 +45,8 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
-from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
-from deerflow.agents.middlewares.pii_redaction_middleware import redact_text
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_content, redact_text
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.task_continuity.state import normalize_task_history, normalize_task_notes
@@ -369,7 +369,7 @@ def _run_opening_human_index(messages: list[AnyMessage], run_id: str, pre_existi
     """
     for index in range(len(messages) - 1, -1, -1):
         message = messages[index]
-        if not isinstance(message, HumanMessage):
+        if not is_genuine_user_message(message):
             continue
         message_run_id = message.additional_kwargs.get("run_id")
         if message_run_id is not None:
@@ -469,7 +469,7 @@ def _close_delegations_left_by_earlier_runs(messages: list[AnyMessage], existing
     replied_ids: set[str] = set()
     message_run_id: str | None = None
     for message in history:
-        if isinstance(message, HumanMessage):
+        if is_genuine_user_message(message):
             marker = message.additional_kwargs.get("run_id")
             message_run_id = str(marker) if marker else None
             if message_run_id is not None:
@@ -638,9 +638,9 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
     def _plan_emission(self, state: AgentState, messages: list[AnyMessage], runtime: Runtime | None) -> tuple[HumanMessage | None, dict | None, list[AnyMessage]]:
         """Return (frozen block for the request, snapshot write, appended updates).
 
-        The frozen block is rendered once per session and re-sent verbatim after
-        the system prompt on every call: a byte-stable prefix is what lets a
-        provider reuse the previous request's cached prompt (#7320). Anything
+        The frozen block is rendered once per session, then projected under the
+        current PII policy after the system prompt. With a stable policy, its
+        byte-stable prefix lets a provider reuse the cached prompt (#7320). Anything
         that changes afterwards is a new hidden message appended after the whole
         latest turn, so the request stream keeps growing instead of diverging.
         """
@@ -648,13 +648,18 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         digests = {name: _section_digest(text) for name, text in sections.items()}
         snapshot = state.get("durable_context_snapshot")
         anchor_write: dict | None = None
-        if not isinstance(snapshot, dict):
+        if (
+            not isinstance(snapshot, dict)
+            or not isinstance(snapshot.get("content"), str)
+            or not isinstance(snapshot.get("sections"), dict)
+            or not all(isinstance(name, str) and isinstance(digest, str) for name, digest in snapshot["sections"].items())
+        ):
             snapshot = {"content": _render_data_block(sections, replace=True) if sections else "", "sections": digests}
             anchor_write = snapshot
         anchor_message = None
         if snapshot.get("content"):
             anchor_message = HumanMessage(
-                content=snapshot["content"],
+                content=redact_text(snapshot["content"], self._pii_redaction_config),
                 additional_kwargs={
                     "hide_from_ui": True,
                     _DURABLE_CONTEXT_DATA_KEY: True,
@@ -735,6 +740,13 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         history = list(request.messages)
         anchor, anchor_write, pending = self._plan_emission(state, history, request.runtime)
         placed = _apply_to_history(history, pending)
+        # A checkpoint can predate the current redaction policy. Project both
+        # old and newly emitted blocks without rewriting their stored contents.
+        for index, message in enumerate(placed):
+            if is_durable_context_data(message):
+                content = redact_content(message.content, self._pii_redaction_config)
+                if content != message.content:
+                    placed[index] = message.model_copy(update={"content": content})
         # The authority contract rides only when durable content exists on the
         # wire (a frozen anchor, a pending update, or an earlier data message):
         # sending it on every request would change the effective system prompt
