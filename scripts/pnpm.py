@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run pnpm directly when available, otherwise run it through Corepack."""
+"""Run the frontend's pinned pnpm version directly or through Corepack."""
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +14,15 @@ from pathlib import Path
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 COREPACK_NOTICE = "Using pnpm via Corepack."
+PACKAGE_JSON_PATH = FRONTEND_DIR / "package.json"
+
+
+def find_corepack_command() -> list[str] | None:
+    corepack_names = ("corepack.cmd", "corepack") if os.name == "nt" else ("corepack", "corepack.cmd")
+    for name in corepack_names:
+        if corepack_path := shutil.which(name):
+            return [str(Path(corepack_path)), "pnpm"]
+    return None
 
 
 def find_pnpm_command() -> list[str] | None:
@@ -21,11 +32,7 @@ def find_pnpm_command() -> list[str] | None:
         if pnpm_path := shutil.which(name):
             return [str(Path(pnpm_path))]
 
-    corepack_names = ("corepack.cmd", "corepack") if os.name == "nt" else ("corepack", "corepack.cmd")
-    for name in corepack_names:
-        if corepack_path := shutil.which(name):
-            return [str(Path(corepack_path)), "pnpm"]
-    return None
+    return find_corepack_command()
 
 
 def run_pnpm(arguments: Sequence[str]) -> int:
@@ -41,6 +48,31 @@ def run_pnpm(arguments: Sequence[str]) -> int:
             file=sys.stderr,
         )
         return 127
+
+    if Path(command[0]).stem.lower() == "pnpm":
+        pinned_version = json.loads(PACKAGE_JSON_PATH.read_text(encoding="utf-8"))["packageManager"].removeprefix("pnpm@")
+        try:
+            probe = subprocess.run(
+                [command[0], "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+                shell=False,
+                cwd=FRONTEND_DIR,
+            )
+        except OSError as exc:
+            print(f"Error: Failed to check pnpm version via {command[0]}: {exc}", file=sys.stderr)
+            return 126
+        installed_version = probe.stdout.strip()
+        if probe.returncode == 0 and re.fullmatch(r"\d+\.\d+\.\d+", installed_version) and installed_version != pinned_version:
+            corepack_command = find_corepack_command()
+            if corepack_command is None:
+                print(
+                    f"Error: pnpm {installed_version} is on PATH, but frontend/package.json pins {pinned_version}. Install that version or make Corepack available.",
+                    file=sys.stderr,
+                )
+                return 127
+            command = corepack_command
 
     if Path(command[0]).stem.lower() == "corepack":
         print(COREPACK_NOTICE, file=sys.stderr)

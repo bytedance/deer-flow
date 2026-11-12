@@ -65,6 +65,45 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
     assert "via Corepack" not in result.stderr
 
 
+def test_runner_uses_corepack_when_direct_pnpm_conflicts_with_package_manager(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    direct = _write_fake_command(bin_dir, "pnpm", "direct")
+    if os.name == "nt":
+        direct.write_text(
+            '@echo off\r\nif "%1"=="--version" (echo 11.25.0 & exit /b 0)\r\necho direct^|%CD%^|%*\r\n',
+            encoding="utf-8",
+        )
+    else:
+        direct.write_text(
+            '#!/bin/sh\nif [ "$1" = "--version" ]; then echo 11.25.0; exit 0; fi\nprintf "direct|%s|%s\\n" "$PWD" "$*"\n',
+            encoding="utf-8",
+        )
+    _write_fake_command(bin_dir, "corepack", "corepack")
+
+    result = _run_pnpm(bin_dir, "install", "--frozen-lockfile")
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == f"corepack|{FRONTEND_DIR}|pnpm install --frozen-lockfile"
+    assert "via Corepack" in result.stderr
+
+
+def test_runner_rejects_mismatched_pnpm_without_corepack(tmp_path: Path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    direct = _write_fake_command(bin_dir, "pnpm", "direct")
+    if os.name == "nt":
+        direct.write_text("@echo off\r\necho 11.25.0\r\n", encoding="utf-8")
+    else:
+        direct.write_text("#!/bin/sh\necho 11.25.0\n", encoding="utf-8")
+
+    result = _run_pnpm(bin_dir, "install")
+
+    assert result.returncode == 127
+    assert "pnpm 11.25.0 is on PATH" in result.stderr
+    assert "pins 10.26.2" in result.stderr
+
+
 def test_runner_prefers_cmd_shim_on_windows(monkeypatch):
     paths = {
         "pnpm": r"C:\tools\pnpm.exe",

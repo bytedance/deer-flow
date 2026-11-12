@@ -76,6 +76,10 @@ make install
 make dev
 ```
 
+The local commands use the pnpm version pinned in `frontend/package.json`. If a
+different global pnpm is on `PATH`, they use Corepack when available; otherwise
+they report the version mismatch before installing frontend dependencies.
+
 Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
