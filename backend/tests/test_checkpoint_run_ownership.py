@@ -197,6 +197,10 @@ async def _exercise_takeover(saver, *, detect_local_loss: bool) -> None:
             stale["id"] = str(uuid4())
             with pytest.raises(CheckpointOwnershipLostError):
                 await RunOwnedSaver(checkpointer, old_manager, old_run).aput(before.config, stale, before.metadata, {})
+            # The database ownership check rejected the write; local state did
+            # not change. A local-state rejection would prove nothing about the
+            # PostgreSQL lease fence.
+            assert not old_run.ownership_lost
 
         release.set()
         await asyncio.wait_for(old_run.task, 5)
