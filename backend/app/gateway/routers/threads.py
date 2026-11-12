@@ -1606,8 +1606,10 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     thread. A conversation whose last turn is an unanswered human-input
     request (a clarification, a sandbox-network approval, an extension prompt)
     is a 422 ``pending_clarification``: the goal is not agreed yet, and
-    synthesizing anyway lets the model invent the missing decision. The
-    synthesis is read-only until the save; the caller starts the run through
+    synthesizing anyway lets the model invent the missing decision. A pending
+    tool approval is a 409 like the other goal mutations, and the save
+    suppresses subagent-batch continuations queued under the previous goal.
+    The synthesis is read-only until the save; the caller starts the run through
     its own existing run path.
     """
     # Best-effort pre-check: has_inflight reads this worker's registry, so a
@@ -1624,6 +1626,11 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
 
     try:
         accessor, config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+        # Same gate as PUT/DELETE /goal: a pending tool approval must not be
+        # silently discarded by changing the goal underneath it.
+        from app.gateway.hitl_approval import reject_new_run_when_approval_pending
+
+        await reject_new_run_when_approval_pending(request, thread_id, accessor=accessor, read_config=config)
         snapshot = await accessor.aget(config)
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
@@ -1678,6 +1685,11 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             await write_thread_goal(checkpointer, thread_id, goal, as_node="goal")
+            # Match PUT/DELETE /goal: a new goal supersedes queued subagent-batch
+            # continuations that were scheduled under the previous one.
+            batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
+            if batch_repo is not None:
+                await batch_repo.suppress_thread_continuations(thread_id)
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
     except HTTPException:

@@ -222,6 +222,29 @@ def test_from_chat_pending_clarification_422s_before_synthesis(monkeypatch):
     assert asyncio.run(threads.read_thread_goal(checkpointer, "t-fc")) is None
 
 
+def test_from_chat_rejects_pending_tool_approval(monkeypatch):
+    # PUT/DELETE /goal reject while a tool approval is pending so a new input
+    # cannot silently discard it; from-chat writes the same goal state and must
+    # share that gate.
+    synthesis = _mock_synthesis(monkeypatch)
+    run_manager = _FromChatRunManager()
+    app, checkpointer = _make_app(monkeypatch, values={"messages": _MESSAGES}, run_manager=run_manager, seed_checkpoint=True)
+
+    async def _pending(request, thread_id, *, accessor=None, read_config=None, snapshot=None):
+        return {"task-approval": [SimpleNamespace(value={"kind": "hitl_approval"})]}
+
+    monkeypatch.setattr("app.gateway.hitl_approval.find_pending_interrupts", _pending)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/t-fc/goal/from-chat", json={})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "approval_pending"
+    synthesis.assert_not_awaited()
+    assert run_manager.reservations == 0
+    assert asyncio.run(threads.read_thread_goal(checkpointer, "t-fc")) is None
+
+
 def test_from_chat_answered_clarification_is_not_pending(monkeypatch):
     objective = "Reconcile A and B against the purchase orders, excluding C."
     synthesis = _mock_synthesis(monkeypatch, objective=objective)
@@ -316,6 +339,29 @@ def test_from_chat_success_saves_goal_through_the_reservation_path(monkeypatch):
     assert run_manager.reservations == 1
     saved = asyncio.run(threads.read_thread_goal(checkpointer, "t-fc"))
     assert saved is not None and saved["objective"] == objective
+
+
+class _FakeBatchRepo:
+    def __init__(self):
+        self.suppressed: list[str] = []
+
+    async def suppress_thread_continuations(self, thread_id: str) -> None:
+        self.suppressed.append(thread_id)
+
+
+def test_from_chat_suppresses_queued_continuations(monkeypatch):
+    # A new goal supersedes subagent-batch continuations queued under the old
+    # one; PUT/DELETE /goal already do this after the write.
+    _mock_synthesis(monkeypatch)
+    app, _ = _make_app(monkeypatch, values={"messages": _MESSAGES}, seed_checkpoint=True)
+    repo = _FakeBatchRepo()
+    app.state.subagent_batch_repo = repo
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/t-fc/goal/from-chat", json={})
+
+    assert response.status_code == 200, response.text
+    assert repo.suppressed == ["t-fc"]
 
 
 def test_from_chat_save_conflict_409s_like_put(monkeypatch):
