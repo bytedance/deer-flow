@@ -188,8 +188,12 @@ def select_facts_for_capacity(
     ``confidence`` exactly preserves the historical ranking. ``hybrid-v1``
     combines three bounded signals and reserves only the minimum number of
     capacity slots for configured reserved categories (defaulting to correction);
-    unused slots immediately return to ordinary competition.
+    corrections take priority when included. Unused slots return to ordinary competition.
     """
+    if isinstance(reserved_categories, str):
+        raise TypeError("reserved_categories must be an iterable of strings, not a bare str")
+    if isinstance(decay_exempt_categories, str):
+        raise TypeError("decay_exempt_categories must be an iterable of strings, not a bare str")
     evaluated_at = (now or datetime.now(UTC)).astimezone(UTC)
     usage = usage or {}
     decay_exempt_set = {c.strip().lower() for c in decay_exempt_categories if isinstance(c, str) and c.strip()} if decay_exempt_categories else None
@@ -228,7 +232,7 @@ def select_facts_for_capacity(
         indexed_facts,
         key=lambda item: (-scored[item[0]].value, item[0]),
     )
-    reserved_count = 0
+    reserved_correction_count = 0
     selected_indexes: set[int] = set()
     if policy == EVICTION_POLICY_HYBRID_V1 and max_facts > 0:
         target_categories = {c.strip().lower() for c in reserved_categories if isinstance(c, str) and c.strip()} if reserved_categories is not None else {"correction"}
@@ -237,8 +241,11 @@ def select_facts_for_capacity(
             math.ceil(max_facts * correction_reserved_fraction),
         )
         reserved_candidates = [item for item in ranked if str(item[1].get("category") or "").strip().lower() in target_categories]
+        reserved_candidates.sort(key=lambda item: str(item[1].get("category") or "").strip().lower() != "correction")
         reserved_count = min(reserved_slots, len(reserved_candidates), max_facts)
-        selected_indexes.update(index for index, _fact in reserved_candidates[:reserved_count])
+        reserved_candidates = reserved_candidates[:reserved_count]
+        selected_indexes.update(index for index, _fact in reserved_candidates)
+        reserved_correction_count = sum(str(fact.get("category") or "").strip().lower() == "correction" for _index, fact in reserved_candidates)
 
     for index, _fact in ranked:
         if len(selected_indexes) >= max(0, max_facts):
@@ -266,5 +273,5 @@ def select_facts_for_capacity(
         evicted=evicted,
         scores=scores,
         policy=policy,
-        reserved_correction_slots=reserved_count,
+        reserved_correction_slots=reserved_correction_count,
     )
