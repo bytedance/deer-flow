@@ -8,9 +8,8 @@ import requests
 MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 OPENAI_DEFAULT_MODEL = "gpt-image-2.5-flare"
-# MiniMax image-01 caps the prompt at 1500 characters and rejects longer requests
-# with a generic "invalid params" error, so validate before calling the API.
-MINIMAX_PROMPT_MAX_CHARS = 1500
+MINIMAX_DEFAULT_MODEL = "MiniMax-H3-Image"
+MINIMAX_REQUEST_TIMEOUT = 610
 
 
 def validate_image(image_path: str) -> bool:
@@ -132,14 +131,14 @@ def _ensure_output_dir(output_file: str) -> None:
 
 
 def _minimax_prompt(raw: str) -> str:
-    """Extract the single text prompt MiniMax image-01 expects.
+    """Extract the single text prompt MiniMax expects.
 
     The shared prompt file is structured JSON (a consolidated ``prompt`` plus
     Gemini-oriented fields like ``style`` / ``composition`` / ``negative_prompt``),
-    but MiniMax consumes one string and expands it via ``prompt_optimizer``. The
-    provider adapts the input itself — the caller never needs to know MiniMax is
-    active. Use the JSON ``prompt`` field; fall back to the raw text for plain-text
-    prompt files or JSON without a ``prompt`` field.
+    but MiniMax consumes one string. The provider adapts the input itself — the
+    caller never needs to know MiniMax is active. Use the JSON ``prompt`` field;
+    fall back to the raw text for plain-text prompt files or JSON without a
+    ``prompt`` field.
     """
     text = raw.strip()
     try:
@@ -160,46 +159,31 @@ def _generate_image_minimax(
     if not bearer_value:
         return "MINIMAX_API_KEY is not set"
     prompt = _minimax_prompt(prompt)
-    if len(prompt) > MINIMAX_PROMPT_MAX_CHARS:
-        return (
-            f"Prompt is {len(prompt)} characters but MiniMax image-01 accepts at most "
-            f"{MINIMAX_PROMPT_MAX_CHARS}. Shorten the prompt to stay within the limit; "
-            f"reference images plus a tighter description usually recover the detail."
-        )
     body = {
-        "model": os.getenv("MINIMAX_IMAGE_MODEL", "image-01"),
+        "model": os.getenv("MINIMAX_IMAGE_MODEL", MINIMAX_DEFAULT_MODEL),
         "prompt": prompt,
         "aspect_ratio": aspect_ratio,
-        "response_format": "base64",
+        "response_format": "b64_json",
         "n": 1,
-        "prompt_optimizer": True,
     }
     if reference_images:
-        # Reference images are passed as character subjects as-is; unlike the Gemini
-        # path we do not pre-validate them — invalid files surface as a MiniMax API error.
-        body["subject_reference"] = [
-            {"type": "character", "image_file": _to_data_url(p)}
-            for p in reference_images
-        ]
+        body["images"] = [{"image_url": _to_data_url(p)} for p in reference_images]
+        path = "/v1/images/edits"
+    else:
+        path = "/v1/images/generations"
     response = requests.post(
-        f"{_minimax_host()}/v1/image_generation",
+        f"{_minimax_host()}{path}",
         headers={
             "Authorization": f"Bearer {bearer_value}",
             "Content-Type": "application/json",
         },
         json=body,
-        timeout=60,
+        timeout=MINIMAX_REQUEST_TIMEOUT,
     )
     response.raise_for_status()
     payload = response.json()
     _check_base_resp(payload)
-    images = (payload.get("data") or {}).get("image_base64") or []
-    if not images:
-        raise Exception("MiniMax returned no image data")
-    _ensure_output_dir(output_file)
-    with open(output_file, "wb") as f:
-        f.write(base64.b64decode(images[0]))
-    return f"Successfully generated image to {output_file}"
+    return _write_openai_image(payload, output_file)
 
 
 def _generate_image_gemini(
@@ -250,7 +234,7 @@ def _generate_image_gemini(
 def _write_openai_image(payload: dict, output_file: str) -> str:
     images = payload.get("data") or []
     if not images or not isinstance(images[0], dict):
-        raise Exception("OpenAI-compatible provider returned no image data")
+        raise Exception("Image provider returned no image data")
 
     item = images[0]
     encoded = item.get("b64_json") or item.get("image_base64") or item.get("base64")
@@ -260,7 +244,7 @@ def _write_openai_image(payload: dict, output_file: str) -> str:
         image_url = item.get("url")
         if not image_url:
             raise Exception(
-                "OpenAI-compatible provider returned neither base64 data nor a URL"
+                "Image provider returned neither base64 data nor a URL"
             )
         if image_url.startswith("data:"):
             _, encoded = image_url.split(",", 1)
