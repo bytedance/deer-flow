@@ -30,6 +30,36 @@ new run sees the latest saved instructions. Instructions are capped at
 multi-byte characters count as their UTF-8 byte length. Oversized instructions
 are rejected with a `422` at write time and are never silently truncated.
 
+## Project memory
+
+With DeerMem automatic memory enabled, project conversations also accumulate
+short project facts in a separate pool (up to 30 facts and 2 KiB of rendered
+context). The same extraction call classifies user and project facts; personal
+facts keep their existing user scope. Unassigned conversations have no project
+pool. Project facts are pinned with the instructions at run start and are used
+only inside that project. They are background context, subordinate to explicit
+instructions and the current request.
+
+An active project pool keeps the shared extraction call enabled for every
+eligible batch, even when the user-memory pre-screen would skip it: that
+pre-screen does not assess project facts. Existing project facts also add input
+tokens. Turn off automatic extraction in the project's Instructions tab to stop
+this project-specific work while retaining its stored facts.
+
+Project writes are best-effort after the user pool commits. If the project write
+fails, the batch is consumed so later turns do not replay the paid model call or
+the committed user writes. The failure is logged and reported separately as
+`project_memory_apply_success: false`; `success` still describes the user-pool
+commit. A failed project update is not automatically retried.
+
+The Instructions tab shows these facts below the editor. Delete incorrect or
+outdated facts, turn automatic extraction off, or move a fact into instructions.
+Turning extraction off preserves existing facts and their injection; deleting
+one removes it from subsequent runs. Promotion saves the instruction and removes
+the fact atomically; save any pending instruction edits first. User edits fence
+already-queued extraction so old results cannot undo them. Archived projects
+retain their facts for reading and do not collect new ones.
+
 ## Document shelf
 
 Each project has a document shelf for files the whole project shares, managed
@@ -72,6 +102,11 @@ do not serialize full file scans behind its cache lock.
 Shelf conversion cleanup failures are logged without replacing the read result
 or its original error. Cancelled reads wait for their staging cleanup to finish;
 files that cannot be removed remain eligible for the existing retention sweep.
+
+Document summaries are enabled by default for newly uploaded or promoted shelf
+files (`projects.summaries_enabled: false` disables generation). Each eligible
+file uses a separate best-effort summary call; existing files are not backfilled.
+The document shelf remains user-curated.
 
 ## Archive read semantics
 

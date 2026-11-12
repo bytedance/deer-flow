@@ -1655,13 +1655,13 @@ projects:
   # Days a trashed project document stays recoverable before the retention
   # sweep may purge it permanently (range: 1-3650).
   trash_retention_days: 30
-  # Best-effort per-document LLM summaries on the shelf (default off). When
+  # Best-effort per-document LLM summaries on the shelf (default on). When
   # enabled, each newly uploaded/promoted document gets a one-line generated
   # description rendered into the injected <documents> index and returned by
   # the documents API. Generation failures leave the summary empty and never
   # affect uploads. Rendering of already-stored summaries stays on even when
   # generation is disabled.
-  summaries_enabled: false
+  summaries_enabled: true
   # Hard UTF-8 write-time cap for a generated summary (range: 64-1024).
   summary_max_bytes: 256
   # Optional model override for summary generation; unset uses the default
