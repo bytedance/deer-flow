@@ -2012,6 +2012,7 @@ sandbox:
 #   # request_timeout: 30             # finite positive management API request timeout seconds
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
