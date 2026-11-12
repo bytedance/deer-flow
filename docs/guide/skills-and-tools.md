@@ -44,6 +44,12 @@ orientation.
 
 The **ppt-generation** skill preserves transparent slide images when composing a presentation, including grayscale and palette PNG transparency.
 
+The **data-analysis** skill reads legacy Excel 97–2003 (`.xls`) workbooks with
+optional `pandas` and `xlrd` packages. It preserves literal text such as `NA`
+and leading-zero identifiers while importing cell values into DuckDB. See the
+[data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
+for the additional dependencies. The existing `.xlsx` reader is unchanged.
+
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the
 package-relative file and, when available, its line and column, with a quoting

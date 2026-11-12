@@ -263,6 +263,10 @@ def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
     """Load all sheets from an Excel file into DuckDB tables."""
+    if os.path.splitext(file_path)[1].lower() == ".xls":
+        _load_legacy_excel(con, file_path, table_map)
+        return
+
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -293,6 +297,52 @@ def _load_excel(
             )
         except Exception as e:
             logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+
+
+def _load_legacy_excel(
+    con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
+) -> None:
+    """Read BIFF workbooks with xlrd through pandas, preserving inferred types."""
+    try:
+        import pandas
+        import xlrd  # noqa: F401 -- check the optional engine before opening a file
+    except ImportError:
+        raise SystemExit(
+            "Legacy .xls analysis requires pandas and xlrd. Prepare this Python "
+            "environment with: python -m pip install pandas xlrd"
+        ) from None
+
+    with pandas.ExcelFile(file_path, engine="xlrd") as workbook:
+        for sheet_name in workbook.sheet_names:
+            alias, table_name = _allocate_table_names(sheet_name, table_map)
+            try:
+                # Preserve literal strings such as "NA" and "00123"; only
+                # empty cells become nulls before DuckDB infers column types.
+                frame = workbook.parse(
+                    sheet_name, dtype=object, keep_default_na=False, na_values=[""]
+                )
+                if frame.columns.empty:
+                    logger.warning(f"  Skipping empty sheet '{sheet_name}'")
+                    continue
+                original_sample = con.execute(
+                    "SELECT current_setting('pandas_analyze_sample')"
+                ).fetchone()[0]
+                try:
+                    # A rare text cell can fall outside DuckDB's default sample.
+                    # Analyze the entire sheet before materializing object columns.
+                    con.execute(
+                        "SET pandas_analyze_sample = ?",
+                        [max(original_sample, len(frame))],
+                    )
+                    con.from_df(frame).create(table_name)
+                finally:
+                    con.execute("SET pandas_analyze_sample = ?", [original_sample])
+                table_map[alias] = table_name
+                logger.info(
+                    f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({len(frame)} rows)"
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
 def _load_csv(
