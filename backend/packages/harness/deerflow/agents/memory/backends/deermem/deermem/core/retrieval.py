@@ -472,6 +472,10 @@ class FTS5Retrieval:
                 fact = None
                 if fact_filters:
                     fact = self._fact_from_row(row)
+                    # score and bm25_score are reserved FTS5 result annotations,
+                    # removed by the adapter before returning fact metadata. Keep
+                    # them ineligible here even if present in the stored payload;
+                    # substring/list_facts do not reserve these field names.
                     if any(key in ("score", "bm25_score") or key not in fact or fact[key] != value for key, value in fact_filters.items()):
                         continue
                 score = self._compute_final_score(bm25_score=-row["bm25_score"], confidence=row["confidence"], created_at=row["created_at"])
