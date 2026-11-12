@@ -5,8 +5,8 @@ external identity; ``name``/``presentation`` are display attributes — renaming
 touches exactly this row and never affects membership (threads reference
 ``threads_meta.project_id``). ``instructions`` is user-authored project
 context; Phase 1 stores and PATCHes it, Phase 2 injects it. There is
-deliberately no ``memory_mode``/sharing/agent-config column: no consumer
-exists in Phase 1/2 (RFC v2 §3, §4.1).
+no sharing/agent-config column. ``memory`` stores bounded project facts, the
+automatic-extraction switch and the user-edit fencing revision.
 
 ``ProjectDocumentRow``: one row per project shelf document. ``stored_relpath``
 is a server-generated content address relative to ``users/{user_id}/projects/``
@@ -37,6 +37,7 @@ class ProjectRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(128))
     instructions: Mapped[str] = mapped_column(Text, default="")
+    memory: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     presentation: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

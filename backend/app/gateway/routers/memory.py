@@ -120,6 +120,12 @@ class MemoryResponse(BaseModel):
     facts: list[Fact] = Field(default_factory=list)
 
 
+class MemoryImportRequest(MemoryResponse):
+    """Replacement imports must explicitly supply the facts to restore."""
+
+    facts: list[Fact] = Field(description="Facts to restore. An empty list explicitly clears the selected fact bucket.")
+
+
 def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
     """Convert updater validation errors into stable API responses."""
     if exc.args and exc.args[0] == "confidence":
@@ -566,10 +572,13 @@ async def export_memory(request: Request, agent_name: str | None = None) -> Memo
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Import Memory Data",
-    description="Import the default memory document, or replace only one selected agent's facts while preserving shared summaries.",
+    description=(
+        "Import the default memory document, or replace only one selected agent's facts while preserving shared summaries. "
+        "The request requires an explicit `facts` array. Omitting it returns HTTP 422, and an empty array clears the selected fact bucket."
+    ),
 )
 @require_permission("memory", "write")
-async def import_memory(body: MemoryResponse, request: Request, agent_name: str | None = None) -> MemoryResponse:
+async def import_memory(body: MemoryImportRequest, request: Request, agent_name: str | None = None) -> MemoryResponse:
     """Import memory data, preserving shared summaries for a selected agent."""
     manager = await asyncio.to_thread(get_memory_manager)
     selected_agent = _management_agent_name_or_501(manager, agent_name, for_creation=True)
