@@ -58,6 +58,14 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
+  could reorder parallel writes during replay or lose paged ancestor history.
+  The ordering and Postgres pagination contracts now fail on regression instead
+  of skipping. ([#8139])
+
 ### Fixed
 
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
@@ -403,6 +411,19 @@ This section accumulates work toward the **2.3.0** milestone
   `config.yaml`, then `extensions_config.json` — so a config edit landing just
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
+
+- **community:** The shared SSRF guard now returns its documented `Error: ...`
+  rejection for malformed URLs instead of raising `ValueError`.
+  `validate_public_http_url` and `validate_delegated_backend_url` called
+  `urlparse()` unguarded, so an authority it rejects, such as the unmatched
+  IPv6 bracket in `http://[::1/api`, escaped to the caller. That surfaced as an
+  unhandled 500 from the personal MCP router and as generic exception text in
+  the crawl4ai and fastCRW `web_fetch` tools. Both validators now reject any
+  malformed authority before the scheme check and the private-address escape
+  hatches, including a raw bracket in userinfo, which RFC 3986 forbids and
+  Python versions disagree on. This is a fail-closed contract fix plus
+  version-drift hardening: no host reachable through a well-formed URL becomes
+  blocked. ([#8079])
 
 ## [2.2.0] — 2026-10-29
 
@@ -16342,9 +16363,11 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8069]: https://github.com/bytedance/deer-flow/issues/8069
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
+[#8079]: https://github.com/bytedance/deer-flow/pull/8079
 [#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
