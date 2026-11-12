@@ -39,19 +39,25 @@ to interactive behavior.
 
 ## HITL tool approval
 
-`hitl_approval` is an operator-controlled, opt-in gate around selected tools,
-not a way for a non-interactive run to wait for clarification. Interactive
-Web/SDK runs pause through LangGraph `interrupt()` and enter
-`waiting_for_input`; only a matching approval response can resume the current
-checkpoint. Scheduled, webhook, autonomous, IM, extension, and MCP notification
-runs follow `hitl_approval.non_interactive`. Subagents and graphs without resume
-support always fail closed, including when that setting is `allow`.
+Tool permissions are independent of interaction and reasoning modes. The opt-in
+`hitl_approval` policy offers Ask, Auto and Full with mandatory deny/ask rules and
+an operator-controlled ceiling. Native tool calls pause at their execution boundary
+using LangGraph interrupts; the durable run becomes `waiting_for_input`. Resume
+consumption is compare-and-swap bound to every pending action's request ID, and
+parallel interrupts are routed by their individual graph IDs.
 
-Resume consumption is a store-level compare-and-swap bound to the validated
-action `request_id` mapping; the middleware recomputes those IDs from the live
-AI message before applying any decision. If worker attachment fails after
-consumption, the Gateway conditionally restores that exact answered run to
-`waiting_for_input` so a valid response or all-reject can retry safely.
+Auto runs a separate, tool-free reviewer over the original user's intent and exact
+bound operation. Review preparation is checkpointed: resuming cannot obtain a new
+review verdict or silently replace the approved arguments. The model's result
+cannot override host policy or inner authorization. Invalid/uncertain review
+requires a human, and fails closed when the run cannot collect an answer.
+
+Interactive child calls wait through a parent-owned bridge with a time limit.
+They retain their original execution and use a session-authenticated, owner-scoped
+HTTP answer. Cancellation, expiry, ownership loss or worker restart invalidates
+these live requests. Unattended parent origins cannot open child approval waits.
+A child without this bridge fails closed. The legacy `non_interactive: allow`
+only bypasses Ask on explicitly configured unattended root runs.
 
 The resume run's journal adopts the paused calls it answers, recovered from the
 durable interrupt payload. Approved calls reach the history feed through their
@@ -73,9 +79,9 @@ id is **not** cleared by this: every resume, including all-reject, is still
 rejected, so continue the work in a new thread. In-place recovery is tracked in
 [#8071](https://github.com/bytedance/deer-flow/issues/8071).
 
-`waiting_for_input` is not a terminal success or failure. Goal checks, final
-artifact delivery checks, and batch continuation cancellation must not treat a
-pending approval as a completed source run. Pending approvals do not expire and
-block new runs on the same thread until resolved. See
-[HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for configuration and
-argument-summary visibility limits.
+`waiting_for_input` is not terminal success or failure. Goals, delivery checks,
+and batch continuation must preserve a native pause. New runs cannot discard it.
+Root checkpoint approvals do not expire and block new runs until resolved;
+live child approvals retain the time limit described above.
+See [HITL Tool Approval](CONFIGURATION.md#hitl-tool-approval) for grant scoping,
+parameter editing, limits and persistence semantics.

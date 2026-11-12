@@ -55,7 +55,10 @@ class FileManagedSubagentStore(ManagedSubagentStore):
             if path.exists():
                 raise ManagedSubagentExistsError(f"Managed subagent '{definition.name}' already exists")
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_write(path, definition)
+            try:
+                self._atomic_write(path, definition, overwrite=False)
+            except FileExistsError as exc:
+                raise ManagedSubagentExistsError(f"Managed subagent '{definition.name}' already exists") from exc
 
     def update(self, definition: ManagedSubagentDefinition) -> None:
         path = get_paths().managed_subagent_file(definition.name)
@@ -86,7 +89,7 @@ class FileManagedSubagentStore(ManagedSubagentStore):
         return tuple(signature)
 
     @staticmethod
-    def _atomic_write(path: Path, definition: ManagedSubagentDefinition) -> None:
+    def _atomic_write(path: Path, definition: ManagedSubagentDefinition, *, overwrite: bool = True) -> None:
         payload = definition.model_dump_json(indent=2) + "\n"
         tmp_path: Path | None = None
         try:
@@ -97,8 +100,13 @@ class FileManagedSubagentStore(ManagedSubagentStore):
                 handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_path, path)
-            tmp_path = None
+            if overwrite:
+                os.replace(tmp_path, path)
+                tmp_path = None
+            else:
+                # Claim the name without replacing a peer's complete definition.
+                # The process-local RLock cannot serialize independent workers.
+                os.link(tmp_path, path)
         finally:
             if tmp_path is not None:
                 cleanup_failed_atomic_write(tmp_path)

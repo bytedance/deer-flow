@@ -52,6 +52,13 @@ change to a query, a lock or a JSON predicate is verified on both dialects.
   the unlock completes.** Drain both through cancellation. Otherwise a second
   bootstrap overlaps a running migration, or a pooled session keeps the lock.
 
+## Managed subagent file creation
+
+Stage and fsync complete definitions before publishing them. The RLock is local
+to one process, so create claims the destination with `os.link` and maps only
+`FileExistsError` to a name conflict. Updates retain `os.replace`. Discard staging
+with best-effort cleanup, preserving the original publication outcome.
+
 ## Leases, claims and terminal writes
 
 - **A scan selects candidates; it grants nothing.** After you take the row locks,

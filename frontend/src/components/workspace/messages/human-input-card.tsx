@@ -649,6 +649,10 @@ export function ToolApprovalCard({
     values: Record<string, HitlApprovalDecision | undefined>;
   }>({ requestId: request.request_id, values: {} });
   const [rejectionReason, setRejectionReason] = useState("");
+  const [argumentState, setArgumentState] = useState<{
+    requestId: string;
+    values: Record<string, string>;
+  }>({ requestId: request.request_id, values: {} });
   const [submitting, setSubmitting] = useState(false);
   const [answeredRequestId, setAnsweredRequestId] = useState<string | null>(
     null,
@@ -661,10 +665,30 @@ export function ToolApprovalCard({
   const isDisabled = disabled || submitting || answered || readOnly;
   const allowApprove = request.allowed_decisions.includes("approve");
   const allowReject = request.allowed_decisions.includes("reject");
+  const argumentTexts =
+    argumentState.requestId === request.request_id ? argumentState.values : {};
+  const editedArguments: Record<string, Record<string, unknown> | undefined> =
+    {};
+  for (const action of request.actions) {
+    if (decisions[action.tool_call_id] !== "edit") continue;
+    try {
+      const parsed: unknown = JSON.parse(
+        argumentTexts[action.tool_call_id] ?? JSON.stringify(action.args ?? {}),
+      );
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+        editedArguments[action.tool_call_id] = parsed as Record<
+          string,
+          unknown
+        >;
+    } catch {
+      /* An invalid edit keeps Submit disabled. */
+    }
+  }
   const responses = createHitlApprovalResponses(
     request,
     decisions,
     rejectionReason,
+    editedArguments,
   );
 
   const submitBatch = async (batch: HitlApprovalResponse[] | null) => {
@@ -727,6 +751,11 @@ export function ToolApprovalCard({
               <p className="text-muted-foreground text-sm leading-6">
                 {copy.description}
               </p>
+              {request.transport === "live" ? (
+                <p className="text-muted-foreground text-xs">
+                  {copy.childApproval}
+                </p>
+              ) : null}
             </div>
             {answered || submitting || readOnly ? (
               <Badge variant={answered ? "outline" : "secondary"}>
@@ -745,7 +774,8 @@ export function ToolApprovalCard({
 
           <div className="space-y-3">
             {request.actions.map((action) => {
-              const args = parseApprovalArgsSummary(action.args_summary);
+              const args =
+                action.args ?? parseApprovalArgsSummary(action.args_summary);
               const oldString = args.old_str;
               const newString = args.new_str;
               const hasReplacementDiff =
@@ -762,7 +792,52 @@ export function ToolApprovalCard({
                     <span className="font-mono text-sm font-medium">
                       {action.tool_name}
                     </span>
-                    <div className="flex gap-1" aria-label={action.tool_name}>
+                    <div
+                      className="flex flex-wrap gap-1"
+                      aria-label={action.tool_name}
+                    >
+                      {action.grant_allowed &&
+                      request.allowed_decisions.includes("approve_thread") ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            decisions[action.tool_call_id] === "approve_thread"
+                              ? "secondary"
+                              : "outline"
+                          }
+                          disabled={isDisabled}
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "approve_thread"
+                          }
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "approve_thread")
+                          }
+                        >
+                          {copy.approveThread}
+                        </Button>
+                      ) : null}
+                      {action.args &&
+                      request.allowed_decisions.includes("edit") ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            decisions[action.tool_call_id] === "edit"
+                              ? "secondary"
+                              : "outline"
+                          }
+                          disabled={isDisabled}
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "edit"
+                          }
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "edit")
+                          }
+                        >
+                          {copy.editArguments}
+                        </Button>
+                      ) : null}
                       {allowApprove ? (
                         <Button
                           aria-pressed={
@@ -830,6 +905,51 @@ export function ToolApprovalCard({
                       </div>
                     ) : null}
                   </ToolCallDetails>
+                  {action.reason ? (
+                    <p className="text-muted-foreground mt-2 text-sm">
+                      {action.reason}
+                    </p>
+                  ) : null}
+                  {action.args ? (
+                    <details className="mt-2 text-xs">
+                      <summary>{copy.fullArguments}</summary>
+                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap">
+                        {JSON.stringify(action.args, null, 2)}
+                      </pre>
+                    </details>
+                  ) : null}
+                  {decisions[action.tool_call_id] === "approve_thread" ? (
+                    <p className="text-muted-foreground mt-2 text-xs">
+                      {copy.grantScope}
+                    </p>
+                  ) : null}
+                  {decisions[action.tool_call_id] === "edit" ? (
+                    <div className="mt-2 space-y-2">
+                      <Textarea
+                        aria-label={copy.editArguments + " " + action.tool_name}
+                        className="min-h-40 font-mono text-xs"
+                        disabled={isDisabled}
+                        value={
+                          argumentTexts[action.tool_call_id] ??
+                          JSON.stringify(action.args ?? {}, null, 2)
+                        }
+                        onChange={(event) =>
+                          setArgumentState({
+                            requestId: request.request_id,
+                            values: {
+                              ...argumentTexts,
+                              [action.tool_call_id]: event.target.value,
+                            },
+                          })
+                        }
+                      />
+                      {!editedArguments[action.tool_call_id] ? (
+                        <p role="alert" className="text-destructive text-xs">
+                          {copy.invalidArguments}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
@@ -870,7 +990,9 @@ export function ToolApprovalCard({
             ) : null}
             {allowApprove ? (
               <Button
-                disabled={isDisabled}
+                disabled={
+                  isDisabled || Object.values(decisions).includes("edit")
+                }
                 onClick={() => void submitAll("approve")}
                 type="button"
                 variant="secondary"

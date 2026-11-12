@@ -60,6 +60,8 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
 - **Server state is authoritative.** `ThreadState.artifacts` is the artifact list.
   Session storage keeps panel UI state only, and an empty first stream value must
   not overwrite restored state before history loads.
+- Recover `present_shared_artifact` paths from history only when all matching
+  receipts confirm the same successful handoff.
 - **A truncated preview is never an editing baseline.** Its ETag can equal the
   full file's. Editing and saving need the complete content.
 - **Account preferences are scoped to the account.** A late response for a
