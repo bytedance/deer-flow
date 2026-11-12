@@ -946,6 +946,8 @@ class MemoryUpdater:
             "access_half_life_days": self._config.eviction_access_half_life_days,
             "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
             "correction_reserved_max": self._config.eviction_correction_reserved_max,
+            "reserved_categories": self._config.eviction_reserved_categories,
+            "decay_exempt_categories": self._config.eviction_decay_exempt_categories,
         }
         decision = select_facts_for_capacity(
             facts,
