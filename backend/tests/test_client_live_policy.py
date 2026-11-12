@@ -242,18 +242,20 @@ def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
 
 
 def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
-    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
+    import yaml
 
-    assert "shard: [1, 2, 3, 4]" in workflow
-    assert "make test-shard SPLITS=4" in workflow
-    assert "GROUP=${{ matrix.shard }}" in workflow
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["backend-unit-tests"]
+    assert job["strategy"]["matrix"] == {"shard": [1, 2, 3, 4, 5, 6]}
+    command = "make test-shard SPLITS=${{ strategy.job-total }} GROUP=${{ matrix.shard }}"
+    assert any(step.get("run") == command for step in job["steps"])
 
     # The sharded command must select the offline suite and balance the shards by
     # real wall-clock cost (duration-aware), not fall back to an even split.
-    command = _dry_run_make_target("test-shard", "SPLITS=4", "GROUP=2")
+    command = _dry_run_make_target("test-shard", "SPLITS=6", "GROUP=6")
 
-    assert "--splits 4" in command
-    assert "--group 2" in command
+    assert "--splits 6" in command
+    assert "--group 6" in command
     assert 'pytest -m "not live"' in command
     assert "--ignore=tests/blocking_io" in command
     assert "--splitting-algorithm least_duration" in command

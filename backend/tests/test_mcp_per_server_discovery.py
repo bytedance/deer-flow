@@ -61,6 +61,39 @@ def test_flatten_server_tool_groups_preserves_enabled_order_and_empty_success():
     assert groups["EMPTY"].tools == ()
 
 
+def test_flatten_server_tool_groups_drops_cross_server_duplicate_names(caplog):
+    """Server 'a' exposing 'b_x' and server 'a_b' exposing 'x' both bind 'a_b_x'."""
+    a_b_x = _tool("a_b_x")
+    duplicate = _tool("a_b_x")
+    other = _tool("a_other")
+    groups = {
+        "a": ServerDiscoveryResult(tools=(a_b_x, other)),
+        "a_b": ServerDiscoveryResult(tools=(duplicate,)),
+    }
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"):
+        flattened = _flatten_server_tool_groups(("a", "a_b"), groups)
+
+    assert flattened == [a_b_x, other]
+    assert flattened[0] is a_b_x
+    assert duplicate not in flattened
+    assert "a_b_x" in caplog.text
+    assert "'a_b'" in caplog.text
+
+
+def test_flatten_server_tool_groups_drops_duplicate_within_one_server(caplog):
+    first = _tool("A_search")
+    second = _tool("A_search")
+    groups = {"A": ServerDiscoveryResult(tools=(first, second))}
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.tools"):
+        flattened = _flatten_server_tool_groups(("A",), groups)
+
+    assert flattened == [first]
+    assert "A_search" in caplog.text
+    assert "already served by server 'A'" in caplog.text
+
+
 def test_server_discovery_result_repr_hides_ownership_handles():
     pool = MagicMock()
     binding = ServerBinding(

@@ -225,6 +225,9 @@ class SandboxConfig(BaseModel):
     OpenSandboxProvider specific options:
         api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
             management and execd connection settings.
+        secure_access: Ask OpenSandbox to require a per-sandbox access token on
+            sandbox endpoints (default: false). Needs a Kubernetes runtime in
+            ingress gateway mode; other servers reject the create with 400.
         ready_timeout: Create/readiness deadline in seconds (default: 30).
         sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
             explicit provider cleanup.
