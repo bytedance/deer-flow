@@ -54,18 +54,16 @@ set, against an isolated PostgreSQL schema. They need no paid model.
 
 ## Isolation from the parent
 
-- **Tool name policies cover middleware declarations after assembly**, even
-  without global authorization, because extensions can add tools after the
-  inherited list was filtered. Preserve shared middleware and allowed callable
-  declarations; name filtering accepts the Sequence contract and rejects
-  one-shot iterators without consuming them. Generated discovery helpers retain
-  their already-filtered catalogs; global authorization keeps its own validation.
-- **Audit the final tool set immediately before `create_agent`.** Check both
-  explicit tools and the final middleware declarations against the subagent's
-  name policy. Exempt generated discovery helpers by their actual build-local
-  identity in the explicit list, never by name; middleware declarations remain
-  subject to the policy. Unexpected tools fail the build rather than being
-  silently re-filtered.
+- **Apply name policies to middleware tools after assembly**, even without global
+  authorization. Preserve shared middleware and allowed callables; require
+  Sequence declarations and reject one-shot iterators unconsumed. Discovery
+  helpers keep filtered catalogs; provider validation remains independent.
+- **Audit immediately before `create_agent`.** Check explicit and middleware
+  tools, failing on unexpected names rather than silently re-filtering. Exempt
+  only actual generated discovery helpers in the explicit list, never name
+  matches or middleware tools. Reuse callable name conversion within this build;
+  recheck new or renamed tools. Errors identify `disallowed_tools` hits or missing
+  `tools` allowlist entries; denylists win.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.

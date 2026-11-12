@@ -1275,9 +1275,10 @@ class SubagentExecutor:
         # was filtered. Apply the same subagent policy to those declarations,
         # independently of global authorization, without changing shared stacks
         # or re-filtering generated discovery helpers in bound_tools.
-        from deerflow.agents.middlewares.tool_declarations import apply_declared_tool_policy, verify_subagent_tool_policy
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
 
-        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools)
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1296,6 +1297,7 @@ class SubagentExecutor:
             allowed=self.config.tools,
             disallowed=self.config.disallowed_tools,
             discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
         )
         agent = create_agent(
             model=model,

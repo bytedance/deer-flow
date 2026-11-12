@@ -453,3 +453,131 @@ def test_final_audit_is_a_noop_for_an_unrestricted_policy():
             raise AssertionError("Unrestricted builds must not inspect declarations")
 
     verify_subagent_tool_policy([None], [UninspectedMiddleware()], allowed=None, disallowed=[])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("container", [list, tuple, UserList], ids=["list", "tuple", "sequence"])
+async def test_callable_names_are_resolved_once_per_build(executor_module, monkeypatch, container):
+    from deerflow.agents.middlewares import tool_declarations
+
+    executed = []
+
+    def read_report() -> str:
+        """Read a synthetic report."""
+        executed.append("callable")
+        return "report"
+
+    def publish_report() -> str:
+        """Publish a synthetic report."""
+        executed.append("denied")
+        return "published"
+
+    declarations = container([read_report, publish_report])
+    middleware = _middleware(declarations)
+    extensions = _load_extension(monkeypatch, middleware)
+    config = SubagentConfig(name="reviewer", description="Read reports", skills=[], tools=["read_report", "finish_report"])
+    converted = []
+    real_create_tool = tool_declarations.create_tool
+
+    def record_conversion(declaration):
+        converted.append(declaration)
+        return real_create_tool(declaration)
+
+    monkeypatch.setattr(tool_declarations, "create_tool", record_conversion)
+    for build in range(2):
+        converted.clear()
+        await _run(
+            executor_module,
+            monkeypatch,
+            extensions,
+            config,
+            [_call("read_report", f"read-{build}"), _call("finish_report", f"finish-{build}")],
+            tools=[_report_tool("finish_report", executed)],
+        )
+        assert converted.count(read_report) == 1
+        assert converted.count(publish_report) == 1
+        assert middleware.tools is declarations
+        assert declarations[0] is read_report
+    assert executed == ["callable", "finish_report", "callable", "finish_report"]
+
+
+@pytest.mark.asyncio
+async def test_final_audit_resolves_a_new_callable_after_narrowing(executor_module, monkeypatch):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError
+
+    def publish_report() -> str:
+        """Publish a synthetic report."""
+        return "published"
+
+    config = SubagentConfig(name="reviewer", description="Read reports", skills=[], tools=["read_report"])
+    executor, builds = _audit_executor(executor_module, monkeypatch, config)
+    real_resolve = executor._resolve_recursion_limit
+    injections = []
+
+    def inject_callable(middlewares):
+        injections.append(publish_report)
+        middlewares.append(_middleware([publish_report]))
+        return real_resolve(middlewares)
+
+    monkeypatch.setattr(executor, "_resolve_recursion_limit", inject_callable)
+    with pytest.raises(DeclaredToolViewError, match="publish_report"):
+        await executor._create_agent()
+    assert injections == [publish_report]
+    assert builds == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["callable", "base-tool"])
+async def test_final_audit_rechecks_a_renamed_declaration(executor_module, monkeypatch, kind):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError
+
+    def read_report() -> str:
+        """Read a synthetic report."""
+        return "report"
+
+    declaration = read_report if kind == "callable" else _report_tool("read_report", [])
+    extensions = _load_extension(monkeypatch, _middleware([declaration]))
+    config = SubagentConfig(name="reviewer", description="Read reports", skills=[], tools=["read_report"])
+    executor, builds = _audit_executor(executor_module, monkeypatch, config, extensions=extensions)
+    real_resolve = executor._resolve_recursion_limit
+    mutations = []
+
+    def rename_declaration(middlewares):
+        # Extension/schema normalization may copy declarations. Mutate the
+        # actual final stack rather than the contributor's original object.
+        name_attribute = "__name__" if kind == "callable" else "name"
+        live_declaration = next(tool for middleware in middlewares for tool in getattr(middleware, "tools", ()) if getattr(tool, name_attribute, None) == "read_report")
+        mutations.append(live_declaration)
+        setattr(live_declaration, name_attribute, "publish_report")
+        return real_resolve(middlewares)
+
+    monkeypatch.setattr(executor, "_resolve_recursion_limit", rename_declaration)
+    with pytest.raises(DeclaredToolViewError, match="publish_report"):
+        await executor._create_agent(extensions=extensions)
+    assert len(mutations) == 1
+    assert builds == []
+
+
+@pytest.mark.parametrize("source", ["explicit", "middleware"])
+@pytest.mark.parametrize(
+    "allowed, disallowed, reason",
+    [
+        (["read_report"], [], "missing from the tools allowlist"),
+        (None, ["publish_report"], "listed in disallowed_tools"),
+        (["read_report"], ["publish_report"], "listed in disallowed_tools"),
+    ],
+    ids=["allowlist-miss", "denylist-hit", "deny-precedence"],
+)
+def test_final_audit_reports_the_policy_check_that_failed(source, allowed, disallowed, reason):
+    from deerflow.agents.middlewares.tool_declarations import DeclaredToolViewError, verify_subagent_tool_policy
+
+    declaration = _report_tool("publish_report", [])
+    middleware = _middleware([declaration])
+    tools, middlewares = ([declaration], []) if source == "explicit" else ([], [middleware])
+    with pytest.raises(DeclaredToolViewError) as raised:
+        verify_subagent_tool_policy(tools, middlewares, allowed=allowed, disallowed=disallowed)
+    message = str(raised.value)
+    assert "publish_report" in message
+    assert reason in message
+    assert ("Subagent explicit tool list" if source == "explicit" else middleware.name) in message
+    assert "before graph creation" in message

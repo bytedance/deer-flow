@@ -274,6 +274,8 @@ remains limited to admitted tools or skills.
 Before creating the agent graph, a final check verifies the explicit tool list
 and middleware declarations against the subagent's name policy. A tool added
 after the earlier filtering passes stops the build if it violates that policy.
+The error identifies whether the tool is listed in `disallowed_tools` or missing
+from the `tools` allowlist, so the corresponding configuration can be corrected.
 Discovery exemptions apply only to the actual framework-generated helper
 instances; an ordinary tool with the same name still follows the name policy.
 
