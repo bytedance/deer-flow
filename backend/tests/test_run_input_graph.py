@@ -6,6 +6,7 @@ from typing import Annotated
 
 import pytest
 from langchain.agents import create_agent
+from langchain.tools import ToolRuntime
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -119,7 +120,7 @@ async def test_native_task_pending_and_final_results_share_an_id_per_invocation(
     inputs = RunInputs(store, "run", "owner", "worker")
     await inputs.submit("update", "Handle this first", "steer")
     control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=None)
-    runtime = SimpleNamespace(context={INPUT_CONTEXT_KEY: control})
+    runtime = ToolRuntime(state={}, context={INPUT_CONTEXT_KEY: control}, config={}, stream_writer=lambda _: None, tools=[], tool_call_id="reused", store=None)
     pending_ids, results = [], []
     try:
         for _ in range(2):
