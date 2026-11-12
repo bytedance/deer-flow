@@ -508,12 +508,18 @@ class Paths:
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
 
-        Idempotent: missing thread directories are ignored. A file the host marks
-        read-only is retried once after clearing that bit, because Windows refuses
-        to unlink it where POSIX only needs a writable parent; a file that stays
-        undeletable still raises.
+        Idempotent: missing thread directories are ignored. The tree is removed
+        through the Windows extended-length namespace so a nested file whose full
+        path exceeds ``MAX_PATH`` (for example a plugin's ``files/<sha256>.docx``
+        under a deep user/thread workspace) is still unlinked. Without the prefix
+        ``shutil.rmtree`` leaves the long child behind and ``os.rmdir`` fails with
+        ``WinError 145``.
+
+        A file the host marks read-only is retried once after clearing that bit,
+        because Windows refuses to unlink it where POSIX only needs a writable
+        parent; a file that stays undeletable still raises.
         """
-        thread_dir = self.thread_dir(thread_id, user_id=user_id)
+        thread_dir = extended_length_path(self.thread_dir(thread_id, user_id=user_id))
         try:
             shutil.rmtree(thread_dir)
         except FileNotFoundError:

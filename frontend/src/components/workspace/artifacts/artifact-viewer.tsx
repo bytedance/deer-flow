@@ -1,6 +1,6 @@
 "use client";
 
-import { DownloadIcon, ExternalLinkIcon, LoaderIcon } from "lucide-react";
+import { ExternalLinkIcon, LoaderIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { useStandaloneArtifactContent } from "@/core/artifacts/hooks";
@@ -8,15 +8,48 @@ import { getTabularDelimiter } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { resolveStoredArtifactLanguage } from "@/core/artifacts/viewer";
 import { useI18n } from "@/core/i18n/hooks";
-import { getFileIcon, getFileName } from "@/core/utils/files";
+import { checkCodeFile, getFileIcon, getFileName } from "@/core/utils/files";
 
+import { FileTypeIcon } from "../file-type-icon";
+
+import { ArtifactDownloadButton } from "./artifact-download-button";
 import {
   formatArtifactBytes,
+  ArtifactDownloadFallback,
   ArtifactFilePreview,
 } from "./artifact-file-preview";
+import { PluginArtifactPreview } from "./plugin-artifact-preview";
+
+type ViewerProps = { filepath: string; threadId: string; isMock?: boolean };
+
+export function ArtifactViewer(props: ViewerProps) {
+  if (
+    checkCodeFile(props.filepath).isCodeFile ||
+    props.filepath.endsWith(".skill")
+  )
+    return <TextArtifactViewer {...props} />;
+  return (
+    <div className="bg-background flex h-screen flex-col">
+      <header className="border-border flex shrink-0 items-center gap-3 border-b px-4 py-3">
+        <FileTypeIcon filename={props.filepath} compact />
+        <span className="min-w-0 flex-1 truncate font-medium">
+          {getFileName(props.filepath)}
+        </span>
+        <ArtifactDownloadButton {...props} />
+      </header>
+      <main className="min-h-0 flex-1">
+        {props.isMock ? (
+          <ArtifactDownloadFallback {...props} />
+        ) : (
+          <PluginArtifactPreview {...props} />
+        )}
+      </main>
+    </div>
+  );
+}
 
 /** Shared standalone reader for Markdown and bounded CSV/TSV previews. */
-export function ArtifactViewer({
+function TextArtifactViewer({
   filepath,
   threadId,
   isMock = false,
@@ -67,19 +100,11 @@ export function ArtifactViewer({
             {t.artifactPreview.viewSource}
           </a>
         </Button>
-        <Button variant="outline" size="sm" asChild>
-          <a
-            href={urlOfArtifact({
-              filepath,
-              threadId,
-              isMock,
-              download: true,
-            })}
-          >
-            <DownloadIcon className="size-4" />
-            {t.common.download}
-          </a>
-        </Button>
+        <ArtifactDownloadButton
+          filepath={filepath}
+          threadId={threadId}
+          isMock={isMock}
+        />
       </header>
 
       {truncated && !isTabular && (

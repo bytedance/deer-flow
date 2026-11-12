@@ -123,6 +123,7 @@ export const enUS: Translations = {
         "Refresh the page after your administrator updates an extension.",
     },
     catalog: {
+      officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
       context: bundledCopy("deerflow-extension-jev-context", "en-US"),
@@ -381,6 +382,13 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "Preparing download…",
+    retryDownload: "Retry download",
+    downloadFailed: "Download failed. Try again.",
+    downloadRequested: "Sent to browser downloads",
+    retry: "Retry preview",
+    unavailable:
+      "Preview is unavailable for this format. Download the original file to view it.",
     loadingPreview: "Preparing preview...",
     resourcesUnavailable:
       "Some preview resources could not be loaded. View the source or download the files for the complete content.",
@@ -859,8 +867,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {
@@ -1910,6 +1928,25 @@ export const enUS: Translations = {
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
     approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
       title: "Tool approval required",
       description:
         "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
@@ -1938,6 +1975,20 @@ export const enUS: Translations = {
 
   // Subtasks
   uploads: {
+    status: {
+      pending: "Ready to send",
+      uploading: "Uploading…",
+      uploaded: "Uploaded",
+      failed: "Upload failed",
+      cancelled: "Cancelled",
+    },
+    cancelUpload: "Cancel upload",
+    retryUpload: "Retry upload",
+    notReady:
+      "Attachments are not ready. Retry failed files or remove them, then send again.",
+    attachment: "Attachment",
+    image: "Image",
+    removeAttachment: (filename) => `Remove attachment: ${filename}`,
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>

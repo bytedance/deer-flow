@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "office-preview",
+  "locales": {
+    "en-US": {
+      "title": "Office file preview",
+      "description": "Preview Excel, Word and PowerPoint files in the side panel with an installed browser extension.",
+      "usage": [
+        {
+          "title": "Open an Office file",
+          "description": "Open an XLSX, DOCX or PPTX attachment or generated file in the right-hand reader."
+        },
+        {
+          "title": "Search and navigate",
+          "description": "Search displayed text and use worksheet tabs, page controls, outlines or thumbnails. Search shows up to 2,000 matches."
+        },
+        {
+          "title": "Download the original",
+          "description": "Download the original when a format is unsupported or a file exceeds preview limits."
+        }
+      ],
+      "requirements": [
+        "Ask your administrator to install the Office preview extension, restart Gateway and refresh the browser.",
+        "Read-only XLSX, DOCX and PPTX files are supported, subject to the resource limits in the package guide."
+      ]
+    },
+    "zh-CN": {
+      "title": "Office 文件预览",
+      "description": "安装浏览器扩展后，在右侧面板预览 Excel、Word 和 PowerPoint 文件。",
+      "usage": [
+        {
+          "title": "打开 Office 文件",
+          "description": "在右侧阅读面板打开 XLSX、DOCX 或 PPTX 附件或生成的文件。"
+        },
+        {
+          "title": "搜索与导航",
+          "description": "搜索显示的文字，并使用工作表标签、翻页、大纲或缩略图导航；最多显示 2,000 处匹配。"
+        },
+        {
+          "title": "下载原始文件",
+          "description": "文件格式不受支持或超过预览限制时，可下载原始文件。"
+        }
+      ],
+      "requirements": [
+        "请管理员安装 Office 预览扩展、重启 Gateway，并刷新浏览器。",
+        "支持只读预览 XLSX、DOCX 和 PPTX，资源限制详见扩展使用说明。"
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-office-preview#readme"
+}

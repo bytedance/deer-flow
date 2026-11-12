@@ -5678,6 +5678,58 @@ def test_create_thread_marks_a_host_origin_from_request_state() -> None:
     assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
 
 
+@pytest.mark.parametrize(
+    "forged",
+    [
+        {"parents": "x"},
+        {"step": "zero"},
+        {"source": "loop", "writes": {"runtime_run_duration": {"run-1": 1.0}}},
+        {"counters_since_delta_snapshot": "x"},
+        {CHECKPOINT_AGENT_NAME_METADATA_KEY: "forged-agent"},
+    ],
+    ids=["parents", "step", "source-writes", "delta-counters", "agent-binding"],
+)
+def test_create_thread_keeps_server_checkpoint_metadata(monkeypatch, forged) -> None:
+    """Client metadata cannot supply the keys the server reads back from the root checkpoint.
+
+    A bad ``parents`` breaks every history read, a bad ``step`` or delta
+    counter breaks every later turn and state update, and a forged agent
+    binding is copied into the next state rewrite as if the server wrote it.
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.run_event_store = MemoryRunEventStore()
+    graph_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    config = {"configurable": {"thread_id": "forged-meta", "checkpoint_ns": ""}}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "forged-meta", "metadata": {**forged, "title": "mine"}})
+        assert created.status_code == 200, created.text
+
+        root = asyncio.run(checkpointer.aget_tuple(config)).metadata
+        assert {key: root[key] for key in ("step", "source", "writes", "parents")} == {"step": -1, "source": "input", "writes": None, "parents": {}}
+        assert "counters_since_delta_snapshot" not in root
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in root
+        assert root["title"] == "mine"
+        for response in (client.get("/api/threads/forged-meta"), client.get("/api/threads/forged-meta/state"), client.post("/api/threads/forged-meta/history", json={})):
+            assert response.status_code == 200, response.text
+
+        updated = client.post("/api/threads/forged-meta/state", json={"values": {"title": "renamed"}})
+        assert updated.status_code == 200, updated.text
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in asyncio.run(checkpointer.aget_tuple(config)).metadata
+
+    graph = graph_factory()
+    graph.checkpointer = checkpointer
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config))
+
+    with TestClient(app) as client:
+        history = client.post("/api/threads/forged-meta/history", json={})
+        assert history.status_code == 200, history.text
+        assert history.json()[-1]["metadata"]["step"] == -1
+        assert all(isinstance(entry["metadata"]["step"], int) for entry in history.json())
+
+
 def _unread_app(tmp_path, *, owner_check_passes: bool = True):
     from uuid import UUID
 

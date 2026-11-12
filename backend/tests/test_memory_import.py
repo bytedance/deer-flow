@@ -26,6 +26,23 @@ def manager(tmp_path: Path) -> Iterator[DeerMem]:
 
 
 @pytest.mark.parametrize("agent_name", [None, "researcher"])
+@pytest.mark.parametrize("changed_first", [False, True], ids=["unchanged-first", "changed-first"])
+def test_import_rejects_duplicate_fact_ids_without_replacing_memory(manager: DeerMem, agent_name: str | None, changed_first: bool) -> None:
+    scope = {"user_id": "alice", "agent_name": agent_name}
+    manager.create_fact("Keep PostgreSQL", **scope)
+    before = manager.get_memory(**scope)
+    backup = copy.deepcopy(before)
+    original = backup["facts"][0]
+    changed = {**original, "content": "Use SQLite instead"}
+    backup["facts"] = [changed, original] if changed_first else [original, changed]
+
+    with pytest.raises(ValueError, match="Duplicate fact id"):
+        manager.import_memory(backup, **scope)
+
+    assert manager.get_memory(**scope) == before
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
 @pytest.mark.parametrize("backup_revision", [1, None, 20], ids=["older", "omitted", "newer"])
 def test_import_restores_backup_with_current_fact_revision(manager: DeerMem, agent_name: str | None, backup_revision: int | None) -> None:
     scope = {"user_id": "alice", "agent_name": agent_name}
