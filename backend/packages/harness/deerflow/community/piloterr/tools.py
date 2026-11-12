@@ -31,6 +31,9 @@ _FETCH_MAX_CHARS = 4096
 # The rendering engine can wait after the page loads; Piloterr accepts 0-30 seconds.
 _MAX_WAIT_IN_SECONDS = 30
 
+# Tool names whose missing-key warning was already logged in this process.
+_api_key_warned: set[str] = set()
+
 readability_extractor = ReadabilityExtractor()
 
 
@@ -41,6 +44,14 @@ def _tool_extra(tool_name: str = "web_fetch") -> dict:
 
 def _get_api_key(extra: dict) -> str | None:
     return resolve_api_key(extra.get("api_key")) or resolve_api_key(os.getenv("PILOTERR_API_KEY"))
+
+
+def _missing_key_message(tool_name: str) -> str:
+    """Log the missing-key warning once per process; return the model-facing message."""
+    if tool_name not in _api_key_warned:
+        _api_key_warned.add(tool_name)
+        logger.warning("Piloterr API key is not set for '%s'. Set PILOTERR_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://www.piloterr.com", tool_name)
+    return "PILOTERR_API_KEY is not configured"
 
 
 def _coerce_engine(value: object) -> str:
@@ -133,8 +144,7 @@ def web_fetch_tool(url: str) -> str:
 
     api_key = _get_api_key(extra)
     if not api_key:
-        logger.warning("Piloterr API key is not set. Set PILOTERR_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://www.piloterr.com")
-        return "Error: PILOTERR_API_KEY is not configured"
+        return f"Error: {_missing_key_message('web_fetch')}"
 
     engine = _coerce_engine(extra.get("engine"))
     timeout = _coerce_int(extra.get("timeout"), default=_DEFAULT_TIMEOUT, minimum=1, maximum=_MAX_TIMEOUT)

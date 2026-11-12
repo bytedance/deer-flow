@@ -10,6 +10,15 @@ _PAGE = "<!doctype html><html><head><title>Example Domain</title></head><body><a
 _URL = "https://example.com/page"
 
 
+@pytest.fixture(autouse=True)
+def reset_api_key_warned():
+    import deerflow.community.piloterr.tools as piloterr_mod
+
+    piloterr_mod._api_key_warned = set()
+    yield
+    piloterr_mod._api_key_warned = set()
+
+
 def _patch_config(extra: dict | None):
     patcher = patch("deerflow.community.piloterr.tools.get_app_config")
     mock = patcher.start()
@@ -185,6 +194,16 @@ class TestWebFetchTool:
             patcher.stop()
         mock_client.assert_not_called()
         assert "PILOTERR_API_KEY" in caplog.text
+
+    def test_missing_key_warns_once_per_process(self, caplog):
+        patcher = _patch_config({})
+        try:
+            with patch.dict("os.environ", {}, clear=True), patch("deerflow.community.piloterr.tools.httpx.Client"), caplog.at_level(logging.WARNING):
+                assert _fetch() == "Error: PILOTERR_API_KEY is not configured"
+                assert _fetch() == "Error: PILOTERR_API_KEY is not configured"
+        finally:
+            patcher.stop()
+        assert caplog.text.count("PILOTERR_API_KEY") == 1
 
     def test_env_key_when_config_absent(self):
         patcher = _patch_config(None)
