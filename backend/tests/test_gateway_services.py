@@ -912,6 +912,78 @@ def test_state_values_reject_unusable_skill_context_with_400():
 
 
 @pytest.mark.parametrize(
+    "promoted",
+    [
+        "oops",
+        ["oops"],
+        {"names": ["search"]},
+        {"catalog_hash": "abc"},
+        {"catalog_hash": "", "names": []},
+        {"catalog_hash": "abc", "names": "search"},
+        {"catalog_hash": "abc", "names": [1]},
+        {"catalog_hash": "abc", "names": [], "turn_id": 3},
+    ],
+    ids=[
+        "string-channel",
+        "list-channel",
+        "missing-catalog-hash",
+        "missing-names",
+        "empty-catalog-hash",
+        "names-not-a-list",
+        "names-not-strings",
+        "turn-id-not-a-string",
+    ],
+)
+def test_normalize_input_rejects_unusable_promoted_with_400(promoted):
+    """A promotion record the deferred-tool reducer cannot merge must be a 400.
+
+    ``merge_promoted`` calls ``new.get(...)`` and indexes ``new["catalog_hash"]``
+    and ``new["names"]``, so each shape below raises ``AttributeError``,
+    ``KeyError`` or ``TypeError`` while the state update merges — a 500 for the
+    caller instead of a refusal at the boundary.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"promoted": promoted})
+
+    assert excinfo.value.status_code == 400
+    assert "input.promoted" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_promoted_record():
+    from app.gateway.services import normalize_input
+
+    record = {"catalog_hash": "abc", "names": ["search", "fetch"], "turn_id": "user-1"}
+
+    assert normalize_input({"promoted": record})["promoted"] == record
+    assert normalize_input({"promoted": None})["promoted"] is None
+
+
+def test_state_values_reject_unusable_promoted_with_400():
+    """The thread-state update path persists this channel, so it shares the boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+
+
+def test_state_values_keep_usable_promoted_record():
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    record = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    assert strip_server_owned_state_metadata({"promoted": record})["promoted"] == record
+
+
+@pytest.mark.parametrize(
     "message",
     [
         {"role": "ai", "content": "", "tool_calls": "x"},
