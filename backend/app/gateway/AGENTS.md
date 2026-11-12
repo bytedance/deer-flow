@@ -77,6 +77,9 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Lifecycle
 
+- **Probe file-backed managed subagent storage once during startup, off the
+  event loop.** Probe failures warn operators before their first create request;
+  atomic create stays fail-closed rather than falling back to an overwrite.
 - **Shutdown order matters.** `lifespan` drains runs and extensions first, then
   closes MCP, then shuts the sandbox provider down off the event loop. Cleanup code
   keeps running after cancellation, allocates nothing new, and logs failures
