@@ -33,6 +33,11 @@ make test-blocking-io
 - **Subgraph frames keep their namespace.** A bare `values` frame from a subgraph
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
+- **`custom` is subscribed for every run, so it is not a caller mode.** The
+  raw-chunk fast path and the batcher are chosen from the caller's own mode list
+  (`caller_langgraph_stream_modes`), never from the graph's `astream` mode list,
+  which also carries the internal `custom` channel that middlewares and tools use
+  to report progress.
 
 ## Checkpoints
 

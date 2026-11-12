@@ -5,10 +5,13 @@ async function captureThreadStreamOptions(assistantId?: string) {
 
   rs.resetModules();
   rs.doMock("react", () => ({
-    createContext: () => ({}),
-    useContext: () => undefined,
+    createContext: <T>(defaultValue: T) => ({
+      Provider: ({ children }: { children: unknown }) => children,
+      _defaultValue: defaultValue,
+    }),
     useCallback: <T extends (...args: never[]) => unknown>(callback: T) =>
       callback,
+    useContext: <T>(context: { _defaultValue: T }) => context._defaultValue,
     useEffect: () => undefined,
     useMemo: <T>(factory: () => T) => factory(),
     useRef: <T>(initialValue: T) => ({ current: initialValue }),
