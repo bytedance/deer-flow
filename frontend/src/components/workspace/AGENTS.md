@@ -28,6 +28,9 @@ pnpm catalog:sync   # after a change to the capability catalog
 - **Thread deletion is hosted outside the virtualized sidebar lists.** The dialog
   keeps its thread snapshot and retry state when a partial deletion removes the
   row. `onDeleted` runs after both the remote and the local step succeed.
+- **Project memory promotion compares the saved instructions.** Disable it
+  while the editor has unsaved changes. After promotion, refetch the
+  project details so the editor sees the new instructions.
 - **A browser download handoff does not prove that the file was saved.** Do not
   report an export as stored.
 - **Read an error body as unknown**, and narrow each field before use. A malformed
