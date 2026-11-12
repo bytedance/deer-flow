@@ -30,6 +30,8 @@ When your role lacks `runs:create`, the Web UI rejects a new task or `/goal <com
 Automatic and manual compaction process all selected history in chronological
 chunks before replacing it. `summarization.trim_tokens_to_summarize` bounds raw
 input per step; generated summaries use at most half to leave room for source.
+The built-in summary prompt asks the model to preserve active user requirements
+and approval conditions. Set `summarization.summary_prompt` to supply a custom template.
 Oversized summaries retain marked head/tail text; raw history is never clipped.
 Native document titles, context and direct plain-text bodies are included in the
 summary input. Binary documents and remote media are not decoded or fetched;

@@ -859,8 +859,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {
@@ -1910,6 +1920,25 @@ export const enUS: Translations = {
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
     approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
       title: "Tool approval required",
       description:
         "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
