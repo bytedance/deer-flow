@@ -68,6 +68,15 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
+  `parents` or `counters_since_delta_snapshot` in its metadata no longer
+  leaves the thread broken. Those keys used to land on the thread's first
+  checkpoint, so a bad `parents` made the thread's history fail with 500 for
+  good, and a bad `step` or delta counter made every later turn fail. A
+  `deerflow_agent_name` key was also copied into the next state update as if
+  the server had set it. The first checkpoint now takes none of these keys
+  from the request. ([#8019])
+  
 - **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
   exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
   declarations reached the model and the provider silently kept only one.
@@ -16392,6 +16401,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
