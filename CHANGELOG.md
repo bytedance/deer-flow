@@ -390,6 +390,13 @@ This section accumulates work toward the **2.3.0** milestone
   there. Retrying in a completed, failed, running or paused batch is
   unchanged. ([#7792])
 
+- **gateway:** A run that names a missing or invalid custom agent now says so.
+  Messaging a chat whose custom agent was deleted, or passing a malformed
+  `agent_name`, returned the 422 detail "knowledge_scope assistant configuration
+  could not be resolved" even when no knowledge scope was involved. The 422 now
+  reports `Agent '<name>' not found`, an invalid `agent_name`, or an agent
+  config that could not be loaded. ([#8087])
+
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
   rejects, so the agent then failed every load: the update, GET and repair
@@ -16393,6 +16400,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
 [#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8117]: https://github.com/bytedance/deer-flow/pull/8117
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126

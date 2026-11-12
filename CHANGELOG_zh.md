@@ -153,6 +153,11 @@
   为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
   ([#7792])
 
+- **网关：** 运行指定的自定义智能体不存在或名称无效时，现在会明确说明原因。此前向一个
+  自定义智能体已被删除的对话发消息，或传入格式错误的 `agent_name`，即使与知识库范围无关，
+  也会返回 422 和 "knowledge_scope assistant configuration could not be resolved"。现在
+  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。([#8087])
+
 - **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
   空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
   GET 和修复性更新都返回 500，文件后端会把它从智能体列表中漏掉，数据库后端会让该用户的
@@ -12889,6 +12894,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
 [#8118]: https://github.com/bytedance/deer-flow/pull/8118
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
