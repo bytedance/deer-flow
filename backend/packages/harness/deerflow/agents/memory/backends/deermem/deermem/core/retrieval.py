@@ -119,6 +119,53 @@ def _quote_fallback_token(token: str) -> str:
     return f'"{escaped}"'
 
 
+# SQLite reports a malformed FTS5 MATCH expression as ``OperationalError``
+# (SQLITE_ERROR), the same exception type it uses for environment failures such
+# as "database is locked" or "disk I/O error". The exception type therefore
+# cannot decide whether a tokenized retry is safe; only the parser messages can.
+_QUERY_SYNTAX_ERROR_MESSAGES = (
+    "fts5: syntax error",
+    "unterminated string",
+    "unknown special query",
+)
+
+# Columns of the derived index. ``no such column`` is ambiguous: an advanced
+# query can reference an unknown column (``typo:alpha``), but the same message
+# also means the index schema drifted away from what this code inserts and
+# selects. Only a missing *schema* column is an index failure; a missing query
+# column still downgrades to the tokenized retry.
+_INDEX_SCHEMA_COLUMNS = frozenset(
+    {
+        "doc_id",
+        "content",
+        "raw_content",
+        "category",
+        "scope_user",
+        "scope_agent",
+        "created_at",
+        "confidence",
+        "source",
+        "fact_json",
+    }
+)
+_NO_SUCH_COLUMN_RE = re.compile(r"no such column: (?:[^.\s]+\.)*([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _missing_column(error: sqlite3.OperationalError) -> str | None:
+    """Return the column named by a ``no such column`` error, if any."""
+    match = _NO_SUCH_COLUMN_RE.search(str(error))
+    return match.group(1).lower() if match else None
+
+
+def _is_fts5_syntax_error(error: sqlite3.OperationalError) -> bool:
+    """Whether the query text, not the index, caused the SQLite error."""
+    message = str(error).lower()
+    if any(marker in message for marker in _QUERY_SYNTAX_ERROR_MESSAGES):
+        return True
+    missing = _missing_column(error)
+    return missing is not None and missing not in _INDEX_SCHEMA_COLUMNS
+
+
 def _build_fallback_query(query: str) -> str:
     """Convert natural-language query to FTS5 OR query (fallback strategy)."""
     tokens = [token for token in _tokenize(query) if any(char.isalnum() for char in token)]
@@ -140,6 +187,7 @@ class FTS5Retrieval:
       2. Natural language -> jieba tokenize + OR join
       3. Syntax error -> fall back to tokenized OR query
       4. Still fails -> return empty
+      5. Index errors (locked, I/O, unusable) -> propagate, never empty
 
     Ranking:
       BM25 score × time_decay + confidence × 0.2
@@ -365,6 +413,13 @@ class FTS5Retrieval:
 
         Returns list of fact dicts (id, content, category, confidence,
         createdAt, source, score, bm25_score) sorted by relevance.
+
+        An empty list means no match, or an empty/invalid request; an index
+        failure raises instead of returning an empty result.
+
+        Raises:
+            sqlite3.OperationalError: the index is unavailable (locked, corrupt,
+                or schema drift).
         """
         import time
 
@@ -432,7 +487,13 @@ class FTS5Retrieval:
         category: str | None,
         top_k: int,
     ) -> list[dict[str, Any]] | None:
-        """Execute FTS5 query. Return None on syntax error."""
+        """Execute FTS5 query. Return None on syntax error; other SQLite errors propagate.
+
+        Raises:
+            sqlite3.OperationalError: the derived index cannot answer -- locked,
+                unreadable, or its schema no longer matches this code. Only the
+                caller decides whether to log and fall back to canonical facts.
+        """
         if not fts5_query:
             return []
 
@@ -479,8 +540,17 @@ class FTS5Retrieval:
                     cursor.row_factory = sqlite3.Row
                     rows = heapq.nlargest(top_k, score_matches(cursor), key=lambda item: item[0])
             except sqlite3.OperationalError as e:
-                logger.debug("FTS5 query syntax error: %s (query: %s)", e, fts5_query)
-                return None
+                # Only a malformed MATCH expression may downgrade to the tokenized
+                # retry. A locked, broken, or drifted index must not masquerade as
+                # "no matching memory"; raise it and let the caller log once and
+                # fall back to canonical Markdown facts.
+                if _is_fts5_syntax_error(e):
+                    logger.debug("FTS5 query syntax error: %s (query: %s)", e, fts5_query)
+                    return None
+                missing = _missing_column(e)
+                if missing is not None:
+                    raise sqlite3.OperationalError(f"FTS5 retrieval index schema is stale (missing column {missing!r}); rebuild the index: {e}") from e
+                raise
 
         results: list[dict[str, Any]] = []
         for score, row in rows:
@@ -670,6 +740,15 @@ class FTS5RetrievalAdapter:
         mode: str,
         filters: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
+        """Search the derived index for facts visible in ``scopes``.
+
+        Returns ``[]`` only for a genuine miss or an empty/invalid request.
+
+        Raises:
+            sqlite3.OperationalError: the index cannot answer (locked, corrupt,
+                or schema drift). Callers must not present that as "no memory";
+                DeerMem logs it and falls back to canonical Markdown facts.
+        """
         if not query.strip() or top_k <= 0:
             return []
         if mode not in {"hybrid", "fts5", "lexical"}:
