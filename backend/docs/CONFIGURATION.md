@@ -933,6 +933,16 @@ agent_storage:
 - `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
 - In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
 
+Managed subagents also follow this backend selection. With `file`, their directory
+must support hard links: creation atomically publishes a fully written temporary
+file without replacing an existing name. Workers sharing that directory therefore
+return one HTTP 201 and one HTTP 409 for concurrent same-name creates. Other
+filesystem errors propagate rather than falling back to an overwrite.
+Gateway startup probes hard-link creation once per worker in that directory,
+off the event loop, and logs a warning if the probe fails. Startup continues;
+use a volume with working hard links or migrate to `backend: db` before creating
+managed subagents on an incompatible volume. Probe files are removed afterward.
+
 Migrating an existing install from `file` to `db`:
 
 Run from the repository root using the backend's `uv` environment. The importer
