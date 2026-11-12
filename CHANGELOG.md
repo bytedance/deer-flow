@@ -60,6 +60,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
 - **memory:** Canonical fact Markdown preserves embedded Unicode line separators,
   allowing JSON fact bodies to survive save/load and reload.
   ([#7891](https://github.com/bytedance/deer-flow/pull/7891))
@@ -88,6 +94,12 @@ This section accumulates work toward the **2.3.0** milestone
   active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
   the run before executing it. Custom `RunStore` implementations used with
   heartbeats must implement that method. ([#8046])
+
+- **subagents:** Concurrent creates for the same managed-subagent name in shared
+  file storage now preserve the winning definition and return HTTP 409 to the
+  losing request instead of reporting two successes and overwriting one definition.
+  Gateway startup also probes hard-link support and warns if the storage volume
+  cannot support managed subagent creation. ([#8132](https://github.com/bytedance/deer-flow/pull/8132))
 
 - **agents:** A high-risk tool call without a usable id no longer wedges the
   thread when `hitl_approval` is enabled. A provider that omits a tool-call id
