@@ -539,7 +539,7 @@ def check_llm_api_key(config_path: Path) -> list[CheckResult]:
             for var in env_refs:
                 label = f"{var} set (model: {model_name})"
                 value = os.environ.get(var)
-                if value and not _looks_like_key_placeholder(value):
+                if value and value.strip() and not _looks_like_key_placeholder(value):
                     results.append(CheckResult(label, "ok"))
                 else:
                     results.append(

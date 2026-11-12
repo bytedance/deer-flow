@@ -68,6 +68,10 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **doctor:** Model credentials that still contain an obvious sample value or
+  only whitespace no longer make `make doctor` report the model as ready.
+  ([#8184](https://github.com/bytedance/deer-flow/pull/8184))
+
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.

@@ -359,7 +359,7 @@ class TestCheckLLMApiKey:
 
     @pytest.mark.parametrize(
         "placeholder",
-        ["your-openai-api-key", "replace-with-your-totokens-api-key"],
+        ["your-openai-api-key", "replace-with-your-totokens-api-key", "   "],
     )
     def test_placeholder_key_is_not_reported_as_ready(self, tmp_path, monkeypatch, placeholder):
         cfg = tmp_path / "config.yaml"
