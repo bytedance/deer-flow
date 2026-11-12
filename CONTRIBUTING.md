@@ -388,6 +388,9 @@ which includes Chromium and its system libraries. When upgrading the locked
 Playwright version, update the image tags in both browser workflows to match.
 Each job launches Chromium before running tests; auth recovery tests run only
 after that browser readiness check succeeds.
+These containers use uv-managed Python instead of the host's Python tool cache,
+so the interpreter's OpenSSL libraries match its runtime. Backend dependency
+setup also verifies SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 

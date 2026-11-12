@@ -36,3 +36,17 @@ def test_auth_recovery_requires_a_working_browser():
     probe = next(step for step in steps if "await chromium.launch()" in step.get("run", ""))
     auth = next(step for step in steps if "playwright.auth.config.ts" in step.get("run", ""))
     assert f"steps.{probe['id']}.outcome == 'success'" in auth["if"]
+
+
+@pytest.mark.parametrize(("workflow", "job"), [("e2e-tests.yml", "e2e-tests"), ("replay-e2e.yml", "fullstack-replay-render")])
+def test_browser_ci_uses_container_compatible_python(workflow, job):
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load((root / ".github/workflows" / workflow).read_text(encoding="utf-8"))
+    browser_job = config["jobs"][job]
+    assert browser_job.get("env", {}).get("UV_PYTHON_PREFERENCE") == "only-managed"
+    steps = browser_job["steps"]
+    assert not any(step.get("uses", "").startswith("actions/setup-python@") for step in steps)
+    install = next(index for index, step in enumerate(steps) if "uv python install 3.12" in step.get("run", ""))
+    sync = next(index for index, step in enumerate(steps) if "uv sync" in step.get("run", ""))
+    assert install < sync
+    assert any("import ssl, sqlite3" in step.get("run", "") for step in steps)
