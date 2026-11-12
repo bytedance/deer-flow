@@ -279,10 +279,13 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
             schedule_spec["cron"] = normalize_cron_expression(raw_cron)
         if schedule_type == "interval":
             every_seconds = validate_interval_seconds(schedule_spec, scheduler_config.min_once_delay_seconds)
-            try:
-                previous_seconds = parse_interval_seconds(dict(existing["schedule_spec"])) if existing["schedule_type"] == "interval" else None
-            except ValueError:
-                previous_seconds = None
+            previous_seconds = None
+            previous_spec = existing["schedule_spec"]
+            if existing["schedule_type"] == "interval" and isinstance(previous_spec, dict):
+                try:
+                    previous_seconds = parse_interval_seconds(previous_spec)
+                except ValueError:
+                    pass
             # Re-saving an unchanged cadence keeps the next occurrence.
             if previous_seconds == every_seconds and existing.get("next_run_at") is not None:
                 upcoming = existing["next_run_at"]
