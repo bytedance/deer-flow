@@ -50,7 +50,6 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
     THREAD_INCARNATION_METADATA_GUARD_KEY,
 )
-from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -243,6 +242,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         "__run_input_control",
+        "__tool_approval_runtime",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -625,8 +625,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
             "__run_input_control",
+            "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
-            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -736,6 +736,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     mcp_task_repo: Any | None = field(default=None)
+    approval_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -1083,6 +1084,7 @@ async def run_agent(
     pending_pause = False
     streamed_interrupts: list[Any] = []
     input_control = None
+    approval_runtime = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
@@ -1356,7 +1358,6 @@ async def run_agent(
         hitl_config = getattr(hitl_app_config, "hitl_approval", None)
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
         hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
-        hitl_resume_tool_names = _hitl_action_tool_names(hitl_resume_actions)
         hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
         if journal is not None and hitl_resume_calls:
             journal.adopt_resumed_tool_calls(hitl_resume_calls)
@@ -1380,9 +1381,6 @@ async def run_agent(
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
-        runtime_ctx.pop("_hitl_resume_tool_names", None)
-        if hitl_resume_tool_names:
-            runtime_ctx["_hitl_resume_tool_names"] = hitl_resume_tool_names
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
@@ -1432,6 +1430,21 @@ async def run_agent(
                 on_replan=record_steered_response,
             )
             runtime_ctx[INPUT_CONTEXT_KEY] = input_control
+        if ctx.approval_store is not None and hitl_config is not None and hitl_config.enabled and isinstance(thread_incarnation, str) and record.user_id:
+            from deerflow.approvals.policy import resolve_mode
+            from deerflow.approvals.runtime import ApprovalRuntime
+
+            approval_runtime = ApprovalRuntime(
+                ctx.approval_store,
+                scope=(record.user_id, thread_id, thread_incarnation),
+                run_id=run_id,
+                mode=resolve_mode(hitl_config, runtime_ctx),
+                timeout=hitl_config.child_approval_timeout_seconds,
+                record=record,
+                journal=journal,
+                interactive=resolve_run_interaction_policy({"context": runtime_ctx}).allows_clarification and origin_kind_of(record.metadata) is None,
+            )
+            runtime_ctx["__tool_approval_runtime"] = approval_runtime
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1636,35 +1649,44 @@ async def run_agent(
             streamed_interrupts.extend(interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])
 
         def remember_approval(interrupts: Any) -> None:
+            from deerflow.approvals.protocol import combine_approval_payloads
+
+            payloads = []
             for pending_interrupt in interrupts:
                 value = pending_interrupt.get("value") if isinstance(pending_interrupt, Mapping) else getattr(pending_interrupt, "value", None)
                 if isinstance(value, dict) and value.get("kind") == "hitl_approval":
-                    record.metadata["hitl_approval"] = value
-                    return
+                    payloads.append(value)
+            if payloads:
+                record.metadata["hitl_approval"] = combine_approval_payloads(payloads)
 
         async def detect_pending_pause() -> None:
             nonlocal pending_pause
             if pending_pause or record.abort_event.is_set():
                 return
-            if streamed_interrupts:
-                pending_pause = True
-                remember_approval(streamed_interrupts)
-                return
             # Values/update frames expose interrupts directly, so disabled HITL
             # keeps the old hot path there. Message-only streams need the snapshot
             # fallback for generic (non-HITL) interrupts as well.
             hitl_enabled = bool(hitl_config is not None and hitl_config.enabled)
+            if streamed_interrupts and not hitl_enabled:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+                return
             if not hitl_enabled and {"values", "updates"} & requested_modes:
                 return
             snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
             if not snapshot_capable:
+                if streamed_interrupts:
+                    pending_pause = True
+                    remember_approval(streamed_interrupts)
                 return
             snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
             snapshot_tasks = getattr(snapshot, "tasks", None) or ()
             pending_pause = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
             if pending_pause:
-                for task in snapshot_tasks:
-                    remember_approval(getattr(task, "interrupts", ()) or ())
+                remember_approval([item for task in snapshot_tasks for item in (getattr(task, "interrupts", ()) or ())])
+            elif streamed_interrupts:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
@@ -1998,7 +2020,7 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
-            nonlocal journal, seq_stamper
+            nonlocal journal, seq_stamper, approval_runtime
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
@@ -2376,6 +2398,12 @@ async def run_agent(
                     raise deferred_finalization_interrupt
             finally:
                 try:
+                    if approval_runtime is not None:
+                        try:
+                            await approval_runtime.close()
+                        except Exception:
+                            logger.warning("Failed to cancel pending child approvals for run %s", run_id, exc_info=True)
+                        approval_runtime = None
                     if journal is not None:
                         try:
                             await journal.close(flush=not record.ownership_lost)
@@ -3185,21 +3213,11 @@ def _is_resume_command_input(graph_input: Any) -> bool:
     return isinstance(graph_input, Command) and graph_input.resume is not None
 
 
-async def _pending_hitl_resume_tool_names(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> set[str]:
-    """Recover gated names from the durable pause matched by this resume."""
-    return _hitl_action_tool_names(await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input))
-
-
-def _hitl_action_tool_names(actions: list[Mapping[str, Any]]) -> set[str]:
-    """Names for the replay gate: every action naming a tool, with or without a usable call id."""
-    return {action["tool_name"] for action in actions if isinstance(action.get("tool_name"), str)}
-
-
 def _hitl_action_calls(actions: list[Mapping[str, Any]]) -> dict[str, str]:
     """Calls for journal adoption: only actions that also carry a usable ``tool_call_id``.
 
     The calls were dispatched by the paused Run, but the resume Run produces
-    their results: a rejection is written by HITL ``after_model`` with no tool
+    their results: a rejection is returned by the approval gate without a tool
     callback, so the resume journal must adopt these calls to persist it.
     """
     return {action["tool_call_id"]: action["tool_name"] for action in actions if isinstance(action.get("tool_call_id"), str) and action["tool_call_id"] and isinstance(action.get("tool_name"), str)}
@@ -3209,7 +3227,10 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
     """Return the actions of the live durable pause this resume answers."""
     if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
         return []
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+    from deerflow.runtime.checkpoint_history import recent_checkpoint_history
+
+    responses = approval_responses(graph_input.resume)
     if not isinstance(responses, list):
         return []
     response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
@@ -3232,9 +3253,17 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
                 payload = getattr(pending_interrupt, "value", None)
                 if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
                     continue
+                # Version 2 routes parallel decisions by LangGraph interrupt
+                # ID. Match each pause against its own response group, rather
+                # than comparing every action with the flattened batch.
+                interrupt_id = getattr(pending_interrupt, "id", None)
+                grouped_responses = responses if "responses" in graph_input.resume else approval_responses(graph_input.resume.get(interrupt_id))
+                if not isinstance(grouped_responses, list):
+                    continue
+                group_ids = {response.get("tool_call_id") for response in grouped_responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
                 pending_ids = payload.get("pending_tool_call_ids")
                 actions = payload.get("actions")
-                if not isinstance(pending_ids, list) or set(pending_ids) != response_ids or not isinstance(actions, list):
+                if not isinstance(pending_ids, list) or set(pending_ids) != group_ids or not isinstance(actions, list):
                     continue
                 matched.extend(action for action in actions if isinstance(action, Mapping))
         return matched
@@ -3245,7 +3274,9 @@ def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
     """Return whether this is a well-formed reject-only HITL resume payload."""
     if not isinstance(graph_input, Command) or not isinstance(graph_input.resume, dict):
         return False
-    responses = graph_input.resume.get("responses")
+    from deerflow.approvals.protocol import approval_responses
+
+    responses = approval_responses(graph_input.resume)
     return (
         isinstance(responses, list)
         and bool(responses)

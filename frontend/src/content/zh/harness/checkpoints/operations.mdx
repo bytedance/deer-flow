@@ -125,13 +125,13 @@ run 获得持久化的同线程 admission 后，Gateway 会在首次 checkpoint 
 
 | 发行包 | 下限 | 原因 |
 | --- | --- | --- |
-| `langgraph-checkpoint` | `>=4.2.0,<5.0` | 4.2.0 修掉了迁移后首个写入丢失（上游 #8526）。解析到 4.1.x 会静默重新引入该缺陷，而 `langgraph` 自己的 `langgraph-checkpoint>=4.1.0` 约束并不排除该版本 |
-| `langgraph-checkpoint-postgres` | `>=3.1.2,<3.2` | 3.1.2 能找到纯值形式的增量种子（上游 #8535）；3.1.1 会越过它一路走到线程根 |
-| `langgraph-checkpoint-sqlite` | `>=3.1.1,<3.2` | 与其他 saver 一同锁定 |
+| `langgraph-checkpoint` | `>=4.3.0,<5.0` | 4.2.0 修掉了迁移后首个写入丢失（上游 #8526）；4.3.0 让并行 super-step 写入在重放时保持实时任务路径顺序（上游 #8544） |
+| `langgraph-checkpoint-postgres` | `>=3.1.3,<3.2` | 3.1.2 能找到纯值形式的增量种子（上游 #8535）；3.1.3 修复分页祖先回走的游标（上游 #8556） |
+| `langgraph-checkpoint-sqlite` | `>=3.1.2,<3.2` | 与 checkpoint 的回放顺序修复配套 |
 
-回归门禁是 `backend/tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`：当 4.2.0 的修复缺失时它会失败，保证 full→delta 迁移仍能在同一线程上回放。锁定环境解析到 `langgraph 1.2.9`、`langgraph-checkpoint 4.2.0`、`langgraph-checkpoint-postgres 3.1.2`。
+`backend/tests/test_delta_channel_checkpointers.py` 中的回归门禁覆盖 full→delta 迁移、并行写入回放顺序和分页祖先回走。锁定环境解析到 `langgraph 1.2.14`、`langgraph-checkpoint 4.3.0`、`langgraph-checkpoint-postgres 3.1.3`。
 
-运行时没有版本检查，也没有告警。运维能看到的唯一版本信号，是一条带有锁定版本号的触发式跳过测试，例如 `#8448` 的 Postgres 跳过或 `#8382` 的回放顺序跳过。
+运行时没有版本检查，也没有告警。依赖下限会排除受影响的版本；这三个回归契约在缺陷复现时都会直接失败，不再跳过。
 
 ## 如何跑基准
 
