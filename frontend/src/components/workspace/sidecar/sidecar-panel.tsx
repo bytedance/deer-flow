@@ -12,7 +12,13 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -48,6 +54,10 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import {
+  isArtifactRewriteClarification,
+  type ArtifactSelectionEdit,
+} from "@/core/artifacts/selection";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import { useI18n } from "@/core/i18n/hooks";
@@ -145,6 +155,8 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
+    artifactEdit: ArtifactSelectionEdit | null;
+    onSent: () => void;
     // Settles the composer's submit with the queued send's outcome.
     resolve: () => void;
     reject: (error: unknown) => void;
@@ -345,10 +357,10 @@ export function SidecarPanel({ className }: { className?: string }) {
       threadId: string,
       message: PromptInputMessage,
       references: SidecarReference[],
+      artifactEdit: ArtifactSelectionEdit | null,
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
-      const artifactEdit = sidecar.artifactEdit;
       const referencedContexts = references.map(
         (reference) => reference.context,
       );
@@ -390,12 +402,7 @@ export function SidecarPanel({ className }: { className?: string }) {
         onSent,
       });
     },
-    [
-      parentThread.messages,
-      sendMessage,
-      sidecar.parentThreadId,
-      sidecar.artifactEdit,
-    ],
+    [parentThread.messages, sendMessage, sidecar.parentThreadId],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -406,6 +413,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
       let sent = false;
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
       await submitToSidecarThread(
         sidecar.sidecarThreadId,
         {
@@ -413,6 +421,14 @@ export function SidecarPanel({ className }: { className?: string }) {
           files: [],
         },
         pendingReferences,
+        edit &&
+          isArtifactRewriteClarification(
+            thread.messages,
+            edit.id,
+            request.request_id,
+          )
+          ? edit
+          : null,
         () => {
           sent = true;
           if (pendingReferences.length > 0) {
@@ -426,7 +442,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       );
       return sent;
     },
-    [sidecar, submitToSidecarThread],
+    [sidecar, submitToSidecarThread, thread.messages],
   );
 
   const handleSubmitApproval = useCallback(
@@ -451,13 +467,8 @@ export function SidecarPanel({ className }: { className?: string }) {
       sidecar.sidecarThreadId,
       nextSubmit.message,
       nextSubmit.references,
-      // Clear references only once the send genuinely proceeds; a send dropped
-      // by the in-flight guard leaves them attached instead of losing them.
-      () => {
-        if (nextSubmit.references.length > 0) {
-          sidecar.clearActiveReferences();
-        }
-      },
+      nextSubmit.artifactEdit,
+      nextSubmit.onSent,
     ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
@@ -468,7 +479,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   ]);
 
   const handleSubmit = useCallback(
-    async (message: PromptInputMessage) => {
+    async (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => {
       const text = message.text.trim();
       const files = promptMessageFiles(message);
       if ((!text && message.files.length === 0) || disabled) {
@@ -481,6 +492,14 @@ export function SidecarPanel({ className }: { className?: string }) {
       }
 
       const pendingReferences = [...sidecar.activeReferences];
+      const edit = sidecar.artifactEdit;
+      const submitter = (event.nativeEvent as SubmitEvent).submitter;
+      const artifactEdit =
+        submitter?.getAttribute("value") === "rewrite" ? edit : null;
+      const onSent = () => {
+        if (pendingReferences.length > 0) sidecar.clearActiveReferences();
+        if (edit && !artifactEdit) sidecar.clearArtifactEdit(edit.id);
+      };
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
@@ -490,6 +509,8 @@ export function SidecarPanel({ className }: { className?: string }) {
             setQueuedSubmit({
               message,
               references: pendingReferences,
+              artifactEdit,
+              onSent,
               resolve,
               reject,
             });
@@ -501,11 +522,8 @@ export function SidecarPanel({ className }: { className?: string }) {
           sidecar.sidecarThreadId,
           message,
           pendingReferences,
-          () => {
-            if (pendingReferences.length > 0) {
-              sidecar.clearActiveReferences();
-            }
-          },
+          artifactEdit,
+          onSent,
         );
       } catch (error) {
         toast.error(
@@ -719,6 +737,16 @@ export function SidecarPanel({ className }: { className?: string }) {
                     variant="outline"
                   />
                 </Tooltip>
+                {sidecar.artifactEdit && (
+                  <Button
+                    type="submit"
+                    value="rewrite"
+                    size="sm"
+                    disabled={disabled}
+                  >
+                    {t.artifactSelection.rewrite}
+                  </Button>
+                )}
               </PromptInputTools>
             </PromptInputFooter>
           </PromptInput>

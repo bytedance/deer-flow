@@ -1,5 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
+import { extractHumanInputRequest } from "@/core/messages/human-input";
 import { extractTextFromMessage } from "@/core/messages/utils";
 import type { SidecarContext } from "@/core/sidecar";
 
@@ -68,8 +69,8 @@ export function selectionLines(source: string, from: number, to: number) {
   return { startLine, endLine };
 }
 
-// CodeMirror represents each CRLF as one position. Shift each endpoint for
-// the CRLFs it has already passed in the original source.
+// CodeMirror normalizes CRLF and lone CR to a one-position line break.
+// Only CRLF changes the number of source positions.
 export function sourceSelectionOffsets(
   source: string,
   { from, to }: SourceSelection,
@@ -118,17 +119,40 @@ export function artifactSelectionContext(
   };
 }
 
+function lastSidecarRequest(messages: Message[]) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (
+      message?.type === "human" &&
+      message.additional_kwargs?.sidecar_visible_message === true
+    )
+      return index;
+  }
+  return -1;
+}
+
+export function isArtifactRewriteClarification(
+  messages: Message[],
+  editId: string,
+  requestId: string,
+) {
+  const request = lastSidecarRequest(messages);
+  return (
+    request >= 0 &&
+    messages[request]?.additional_kwargs?.artifact_selection_edit === editId &&
+    messages
+      .slice(request + 1)
+      .some(
+        (message) =>
+          extractHumanInputRequest(message)?.request_id === requestId,
+      )
+  );
+}
+
 // An answer must follow a submitted request for this particular edit. Restored
 // sidecar history and a previous edit's answer must never become replacements.
 export function artifactReplacement(messages: Message[], editId: string) {
-  const reversed = [...messages].reverse();
-  const lastHumanReverse = reversed.findIndex(
-    (message) =>
-      message.type === "human" &&
-      message.additional_kwargs?.sidecar_visible_message === true,
-  );
-  const lastHuman =
-    lastHumanReverse < 0 ? -1 : messages.length - 1 - lastHumanReverse;
+  const lastHuman = lastSidecarRequest(messages);
   if (
     lastHuman < 0 ||
     messages[lastHuman]?.additional_kwargs?.artifact_selection_edit !== editId

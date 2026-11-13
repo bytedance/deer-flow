@@ -354,7 +354,7 @@ export const zhCN: Translations = {
 
   artifactSelection: {
     rewrite: "改写选区",
-    instructions: "在侧边追问中描述如何改写这段内容，检查回答后再应用到草稿。",
+    instructions: "描述如何修改后，选择「改写选区」。普通追问请使用发送按钮。",
     exactRequired: "切换到源码，选择准确范围后即可改写。",
     review: "预览替换内容",
     original: "选中段落",

@@ -27,7 +27,9 @@ offer the same two quotation actions.
 ![Select an artifact passage to quote or rewrite](assets/artifact-selection/artifact-selection-entry.png)
 
 For a writable output file, **Rewrite selection** opens side chat with that
-passage. Describe the change and send it. Once the answer finishes, choose
+passage. Describe the change and choose **Rewrite selection** in the side-chat
+composer. Use the regular send action to ask a question about the passage and
+end the pending rewrite. Once the rewrite finishes, choose
 **Review replacement**, inspect or adjust the proposed text, and choose
 **Apply to draft**. This replaces exactly the selected source range and opens
 the file's editor. **Save** publishes the draft using the existing revision

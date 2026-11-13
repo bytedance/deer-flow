@@ -172,7 +172,7 @@ test("rewriting changes only the selection after review, then uses revision-chec
   await composer.fill("Make the wording simpler");
   await composer
     .locator("xpath=ancestor::form")
-    .getByRole("button", { name: "Submit", exact: true })
+    .getByRole("button", { name: "Rewrite selection", exact: true })
     .click();
   await expect(
     review.getByRole("button", { name: "Review replacement" }),
@@ -296,7 +296,7 @@ test("the source editor quotes the exact text after a CRLF", async ({
   await composer.fill("Update this word");
   await composer
     .locator("xpath=ancestor::form")
-    .getByRole("button", { name: "Submit", exact: true })
+    .getByRole("button", { name: "Rewrite selection", exact: true })
     .click();
   await expect.poll(() => JSON.stringify(submitted)).toContain("Target");
 });
@@ -315,6 +315,34 @@ test("a rendered link label cannot match the hidden URL for rewriting", async ({
   ).toBeEnabled();
 });
 
+test("a regular send while a rewrite is pending stays a question", async ({
+  page,
+}) => {
+  await setup(page);
+  let submitted: unknown;
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    submitted = route.request().postDataJSON();
+    return handleRunStream(route);
+  });
+  await select(page, selected);
+  await page
+    .getByTestId("artifact-selection-toolbar")
+    .getByRole("button", { name: "Rewrite selection" })
+    .click();
+  const composer = page.getByPlaceholder(/deeper follow-up/i);
+  await composer.fill("What does this section mean?");
+  await composer.press("Enter");
+  await expect
+    .poll(() => JSON.stringify(submitted))
+    .toContain("What does this section mean?");
+  expect(JSON.stringify(submitted)).toContain(selected);
+  expect(JSON.stringify(submitted)).not.toContain("artifact_selection_edit");
+  expect(JSON.stringify(submitted)).not.toContain(
+    "Rewrite only the first referenced passage",
+  );
+  await expect(page.getByTestId("artifact-rewrite-review")).toBeHidden();
+});
+
 for (const discard of ["close draft", "delete thread"] as const) {
   test(`ordinary side-chat questions omit a discarded rewrite after ${discard}`, async ({
     page,
@@ -331,15 +359,15 @@ for (const discard of ["close draft", "delete thread"] as const) {
       .getByRole("button", { name: "Rewrite selection" })
       .click();
     const composer = page.getByPlaceholder(/deeper follow-up/i);
-    const submit = async (text: string) => {
+    const submit = async (text: string, button = "Submit") => {
       await composer.fill(text);
       await composer
         .locator("xpath=ancestor::form")
-        .getByRole("button", { name: "Submit", exact: true })
+        .getByRole("button", { name: button, exact: true })
         .click();
     };
     if (discard === "delete thread") {
-      await submit("Rewrite this line");
+      await submit("Rewrite this line", "Rewrite selection");
       await expect
         .poll(() => JSON.stringify(submitted))
         .toContain("artifact_selection_edit");

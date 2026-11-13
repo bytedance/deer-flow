@@ -370,7 +370,7 @@ export const enUS: Translations = {
   artifactSelection: {
     rewrite: "Rewrite selection",
     instructions:
-      "Describe how to rewrite this passage in the side chat. Review the answer before applying it to the draft.",
+      "Describe the change, then choose Rewrite selection. To ask a regular question, use Send.",
     exactRequired: "Switch to source to select an exact range for rewriting.",
     review: "Review replacement",
     original: "Selected passage",

@@ -1,16 +1,78 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, it } from "@rstest/core";
 
 import {
   applyArtifactSelectionDraft,
   artifactReplacement,
   artifactSelectionContext,
+  isArtifactRewriteClarification,
   locateArtifactSelection,
   replaceArtifactSelection,
   selectionLines,
+  sourceSelectionOffsets,
 } from "@/core/artifacts/selection";
 import { isSameSidecarContext } from "@/core/sidecar";
 
 describe("artifact selections", () => {
+  it.each([
+    [1, 2, "\r\n"],
+    [0, 1, "a"],
+    [2, 5, "b\r\nc"],
+    [1, 6, "\r\nb\r\nc\r"],
+    [6, 7, "d"],
+  ])(
+    "maps editor offsets %i–%i to the original line endings",
+    (from, to, expected) => {
+      const source = "a\r\nb\r\nc\rd";
+      const offsets = sourceSelectionOffsets(source, { from, to });
+      expect(source.slice(offsets.from, offsets.to)).toBe(expected);
+    },
+  );
+
+  it("keeps the rewrite marker only on its own clarification chain", () => {
+    const messages: Message[] = [
+      {
+        type: "human",
+        content: "Rewrite this",
+        additional_kwargs: {
+          sidecar_visible_message: true,
+          artifact_selection_edit: "edit",
+        },
+      },
+      {
+        type: "tool",
+        content: "",
+        tool_call_id: "tool",
+        artifact: {
+          human_input: {
+            version: 1,
+            kind: "human_input_request",
+            source: "ask_clarification",
+            request_id: "request",
+            question: "Which tone?",
+            input_mode: "free_text",
+          },
+        },
+      },
+    ];
+    expect(isArtifactRewriteClarification(messages, "edit", "request")).toBe(
+      true,
+    );
+    expect(isArtifactRewriteClarification(messages, "edit", "other")).toBe(
+      false,
+    );
+    expect(isArtifactRewriteClarification(messages, "other", "request")).toBe(
+      false,
+    );
+    messages.push({
+      type: "human",
+      content: "Ordinary question",
+      additional_kwargs: { sidecar_visible_message: true },
+    });
+    expect(isArtifactRewriteClarification(messages, "edit", "request")).toBe(
+      false,
+    );
+  });
   it("locates repeated text only inside its selected source block", () => {
     const source = "same\n\nother\n\nsame";
     expect(
