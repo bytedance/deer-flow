@@ -453,9 +453,10 @@ def render_markdown_report(results: list[dict[str, Any]]) -> str:
         facts = item["llm"] if isinstance(item["llm"], dict) else {}
         number = item.get("number")
         url = item.get("url") or ""
+        match = ISSUE_URL_RE.fullmatch(url) if isinstance(url, str) else None
         link = (
             f"[#{number}]({url})"
-            if ISSUE_URL_RE.fullmatch(url)
+            if type(number) is int and match and match["number"] == str(number)
             else _table_text(f"#{number}")
         )
         quotes = []
@@ -475,9 +476,9 @@ def render_markdown_report(results: list[dict[str, Any]]) -> str:
             str(idx),
             f"{link} {_table_text(item['title'])}",
             _table_text(sc["kind"]),
-            sc["priority"],
+            _table_text(sc["priority"]),
             _table_text(sc["action_zh"]),
-            sc["area"],
+            _table_text(sc["area"]),
             *quotes,
             _table_text(facts.get("extension_hook", "")),
             _table_text(facts.get("reason_zh", "")),

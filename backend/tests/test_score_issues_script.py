@@ -225,6 +225,17 @@ def test_report_keeps_quotes_but_escapes_issue_markup(scorer, transport, issue, 
     assert report.splitlines()[-1].count("|") == 12
 
 
+def test_report_links_only_validated_issue_numbers_and_escapes_free_text(scorer, transport, issue, facts):
+    issue["number"] = "42]|![badge](https://example.com/badge)"
+    facts["reason_zh"] = "说明 | ![badge](https://example.com/badge)"
+    transport(response(facts))
+    report = scorer.render_markdown_report([scorer.evaluate_issue(issue, api_key="test-key")])
+    assert "| ![badge]" not in report
+    assert "![badge]" not in report
+    assert "https://github.com/bytedance/deer-flow/issues/42" not in report
+    assert report.splitlines()[-1].count("|") == 12
+
+
 def test_cli_offline_preview_under_ascii_stdout_never_labels(script_path, tmp_path, issue):
     input_file = tmp_path / "issues.json"
     output_file = tmp_path / "results.json"
