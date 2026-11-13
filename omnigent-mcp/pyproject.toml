@@ -1,0 +1,10 @@
+[project]
+name = "deerflow-mcp"
+version = "0.1.0"
+description = "MCP server wrapping DeerFlow REST API for Omnigent/polly"
+requires-python = ">=3.11"
+dependencies = ["mcp>=1.0.0", "httpx>=0.28.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
