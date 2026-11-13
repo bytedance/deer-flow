@@ -1,5 +1,9 @@
 # Browser E2E tests (`frontend/tests/e2e/`)
 
+- **Install the Office fixture dependencies before collecting tests.** Run
+  `npm ci --ignore-scripts` in `examples/deerflow-extension-office-preview`.
+  Playwright loads the resource suite before it selects a shard.
+
 - **A virtualized list does not keep every fetched row mounted.** Assert the
   pagination request, then filter or scroll the row into the rendered window
   before you check its content. Keep the real scroll trigger.
