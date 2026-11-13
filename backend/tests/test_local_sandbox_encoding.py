@@ -456,10 +456,10 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 
 
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
+    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None, bool]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
-        calls.append((args, timeout, env, encoding, fallback_encoding))
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
+        calls.append((args, timeout, env, encoding, fallback_encoding, isolate_console))
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -473,7 +473,9 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
     assert output == "ok"
     # Platform secrets are scrubbed from the inherited environment even on the
     # Windows PowerShell path (#3861); benign PATH is preserved and the env is an
-    # explicit scrubbed dict, no longer None.
+    # explicit scrubbed dict, no longer None. ``isolate_console`` pins the
+    # private-console requirement on a POSIX-runnable test: the value is a plain
+    # bool, so no Windows-only ``subprocess`` constant is touched here.
     assert calls == [
         (
             [
@@ -486,6 +488,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
             {"PATH": r"C:\Windows"},
             "utf-8",
             "cp936",
+            True,
         )
     ]
 
@@ -494,10 +497,10 @@ def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypat
     """PowerShell 5.1 defaults console output to the OEM codepage (GBK on
     zh-CN); without the UTF-8 preamble, CJK output is garbled by the UTF-8
     pipe reader even though decoding never raises (errors=replace)."""
-    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
+    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None, bool]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
-        calls.append((args, timeout, env, encoding, fallback_encoding))
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
+        calls.append((args, timeout, env, encoding, fallback_encoding, isolate_console))
         return "你好", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -514,6 +517,11 @@ def test_execute_command_forces_utf8_console_for_powershell_cjk_output(monkeypat
     assert cmd.endswith("Write-Output 你好")
     assert calls[0][3] == "utf-8"
     assert calls[0][4] == "cp936"
+    # The PowerShell preamble reconfigures whatever console the child is attached
+    # to, so this branch must ask for a private one. Asserting the intent here
+    # (rather than the Windows-only flag value) keeps the guard runnable on the
+    # ubuntu CI that has no way to observe the code page flip itself.
+    assert calls[0][5] is True
 
 
 def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monkeypatch):
@@ -521,10 +529,10 @@ def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monk
     (GBK on zh-CN) mangles CJK output silently because the pipe decoder replaces
     instead of raising. The native children Git Bash spawns still write the host
     code page, so the forced UTF-8 decode keeps the locale as a guarded fallback."""
-    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None]] = []
+    calls: list[tuple[list[str], float, dict[str, str], str | None, str | None, bool]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
-        calls.append((args, timeout, env, encoding, fallback_encoding))
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
+        calls.append((args, timeout, env, encoding, fallback_encoding, isolate_console))
         return "你好", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -541,12 +549,15 @@ def test_execute_command_forces_utf8_decoding_with_locale_fallback_for_msys(monk
     # Native children of Git Bash keep writing the host code page; the locale is
     # retained as a guarded fallback instead of forcing every byte through UTF-8.
     assert calls[0][4] == "cp936"
+    # Only the PowerShell preamble rewrites console state; the MSYS branch must
+    # not pay for a private console it does not need.
+    assert calls[0][5] is False
 
 
 def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -574,7 +585,7 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
 def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
@@ -596,7 +607,7 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
 def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None):
+    def fake_run(args, timeout, env, *, encoding=None, fallback_encoding=None, isolate_console=False):
         calls.append((args, timeout, env))
         return "ok", "", 0, False
 
