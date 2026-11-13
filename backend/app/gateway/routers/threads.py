@@ -65,7 +65,7 @@ from deerflow.runtime.context_compaction import (
     ThreadCompactionResult,
     compact_thread_context,
 )
-from deerflow.runtime.context_keys import checkpoint_agent_binding_metadata
+from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, checkpoint_agent_binding_metadata
 from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -129,6 +129,13 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY})
+# Checkpoint metadata the server writes and later reads back as trusted:
+# LangGraph's lineage keys and delta counters (``step`` drives the next turn,
+# ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
+# by every run and state update) and the agent binding that gates memory
+# writes. ``create_thread`` copies client metadata into the root checkpoint
+# without them; the thread row keeps the client's metadata as sent.
+_CHECKPOINT_OWNED_METADATA_KEYS: frozenset[str] = frozenset({"step", "source", "writes", "parents", "created_at", "counters_since_delta_snapshot", CHECKPOINT_AGENT_NAME_METADATA_KEY})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
@@ -1065,12 +1072,14 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     # Write an empty checkpoint so state endpoints work immediately
     config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     try:
+        # Client metadata cannot supply checkpoint-owned keys; see
+        # ``_CHECKPOINT_OWNED_METADATA_KEYS``.
         ckpt_metadata = {
+            **{key: value for key, value in metadata.items() if key not in _CHECKPOINT_OWNED_METADATA_KEYS},
             "step": -1,
             "source": "input",
             "writes": None,
             "parents": {},
-            **metadata,
             "created_at": now,
         }
         await checkpointer.aput(config, empty_checkpoint(), ckpt_metadata, {})

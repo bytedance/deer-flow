@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Mapping
+from typing import Any
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator
@@ -39,11 +40,20 @@ def user_instructions(messages) -> list[str]:
 
 
 def denial(request, reason: str) -> ToolMessage:
+    additional_kwargs: dict[str, Any] = {}
+    if request.tool_call["name"] == "task":
+        # A denied delegation never ran. Stamp the subagent status contract so
+        # the delegation ledger settles it as cancelled instead of leaving it
+        # in_progress; the ledger never infers status from result text.
+        from deerflow.subagents.status_contract import make_subagent_additional_kwargs
+
+        additional_kwargs = make_subagent_additional_kwargs("cancelled", error=reason)
     return ToolMessage(
         content=f"The tool was not executed. {reason} Do not retry without new user authorization.",
         name=request.tool_call["name"],
         tool_call_id=request.tool_call["id"],
         status="error",
+        additional_kwargs=additional_kwargs,
     )
 
 

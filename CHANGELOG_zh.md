@@ -33,6 +33,12 @@
 
 ### 修复
 
+- **网关：** 创建对话时在元数据中带上 `step`、`parents`、`counters_since_delta_snapshot`
+  等由检查点自身维护的键，不再让该对话损坏。此前这些键会写入对话的首个检查点，错误的 `parents`
+  会让该对话的历史记录永久返回 500，错误的 `step` 或增量计数器会让之后每一轮对话都失败；
+  `deerflow_agent_name` 还会被当作服务端写入的值复制到下一次状态更新中。现在首个检查点不再从
+  请求中接收这些键。([#8019])
+  
 - **通道：** 企业微信不再丢弃 2–10 MB 的图片。此前适配器把图片上限定为 2 MB（同一协议中语音的限制），
   超出即在上传前被跳过，消息到达时缺少图片。现在图片上限与平台的 10 MB 对齐；普通文件 20 MB 的限制不变。([#8174])
 
@@ -62,6 +68,9 @@
   返回成功；之后任何已登录用户都能通过 `GET /threads/{id}`、`/state`、`/history` 和
   `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
   可以再次删除。([#7992])
+
+- **模型：** 取消使用 Codex 的任务时，会关闭上游 HTTP/SSE 连接，包括等待响应头期间；
+  重试等待也可取消。本地资源会释放，远端服务仍可能继续生成。([#8053](https://github.com/bytedance/deer-flow/pull/8053))
 
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
@@ -12891,6 +12900,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
