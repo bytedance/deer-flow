@@ -998,6 +998,92 @@ async def test_queue_expiry_failure_does_not_launch_expired_work(
     assert "Failed to expire queued scheduled" in caplog.text
 
 
+async def test_expired_queue_rows_do_not_consume_capped_candidates(
+    sqlite_repos,
+    monkeypatch,
+):
+    """Timeout failures must not let expired rows crowd healthy work out of the batch."""
+    sf, task_repo, run_repo = sqlite_repos
+    poll_at = datetime.now(UTC).replace(microsecond=0)
+    for task_id, row_id, created_at in (
+        ("task-expired-1", "expired-1", poll_at - timedelta(hours=2)),
+        ("task-expired-2", "expired-2", poll_at - timedelta(hours=2)),
+        ("task-healthy", "healthy-queued", poll_at - timedelta(minutes=1)),
+    ):
+        await _owner_task(
+            task_repo,
+            task_id,
+            user_id=OWNER_A,
+            next_run_at=poll_at + timedelta(hours=1),
+        )
+        await _owned_occurrence(
+            task_repo,
+            run_repo,
+            row_id,
+            user_id=OWNER_A,
+            task_id=task_id,
+        )
+        async with sf() as session:
+            await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == row_id).values(created_at=created_at))
+            await session.commit()
+
+    async def fail_expiry_scan(**_kwargs):
+        raise RuntimeError("queue expiry scan failed")
+
+    monkeypatch.setattr(run_repo, "expire_queued_runs", fail_expiry_scan)
+
+    launches: list[dict] = []
+    service = _capped_service(
+        task_repo,
+        run_repo,
+        launches,
+        max_concurrent_runs=3,
+        max_concurrent_runs_per_user=2,
+        queue_timeout_seconds=3600,
+    )
+
+    for offset in range(3):
+        await service.run_once(now=poll_at + timedelta(seconds=offset))
+
+    assert [item["metadata"]["scheduled_task_id"] for item in launches] == ["task-healthy"]
+    for row_id in ("expired-1", "expired-2"):
+        row = (await run_repo.list_by_task(f"task-{row_id}"))[0]
+        assert (row["status"], row["attempt_count"]) == ("queued", 0)
+    healthy = (await run_repo.list_by_task("task-healthy"))[0]
+    assert healthy["status"] == "running"
+
+
+async def test_expired_same_thread_head_does_not_hide_unexpired_candidate(sqlite_repos):
+    """An expired FIFO head cannot block a newer row once it is due for timeout."""
+    sf, task_repo, run_repo = sqlite_repos
+    poll_at = datetime.now(UTC).replace(microsecond=0)
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "expired-head",
+        user_id=OWNER_A,
+        thread_id="shared-thread",
+    )
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "healthy-next",
+        user_id=OWNER_A,
+        thread_id="shared-thread",
+    )
+    async with sf() as session:
+        await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == "expired-head").values(created_at=poll_at - timedelta(hours=2)))
+        await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == "healthy-next").values(created_at=poll_at - timedelta(minutes=1)))
+        await session.commit()
+
+    batch = await run_repo.list_queued_runs(
+        limit=16,
+        created_after=poll_at - timedelta(hours=1),
+    )
+
+    assert [row["id"] for row in batch] == ["healthy-next"]
+
+
 async def test_manual_queue_timeout_preserves_serialized_next_run_at(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

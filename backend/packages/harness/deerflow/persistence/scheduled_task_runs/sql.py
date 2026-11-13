@@ -454,26 +454,44 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return int(result.scalar() or 0)
 
-    async def list_queued_runs(self, *, limit: int, per_user_max_concurrent_runs: int = 0) -> list[dict[str, Any]]:
+    async def list_queued_runs(
+        self,
+        *,
+        limit: int,
+        per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         """The next bounded drain batch, fair to task owners (see ``_fair_queue_statement``)."""
-        stmt = self._fair_queue_statement(limit=limit, per_user_max_concurrent_runs=per_user_max_concurrent_runs)
+        stmt = self._fair_queue_statement(
+            limit=limit,
+            per_user_max_concurrent_runs=per_user_max_concurrent_runs,
+            created_after=created_after,
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
     @staticmethod
-    def _fair_queue_statement(*, limit: int, per_user_max_concurrent_runs: int = 0):
+    def _fair_queue_statement(
+        *,
+        limit: int,
+        per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
+    ):
         """SELECT for the next bounded drain batch, fair to task owners.
 
         Only same-thread FIFO heads are eligible (an older active row on the
-        same thread hides every newer one). Eligible rows are ranked within
-        their owner by ``attempt_count, created_at, id`` and the batch is
-        ordered by that rank first, so every owner's head comes before any
-        owner's second row: one owner's backlog cannot fill the batch. With a
-        per-owner cap, an owner only contributes as many rows as it has free
-        slots (``cap - executing``), and owners already at the cap drop out
-        before the limit is applied. With a single owner the order equals the
-        plain ``attempt_count, created_at, id`` order.
+        same thread hides every newer one). Rows at or before ``created_after``
+        are already due for timeout and are removed before FIFO checks, owner
+        ranking, and the batch limit; they must not occupy another row's slot.
+        Eligible rows are ranked within their owner by
+        ``attempt_count, created_at, id`` and the batch is ordered by that rank
+        first, so every owner's head comes before any owner's second row: one
+        owner's backlog cannot fill the batch. With a per-owner cap, an owner
+        only contributes as many rows as it has free slots
+        (``cap - executing``), and owners already at the cap drop out before
+        the limit is applied. With a single owner the order equals the plain
+        ``attempt_count, created_at, id`` order.
 
         Rows whose task is gone (deleted while queued) have no owner. They are
         never launched (the drain marks them interrupted), so the cap does not
@@ -481,19 +499,20 @@ class ScheduledTaskRunRepository:
         """
         candidate = aliased(ScheduledTaskRunRow)
         older = aliased(ScheduledTaskRunRow)
-        older_same_thread = exists(
-            select(older.id).where(
-                older.thread_id == candidate.thread_id,
-                older.status.in_(ACTIVE_RUN_STATUSES),
-                or_(
-                    older.created_at < candidate.created_at,
-                    and_(
-                        older.created_at == candidate.created_at,
-                        older.id < candidate.id,
-                    ),
+        older_conditions = [
+            older.thread_id == candidate.thread_id,
+            older.status.in_(ACTIVE_RUN_STATUSES),
+            or_(
+                older.created_at < candidate.created_at,
+                and_(
+                    older.created_at == candidate.created_at,
+                    older.id < candidate.id,
                 ),
-            )
-        )
+            ),
+        ]
+        if created_after is not None:
+            older_conditions.append(older.created_at > created_after)
+        older_same_thread = exists(select(older.id).where(*older_conditions))
         executing_run = aliased(ScheduledTaskRunRow)
         executing_task = aliased(ScheduledTaskRow)
         executing = (
@@ -505,6 +524,9 @@ class ScheduledTaskRunRepository:
             .subquery("executing")
         )
         owner_task = aliased(ScheduledTaskRow)
+        eligible_conditions = [candidate.status == "queued", ~older_same_thread]
+        if created_after is not None:
+            eligible_conditions.append(candidate.created_at > created_after)
         eligible = (
             select(
                 candidate.id.label("id"),
@@ -522,7 +544,7 @@ class ScheduledTaskRunRepository:
             .select_from(candidate)
             .outerjoin(owner_task, owner_task.id == candidate.task_id)
             .outerjoin(executing, executing.c.owner == owner_task.user_id)
-            .where(candidate.status == "queued", ~older_same_thread)
+            .where(*eligible_conditions)
             .subquery("eligible")
         )
         stmt = select(ScheduledTaskRunRow).join(eligible, eligible.c.id == ScheduledTaskRunRow.id)

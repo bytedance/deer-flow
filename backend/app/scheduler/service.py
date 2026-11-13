@@ -1043,6 +1043,7 @@ class ScheduledTaskService:
         queued_rows = await self._task_run_repo.list_queued_runs(
             limit=max(16, self._max_concurrent_runs * 4),
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
         )
         for queued in queued_rows:
             try:
