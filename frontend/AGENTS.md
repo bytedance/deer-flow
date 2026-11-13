@@ -68,6 +68,10 @@ through `scripts/pnpm.py`.
 - **`make build-static` produces a read-only demo.** Gateway reads come from
   bundled fixtures, and writes fail locally.
 
+File attachments use typed session errors, preserving per-file causes independently
+of display text. Preview and upload ownership, Office worker budgets and resource
+regressions: [file preview ownership](docs/file-preview-ownership.md).
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 ## This is NOT the Next.js you know
