@@ -19,17 +19,27 @@ import {
 import type { UploadResponse } from "@/core/uploads/api";
 
 const streamMockState = rs.hoisted(() => ({
-  submit: rs.fn(async () => undefined),
+  submit: rs.fn(
+    async (_values?: unknown, _options?: { threadId?: string }) => undefined,
+  ),
+  onCreated: undefined as
+    | ((meta: { thread_id: string; run_id: string }) => void)
+    | undefined,
 }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
-  useStream: () => ({
-    isLoading: false,
-    messages: [],
-    stop: rs.fn(async () => undefined),
-    submit: streamMockState.submit,
-    values: { artifacts: [], messages: [], title: "", todos: [] },
-  }),
+  useStream: (options: {
+    onCreated?: (meta: { thread_id: string; run_id: string }) => void;
+  }) => {
+    streamMockState.onCreated = options.onCreated;
+    return {
+      isLoading: false,
+      messages: [],
+      stop: rs.fn(async () => undefined),
+      submit: streamMockState.submit,
+      values: { artifacts: [], messages: [], title: "", todos: [] },
+    };
+  },
 }));
 
 const QUOTE = {
@@ -124,7 +134,17 @@ function displayedHuman(messages: Message[]): Message | undefined {
 }
 
 beforeEach(() => {
-  streamMockState.submit.mockClear();
+  streamMockState.submit.mockReset();
+  // The SDK creates the run after `thread.submit` returns; report acceptance so
+  // `sendMessage` resolves once the run exists, like the real Gateway.
+  streamMockState.submit.mockImplementation(
+    async (_values: unknown, options?: { threadId?: string }) => {
+      streamMockState.onCreated?.({
+        thread_id: options?.threadId ?? "thread-1",
+        run_id: "run-accepted",
+      });
+    },
+  );
 });
 
 afterEach(() => {

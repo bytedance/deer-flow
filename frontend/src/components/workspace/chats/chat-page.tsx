@@ -469,10 +469,19 @@ export default function ChatPage() {
         runModelContext,
         executionOptions,
       );
-      if (message.files.length > 0) {
-        return sendPromise;
+      try {
+        await sendPromise;
+      } catch (error) {
+        // A first send whose run request was rejected never became a turn
+        // (upstream #8039): put the welcome layout back. The hook keeps the
+        // composer's text and draft. A session that Gateway admission may have
+        // created for that rejected send is left alone; removing it needs a
+        // server-side conditional delete.
+        if (submissionEpochRef.current === submissionEpoch && isNewThread) {
+          setIsWelcomeMode(true);
+        }
+        throw error;
       }
-      void sendPromise;
     },
     [
       currentKnowledgeScopeSnapshot,

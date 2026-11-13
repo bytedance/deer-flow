@@ -280,9 +280,21 @@ export function HumanInputCard({
       return;
     }
     setError("");
-    const result = await onSubmit(response);
-    if (result !== false && response.response_kind === "text") {
-      setText("");
+    try {
+      const result = await onSubmit(response);
+      if (result === false) {
+        // The answer never became a turn; keep the input for a retry instead
+        // of reporting it as answered.
+        setError(t.humanInput.submitFailed);
+        return;
+      }
+      if (response.response_kind === "text") {
+        setText("");
+      }
+    } catch {
+      // A rejected send (e.g. a refused run request) must stay retryable: the
+      // card owns the error surface so the rejection never goes unhandled.
+      setError(t.humanInput.submitFailed);
     }
   };
 
@@ -599,6 +611,15 @@ export function HumanInputCard({
           {!allowText && !isForm && answeredResponse ? (
             <p className="text-muted-foreground text-sm" aria-live="polite">
               {t.humanInput.answeredValue(answeredResponse.value)}
+            </p>
+          ) : null}
+
+          {/* An option-only card mounts neither the text form nor the form
+              branch: without this node a rejected option submit would set the
+              error and never render it. */}
+          {!allowText && !isForm && error ? (
+            <p className="text-destructive text-sm" role="alert">
+              {error}
             </p>
           ) : null}
         </div>

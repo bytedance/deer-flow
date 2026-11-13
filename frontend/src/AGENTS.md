@@ -98,3 +98,7 @@ pnpm test:e2e                    # Playwright, for anything that depends on a re
   A separate branch per panel loses the drag handle.
 - Composer permission checks run in `InputBox.handleSubmit` after the command is
   classified and before the thread is prepared or the draft cleared.
+- Composer drafts clear only when `SendMessageOptions.onSent` fires, i.e. once
+  the run was accepted; a rejected send keeps its text, quotes and staged files
+  for a retry, and a send released on navigation still retires its draft when
+  the acceptance arrives.
