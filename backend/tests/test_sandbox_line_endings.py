@@ -221,15 +221,20 @@ def test_read_before_write_content_changes_when_only_line_endings_change(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("pattern", "expected"),
-    [(r"\s$", [(2, "trailing ")]), (r"[^a-z]$", [(2, "trailing ")]), (r"\n", [])],
+    ("pattern", "literal", "expected"),
+    [
+        (r"\s$", False, [(2, "trailing ")]),
+        (r"[^a-z]$", False, [(2, "trailing ")]),
+        (r"\n", False, []),
+        pytest.param("\n", True, [], id="literal-newline"),
+    ],
 )
-def test_grep_does_not_match_the_line_terminator(tmp_path, pattern, expected) -> None:
-    # LocalSandbox excludes LF and CRLF terminators from regex matching, so
+def test_grep_does_not_match_the_line_terminator(tmp_path, pattern, literal, expected) -> None:
+    # LocalSandbox excludes LF and CRLF terminators from matching, so
     # a trailing-whitespace search only matches whitespace in the line text.
     path = tmp_path / "ws.txt"
     path.write_bytes(b"clean\ntrailing \r\nalso clean\r\nlast clean")
 
-    matches, _ = LocalSandbox("t").grep(str(path), pattern)
+    matches, _ = LocalSandbox("t").grep(str(path), pattern, literal=literal)
 
     assert [(match.line_number, match.line) for match in matches] == expected
