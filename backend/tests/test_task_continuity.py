@@ -1093,3 +1093,68 @@ def test_repeated_archive_sources_keep_canonical_read_version(role_runtime):
     assert row["truncated"] is source["truncated"] is True
     assert source["text"] == text[:1000]
     assert row["excerpt"] == source["text"][row["excerpt_start"] : row["excerpt_end"]]
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("keyword", ["SQLite", "Qwen3", "Straße"])
+@pytest.mark.asyncio
+async def test_mixed_han_keywords_survive_capture(role_runtime, async_mode, keyword):
+    import json
+
+    text = "😀 ß " * 300 + f"约定使用{keyword}保存缓存。" + " tail" * 200
+    message = HumanMessage(content=text, id="mixed")
+    role_runtime.state = {"messages": [message]}
+    args = {"runtime": role_runtime, "query": keyword.upper(), "role": "user"}
+
+    async def search(arguments):
+        return json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))
+
+    active = await search(args)
+    source_id = active["results"][0]["id"]
+    config = TaskContinuityConfig(enabled=True)
+    history = await archive.acapture({}, role_runtime, [message], config) if async_mode else archive.capture({}, role_runtime, [message], config)
+    role_runtime.state = {"task_history": history}
+    result = await search(args)
+    assert result["status"] == "available"
+    assert len(result["results"]) == 1
+    row = result["results"][0]
+    assert row["id"] == source_id
+    assert row["excerpt_match"] is True
+    assert keyword in row["excerpt"]
+    assert row["excerpt_start"] > 0
+    assert row["excerpt"] == text[row["excerpt_start"] : row["excerpt_end"]]
+    read_args = {"runtime": role_runtime, "source_id": source_id, "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_args) if async_mode else history_read.invoke(read_args))
+    assert page["text"].startswith(row["excerpt"])
+    assert (await search({**args, "query": "保存"}))["results"]
+    assert (await search({**args, "query": f"使用{keyword}保存"}))["results"]
+    assert not (await search({**args, "query": keyword[1:]}))["results"]
+    assert not (await search({**args, "role": "assistant"}))["results"]
+
+
+@pytest.mark.parametrize("recapture", [False, True], ids=["search-upgrade", "capture-upgrade"])
+def test_mixed_han_keywords_upgrade_legacy_index(role_runtime, recapture):
+    import json
+    import sqlite3
+
+    message = HumanMessage(content="约定使用SQLite保存缓存。", id="legacy")
+    config = TaskContinuityConfig(enabled=True)
+    history = archive.capture({}, role_runtime, [message], config)
+    source_id = archive.records([message])[0]["id"]
+    path, _ = archive.scope(role_runtime)
+    # Reproduce the persisted pre-fix FTS format, retaining real captured payloads.
+    with sqlite3.connect(path) as db:
+        original = db.execute("SELECT batch, id, payload FROM sources").fetchall()
+        db.execute("UPDATE sources SET words=?", ("约定 定使 使用 用s sq ql li it te e保 保存 存缓 缓存",))
+        db.execute("PRAGMA user_version=0")
+    role_runtime.state = {"task_history": history}
+    if recapture:
+        assert archive.capture(role_runtime.state, role_runtime, [message], config) == history
+    result = json.loads(history_search.invoke({"runtime": role_runtime, "query": "SQLite"}))
+    assert result["status"] == "available"
+    assert [row["id"] for row in result["results"]] == [source_id]
+    assert result["results"][0]["excerpt_match"] is True
+    assert json.loads(history_read.invoke({"runtime": role_runtime, "source_id": source_id}))["text"] == message.content
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT batch, id, payload FROM sources").fetchall() == original
+        assert db.execute("SELECT words FROM sources").fetchone()[0] == "约定 定使 使用 sqlite 保存 存缓 缓存"

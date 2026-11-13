@@ -78,8 +78,8 @@ def records(messages, cap: int = 16000) -> list[dict]:
 
 
 def _token_spans(folded: str):
-    """Preserve indexed token positions in casefolded text without changing tokenization."""
-    for match in re.finditer(r"[^\W_]+", folded):
+    """Keep non-Han words intact and bigram Han runs, preserving folded offsets."""
+    for match in re.finditer(r"[\u3400-\u9fff]+|[^\W_\u3400-\u9fff]+", folded):
         word = match.group()
         if re.search(r"[\u3400-\u9fff]", word):
             for index in range(max(1, len(word) - 1)):
@@ -98,6 +98,14 @@ def terms(text: str) -> list[str]:
 
 def index_text(text: str) -> str:
     return " ".join(_tokens(text))
+
+
+def _upgrade_index(db: sqlite3.Connection) -> None:
+    """Reindex legacy terms under the caller's write transaction, once per archive."""
+    if db.execute("PRAGMA user_version").fetchone()[0] < 1:
+        rows = db.execute("SELECT rowid, payload FROM sources").fetchall()
+        db.executemany("UPDATE sources SET words=? WHERE rowid=?", [(index_text(json.loads(payload)["text"]), rowid) for rowid, payload in rows])
+        db.execute("PRAGMA user_version=1")
 
 
 def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
@@ -165,6 +173,7 @@ def capture(state: dict, runtime, messages, config) -> dict:
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
+            _upgrade_index(db)
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
@@ -206,6 +215,13 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
     if batches:
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+                if query is not None and db.execute("PRAGMA user_version").fetchone()[0] < 1:
+                    # Open an existing archive for a transactional upgrade only
+                    # when needed; ordinary searches and reads stay read-only.
+                    with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as writer, writer:
+                        writer.execute("PRAGMA max_page_count=32768")
+                        writer.execute("BEGIN IMMEDIATE")
+                        _upgrade_index(writer)
                 placeholders = ",".join("?" for _ in batches)
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":
