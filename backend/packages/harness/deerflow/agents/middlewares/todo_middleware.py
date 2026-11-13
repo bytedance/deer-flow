@@ -27,16 +27,21 @@ import threading
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from typing import Any, override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+_TODO_REMINDER_INTRO_EDITED = "Your todo list was revised after your last `write_todos` call; here is the current state:"
+_TODO_REMINDER_INTRO_TRUNCATED = "Your todo list from earlier is no longer visible in the current context window, but it is still active. Here is the current state:"
+_TODO_REMINDER_FOOTER = "Continue tracking and updating this todo list as you work. Call `write_todos` whenever the status of any item changes."
 # Source-inventory and graph tests pin these values to the actual guard stamps;
 # the provider-stop vocabulary is imported from the guards that write it.
 # Loop and token stops cap the whole run: their budgets stay exhausted and a
@@ -59,12 +64,55 @@ def _todos_in_messages(messages: list[Any]) -> bool:
     return False
 
 
-def _reminder_in_messages(messages: list[Any]) -> bool:
-    """Return True if a todo_reminder HumanMessage is already present in *messages*."""
+def _last_write_todos(messages: list[Any]) -> list[Mapping[str, Any]] | None:
+    """Return the todos argument of the most recent write_todos call, or None.
+
+    None covers both "no write_todos call" and "the last call carried no
+    usable todos list". History readers must never abort a model call on a
+    malformed persisted value, so an unreadable argument degrades to None
+    and the caller treats it as "cannot prove a difference".
+    """
+    last: Any = None
+    for msg in messages:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                if not isinstance(tc, Mapping):
+                    continue
+                if tc.get("name") != "write_todos":
+                    continue
+                args = tc.get("args")
+                last = args.get("todos") if isinstance(args, Mapping) else None
+    if not isinstance(last, list):
+        return None
+    if any(not isinstance(todo, Mapping) for todo in last):
+        return None
+    return last
+
+
+def _same_todos(a: Iterable[Mapping[str, Any]], b: Iterable[Mapping[str, Any]]) -> bool:
+    """Return True when two todo lists carry the same items in the same order.
+
+    Comparison is on (content, status) with the same defaults `_format_todos`
+    uses, so a status-only change counts as a different list.
+    """
+
+    def _key(todo: Mapping[str, Any]) -> tuple[str, str]:
+        return (str(todo.get("content", "")), str(todo.get("status", "pending")))
+
+    return [_key(todo) for todo in a] == [_key(todo) for todo in b]
+
+
+def _find_todo_reminder(messages: list[Any]) -> HumanMessage | None:
+    """Return the injected todo_reminder HumanMessage, if one is present."""
     for msg in messages:
         if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == TODO_REMINDER_MESSAGE_NAME:
-            return True
-    return False
+            return msg
+    return None
+
+
+def _reminder_in_messages(messages: list[Any]) -> bool:
+    """Return True if a todo_reminder HumanMessage is already present in *messages*."""
+    return _find_todo_reminder(messages) is not None
 
 
 def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
@@ -83,13 +131,62 @@ def _usable_todos(state: ThreadState) -> list[Mapping[str, Any]]:
 
 
 def _format_todos(todos: Iterable[Mapping[str, Any]]) -> str:
-    """Format a list of Todo items into a human-readable string."""
+    """Format a list of Todo items into a human-readable string.
+
+    Todo content is caller-influenced text rendered inside a
+    ``<system_reminder>`` block, so framework-looking tags in it are
+    neutralized before rendering: unescaped content could otherwise close
+    the reminder block and forge framework text.
+    """
     lines: list[str] = []
     for todo in todos:
-        status = todo.get("status", "pending")
-        content = todo.get("content", "")
+        status = neutralize_untrusted_tags(str(todo.get("status", "pending")))
+        content = neutralize_untrusted_tags(str(todo.get("content", "")))
         lines.append(f"- [{status}] {content}")
     return "\n".join(lines)
+
+
+def _build_todo_reminder(formatted: str, *, edited_after_write: bool, message_id: str | None = None) -> HumanMessage:
+    """Build the persisted todo reminder for the current list.
+
+    The reminder stays in state, so it carries the middleware provenance
+    stamp: without it the approval path would read this server-generated
+    reminder as user intent. *message_id* reuses an existing reminder's id
+    when refreshing it in place; a fresh reminder gets a new id.
+    """
+    intro = _TODO_REMINDER_INTRO_EDITED if edited_after_write else _TODO_REMINDER_INTRO_TRUNCATED
+    kwargs: dict[str, Any] = {}
+    if message_id is not None:
+        kwargs["id"] = message_id
+    return HumanMessage(
+        name=TODO_REMINDER_MESSAGE_NAME,
+        additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "todo_reminder")},
+        content=(f"<system_reminder>\n{intro}\n\n{formatted}\n\n{_TODO_REMINDER_FOOTER}\n</system_reminder>"),
+        **kwargs,
+    )
+
+
+def _rendered_todo_section(content: str) -> str:
+    """Return the todo list rendered inside a todo reminder.
+
+    The section is what `_build_todo_reminder` renders between the intro and
+    the closing instruction; a reminder built without them is a bare section.
+    Callers compare the returned section with the current rendering as a
+    whole: a substring check is not enough, because a stale reminder that
+    renders tasks A and B contains the rendering of A alone.
+    """
+    text = content
+    if text.startswith("<system_reminder>\n"):
+        text = text[len("<system_reminder>\n") :]
+    if text.endswith("\n</system_reminder>"):
+        text = text[: -len("\n</system_reminder>")]
+    for intro in (_TODO_REMINDER_INTRO_EDITED, _TODO_REMINDER_INTRO_TRUNCATED):
+        if text.startswith(intro + "\n\n"):
+            text = text[len(intro) + 2 :]
+            break
+    if text.endswith("\n\n" + _TODO_REMINDER_FOOTER):
+        text = text[: -len(_TODO_REMINDER_FOOTER) - 2]
+    return text
 
 
 def _format_completion_reminder(todos: Iterable[Mapping[str, Any]]) -> str:
@@ -144,6 +241,10 @@ class TodoMiddleware(TodoListMiddleware):
     history (e.g., after summarization), the model loses awareness of the current
     todo list. This middleware detects that gap in `before_model` / `abefore_model`
     and injects a reminder message so the model can continue tracking progress.
+    The same injection fires when the state was edited after the last visible
+    `write_todos` call (e.g. an approved plan revised via `update_state()` on
+    resume), and an already-injected reminder is refreshed in place when the
+    state changes again underneath it.
     """
 
     state_schema = ThreadState
@@ -176,6 +277,9 @@ class TodoMiddleware(TodoListMiddleware):
             # runtime.context; provider stops are matched by response marker.
             "completion_reminder_hard_stop_reasons": [*_COMPLETION_REMINDER_RUN_STOP_REASONS, *_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS],
             "completion_reminder_response_stop_markers": dict(_COMPLETION_REMINDER_RESPONSE_STOP_MARKERS),
+            # A reminder is injected (or an existing one refreshed) when the
+            # last visible write_todos call no longer matches the stored list.
+            "inject_reminder_when_state_edited_after_write_todos": True,
         }
 
     @override
@@ -184,7 +288,13 @@ class TodoMiddleware(TodoListMiddleware):
         state: ThreadState,
         runtime: Runtime,
     ) -> dict[str, Any] | None:
-        """Inject a todo-list reminder when write_todos has left the context window."""
+        """Inject a todo-list reminder when write_todos has left the context window.
+
+        The same reminder fires when the state was edited after the last visible
+        `write_todos` call, and an already-injected reminder is refreshed in
+        place when it renders a stale list, so the model never keeps seeing a
+        superseded list while the current one is in state.
+        """
         if not self._todo_capability_enabled:
             # write_todos was denied for this build; context-loss detection only
             # exists to protect todo state the model cannot update anyway.
@@ -194,31 +304,32 @@ class TodoMiddleware(TodoListMiddleware):
             return None
 
         messages = state.get("messages") or []
+        edited_after_write = False
         if _todos_in_messages(messages):
-            # write_todos is still visible in context — nothing to do.
-            return None
+            # A write_todos call is still visible in context, but that alone
+            # does not mean the model has seen the current list: the state
+            # may have been edited after the call (e.g. an approved plan
+            # revised via update_state() on resume, #8168). Only skip when
+            # the last call wrote exactly the current todos; an unreadable
+            # argument degrades to "cannot prove a difference" and skips.
+            last_written = _last_write_todos(messages)
+            if last_written is None or _same_todos(last_written, todos):
+                return None
+            edited_after_write = True
 
-        if _reminder_in_messages(messages):
-            # A reminder was already injected and hasn't been truncated yet.
-            return None
-
-        # The todo list exists in state but the original write_todos call is gone.
-        # Inject a reminder as a HumanMessage so the model stays aware.
+        # The todo list exists in state but the original write_todos call is gone
+        # (or wrote a different list). Inject a reminder as a HumanMessage so
+        # the model stays aware.
         formatted = _format_todos(todos)
-        reminder = HumanMessage(
-            name=TODO_REMINDER_MESSAGE_NAME,
-            additional_kwargs={"hide_from_ui": True},
-            content=(
-                "<system_reminder>\n"
-                "Your todo list from earlier is no longer visible in the current context window, "
-                "but it is still active. Here is the current state:\n\n"
-                f"{formatted}\n\n"
-                "Continue tracking and updating this todo list as you work. "
-                "Call `write_todos` whenever the status of any item changes.\n"
-                "</system_reminder>"
-            ),
-        )
-        return {"messages": [reminder]}
+        existing = _find_todo_reminder(messages)
+        if existing is not None:
+            if isinstance(existing.content, str) and _rendered_todo_section(existing.content) == formatted:
+                # The injected reminder already renders the current list.
+                return None
+            # The reminder renders a stale list: replace it in place (same id)
+            # instead of stacking a second, contradicting reminder.
+            return {"messages": [_build_todo_reminder(formatted, edited_after_write=edited_after_write, message_id=existing.id)]}
+        return {"messages": [_build_todo_reminder(formatted, edited_after_write=edited_after_write)]}
 
     @override
     async def abefore_model(
