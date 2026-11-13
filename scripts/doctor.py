@@ -694,6 +694,7 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "specstream": "SPECSTREAM_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
                 "webz": "WEBZ_API_KEY",
+                "groundroute": "GROUNDROUTE_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
@@ -703,6 +704,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "sofya": "SOFYA_API_KEY",
                 "specstream": "SPECSTREAM_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
+                "groundroute": "GROUNDROUTE_API_KEY",
+                "browserless": "BROWSERLESS_TOKEN",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",
@@ -714,6 +717,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             },
         }
         key_fields = {
+            "web_fetch": {
+                "browserless": "token",
+            },
             "web_capture": {
                 "browserless": "token",
             },
@@ -723,8 +729,13 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
         # (community/browserless/tools.py). The other providers fall back to
         # their variable whenever the configured value gives no key.
         authoritative_key_providers = {"browserless"}
-        # Keyless providers that still send their variable when it holds a key.
-        free_provider_keys = {"youcom": "YDC_API_KEY", "jina_ai": "JINA_API_KEY"}
+        # InfoQuest reads only INFOQUEST_API_KEY; an api_key field in its tool
+        # config never reaches the client (community/infoquest/).
+        env_only_key_providers = {"infoquest"}
+        # Keyless providers that still send a key when one is set, and whether
+        # they read an api_key field before the variable (Jina reads only the
+        # variable).
+        free_provider_keys = {"youcom": ("YDC_API_KEY", True), "jina_ai": ("JINA_API_KEY", False)}
 
         def _is_placeholder(value: object) -> bool:
             # Ask the runtime's owner of the rule: providers drop an .env.example
@@ -750,8 +761,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                     return ("ok", f"{env_name} set from config")
             if authoritative and key_field in tool:
                 return None
-            # The configured value gives no key; the tool falls back to its
-            # default variable at runtime.
+            # A blank or placeholder configured value gives no key, and the tool
+            # falls back to its default variable. An unset $VAR reference never
+            # gets here at runtime: config loading fails, which
+            # check_config_loadable reports.
             return ("ok", f"{default_var} set") if _real_key(os.environ.get(default_var)) else None
 
         def _config_source(tool: dict, key_field: str) -> tuple[str, object]:
@@ -831,9 +844,13 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
-                    var = free_provider_keys.get(provider)
-                    if var and _is_placeholder(os.environ.get(var)):
-                        detail = f"{detail}; {var} holds the .env.example placeholder and is ignored"
+                    var, reads_config = free_provider_keys.get(provider, (None, False))
+                    sources = [_config_source(tool, "api_key")] if reads_config else []
+                    if var:
+                        sources.append((var, os.environ.get(var)))
+                    ignored = next((name for name, value in sources if _is_placeholder(value)), None)
+                    if ignored:
+                        detail = f"{detail}; {ignored} holds the .env.example placeholder and is ignored"
                     return CheckResult(label, "ok", detail)
 
         for tool in tool_entries:
@@ -842,7 +859,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 if provider in use:
                     key_field = key_fields.get(tool_name, {}).get(provider, "api_key")
                     authoritative = provider in authoritative_key_providers
-                    key_status = _configured_key_detail(tool, var, key_field=key_field, authoritative=authoritative)
+                    # What the provider reads: an env-only provider never sees the field.
+                    read = {name: value for name, value in tool.items() if name != key_field} if provider in env_only_key_providers else tool
+                    key_status = _configured_key_detail(read, var, key_field=key_field, authoritative=authoritative)
                     if key_status:
                         status, detail = key_status
                         if status == "warn":
@@ -853,14 +872,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                                 fix=f"Move the {key_field} to .env as {var}=<your-key> and reference it as ${var}",
                             )
                         return CheckResult(label, "ok", f"{provider} ({detail})")
-                    reason, placeholder = _missing_key_reason(tool, var, key_field, authoritative=authoritative)
-                    if not placeholder and tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
+                    reason, placeholder = _missing_key_reason(read, var, key_field, authoritative=authoritative)
+                    if not placeholder and provider == "browserless" and _browserless_self_hosted(tool):
                         return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
                     return CheckResult(
                         label,
                         "warn",
                         f"{provider} configured but {reason}",
-                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'" if not (authoritative and key_field in tool) else f"Set {key_field} to ${var} with the real token in .env, or remove {key_field} to use {var}",
+                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'" if not (authoritative and key_field in read) else f"Set {key_field} to ${var} with the real token in .env, or remove {key_field} to use {var}",
                     )
 
         for tool in tool_entries:

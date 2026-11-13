@@ -14,8 +14,10 @@ transport refuse it with an error that quotes the whole header, key included
 (``tests/test_provider_api_key_whitespace.py``).
 
 ``is_template_placeholder`` is the one definition of an ``.env.example`` example
-value. ``scripts/doctor.py`` asks it too, so the diagnosis and the runtime agree
-on which keys count as configured.
+value. ``scripts/doctor.py`` asks it for every web provider key, so the diagnosis
+and the runtime agree on which keys count as configured. Model credentials do not
+pass through here: their clients send whatever is set, so doctor's model check
+flags likely sample values with its own, broader rule.
 
 The marker and the message are module constants because the strings are part of
 the contract: provider tests and operators' log grep patterns assert on them.
