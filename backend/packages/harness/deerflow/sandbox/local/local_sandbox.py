@@ -926,6 +926,18 @@ class LocalSandbox(Sandbox):
                     # would report ``"utf-8"`` on hosts running under
                     # ``PYTHONUTF8=1``, silently making this fallback a no-op.
                     fallback_encoding=locale.getencoding(),
+                    # The preamble's ``[Console]::(In|Out)putEncoding`` setters
+                    # reconfigure the console the child is attached to. Without
+                    # this flag the child attaches to the parent's shared console,
+                    # so one sandbox PowerShell command leaves the whole process
+                    # in code page 65001 — and cmd.exe, which decodes .cmd/.bat
+                    # files with the console code page while the ecosystem writes
+                    # shims in the ANSI one, then cannot start any ANSI-encoded
+                    # shim under a non-ASCII path (the lark-cli launcher under a
+                    # CJK user directory). An isolated console gives the child
+                    # something private to pin instead; timeout teardown uses
+                    # taskkill /T /F and does not depend on console signals.
+                    isolate_console=True,
                 )
             elif self._is_cmd_shell(shell):
                 # cmd builtins use the console output page, which can differ
@@ -971,9 +983,18 @@ class LocalSandbox(Sandbox):
         *,
         encoding: str | None = None,
         fallback_encoding: str | None = None,
+        isolate_console: bool = False,
     ) -> tuple[str, str, int, bool]:
         """Run with bounded capture, a process-tree timeout, and locale decoding unless overridden."""
         timed_out = False
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        if isolate_console:
+            # ``CREATE_NO_WINDOW`` is contributed by the Windows build of CPython
+            # only, so it must never be evaluated outside this Windows-only
+            # function: the PowerShell branch that sets ``isolate_console`` is
+            # reachable from POSIX tests that fake ``os.name`` and stub this
+            # method out.
+            creationflags |= subprocess.CREATE_NO_WINDOW
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
         process = None
@@ -984,7 +1005,7 @@ class LocalSandbox(Sandbox):
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_write_fd,
                 stderr=stderr_write_fd,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                creationflags=creationflags,
                 env=env,
             )
         except BaseException:
