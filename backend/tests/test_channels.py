@@ -7511,6 +7511,37 @@ class TestExtractArtifacts:
         }
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.csv"]
 
+    def test_multiple_calls_keep_presentation_order_and_deduplicate(self):
+        """A file presented twice in one turn is delivered once, in the order presented.
+
+        ``present_files`` relies on the ``merge_artifacts`` reducer, which keeps
+        first-presented order and drops repeats; the IM reply must match it.
+        """
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "chart then report"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [{"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/chart.png"]}}],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+                {
+                    "type": "ai",
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "present_files", "args": {"filepaths": ["/mnt/user-data/outputs/report.md", "/mnt/user-data/outputs/chart.png"]}},
+                    ],
+                },
+                {"type": "tool", "name": "present_files", "content": "Successfully presented files"},
+                {"type": "ai", "content": "Done."},
+            ]
+        }
+
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png", "/mnt/user-data/outputs/report.md"]
+
     def test_ignores_hidden_human_control_messages(self):
         """Hidden control messages should not hide current-turn present_files artifacts."""
         from app.channels.manager import _extract_artifacts
