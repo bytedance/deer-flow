@@ -1,8 +1,7 @@
 # Subagents (`deerflow/subagents/`)
 
-Owns in-memory `task` executions, durable `batch_task` services, registries,
-capacity, reports and acceptance checks. Batch workers run in the Gateway or
-separately; see
+Owns in-memory `task` execution, durable `batch_task`, registries, capacity,
+reports and acceptance checks. For Gateway and standalone batch workers, see
 [BATCH_CONTINUATION.md](../../../../docs/BATCH_CONTINUATION.md).
 
 ## Verify
@@ -18,32 +17,28 @@ PostgreSQL schema. No paid model is needed.
 
 ## Terminal state
 
-- **The first terminal write wins.** Completion, timeout and cancellation race;
-  reject later cancellations and result/evidence writes from cancelled or stale
-  attempts.
-- **Delivery and cleanup have separate lifetimes.** Hard timeouts publish before
-  cleanup. Ordinary consumers return then; capacity, sandbox leases and normal
-  registry removal remain fenced through teardown. Interrupted usage publishes
-  after stream cleanup, with its final tail supervised on the parent loop.
-- **Drain cleanup under cancellation.** Finish capacity release, queued-waiter
-  removal and runtime shutdown even under repeated cancellation; leaked slots
-  persist until restart.
-- **Caps are not a new status.** Return usable capped results as `completed`,
-  recording token/turn/loop caps in additive `stop_reason` for compatibility.
-- **A handled model failure is still a failure.** Middleware converts provider
-  exceptions to normal messages for clean graph termination. Decide task status
-  from the `additional_kwargs` marker, independently of message text.
+- **The first terminal write wins.** Reject later cancellations and
+  result/evidence writes from cancelled or stale attempts.
+- **Deliver hard timeouts before cleanup.** Consumers can return while teardown
+  still fences capacity, sandbox leases and normal registry removal.
+- **Drain cleanup under repeated cancellation.** Release capacity, remove queued
+  waiters and shut down the runtime. Leaked slots persist until restart.
+- **Return usable capped results as `completed`.** Record token, turn and loop
+  caps in `stop_reason` for compatibility.
+- **Detect handled model failures by their `additional_kwargs` marker.**
+  Middleware turns provider exceptions into normal messages to end the graph.
 
 ## Ordinary task notifications
 
-Under `SubagentResult`'s lock, publish revisions and detach waiters; wake their
-consumer-loop futures outside it. Recheck revisions to prevent lost wakeups.
-Publish local step suffixes and read isolated snapshots. Keep awaits/callbacks
-outside the lock and reject late steps. Usage/evidence-only updates do not notify.
+Publish revisions and detach waiters under the `SubagentResult` lock. Recheck
+revisions to prevent lost wakeups. Wake consumer-loop futures and run awaits
+and callbacks outside the lock. Publish local step suffixes, read isolated
+snapshots and reject late steps. Only progress, state and terminal updates notify.
 
-Set one monotonic deadline after dispatch and recheck registry/terminal state at
-expiry; progress never renews it. Supervise interrupted usage with the original
-holder and deduplicate journal entries by `source_run_id`.
+Set one monotonic deadline after dispatch and recheck registry and terminal state
+at expiry. Progress never renews it. After stream cleanup, supervise the final
+interrupted usage on the parent loop with the original holder. Deduplicate journal
+entries by `source_run_id`.
 See [delivery boundaries](../../../../../docs/guide/subagent-task-delivery.md).
 
 ## Durable batches
