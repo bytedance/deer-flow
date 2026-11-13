@@ -1,10 +1,7 @@
 # Subagents (`deerflow/subagents/`)
 
-Runs delegated work for the lead agent. `task` starts one in-memory subagent and
-waits for it. `batch_task` writes durable rows that a lease-based batch service
-executes, in the Gateway or in a separate worker. This directory also owns the
-subagent registry, capacity limits, the report contract and the acceptance checks
-that verify a subagent's claims. Batch behaviour and ownership:
+Owns in-memory `task` execution, durable `batch_task`, registries, capacity,
+reports and acceptance checks. For Gateway and standalone batch workers, see
 [BATCH_CONTINUATION.md](../../../../docs/BATCH_CONTINUATION.md).
 
 ## Verify
@@ -15,31 +12,37 @@ python -m pytest tests -q -k "subagent or batch or acceptance"
 make test-blocking-io
 ```
 
-Batch and result-reader tests run against SQLite and, when `TEST_POSTGRES_URI` is
-set, against an isolated PostgreSQL schema. They need no paid model.
+Batch and result-reader tests use SQLite or, with `TEST_POSTGRES_URI`, an isolated
+PostgreSQL schema. No paid model is needed.
 
 Run input delivery and parent context snapshots share `SUBAGENT_RESULT_MESSAGE_NAME`
 from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 
 ## Terminal state
 
-- **The first terminal write wins.** Cancellation, timeout and completion race.
-  A late cancellation must not replace a recorded timeout, and a cancelled or
-  stale attempt must not publish a result or evidence.
-- **Clean up before you notify.** Stream cleanup and the final usage snapshot come
-  before the terminal notification, because callbacks can arrive before the last
-  values chunk.
-- **Drain cleanup under cancellation.** Releasing a capacity slot, removing a
-  queued waiter and stopping the runtime all finish even when the caller is
-  cancelled again while they run. A slot that is not released stays lost until
-  restart.
-- **Caps are not a new status.** A token, turn or loop cap is reported through the
-  additive `stop_reason` field. A capped run with a usable answer stays
-  `completed`, so existing consumers of the status enum keep working.
-- **A handled model failure is still a failure.** The error-handling middleware
-  turns a provider exception into a normal message so that the graph ends cleanly.
-  Read its marker in `additional_kwargs` to decide the task status; do not read the
-  message text.
+- **The first terminal write wins.** Reject later cancellations and
+  result/evidence writes from cancelled or stale attempts.
+- **Deliver hard timeouts before cleanup.** Consumers can return while teardown
+  still fences capacity, sandbox leases and normal registry removal.
+- **Drain cleanup under repeated cancellation.** Release capacity, remove queued
+  waiters and shut down the runtime. Leaked slots persist until restart.
+- **Return usable capped results as `completed`.** Record token, turn and loop
+  caps in `stop_reason` for compatibility.
+- **Detect handled model failures by their `additional_kwargs` marker.**
+  Middleware turns provider exceptions into normal messages to end the graph.
+
+## Ordinary task notifications
+
+Publish revisions and detach waiters under the `SubagentResult` lock. Recheck
+revisions to prevent lost wakeups. Wake consumer-loop futures and run awaits
+and callbacks outside the lock. Publish local step suffixes, read isolated
+snapshots and reject late steps. Only progress, state and terminal updates notify.
+
+Set one monotonic deadline after dispatch and recheck registry and terminal state
+at expiry. Progress never renews it. After stream cleanup, supervise the final
+interrupted usage on the parent loop with the original holder. Deduplicate journal
+entries by `source_run_id`.
+See [delivery boundaries](../../../../../docs/guide/subagent-task-delivery.md).
 
 ## Durable batches
 
@@ -70,8 +73,8 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 - **A subagent inherits scope, not state.** It gets the parent's identity, the
   user's skill storage, the knowledge execution scope and a deep copy of the
   uploaded-file list at dispatch. It does not share the parent's message history.
-- **Thinking settings do not inherit.** A subagent's reasoning settings come from
-  its own definition. Unset means off, not "same as the parent".
+- **Configure thinking per subagent.** Unset reasoning means off; use the
+  subagent's definition independently of the parent.
 - **Registry overrides copy.** Resolution order is built-in, then
   `config.yaml custom_agents`, then enabled admin-managed definitions, then
   explicit per-agent overrides. An override must not mutate `BUILTIN_SUBAGENTS`.
@@ -90,17 +93,15 @@ from `deerflow.utils.messages`. Keep delayed Steer reports as sanitized history.
 - **Acceptance is decided in code.** The lead supplies acceptance criteria and
   `acceptance_checks.py` evaluates them against recorded tool results. The
   subagent's own report cannot mark a criterion as met.
-- **Unverified is the safe result.** Missing criteria, a checker error, a legacy
-  row or a failed execution is never treated as accepted. A path the caller may
-  not read stays unverified.
-- **A build banner is not a test result.** "Tests passed" needs a complete count
-  summary from the test runner with at least one test that ran. Failure counters
-  win over pass counters. Keep this rule when you add a runner format.
+- **Unverified is the safe result.** Missing criteria, checker errors, legacy
+  rows, failed executions and inaccessible paths remain unverified.
+- **Require a complete runner summary.** Report test success only when at least
+  one test ran and no failures were counted. Preserve this rule when adding
+  runner formats.
 - **Pair results by message, not by call ID alone.** Providers reuse tool-call
   IDs. A call without an ID records no evidence.
-- **Classify the full output before you shorten it.** The test summary is computed
-  from the complete tool message and stored. The tail kept for display can cut the
-  line that carries the result.
+- **Classify before truncating.** Compute and store test summaries from complete
+  tool messages; display tails can omit the result.
 - **Authorize before you read.** File criteria pass the same owner-scoped path
   checks and sandbox authorization as the file tools, and blocking reads are
   drained before the lease is released.

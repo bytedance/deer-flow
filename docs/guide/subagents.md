@@ -194,6 +194,8 @@ Embedded Python uploads use the same captured content for the saved document and
 返回游标。目录元数据或调用上下文变化时会明确要求重新枚举；详情见
 [文件上传文档](../../backend/docs/FILE_UPLOAD.md)。
 
+See [ordinary task progress and result delivery](subagent-task-delivery.md) for notification, deadline, and cleanup boundaries.
+
 Native subagent hard timeouts publish `TIMED_OUT` at the execution deadline while cleanup continues under supervision. Durable batch workers wait up to 60 seconds for cleanup before recording the published outcome and applying the configured retry policy. Unfinished executions retain capacity and sandbox leases until teardown finishes; keep work idempotent because retries may overlap late cleanup.
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.

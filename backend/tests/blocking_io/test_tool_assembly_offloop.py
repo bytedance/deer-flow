@@ -32,6 +32,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from langchain_core.messages import ToolMessage
+from support.subagent_executor import CompletedResult
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.extensions import get_agent_build_extensions
@@ -76,7 +77,7 @@ def _blocking_probe_tools(probe_file: Path, observed_threads: list | None = None
 
 
 def _completed_result() -> SimpleNamespace:
-    return SimpleNamespace(
+    return CompletedResult(
         status=_FakeSubagentStatus.COMPLETED,
         ai_messages=[],
         result="done",

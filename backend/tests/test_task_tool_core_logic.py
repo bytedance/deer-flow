@@ -7,6 +7,7 @@ import inspect
 import threading
 import time
 import weakref
+from copy import deepcopy
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+from support.subagent_executor import real_executor_classes
 
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
@@ -136,6 +138,10 @@ class FakeSubagentStatus(Enum):
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
 
+    @property
+    def is_terminal(self):
+        return self not in {self.PENDING, self.RUNNING}
+
 
 def _make_runtime(*, app_config=None) -> SimpleNamespace:
     # Minimal ToolRuntime-like object; task_tool only reads these three attributes.
@@ -166,6 +172,24 @@ def _make_subagent_config(name: str = "general-purpose") -> SubagentConfig:
     )
 
 
+class _ScriptedResult(SimpleNamespace):
+    """Legacy orchestration cases script each read rather than run a producer.
+
+    Real notification races are exercised with the real executor/result fixture.
+    Keep this double's scheduling point explicit so cancellation tests can steer it.
+    """
+
+    def snapshot(self, after_message_index=0):
+        data = deepcopy({key: value for key, value in vars(self).items() if key != "execution_done_event"})
+        for key in ("ai_messages", "token_usage_records"):
+            data.setdefault(key, [])
+        data.update(revision=0, message_start_index=0, message_count=len(self.ai_messages))
+        return SimpleNamespace(**data)
+
+    async def wait_for_change(self, revision, *, timeout):
+        await asyncio.sleep(0)
+
+
 def _make_result(
     status: FakeSubagentStatus,
     *,
@@ -177,7 +201,7 @@ def _make_result(
     tool_receipts: list[dict] | None = None,
     bash_executions: list[dict] | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    return _ScriptedResult(
         status=status,
         ai_messages=ai_messages or [],
         result=result,
@@ -1013,7 +1037,7 @@ def test_task_tool_emits_cumulative_usage_on_running_event(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_, **kwargs: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
     _run_task_tool(
@@ -1588,6 +1612,8 @@ def test_task_tool_surfaces_stop_reason_for_capped_run(monkeypatch):
 
 
 def test_task_tool_polling_safety_timeout(monkeypatch):
+    ticks = iter([0, 65, 65])
+    monkeypatch.setattr(task_tool_module, "_monotonic", lambda: next(ticks))
     config = _make_subagent_config()
     # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
     config.timeout_seconds = 1
@@ -1789,6 +1815,8 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     The task is still RUNNING so it cannot be safely removed yet. Instead,
     cooperative cancellation is requested and a deferred cleanup is scheduled.
     """
+    ticks = iter([0, 65, 65])
+    monkeypatch.setattr(task_tool_module, "_monotonic", lambda: next(ticks))
     config = _make_subagent_config()
     # Keep max_poll_count small for test speed: (1 + 60) // 5 = 12
     config.timeout_seconds = 1
@@ -1970,7 +1998,7 @@ def test_unexpected_poller_error_deferred_cleanup_survives_sync_invocation(monke
     main_thread = threading.current_thread()
     caller_loop_finished = threading.Event()
     execution_id = "exec-sync-poller-death"
-    result = SimpleNamespace(
+    result = _ScriptedResult(
         status=FakeSubagentStatus.RUNNING,
         ai_messages=["partial"],
         result=None,
@@ -2234,7 +2262,7 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
     main_thread = threading.current_thread()
     caller_loop_finished = threading.Event()
     execution_id = "exec-deferred-final-usage"
-    result = SimpleNamespace(
+    result = _ScriptedResult(
         status=FakeSubagentStatus.RUNNING,
         ai_messages=["partial"],
         result=None,
@@ -2379,7 +2407,7 @@ def test_deferred_final_usage_reported_on_parent_loop_with_real_recorder(monkeyp
     emit_calls = 0
     scheduled_handles: list = []
     execution_id = "exec-final-usage-live-loop"
-    result = SimpleNamespace(
+    result = _ScriptedResult(
         status=FakeSubagentStatus.RUNNING,
         ai_messages=["partial"],
         result=None,
@@ -2517,7 +2545,7 @@ async def test_terminal_usage_tail_waits_for_cleanup_fence_and_reports_on_parent
     execution_done = threading.Event()
     calls: list[tuple[object, list[dict]]] = []
     scheduled: list[asyncio.Task] = []
-    result = SimpleNamespace(
+    result = _ScriptedResult(
         status=FakeSubagentStatus.TIMED_OUT,
         usage_reported=True,
         token_usage_records=[
@@ -2647,7 +2675,7 @@ async def test_unexpected_error_grace_wait_cancellation_is_honored(monkeypatch):
         type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]))
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[{"content": "partial"}]))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
     monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id_arg: cancel_calls.append(execution_id_arg))
@@ -3062,7 +3090,7 @@ def test_task_tool_emits_completed_metadata(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_, **kwargs: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
 
@@ -3128,7 +3156,7 @@ def test_task_tool_bounds_large_result_metadata(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=huge))
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_, **kwargs: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
 
@@ -3256,7 +3284,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_, **kwargs: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
 
@@ -3291,7 +3319,7 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_, **kwargs: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
 
@@ -3759,6 +3787,203 @@ def test_parallel_task_choices_do_not_mutate_parent_or_shared_config(monkeypatch
     assert {entry["config"].model for entry in seen} == {"B", "C"}
     assert shared.model == "inherit"
     assert runtime.config["metadata"]["model_name"] == "ark-model"
+
+
+@pytest.fixture
+def notified_task(monkeypatch):
+    with real_executor_classes() as classes:
+        status = classes["SubagentStatus"]
+        holder = classes["SubagentResult"]("notification-execution", "trace", status.RUNNING)
+        config = _make_subagent_config()
+        events = []
+        cleanup = []
+        cancel = []
+        monkeypatch.setattr(task_tool_module, "SubagentStatus", status)
+        monkeypatch.setattr(task_tool_module, "SubagentExecutor", type("Executor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda *args, **kwargs: holder.task_id}))
+        monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *args, **kwargs: config)
+        monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: holder)
+        monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+        monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleanup.append)
+        monkeypatch.setattr(task_tool_module, "request_cancel_background_task", cancel.append)
+        monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+        async def emit(payload, *, writer):
+            writer(payload)
+
+        monkeypatch.setattr(task_tool_module, "aemit_custom_event", emit)
+
+        async def run():
+            return await task_tool_module.task_tool.coroutine(runtime=_make_runtime(), prompt="offline", subagent_type="general-purpose", tool_call_id="external-call")
+
+        yield SimpleNamespace(holder=holder, status=status, config=config, events=events, cleanup=cleanup, cancel=cancel, run=run, classes=classes)
+
+
+@pytest.mark.asyncio
+async def test_task_consumes_coalesced_real_notifications_in_order(notified_task, monkeypatch):
+    probe = notified_task
+    registered = asyncio.Event()
+    original_wait = probe.holder.wait_for_change
+
+    async def wait(revision, *, timeout):
+        registered.set()
+        await original_wait(revision, timeout=timeout)
+
+    monkeypatch.setattr(probe.holder, "wait_for_change", wait)
+    parent = asyncio.create_task(probe.run())
+    try:
+        await asyncio.wait_for(registered.wait(), 2)
+        for i in range(100):
+            probe.holder.publish_steps([{"content": str(i)}], [])
+        probe.holder.try_set_terminal(probe.status.COMPLETED, result="done")
+        message = _task_tool_message(await asyncio.wait_for(parent, 2))
+        progress = [event for event in probe.events if event["type"] == "task_running"]
+        assert [event["message_index"] for event in progress] == list(range(1, 101))
+        assert [event["message"]["content"] for event in progress] == [str(i) for i in range(100)]
+        assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+        assert {event["task_id"] for event in probe.events} == {"external-call"}
+        assert probe.cleanup == [probe.holder.task_id]
+        assert not probe.holder._change_waiters
+    finally:
+        if not parent.done():
+            parent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await parent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("outcome", ["running", "completed", "disappeared"])
+async def test_task_deadline_fixed_and_final_registry_read_wins(notified_task, monkeypatch, progress, outcome):
+    probe = notified_task
+    probe.config.timeout_seconds = 1800
+    now = [0.0]
+    waits = []
+    scheduled = []
+    monkeypatch.setattr(task_tool_module, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(task_tool_module, "_schedule_deferred_subagent_cleanup", lambda *args: scheduled.append(args))
+
+    async def wait(revision, *, timeout):
+        waits.append(timeout)
+        if progress and len(waits) == 1:
+            now[0] = 1000
+            probe.holder.publish_steps([{"content": "progress"}], [])
+        else:
+            now[0] = 1865
+            if outcome == "completed":
+                probe.holder.try_set_terminal(probe.status.COMPLETED, result="at deadline")
+            elif outcome == "disappeared":
+                monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: None)
+
+    monkeypatch.setattr(probe.holder, "wait_for_change", wait)
+    message = _task_tool_message(await probe.run())
+    assert waits == ([1865, 865] if progress else [1865])
+    expected = {"running": "polling_timed_out", "completed": "completed", "disappeared": "failed"}[outcome]
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == expected
+    assert probe.cancel == ([probe.holder.task_id] if outcome == "running" else [])
+    assert len(scheduled) == (1 if outcome == "running" else 0)
+    assert not probe.holder._change_waiters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired_before_progress", [False, True])
+async def test_task_event_time_counts_towards_deadline_and_rechecks_terminal(notified_task, monkeypatch, expired_before_progress):
+    probe = notified_task
+    now = [0.0]
+    reads = []
+
+    def lookup(execution_id):
+        reads.append(execution_id)
+        return probe.holder if len(reads) <= 2 else None
+
+    monkeypatch.setattr(task_tool_module, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lookup)
+    probe.holder.publish_steps([{"content": "last step"}], [])
+
+    async def emit(payload, *, writer):
+        writer(payload)
+        if payload["type"] == "task_started" and expired_before_progress:
+            now[0] = 10000
+        if payload["type"] == "task_running" and payload["message_index"] == 1:
+            now[0] = 10000
+            probe.holder.publish_steps([{"content": "terminal step"}], [])
+            probe.holder.try_set_terminal(probe.status.COMPLETED, result="during emit")
+
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", emit)
+    message = _task_tool_message(await probe.run())
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "completed"
+    assert [event["type"] for event in probe.events] == ["task_started", "task_running", "task_running", "task_completed"]
+    assert [event["message_index"] for event in probe.events if event["type"] == "task_running"] == [1, 2]
+    assert reads == [probe.holder.task_id, probe.holder.task_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["disappeared", "more_progress"])
+async def test_task_deadline_final_read_preserves_absence_and_does_not_follow_progress(notified_task, monkeypatch, outcome):
+    probe = notified_task
+    now = [0.0]
+    reads = []
+    scheduled = []
+
+    def lookup(execution_id):
+        reads.append(execution_id)
+        assert len(reads) <= 2, "Progress must not extend the expired waiting deadline"
+        if len(reads) == 2:
+            if outcome == "disappeared":
+                return None
+            probe.holder.publish_steps([{"content": "late progress"}], [])
+        return probe.holder
+
+    async def emit(payload, *, writer):
+        writer(payload)
+        if payload["type"] == "task_started":
+            now[0] = 10000
+
+    monkeypatch.setattr(task_tool_module, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lookup)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", emit)
+    monkeypatch.setattr(task_tool_module, "_schedule_deferred_subagent_cleanup", lambda *args: scheduled.append(args))
+    message = _task_tool_message(await probe.run())
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == ("failed" if outcome == "disappeared" else "polling_timed_out")
+    assert len(reads) == 2
+    assert probe.cancel == ([] if outcome == "disappeared" else [probe.holder.task_id])
+    assert len(scheduled) == (0 if outcome == "disappeared" else 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["snapshot", "wait", "emit"])
+async def test_task_notification_failures_preserve_original_and_finalize(notified_task, monkeypatch, failure):
+    probe = notified_task
+    original = RuntimeError("original notification failure")
+    finalized = []
+
+    async def finalize(*args, **kwargs):
+        finalized.append((args, kwargs))
+
+    def fail_snapshot(**kwargs):
+        raise original
+
+    async def fail_wait(*args, **kwargs):
+        raise asyncio.CancelledError
+
+    async def fail_emit(payload, *, writer):
+        if payload["type"] == "task_running":
+            raise original
+
+    monkeypatch.setattr(task_tool_module, "_finalize_interrupted_subagent", finalize)
+    if failure == "snapshot":
+        monkeypatch.setattr(probe.holder, "snapshot", fail_snapshot)
+    elif failure == "wait":
+        monkeypatch.setattr(probe.holder, "wait_for_change", fail_wait)
+    else:
+        probe.holder.publish_steps([{"content": "step"}], [])
+        monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_emit)
+    with pytest.raises(asyncio.CancelledError if failure == "wait" else RuntimeError) as raised:
+        await probe.run()
+    if failure != "wait":
+        assert raised.value is original
+    assert probe.cancel == [probe.holder.task_id]
+    assert len(finalized) == 1
+    assert not probe.holder._change_waiters
 
 
 def _preflight(**overrides):

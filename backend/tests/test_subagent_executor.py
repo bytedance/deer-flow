@@ -21,6 +21,7 @@ import logging
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import Context
 from datetime import datetime
 from importlib.metadata import version as package_version
@@ -30,6 +31,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from packaging.version import Version
+from support.subagent_executor import (
+    default_subagent_app_config as _default_app_config,
+)
+from support.subagent_executor import (
+    patch_default_executor_app_config as _patch_default_get_app_config,
+)
+from support.subagent_executor import (
+    real_executor_classes,
+)
 
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
@@ -38,19 +48,6 @@ from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
 from deerflow.trace_context import request_trace_context
-
-# Module names that need to be mocked to break circular imports
-_MOCKED_MODULE_NAMES = [
-    "deerflow.agents",
-    "deerflow.agents.thread_state",
-    "deerflow.agents.middlewares",
-    "deerflow.agents.middlewares.thread_data_middleware",
-    "deerflow.sandbox",
-    "deerflow.sandbox.middleware",
-    "deerflow.sandbox.security",
-    "deerflow.models",
-    "deerflow.skills.storage",
-]
 
 _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgraph")) >= Version("1.2.6")
 
@@ -121,144 +118,11 @@ async def test_knowledge_provider_receives_real_subagent_execution_identity(clas
     assert context.scope == scope
 
 
-def _default_app_config():
-    return SimpleNamespace(
-        tool_search=SimpleNamespace(enabled=False),
-        authorization=SimpleNamespace(enabled=False),
-        skills=SimpleNamespace(
-            deferred_discovery=True,
-            container_path="/mnt/skills",
-        ),
-        skill_evolution=SimpleNamespace(enabled=False),
-    )
-
-
-def _patch_default_get_app_config(executor_module):
-    executor_module.get_app_config = _default_app_config
-    return executor_module
-
-
-def _clear_stale_executor_package_attr() -> None:
-    subagents_pkg = sys.modules.get("deerflow.subagents")
-    if subagents_pkg is not None and hasattr(subagents_pkg, "executor"):
-        delattr(subagents_pkg, "executor")
-
-
 @pytest.fixture(autouse=True)
 def _setup_executor_classes():
-    """Set up mocked modules and import real executor classes.
-
-    This fixture runs once per test and yields the executor classes.
-    It handles module cleanup to avoid affecting other test files.
-    """
-    # Save original modules
-    original_modules = {name: sys.modules.get(name) for name in _MOCKED_MODULE_NAMES}
-    original_executor = sys.modules.get("deerflow.subagents.executor")
-    original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
-    original_tool_declarations = sys.modules.get("deerflow.agents.middlewares.tool_declarations")
-    original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
-    original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
-    original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
-    original_sandbox_prewarm = sys.modules.get("deerflow.sandbox.prewarm")
-
-    # Preload real executor dependencies before replacing their parent packages
-    # with cycle-breaking test doubles. Keeping the concrete leaf modules in
-    # sys.modules makes this fixture independent of test collection order.
-    audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
-    tool_declarations_module = importlib.import_module("deerflow.agents.middlewares.tool_declarations")
-    tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
-    sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
-    sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
-    sandbox_prewarm_module = importlib.import_module("deerflow.sandbox.prewarm")
-    for module_name in ("deerflow.models.factory", "deerflow.models.openai_codex_provider", "deerflow.agents.assembly_descriptor"):
-        importlib.import_module(module_name)
-
-    # Remove mocked executor if exists (from conftest.py)
-    if "deerflow.subagents.executor" in sys.modules:
-        del sys.modules["deerflow.subagents.executor"]
-    _clear_stale_executor_package_attr()
-
-    # Set up mocks
-    for name in _MOCKED_MODULE_NAMES:
-        sys.modules[name] = MagicMock()
-    storage_module = ModuleType("deerflow.skills.storage")
-    storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
-    sys.modules["deerflow.skills.storage"] = storage_module
-    sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
-    sys.modules["deerflow.agents.middlewares.tool_declarations"] = tool_declarations_module
-    sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
-    sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
-    sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
-    sys.modules["deerflow.sandbox.prewarm"] = sandbox_prewarm_module
-
-    # Import real classes inside fixture
-    from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-    from deerflow.subagents.config import SubagentConfig
-    from deerflow.subagents.executor import (
-        SubagentExecutor,
-        SubagentResult,
-        SubagentStatus,
-    )
-
-    executor_module = sys.modules["deerflow.subagents.executor"]
-
-    # Most tests in this module patch _create_agent and exercise executor
-    # control flow only. Keep those tests hermetic: CI checkouts do not include
-    # the gitignored config.yaml, and deferral-specific tests override this
-    # default explicitly.
-    _patch_default_get_app_config(executor_module)
-
-    # Store classes in a dict to yield
-    classes = {
-        "AIMessage": AIMessage,
-        "HumanMessage": HumanMessage,
-        "ToolMessage": ToolMessage,
-        "SubagentConfig": SubagentConfig,
-        "SubagentExecutor": SubagentExecutor,
-        "SubagentResult": SubagentResult,
-        "SubagentStatus": SubagentStatus,
-    }
-
-    yield classes
-
-    # Cleanup: Restore original modules
-    for name in _MOCKED_MODULE_NAMES:
-        if original_modules[name] is not None:
-            sys.modules[name] = original_modules[name]
-        elif name in sys.modules:
-            del sys.modules[name]
-
-    # Restore executor module (conftest.py mock)
-    if original_executor is not None:
-        sys.modules["deerflow.subagents.executor"] = original_executor
-    elif "deerflow.subagents.executor" in sys.modules:
-        del sys.modules["deerflow.subagents.executor"]
-    if original_audit_context is not None:
-        sys.modules["deerflow.agents.middlewares.audit_context"] = original_audit_context
-    else:
-        sys.modules.pop("deerflow.agents.middlewares.audit_context", None)
-    if original_tool_declarations is not None:
-        sys.modules["deerflow.agents.middlewares.tool_declarations"] = original_tool_declarations
-    else:
-        sys.modules.pop("deerflow.agents.middlewares.tool_declarations", None)
-    if original_tool_search is not None:
-        sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
-    else:
-        sys.modules.pop("deerflow.tools.builtins.tool_search", None)
-    if original_sandbox_provider is not None:
-        sys.modules["deerflow.sandbox.sandbox_provider"] = original_sandbox_provider
-    else:
-        sys.modules.pop("deerflow.sandbox.sandbox_provider", None)
-    if original_sandbox_overwrite is not None:
-        sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
-    else:
-        sys.modules.pop("deerflow.sandbox.overwrite", None)
-    if original_sandbox_prewarm is not None:
-        sys.modules["deerflow.sandbox.prewarm"] = original_sandbox_prewarm
-    else:
-        sys.modules.pop("deerflow.sandbox.prewarm", None)
+    """Import real executor classes with per-test module isolation."""
+    with real_executor_classes() as classes:
+        yield classes
 
 
 def _async_create_agent_double(agent):
@@ -7940,3 +7804,484 @@ class TestSubagentCompactionIdentity:
         info = store.get(TaskInfo)
         assert info == TaskInfo(task_id="exec-1", run_id=run_id, thread_id="sub-thread", kind="subagent", parent_task_id=run_id, agent_name=base_config.name)
         assert (event.task_id, event.run_id, event.thread_id) == (info.task_id, info.run_id, info.thread_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("publication", ["before_snapshot", "before_subscribe", "after_subscribe"])
+async def test_result_change_subscription_cannot_lose_publication(classes, publication):
+    result = classes["SubagentResult"]("notify", "trace", classes["SubagentStatus"].PENDING)
+    if publication == "before_snapshot":
+        result.try_set_running()
+    snapshot = result.snapshot()
+    if publication == "before_subscribe":
+        result.try_set_running()
+    waiter = asyncio.create_task(result.wait_for_change(snapshot.revision, timeout=1))
+    await asyncio.sleep(0)  # Registration barrier: wait_for_change has no other await before subscribing.
+    if publication == "after_subscribe":
+        result.try_set_running()
+    elif publication == "before_snapshot":
+        assert result.snapshot().status is classes["SubagentStatus"].RUNNING
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not result._change_waiters
+        return
+    await asyncio.wait_for(waiter, 1)
+    assert result.snapshot().revision > snapshot.revision
+    assert not result._change_waiters
+
+
+@pytest.mark.asyncio
+async def test_result_snapshot_isolated_suffix_and_terminal_payload(classes):
+    status = classes["SubagentStatus"]
+    result = classes["SubagentResult"]("snapshot", "trace", status.RUNNING)
+    steps = [{"content": [{"text": "first"}]}]
+    usage = [{"source_run_id": "first", "total_tokens": 10}]
+    result.publish_steps(steps, usage)
+    first = result.snapshot()
+    steps[0]["content"][0]["text"] = "external mutation"
+    usage[0]["total_tokens"] = 999
+    result.publish_steps([{"content": "second"}], [{"total_tokens": 20}])
+    suffix = result.snapshot(after_message_index=1)
+    assert suffix.ai_messages == [{"content": "second"}]
+    assert suffix.message_start_index == 1
+    assert suffix.message_count == 2
+    assert first.ai_messages == [{"content": [{"text": "first"}]}]
+    assert first.token_usage_records == [{"source_run_id": "first", "total_tokens": 10}]
+    result.update_tool_receipts([{"id": "r1", "nested": {"value": "receipt"}}])
+    result.update_bash_executions([])
+    assert result.snapshot().revision == suffix.revision  # Metadata alone does not wake progress.
+    assert result.try_set_terminal(status.COMPLETED, result="done", stop_reason="turn_capped", token_usage_records=[{"total_tokens": 30}])
+    terminal = result.snapshot(after_message_index=2)
+    assert terminal.result == "done"
+    assert terminal.stop_reason == "turn_capped"
+    assert terminal.token_usage_records == [{"total_tokens": 30}]
+    assert terminal.tool_receipts[0]["nested"]["value"] == "receipt"
+    assert terminal.bash_executions == []
+    assert terminal.message_start_index == 0
+    assert len(terminal.ai_messages) == 2
+    assert not hasattr(terminal, "execution_done_event")
+    terminal.ai_messages[0]["content"][0]["text"] = "consumer mutation"
+    assert result.snapshot().ai_messages[0]["content"][0]["text"] == "first"
+    result.publish_steps([{"content": "late"}], [{"total_tokens": 999}])
+    assert result.snapshot().revision == terminal.revision
+    assert result.snapshot().token_usage_records == [{"total_tokens": 30}]
+
+
+@pytest.mark.anyio
+async def test_existing_running_holder_still_gets_executor_start_time(classes, base_config):
+    holder = classes["SubagentResult"]("already-running", "trace", classes["SubagentStatus"].RUNNING)
+    executor = classes["SubagentExecutor"](config=base_config, tools=[])
+    with patch.object(executor, "_aexecute_admitted", new=AsyncMock(return_value=holder)):
+        await executor._aexecute("task", holder)
+    assert holder.started_at is not None
+    assert holder.started_at.utcoffset().total_seconds() == 0
+
+
+@pytest.mark.asyncio
+async def test_result_burst_schedules_one_wakeup_and_preserves_all_steps(classes, monkeypatch):
+    result = classes["SubagentResult"]("burst", "trace", classes["SubagentStatus"].RUNNING)
+    snapshot = result.snapshot()
+    waiter = asyncio.create_task(result.wait_for_change(snapshot.revision, timeout=5))
+    await asyncio.sleep(0)
+    assert len(result._change_waiters) == 1
+    loop = asyncio.get_running_loop()
+    schedule = MagicMock(wraps=loop.call_soon_threadsafe)
+    monkeypatch.setattr(loop, "call_soon_threadsafe", schedule)
+    for index in range(100):
+        result.publish_steps([{"content": str(index)}], [])
+    assert schedule.call_count == 1
+    await waiter
+    assert [step["content"] for step in result.snapshot().ai_messages] == [str(i) for i in range(100)]
+    assert not result._change_waiters
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_result_notification_between_threads_and_loops(classes, cancel):
+    result = classes["SubagentResult"]("loops", "trace", classes["SubagentStatus"].RUNNING)
+    consumer_loop = asyncio.new_event_loop()
+    consumer_loop.set_debug(True)
+    thread = threading.Thread(target=consumer_loop.run_forever, daemon=True)
+    subscribed = threading.Event()
+    errors = []
+    consumer_loop.set_exception_handler(lambda loop, context: errors.append(context))
+    thread.start()
+
+    async def consume():
+        snapshot = result.snapshot()
+        waiter = asyncio.create_task(result.wait_for_change(snapshot.revision, timeout=5))
+        await asyncio.sleep(0)
+        subscribed.set()
+        if cancel:
+            waiter.cancel()
+            # Publication races with the already scheduled cancellation delivery.
+            result.publish_steps([{"content": "cancel race"}], [])
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+        else:
+            await waiter
+        return asyncio.get_running_loop()
+
+    handle = asyncio.run_coroutine_threadsafe(consume(), consumer_loop)
+    try:
+        assert await asyncio.to_thread(subscribed.wait, 5)
+        if not cancel:
+            # A producer coroutine runs in this thread/loop, distinct from consumer.
+            result.publish_steps([{"content": "cross loop"}], [])
+        assert await asyncio.wrap_future(handle) is consumer_loop
+        assert not result._change_waiters
+        assert not errors
+    finally:
+        if not handle.done():
+            handle.cancel()
+
+        async def drain_consumer_loop():
+            # Cancelling the concurrent Future does not wait for its Task's
+            # finally block. Drain this test-owned loop before closing it.
+            tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            assert not result._change_waiters
+
+        try:
+            drain = asyncio.run_coroutine_threadsafe(drain_consumer_loop(), consumer_loop)
+            await asyncio.wait_for(asyncio.wrap_future(drain), 5)
+        finally:
+            consumer_loop.call_soon_threadsafe(consumer_loop.stop)
+            await asyncio.to_thread(thread.join, 5)
+            consumer_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_result_silent_wait_timeout_cancellation_and_closed_loop(classes):
+    result = classes["SubagentResult"]("silent", "trace", classes["SubagentStatus"].RUNNING)
+    revision = result.snapshot().revision
+    await result.wait_for_change(revision, timeout=0)
+    assert not result._change_waiters
+    waiter = asyncio.create_task(result.wait_for_change(revision, timeout=5))
+    await asyncio.sleep(0)
+    assert not waiter.done()
+    # No periodic timer completes a silent subscription.
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not result._change_waiters
+    closed = asyncio.new_event_loop()
+    future = closed.create_future()
+    with result._state_lock:
+        result._change_waiters[future] = closed
+    closed.close()
+    assert result.try_set_terminal(classes["SubagentStatus"].COMPLETED, result="closed consumer")
+    assert not result._change_waiters
+    assert result.snapshot().result == "closed consumer"
+
+
+@pytest.mark.parametrize("winner", ["COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"])
+def test_result_first_terminal_wins_with_atomic_payload(classes, winner):
+    status = classes["SubagentStatus"]
+    result = classes["SubagentResult"]("terminal", "trace", status.RUNNING)
+    assert result.try_set_terminal(status[winner], result="winner", error="winner error", token_usage_records=[{"total_tokens": 10}], tool_receipts=[{"id": "winner"}])
+    barrier = threading.Barrier(4)
+
+    def race(name):
+        barrier.wait(timeout=5)
+        assert not result.try_set_terminal(status[name], result="loser", error="loser error", token_usage_records=[{"total_tokens": 999}], tool_receipts=[{"id": "loser"}])
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(race, name) for name in ("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT")]
+        for future in futures:
+            future.result(timeout=5)
+    snapshot = result.snapshot()
+    assert snapshot.status is status[winner]
+    assert snapshot.result == "winner"
+    assert snapshot.error == "winner error"
+    assert snapshot.token_usage_records == [{"total_tokens": 10}]
+    assert snapshot.tool_receipts == [{"id": "winner"}]
+
+
+def test_result_racing_terminal_payload_matches_winning_writer(classes):
+    status = classes["SubagentStatus"]
+    result = classes["SubagentResult"]("race", "trace", status.RUNNING)
+    barrier = threading.Barrier(4)
+
+    def publish(index, name):
+        barrier.wait(timeout=5)
+        won = result.try_set_terminal(status[name], result=name, error=name, token_usage_records=[{"total_tokens": index}])
+        return won, name, index
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(publish, index, name) for index, name in enumerate(("COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"), 1)]
+        winners = [(name, index) for future in futures for won, name, index in [future.result(timeout=5)] if won]
+    assert len(winners) == 1
+    name, index = winners[0]
+    snapshot = result.snapshot()
+    assert snapshot.status is status[name]
+    assert snapshot.result == snapshot.error == name
+    assert snapshot.token_usage_records == [{"total_tokens": index}]
+
+
+@pytest.fixture
+def task_result_delivery(classes, monkeypatch):
+    """Drive the real task tool, result holder and isolated executor with an offline child."""
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.subagents.capacity import SubagentExecutionCapacity
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
+    config = classes["SubagentConfig"](name="general-purpose", description="Offline result delivery", model="delivery-test", timeout_seconds=10)
+    probe = SimpleNamespace(
+        config=config,
+        runtime=SimpleNamespace(state={}, context={"thread_id": "delivery-test"}, config={"metadata": {"model_name": "delivery-test"}}),
+        first_read=threading.Event(),
+        terminal_published=threading.Event(),
+        terminal_at=None,
+        producer_loop=None,
+        holder=None,
+        execution_id=None,
+        execution_future=None,
+        stream=None,
+        before_first_read=False,
+        events=[],
+        event_times=[],
+        releases=[],
+        release_on_progress=None,
+        finish_during_progress=False,
+        tool_module=tool_module,
+        executor_module=executor_module,
+    )
+    original_terminal = classes["SubagentResult"].try_set_terminal
+    previous_cleanups = set(tool_module._deferred_cleanup_tasks)
+
+    def publish_terminal(holder, status, **kwargs):
+        # Stamp before publication: the new consumer can return before this
+        # wrapper regains control after original_terminal schedules the wakeup.
+        if not holder.status.is_terminal:
+            probe.terminal_at = time.perf_counter()
+            probe.producer_loop = asyncio.get_running_loop()
+        changed = original_terminal(holder, status, **kwargs)
+        if changed:
+            probe.terminal_published.set()
+        return changed
+
+    def make_executor(**kwargs):
+        kwargs["extensions"] = SimpleNamespace(needs_task_store=False, has_task_lifecycle=False)
+        kwargs["execution_capacity"] = SubagentExecutionCapacity(SubagentRuntimeConfig())
+        executor = classes["SubagentExecutor"](**kwargs)
+        probe.capacity = executor.execution_capacity
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({"messages": []}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=probe.stream)))
+        execute_async = executor.execute_async
+
+        def dispatch(prompt, task_id=None):
+            probe.execution_id = execute_async(prompt, task_id=task_id)
+            probe.holder = executor_module.get_background_task_result(probe.execution_id)
+            probe.execution_future = executor_module._background_futures.get(probe.execution_id)
+            return probe.execution_id
+
+        monkeypatch.setattr(executor, "execute_async", dispatch)
+        return executor
+
+    def read_result(execution_id):
+        holder = executor_module.get_background_task_result(execution_id)
+        probe.first_read.set()
+        return holder
+
+    async def emit(payload, *, writer):
+        if payload["type"] == "task_started" and probe.before_first_read:
+            assert await asyncio.to_thread(probe.terminal_published.wait, 5), "child did not publish before the initial read"
+        probe.event_times.append(time.perf_counter())
+        writer(payload)
+        if payload["type"] == "task_running" and probe.release_on_progress is not None:
+            probe.release_on_progress.set()
+            if probe.finish_during_progress:
+                assert await asyncio.to_thread(probe.terminal_published.wait, 5), "child did not finish during progress delivery"
+
+    async def run():
+        return await tool_module.task_tool.coroutine(runtime=probe.runtime, prompt="offline child", subagent_type="general-purpose", tool_call_id="delivery-call")
+
+    probe.run = run
+    monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", publish_terminal)
+    monkeypatch.setattr(tool_module, "SubagentExecutor", make_executor)
+    monkeypatch.setattr(tool_module, "SubagentStatus", classes["SubagentStatus"])
+    monkeypatch.setattr(tool_module, "get_subagent_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(tool_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+    monkeypatch.setattr(tool_module, "get_background_task_result", read_result)
+    for name in ("cleanup_background_task", "request_cancel_background_task", "force_cleanup_background_task", "run_on_isolated_subagent_loop"):
+        monkeypatch.setattr(tool_module, name, getattr(executor_module, name))
+    monkeypatch.setattr(tool_module, "get_stream_writer", lambda: probe.events.append)
+    monkeypatch.setattr(tool_module, "aemit_custom_event", emit)
+    # Only accelerate existing interruption/cleanup waits, never the task tool's main wait.
+    monkeypatch.setattr(tool_module, "_SUBAGENT_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(executor_module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+    try:
+        yield probe
+    finally:
+        try:
+            for release in probe.releases:
+                release.set()
+            if probe.holder is not None:
+                if not probe.holder.status.is_terminal:
+                    executor_module.request_cancel_background_task(probe.execution_id)
+                assert probe.holder.execution_done_event.wait(5), "offline child teardown did not finish"
+                executor_module.cleanup_background_task(probe.execution_id)
+            for handle in set(tool_module._deferred_cleanup_tasks) - previous_cleanups:
+                handle.result(timeout=6)
+        finally:
+            executor_module._shutdown_isolated_subagent_loop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+@pytest.mark.parametrize("publication", ["before_first_read", "after_first_read"])
+async def test_task_tool_delivers_terminal_without_poll_interval(classes, task_result_delivery, outcome, publication):
+    probe = task_result_delivery
+    probe.before_first_read = publication == "before_first_read"
+
+    async def stream(*args, **kwargs):
+        if not probe.before_first_read:
+            assert await asyncio.to_thread(probe.first_read.wait, 5), "parent did not read the running child"
+        await asyncio.sleep(0.1)
+        if outcome == "failed":
+            raise RuntimeError("offline child failure")
+        yield {"messages": [classes["AIMessage"](content="offline child result", id="delivery-step")]}
+
+    probe.stream = stream
+    started_at = time.perf_counter()
+    command = await probe.run()
+    returned_at = time.perf_counter()
+    message = command.update["messages"][0]
+    observed_at = next(stamp for event, stamp in zip(probe.events, probe.event_times, strict=True) if event["type"] == f"task_{outcome}")
+    latency = returned_at - probe.terminal_at
+    print(f"DELIVERY outcome={outcome} publication={publication} published={probe.terminal_at - started_at:.6f}s observed={observed_at - started_at:.6f}s returned={returned_at - started_at:.6f}s latency={latency:.6f}s")
+    assert probe.producer_loop is not asyncio.get_running_loop()
+    assert message.additional_kwargs["subagent_status"] == outcome
+    assert [event["type"] for event in probe.events].count(f"task_{outcome}") == 1
+    assert latency < 1.0, f"published {outcome} result waited {latency:.3f}s for the parent"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_delivers_all_progress_before_child_finishes(classes, task_result_delivery):
+    probe = task_result_delivery
+    release = threading.Event()
+    probe.releases.append(release)
+    probe.release_on_progress = release
+    timing = {}
+
+    async def stream(*args, **kwargs):
+        assert await asyncio.to_thread(probe.first_read.wait, 5), "parent did not read the running child"
+        await asyncio.sleep(0.1)
+        timing["produced_at"] = time.perf_counter()
+        yield {
+            "messages": [
+                classes["AIMessage"](content="first step", id="delivery-ai"),
+                classes["ToolMessage"](content="tool output", id="delivery-tool", tool_call_id="child-call", name="echo"),
+            ]
+        }
+        assert await asyncio.to_thread(release.wait, 15), "parent never delivered the progress"
+
+    probe.stream = stream
+    command = await probe.run()
+    running = [(event, stamp) for event, stamp in zip(probe.events, probe.event_times, strict=True) if event["type"] == "task_running"]
+    assert command.update["messages"][0].additional_kwargs["subagent_status"] == "completed"
+    assert [event["message_index"] for event, _ in running] == [1, 2]
+    assert [event["message"]["content"] for event, _ in running] == ["first step", "tool output"]
+    assert running[0][1] < probe.terminal_at, "progress must be delivered while the child is still running"
+    latency = running[0][1] - timing["produced_at"]
+    print(f"PROGRESS produce_to_observe={latency:.6f}s messages={len(running)}")
+    assert latency < 1.0, f"published progress waited {latency:.3f}s for the parent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["TIMED_OUT", "CANCELLED"])
+async def test_task_tool_retains_terminal_usage_tail_after_return(classes, task_result_delivery, monkeypatch, outcome):
+    probe = task_result_delivery
+    probe.before_first_read = True
+    release = threading.Event()
+    probe.releases.append(release)
+    initial = {"source_run_id": "delivery-initial", "caller": "subagent:general-purpose", "model_name": "delivery-test", "input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    tail = {"source_run_id": "delivery-tail", "caller": "subagent:general-purpose", "model_name": "delivery-test", "input_tokens": 20, "output_tokens": 5, "total_tokens": 25}
+
+    async def child(self, prompt, result_holder=None):
+        result_holder.try_set_terminal(classes["SubagentStatus"][outcome], error="offline interrupted child", token_usage_records=[initial])
+        assert await asyncio.to_thread(release.wait, 10), "test did not release cleanup"
+        result_holder.update_token_usage_records([initial, tail])
+        return result_holder
+
+    monkeypatch.setattr(classes["SubagentExecutor"], "_aexecute_admitted", child)
+    journal = RunJournal(run_id="delivery-parent", thread_id="delivery-test", event_store=MagicMock())
+    probe.runtime.config["callbacks"] = [journal]
+    previous_cleanups = set(probe.tool_module._deferred_cleanup_tasks)
+    try:
+        command = await probe.run()
+        message = command.update["messages"][0]
+        assert message.additional_kwargs["subagent_status"] == outcome.lower()
+        assert message.additional_kwargs["subagent_token_usage"]["total_tokens"] == 10
+        assert journal.get_completion_data()["total_tokens"] == 10
+        assert not probe.holder.execution_done_event.is_set(), "delivery must precede cleanup completion"
+        assert probe.capacity.snapshot().running == 1
+        probe.executor_module.force_cleanup_background_task(probe.execution_id)
+        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+        assert probe.capacity.snapshot().running == 1
+        release.set()
+        assert await asyncio.to_thread(probe.holder.execution_done_event.wait, 5), "cleanup did not finish"
+        if probe.execution_future is not None:
+            await asyncio.wrap_future(probe.execution_future)
+        for handle in set(probe.tool_module._deferred_cleanup_tasks) - previous_cleanups:
+            await asyncio.wrap_future(handle)
+        await asyncio.sleep(0)  # Drain the supervisor's parent-loop usage delivery.
+        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+        assert probe.capacity.snapshot().running == 0
+        assert journal.get_completion_data()["total_tokens"] == 35
+        assert journal.get_completion_data()["subagent_tokens"] == 35
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_observes_completion_published_during_progress_delivery(classes, task_result_delivery):
+    probe = task_result_delivery
+    release = threading.Event()
+    probe.releases.append(release)
+    probe.release_on_progress = release
+    probe.finish_during_progress = True
+
+    async def stream(*args, **kwargs):
+        assert await asyncio.to_thread(probe.first_read.wait, 5), "parent did not read the running child"
+        await asyncio.sleep(0.1)
+        yield {"messages": [classes["AIMessage"](content="last step", id="completion-race-step")]}
+        assert await asyncio.to_thread(release.wait, 15), "parent did not deliver the last step"
+
+    probe.stream = stream
+    command = await asyncio.wait_for(probe.run(), 10)
+    assert command.update["messages"][0].additional_kwargs["subagent_status"] == "completed"
+    assert [event["type"] for event in probe.events] == ["task_started", "task_running", "task_completed"]
+    assert time.perf_counter() - probe.terminal_at < 1.0, "completion published before the next wait must not be missed"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_cancellation_while_waiting_settles_child(classes, task_result_delivery):
+    probe = task_result_delivery
+
+    async def stream(*args, **kwargs):
+        await asyncio.Event().wait()
+        yield {"messages": []}
+
+    probe.stream = stream
+    parent = asyncio.create_task(probe.run())
+    try:
+        assert await asyncio.to_thread(probe.first_read.wait, 5), "parent never started waiting"
+        parent.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+        assert probe.holder.status is classes["SubagentStatus"].CANCELLED
+        assert probe.holder.execution_done_event.is_set()
+        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+    finally:
+        if not parent.done():
+            parent.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await parent

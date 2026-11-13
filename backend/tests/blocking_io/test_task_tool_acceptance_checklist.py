@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
+from support.subagent_executor import CompletedResult
 
 from deerflow.subagents.config import SubagentConfig
 
@@ -73,7 +74,7 @@ def _runtime(tmp_path: Path) -> SimpleNamespace:
 
 
 def _completed_result() -> SimpleNamespace:
-    return SimpleNamespace(
+    return CompletedResult(
         status=_FakeSubagentStatus.COMPLETED,
         ai_messages=[],
         result="done",

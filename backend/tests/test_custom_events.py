@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 from enum import Enum
-from types import SimpleNamespace
 from typing import TypedDict
 
 import pytest
@@ -15,6 +14,7 @@ from langgraph.config import get_stream_writer
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Interrupt
+from support.subagent_executor import CompletedResult
 
 from deerflow.subagents.config import SubagentConfig
 from deerflow.utils import custom_events as custom_events_module
@@ -126,7 +126,8 @@ async def test_real_task_tool_events_reach_astream_events(monkeypatch):
         model="test-model",
         timeout_seconds=10,
     )
-    completed = SimpleNamespace(
+
+    completed = CompletedResult(
         status=_SubagentStatus.COMPLETED,
         ai_messages=[],
         result="delegated result",
