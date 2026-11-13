@@ -113,6 +113,10 @@ class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
 
 
+class MemoryDuplicateFactIdError(ValueError):
+    """A memory import contains more than one record for the same fact ID."""
+
+
 class MemoryReadError(MemoryManagerError):
     """A required memory read failed, so callers must not continue without it."""
 
@@ -989,9 +993,11 @@ def _collect_host_hooks() -> dict[str, Any]:
     silently degrading on the first batch: it can decide whether a call happens,
     so a half-configured one must not run.
     """
+    from deerflow.projects.memory import prepare_project_extraction
     from deerflow.trace_context import ensure_trace_context
 
     return {
+        "project_memory": prepare_project_extraction,
         "callbacks": LangfuseMemoryCallbacks(),
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
         "trace_context_manager": ensure_trace_context,

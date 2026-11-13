@@ -1014,8 +1014,52 @@ def _flatten_server_tool_groups(
     enabled_order: Collection[str],
     groups: Mapping[str, ServerDiscoveryResult],
 ) -> list[BaseTool]:
-    """Flatten grouped results in enabled-server declaration order."""
-    return [tool for name in enabled_order if name in groups for tool in groups[name].tools]
+    """Flatten grouped results in enabled-server declaration order.
+
+    A tool whose bound name duplicates an earlier one is dropped with a
+    warning naming the server whose tool survived. Server prefixes do not
+    make bound names unique across servers (server ``a`` exposing ``b_x`` and
+    server ``a_b`` exposing ``x`` both bind ``a_b_x``), and a duplicate name
+    would reach the model as two same-named declarations, where the provider
+    silently keeps only one. The surviving server is stable only while its
+    discovery keeps succeeding: when the winner's discovery fails, its group
+    is absent from both this flatten and the cache initializer's reuse path,
+    so the later duplicate becomes served again and the implementation behind
+    a bound name can alternate across cache generations with transient server
+    health.
+
+    The string checks below only cover a directly constructed
+    ``ServerDiscoveryResult`` in tests: production tools always pass through
+    ``_wrap_discovered_server_tools``, which guarantees a validated non-empty
+    string name before a group can exist.
+    """
+    flattened: list[BaseTool] = []
+    serving_server: dict[str, str] = {}
+    dropped = 0
+    for name in enabled_order:
+        if name not in groups:
+            continue
+        for tool in groups[name].tools:
+            bound_name = getattr(tool, "name", None)
+            if isinstance(bound_name, str) and bound_name in serving_server:
+                logger.warning(
+                    "Dropping MCP tool %r from server '%s': its bound name is already served by server '%s'; publishing both would hand the model two same-named declarations.",
+                    bound_name,
+                    name,
+                    serving_server[bound_name],
+                )
+                dropped += 1
+                continue
+            if isinstance(bound_name, str):
+                serving_server[bound_name] = name
+            flattened.append(tool)
+    if dropped:
+        logger.info(
+            "Publishing %d MCP tool(s) after dropping %d duplicate bound name(s)",
+            len(flattened),
+            dropped,
+        )
+    return flattened
 
 
 def _load_mcp_adapter_symbols() -> tuple[Any, Any] | None:
@@ -1237,6 +1281,14 @@ def _wrap_discovered_server_tools(
     # Grouped results are directly usable by the cache/adapters that consume
     # them, so sync invocation is patched inside each server's group.
     for tool in current_server_tools:
+        if server_cfg is not None:
+            from deerflow.approvals.policy import digest
+            from deerflow.mcp.config_normalization import normalize_mcp_server_config
+
+            tool.metadata = {
+                **(tool.metadata or {}),
+                "deerflow_approval_binding": digest({"scope": connection_scope, "server": server_name, "config": normalize_mcp_server_config(server_cfg)}),
+            }
         if getattr(tool, "func", None) is None and getattr(tool, "coroutine", None) is not None:
             tool.func = make_sync_tool_wrapper(tool.coroutine, tool.name)
 

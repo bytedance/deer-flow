@@ -24,6 +24,7 @@ import {
   Conversation,
   ConversationContent,
   type ConversationProps,
+  ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
@@ -380,7 +381,7 @@ export function MessageList({
     request: HumanInputRequest,
     response: HumanInputResponse,
   ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
-  approvalRequests?: HitlApprovalRequest[];
+  approvalRequests?: readonly HitlApprovalRequest[];
   approvalMetadataLoading?: boolean;
   approvalMetadataError?: boolean;
   onReloadApprovalMetadata?: () => unknown;
@@ -1762,7 +1763,7 @@ export function MessageList({
           />
           {approvalRequests.map((request) => (
             <ToolApprovalCard
-              disabled={thread.isLoading}
+              disabled={thread.isLoading && request.transport !== "live"}
               key={request.request_id}
               request={request}
               onSubmit={onSubmitApproval}
@@ -1809,6 +1810,10 @@ export function MessageList({
           )}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
+        <ConversationScrollButton
+          aria-label={t.common.scrollToBottom}
+          className="z-10"
+        />
       </Conversation>
       {conversationOutlineEnabled && (
         <ConversationOutline
