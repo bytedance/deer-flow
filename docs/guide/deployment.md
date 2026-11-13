@@ -384,6 +384,12 @@ root `.env`, whose value takes precedence over the shell. It applies to local
 or LLM request timeouts. Check `logs/gateway.log` for startup errors before
 increasing the wait; an expired deadline still stops the services.
 
+When calling `bash scripts/wait-for-port.sh <port> [timeout_seconds]` directly,
+use a decimal port from 1 to 65535 and a non-negative integer timeout within
+Bash's integer range. The timeout defaults to 60 seconds. A timeout of zero
+checks once without waiting. Invalid ports or timeouts exit with status 1
+before probing.
+
 ## Startup Modes
 
 DeerFlow runs the agent runtime inside the Gateway API. Development mode enables hot-reload; production mode uses a pre-built frontend.
