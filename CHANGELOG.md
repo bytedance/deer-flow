@@ -304,14 +304,6 @@ This section accumulates work toward the **2.3.0** milestone
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
 
-- **models:** The Codex Responses provider now stamps `finish_reason="refusal"`
-  on a refusal-only turn, so the empty-response guard no longer retries it away
-  before the safety middleware can classify the refusal. A completed Responses
-  message can carry a `refusal` content part instead of `output_text`; the
-  provider preserved the explanation but set no finish/stop reason, so
-  `LLMErrorHandlingMiddleware` raised `EmptyModelResponseError` and the refusal
-  never reached the `CodexRefusalDetector`. ([#8085])
-
 ## [2.2.0] — 2026-10-29
 
 This section accumulates work toward the **2.2.0** milestone
