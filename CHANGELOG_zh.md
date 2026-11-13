@@ -14,9 +14,6 @@
 
 ### 新增
 
-- **社区工具：** 新增 Olostep `web_search` 和 `web_fetch` 提供方。搜索结果包含标题、URL 和描述
-  （`max_results` 上限为 25），抓取以 Markdown 形式返回页面内容。需要 `OLOSTEP_API_KEY`。 ([#8195](https://github.com/bytedance/deer-flow/pull/8195))
-
 - **子智能体：** 后台批次可声明条目前置关系，并可登记一次主 Agent 接续，在批次结束后完成
   用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839](https://github.com/bytedance/deer-flow/pull/7839))
 
