@@ -300,7 +300,7 @@ describe("ProjectDocumentsSection", () => {
       wrapper: Wrapper,
     });
     expect(screen.getByText("No documents yet")).toBeDefined();
-    expect(screen.getByText(/Memory stays global for now/)).toBeDefined();
+    expect(screen.queryByText(/Memory stays global for now/)).toBeNull();
     expect(screen.getByRole("button", { name: "Upload" })).toBeDefined();
   });
 

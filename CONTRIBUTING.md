@@ -320,6 +320,14 @@ Nginx (port 2026) ← Unified entry point
    git push origin feature/your-feature-name
    ```
 
+Please don't include changes to `CHANGELOG.md` or `CHANGELOG_zh.md` in your
+pull request. Maintainers add the changelog entry at merge time: this keeps
+the Unreleased section's structure and entry ordering consistent and its
+English and Chinese files in sync, and it avoids conflicts with other
+in-flight merges, where the Unreleased section changes frequently. If your
+PR touches the changelog, a reviewer will ask you to drop that hunk — the
+rest of the PR is unaffected.
+
 ## AI assistance disclosure
 
 DeerFlow is an AI project and we welcome AI-assisted contributions. To help
@@ -382,6 +390,15 @@ Every pull request triggers the following CI workflows:
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
 - **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+
+The browser E2E and full-stack replay jobs use the official Playwright image,
+which includes Chromium and its system libraries. When upgrading the locked
+Playwright version, update the image tags in both browser workflows to match.
+Each job launches Chromium before running tests; auth recovery tests run only
+after that browser readiness check succeeds.
+These containers use uv-managed Python instead of the host's Python tool cache,
+so the interpreter's OpenSSL libraries match its runtime. Backend dependency
+setup also verifies SSL and SQLite imports before launching fixture gateways.
 
 ### Test and diagnostics notes
 

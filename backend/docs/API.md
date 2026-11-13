@@ -188,6 +188,11 @@ only letters, digits and hyphens; any other value is rejected with `422`.
 Branches preserve valid stored IDs, including their original spelling. If a
 legacy source has an invalid ID, its new branch stores `null` and uses the lead agent.
 
+`metadata` is stored on the thread as sent and copied into its first
+checkpoint, except for the keys the server owns there: `step`, `source`,
+`writes`, `parents`, `created_at`, `counters_since_delta_snapshot` and
+`deerflow_agent_name`.
+
 **Response:**
 ```json
 {
