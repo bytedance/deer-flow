@@ -15,6 +15,7 @@ token endpoint is an in-memory ``httpx.MockTransport``.
 from __future__ import annotations
 
 import asyncio
+import threading
 from urllib.parse import parse_qs
 
 import httpx
@@ -99,3 +100,42 @@ async def test_waiting_on_a_peer_lease_does_not_block_the_event_loop(tmp_path, t
     manager = OAuthTokenManager.from_extensions_config(CONFIG, token_store=store)
     assert await manager.get_authorization_header("reports") == "Bearer access-1"
     assert token_endpoint == ["refresh-0"]
+
+
+async def test_token_request_builds_its_client_off_the_event_loop(tmp_path, monkeypatch) -> None:
+    """``_fetch_token`` must not construct ``httpx.AsyncClient`` on the caller's loop.
+
+    The constructor loads the platform trust store synchronously -- cheap on
+    Linux, but seconds on Windows -- while the refresh lease is already held.
+    A loop blocked that long starves the lease-renewal task, so the lease can
+    expire mid-request and a peer re-posts the already-consumed refresh token
+    (``invalid_grant``). Construction belongs in a worker thread, like the other
+    client fixes in this series (#7889, #7909).
+
+    The construction thread is recorded below instead of leaving the check to
+    this package's Blockbuster gate: ``ssl.SSLContext`` loads its trust store
+    inside OpenSSL/CryptoAPI C code, which Blockbuster's Python-level file
+    instrumentation cannot see, so a regression back onto the loop would pass
+    the gate silently.
+    """
+    construction_threads: list[int] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600})
+
+    original_client = httpx.AsyncClient
+
+    class RecordingClient(original_client):
+        def __init__(self, *args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handle)
+            kwargs["trust_env"] = False
+            # Recorded explicitly: the Blockbuster gate cannot see the C-level trust-store load.
+            construction_threads.append(threading.get_ident())
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", RecordingClient)
+    session_factory = await asyncio.to_thread(_session_factory, tmp_path / "oauth.db")
+    manager = OAuthTokenManager.from_extensions_config(CONFIG, token_store=_store(session_factory))
+    assert await manager.get_authorization_header("reports") == "Bearer access-1"
+    assert construction_threads, "the token request never built an httpx client"
+    assert construction_threads[0] != threading.get_ident(), "httpx.AsyncClient was constructed on the event-loop thread"
