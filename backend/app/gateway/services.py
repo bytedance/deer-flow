@@ -702,6 +702,35 @@ def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict
     return normalized
 
 
+def _normalize_external_promoted(value: Any, *, location: str) -> dict[str, Any] | None:
+    """Reject promoted-tool records the promotion reducer cannot merge.
+
+    ``promoted`` is a checkpointed reducer channel a caller may overwrite.
+    ``merge_promoted`` reads ``new.get("turn_id")`` and indexes
+    ``new["catalog_hash"]``/``new["names"]`` while the state update merges, so a
+    non-object value or a missing field raises there — failing the run with an
+    unhandled ``AttributeError``/``KeyError``/``TypeError`` instead of a 400 at
+    this boundary. The thread-state update route additionally wraps reducer
+    channels in ``Overwrite``, which bypasses the reducer entirely: a malformed
+    value is persisted as-is, and every later genuine promotion write then fails
+    on the same poisoned state. ``turn_id`` is optional; when present it must be
+    a string so the persisted record stays mergeable.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise HTTPException(status_code=400, detail=f"{location} must be an object with catalog_hash and names")
+    catalog_hash = value.get("catalog_hash")
+    if not isinstance(catalog_hash, str) or not catalog_hash:
+        raise HTTPException(status_code=400, detail=f"{location}.catalog_hash must be a non-empty string")
+    names = value.get("names")
+    if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+        raise HTTPException(status_code=400, detail=f"{location}.names must be a list of strings")
+    if "turn_id" in value and not isinstance(value["turn_id"], str):
+        raise HTTPException(status_code=400, detail=f"{location}.turn_id must be a string")
+    return value
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
@@ -759,6 +788,8 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
+        elif channel == "promoted":
+            stripped[channel] = _normalize_external_promoted(value, location="values.promoted")
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -829,6 +860,8 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 result = {**result, "delegations": cleaned}
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
+        if "promoted" in result:
+            result = {**result, "promoted": _normalize_external_promoted(result["promoted"], location="input.promoted")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")

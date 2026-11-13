@@ -912,6 +912,64 @@ def test_state_values_reject_unusable_skill_context_with_400():
 
 
 @pytest.mark.parametrize(
+    "promoted",
+    [
+        "oops",
+        {"names": ["search"]},
+        {"catalog_hash": "abc"},
+        {"catalog_hash": "abc", "names": "search"},
+        {"catalog_hash": "abc", "names": ["search", 3]},
+        {"catalog_hash": "", "names": []},
+        {"catalog_hash": "abc", "names": [], "turn_id": 3},
+    ],
+    ids=["string-channel", "missing-catalog-hash", "missing-names", "non-list-names", "non-string-name", "empty-catalog-hash", "non-string-turn-id"],
+)
+def test_normalize_input_rejects_unusable_promoted_with_400(promoted):
+    """A promoted record the promotion reducer cannot merge must be a 400, not
+    an ``AttributeError``/``KeyError``/``TypeError`` while the state update
+    merges.
+
+    ``merge_promoted`` reads ``new.get("turn_id")`` and indexes
+    ``new["catalog_hash"]``/``new["names"]``, all of which crash on the shapes
+    below. The thread-state update route additionally wraps the channel in
+    ``Overwrite``, which persists a malformed value as-is — and then every later
+    genuine promotion write fails on the poisoned state.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"promoted": promoted})
+
+    assert excinfo.value.status_code == 400
+    assert "input.promoted" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_promoted_record():
+    from app.gateway.services import normalize_input
+
+    promoted = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    assert normalize_input({"promoted": promoted})["promoted"] == promoted
+    # ``None`` means "no promotion state" to the reducer and stays allowed.
+    assert normalize_input({"promoted": None})["promoted"] is None
+
+
+def test_state_values_reject_unusable_promoted_with_400():
+    """The thread-state update path shares the promotion-record boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
     "message",
     [
         {"role": "ai", "content": "", "tool_calls": "x"},
