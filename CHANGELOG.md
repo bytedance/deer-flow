@@ -240,8 +240,9 @@ This section accumulates work toward the **2.3.0** milestone
 - **scheduler:** Exceptions escaping the queue-timeout sweep or the
   queued-occurrence drain are now contained to that occurrence. The
   scheduler logs the failed row and continues with the remaining queue
-  and the tasks claimed in the same poll; lease and queue-timeout recovery
-  remain responsible for the failed row. ([#7998])
+  and the tasks claimed in the same poll. A launch claim also enforces the
+  queue timeout, so a row left queued by a failed sweep cannot start while
+  lease and queue-timeout recovery retry that row. ([#7998])
 
 - **scheduler:** One scheduled task whose saved schedule can no longer be
   computed no longer stops every other task. When a stored timezone or cron

@@ -566,12 +566,16 @@ class ScheduledTaskRunRepository:
         lease_seconds: int,
         global_max_concurrent_runs: int,
         per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Atomically move one waiting row into the lease-fenced launch phase.
 
         Both budgets are checked under the same database-wide budget lock, so
         the per-owner cap is as atomic across workers and instances as the
         global one. A row rejected by either budget stays ``queued``.
+
+        ``created_after`` is the queue-age cutoff. Rows at or before it are
+        due for timeout and must stay waiting even if the timeout sweep failed.
         """
         async with self._sf() as session:
             dialect = session.get_bind().dialect.name
@@ -637,13 +641,16 @@ class ScheduledTaskRunRepository:
                     ),
                 )
             )
+            claim_conditions = [
+                ScheduledTaskRunRow.id == run_record_id,
+                ScheduledTaskRunRow.status == "queued",
+                ~older_same_thread,
+            ]
+            if created_after is not None:
+                claim_conditions.append(ScheduledTaskRunRow.created_at > created_after)
             result = await session.execute(
                 update(ScheduledTaskRunRow)
-                .where(
-                    ScheduledTaskRunRow.id == run_record_id,
-                    ScheduledTaskRunRow.status == "queued",
-                    ~older_same_thread,
-                )
+                .where(*claim_conditions)
                 .values(
                     status="launching",
                     lease_owner=lease_owner,

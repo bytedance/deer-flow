@@ -2055,9 +2055,9 @@ async def test_manual_trial_retry_reuses_the_admitted_origin():
     attempted: list[dict] = []
     original_attempt = service._attempt_queued_run
 
-    async def capture_attempt(task, queued, *, now):
+    async def capture_attempt(task, queued, *, now, **kwargs):
         attempted.append(dict(queued))
-        return await original_attempt(task, queued, now=now)
+        return await original_attempt(task, queued, now=now, **kwargs)
 
     service._attempt_queued_run = capture_attempt
     admitted = datetime(2026, 10, 7, 1, 0, tzinfo=UTC)

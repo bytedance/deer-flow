@@ -10,7 +10,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from _router_auth_helpers import make_authed_test_app
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from app.gateway.auth.models import User
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
@@ -920,6 +920,82 @@ async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(t
         assert task["last_error"] == "scheduled task queue wait timeout exceeded"
     finally:
         await close_engine()
+
+
+@pytest.mark.parametrize("failure_mode", ["row", "scan"])
+async def test_queue_expiry_failure_does_not_launch_expired_work(
+    sqlite_repos,
+    monkeypatch,
+    caplog,
+    failure_mode,
+):
+    """A failed timeout sweep may delay cleanup, but never admits old work."""
+    sf, task_repo, run_repo = sqlite_repos
+    poll_at = datetime.now(UTC).replace(microsecond=0)
+    await _owner_task(
+        task_repo,
+        "task-expired",
+        user_id=OWNER_A,
+        next_run_at=poll_at - timedelta(minutes=5),
+    )
+    await _owner_task(
+        task_repo,
+        "task-healthy-queued",
+        user_id=OWNER_A,
+        next_run_at=poll_at + timedelta(hours=1),
+    )
+    await _owner_task(
+        task_repo,
+        "task-due",
+        user_id=OWNER_A,
+        next_run_at=poll_at - timedelta(minutes=1),
+    )
+    await _owned_occurrence(task_repo, run_repo, "expired", user_id=OWNER_A, task_id="task-expired")
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "healthy-queued",
+        user_id=OWNER_A,
+        task_id="task-healthy-queued",
+    )
+    async with sf() as session:
+        await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == "expired").values(created_at=poll_at - timedelta(hours=2)))
+        await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == "healthy-queued").values(created_at=poll_at - timedelta(minutes=1)))
+        await session.commit()
+
+    if failure_mode == "scan":
+
+        async def fail_expiry_scan(**_kwargs):
+            raise RuntimeError("queue expiry scan failed")
+
+        monkeypatch.setattr(run_repo, "expire_queued_runs", fail_expiry_scan)
+    else:
+        original_lock_task = run_repo._lock_task
+        failed = False
+
+        async def fail_expired_row_once(session, task_id):
+            nonlocal failed
+            if task_id == "task-expired" and not failed:
+                failed = True
+                raise RuntimeError("queue expiry row failed")
+            return await original_lock_task(session, task_id)
+
+        monkeypatch.setattr(run_repo, "_lock_task", fail_expired_row_once)
+
+    launches: list[dict] = []
+    service = _capped_service(task_repo, run_repo, launches, max_concurrent_runs=3, queue_timeout_seconds=3600)
+
+    await service.run_once(now=poll_at)
+
+    launched_tasks = {item["metadata"]["scheduled_task_id"] for item in launches}
+    assert launched_tasks == {"task-healthy-queued", "task-due"}
+    expired = (await run_repo.list_by_task("task-expired"))[0]
+    assert (expired["status"], expired["error"], expired["attempt_count"]) == (
+        "queued",
+        None,
+        0,
+    )
+    assert "Failed to expire queued scheduled" in caplog.text
 
 
 async def test_manual_queue_timeout_preserves_serialized_next_run_at(tmp_path):

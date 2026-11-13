@@ -710,6 +710,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         """Turn one queued occurrence into a live run under its own trace scope.
 
@@ -718,9 +719,17 @@ class ScheduledTaskService:
         sharing one id across a whole poll cycle. A manual trigger arrives
         inside a Gateway request and keeps that request's trace instead, so
         the launched run stays correlated with the call that asked for it.
+
+        ``created_after`` applies the queue-age cutoff when retrying a row
+        from the waiting queue. A freshly admitted row has not waited.
         """
         with ensure_trace_context():
-            return await self._launch_queued_occurrence(task, queued, now=now)
+            return await self._launch_queued_occurrence(
+                task,
+                queued,
+                now=now,
+                created_after=created_after,
+            )
 
     async def _launch_queued_occurrence(
         self,
@@ -728,6 +737,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         task_run_id = queued["id"]
         execution_thread_id = queued["thread_id"]
@@ -739,6 +749,7 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=created_after,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
@@ -1069,7 +1080,14 @@ class ScheduledTaskService:
                 finished_at=now,
             )
             return
-        await self._attempt_queued_run(task, queued, now=now)
+        # The timeout sweep may have failed for this row. Enforce the same
+        # cutoff in the atomic claim so cleanup retries cannot start it.
+        await self._attempt_queued_run(
+            task,
+            queued,
+            now=now,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
+        )
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
         await self._task_run_repo.expire_queued_runs(

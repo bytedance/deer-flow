@@ -13,10 +13,12 @@ duplicate work that already started. Cleanup is appropriate only when the
 operation's outcome and ownership are known.
 
 Containment preserves progress, not success. Keep failures observable and let
-normal recovery retry the affected occurrence. Queue timeout is a recovery
-policy, not a guarantee that a persistently failing database write can complete
-by a deadline. Failure to read the queue or claim due work still prevents that
-stage from progressing; the next poll retries it.
+normal recovery retry the affected occurrence. Queue timeout is enforced again
+when a waiting row is claimed for launch. If timeout cleanup fails, the row
+remains queued for the next recovery pass but is no longer eligible to start;
+cleanup failure must never turn expired work into a live run. Failure to read
+the queue or claim due work still prevents that stage from progressing; the
+next poll retries it.
 
 For user-visible behavior and deployment requirements, see the
 [scheduled tasks guide](../../../../docs/guide/scheduled-tasks.md).
