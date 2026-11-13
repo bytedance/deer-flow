@@ -67,7 +67,8 @@ def _resolve_local_datetime(value: datetime, timezone: str) -> datetime:
         zone = ZoneInfo(timezone)
         resolved = value.replace(tzinfo=zone).astimezone(UTC)
     except OverflowError as exc:
-        raise ValueError(f"Local time {value.isoformat()} in timezone {timezone} cannot be represented in UTC; choose an earlier time") from exc
+        zone_note = f" in timezone {timezone}" if value.tzinfo is None else ""
+        raise ValueError(f"Local time {value.isoformat()}{zone_note} cannot be represented in UTC; choose a time inside the supported UTC range") from exc
     if resolved.astimezone(zone).replace(tzinfo=None) != value:
         raise ValueError(f"Local time {value.isoformat()} does not exist in timezone {timezone}; choose a valid local time or an explicit instant with a UTC offset")
     return resolved
