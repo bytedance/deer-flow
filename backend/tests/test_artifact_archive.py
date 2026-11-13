@@ -18,6 +18,7 @@ from app.gateway.routers import thread_runs
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
 THREAD_ID = "thread-archive"
 RUN_ID = "run-archive"
@@ -316,6 +317,27 @@ def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch, method: 
         response = getattr(client, method)(ARCHIVE_URL)
 
     assert response.status_code == 404
+
+
+def test_archive_returns_503_when_sandbox_config_is_unavailable(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=["/mnt/user-data/outputs/report.txt"],
+    )
+
+    async def unavailable():
+        raise SandboxAuthorizationError("Sandbox execution is temporarily unavailable")
+
+    monkeypatch.setattr(thread_runs, "safe_app_config_async", unavailable)
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Artifact archive is temporarily unavailable"
 
 
 def test_archive_conflicts_with_an_active_run(tmp_path, monkeypatch) -> None:
