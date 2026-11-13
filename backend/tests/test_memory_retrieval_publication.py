@@ -7,9 +7,10 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+from deerflow.agents.memory.backends.deermem.deermem.core import storage as storage_module
 
 
-@pytest.mark.parametrize("publication", ["refresh", "install", "delta"])
+@pytest.mark.parametrize("publication", ["refresh", "install", "delta", "warmup"])
 @pytest.mark.parametrize("mutation", ["delete", "update"])
 def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, publication: str, mutation: str) -> None:
     def pod(index: str) -> DeerMem:
@@ -20,6 +21,7 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
     at_old, allow_old = threading.Event(), threading.Event()
     at_freshness, allow_freshness = threading.Event(), threading.Event()
     installed, allow_publication, queried = threading.Event(), threading.Event(), threading.Event()
+    full_rebuild = threading.Event()
     errors: list[BaseException] = []
     observed: list[dict] = []
     workers: list[threading.Thread] = []
@@ -40,8 +42,14 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
         _, keep_id = pod_a.create_fact("alpha deployment remains", **scope)
         _, deleted_id = pod_a.create_fact("beta retired deployment", **scope)
         assert deleted_id and keep_id
-        assert pod_a.warm_retrieval() and pod_b.warm_retrieval()
+        if publication == "warmup":
+            # Lazy scoped search can serve before the background full warmup.
+            assert [fact["id"] for fact in pod_a.search("beta", **scope)] == [deleted_id]
+        else:
+            assert pod_a.warm_retrieval()
+        assert pod_b.warm_retrieval()
         real_load = pod_a._storage.load
+        real_parse = storage_module._parse_listed_fact
         real_upsert = pod_a._storage._retrieval.upsert
         real_signature = pod_a._storage._scope_signature
         real_rebuild = pod_a._storage._retrieval.rebuild
@@ -49,10 +57,20 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
 
         def held_load(*args, **kwargs):
             document = real_load(*args, **kwargs)
-            if publication != "delta" and threading.current_thread().name == "old-publication":
+            if publication in {"refresh", "install"} and threading.current_thread().name == "old-publication":
                 at_old.set()
                 assert allow_old.wait(10), "stalled before old index install"
             return document
+
+        def held_parse(*args, **kwargs):
+            fact = real_parse(*args, **kwargs)
+            if publication == "warmup" and threading.current_thread().name == "old-publication" and fact is not None and fact["id"] == deleted_id:
+                at_old.set()
+                assert allow_old.wait(10), "stalled after the full warmup read"
+            return fact
+
+        def warmup():
+            assert pod_a.warm_retrieval()
 
         def held_upsert(*args, **kwargs):
             if publication == "delta" and threading.current_thread().name == "old-publication":
@@ -68,6 +86,10 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
             return signature
 
         def held_rebuild(*args, **kwargs):
+            if publication == "warmup" and threading.current_thread().name == "old-publication":
+                assert kwargs["scopes"] is None
+                assert any(fact["id"] == deleted_id for fact, _scope, _path in args[0])
+                full_rebuild.set()
             real_rebuild(*args, **kwargs)
             if publication == "install" and threading.current_thread().name == "old-publication":
                 installed.set()
@@ -81,12 +103,15 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
 
         with (
             patch.object(pod_a._storage, "load", side_effect=held_load),
+            patch.object(storage_module, "_parse_listed_fact", side_effect=held_parse),
             patch.object(pod_a._storage._retrieval, "upsert", side_effect=held_upsert),
             patch.object(pod_a._storage, "_scope_signature", side_effect=held_signature),
             patch.object(pod_a._storage._retrieval, "rebuild", side_effect=held_rebuild),
             patch.object(pod_a._storage._retrieval, "search", side_effect=observed_search),
         ):
-            if publication != "delta":
+            if publication == "warmup":
+                stale = start("old-publication", warmup)
+            elif publication != "delta":
                 pod_b.update_fact(keep_id, content="alpha current deployment", **scope)
                 stale = start("old-publication", lambda: pod_a.reload_memory(**scope))
             else:
@@ -116,6 +141,8 @@ def test_search_after_completed_write_ignores_stale_publication(tmp_path: Path, 
             assert not target.is_alive()
         assert not errors
         assert at_old.is_set() and at_freshness.is_set(), "both scheduling gates must fire"
+        if publication == "warmup":
+            assert full_rebuild.is_set(), "the raced warmup must install a full index snapshot"
         canonical = pod_a._storage.get_fact(deleted_id, **scope)
         if mutation == "delete":
             assert canonical is None
