@@ -512,8 +512,10 @@ A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` U
 (also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
 on the host and port the client sent the run request to, without query or fragment.
 Gateway takes that host from `Forwarded` / `X-Forwarded-Host` / `Host`, as the CSRF
-check does. The scheme is not compared, since behind a TLS proxy Gateway can see
-`http` for an `https` link. URLs are parsed as local selectors and are never fetched.
+check does, and appends `X-Forwarded-Port` when that host carries no port of its own.
+A stray `X-Forwarded-Port: 8443` therefore turns `deerflow.example` into
+`deerflow.example:8443`, and a link without that port gets a 422. The scheme is
+not compared, since behind a TLS proxy Gateway can see `http` for an `https` link. URLs are parsed as local selectors and are never fetched.
 For split-origin clients or internal proxies, pass the thread ID. The field is
 separate from message text: links in pasted documents, tool results, or previous
 messages grant no access.

@@ -77,6 +77,8 @@ _TLS_EDGE = {"host": "deerflow.example", "x-forwarded-proto": "https", "x-forwar
         pytest.param(f"https://deerflow.example:443{_CHAT}", _TLS_EDGE, _NGINX_CONTAINER, "127.0.0.1", id="explicit-default-port"),
         pytest.param(f"https://DeerFlow.Example{_CHAT}", _TLS_EDGE, _NGINX_CONTAINER, "127.0.0.1", id="host-case"),
         pytest.param(f"http://localhost:2026{_CHAT}", {"host": "localhost:2026", "x-forwarded-proto": "http"}, "127.0.0.1", "127.0.0.1", id="plain-http-dev"),
+        pytest.param(f"https://deerflow.example:8443{_CHAT}", {**_TLS_EDGE, "x-forwarded-port": "8443"}, _NGINX_CONTAINER, "127.0.0.1", id="forwarded-port"),
+        pytest.param(f"http://[::1]:2026{_CHAT}", {"host": "[::1]:2026", "x-forwarded-proto": "http"}, "127.0.0.1", "127.0.0.1", id="ipv6-host"),
     ],
 )
 async def test_a_link_from_the_addressed_host_is_accepted(reference, headers, peer, trusted) -> None:
@@ -93,6 +95,7 @@ async def test_a_link_from_the_addressed_host_is_accepted(reference, headers, pe
         pytest.param(f"https://deerflow.example:notaport{_CHAT}", id="bad-port"),
         pytest.param(f"https://{_CHAT}", id="no-host"),
         pytest.param(f"https://deerflow.example{_CHAT}?tab=1", id="query"),
+        pytest.param(f"https://deerflow.example{_CHAT}#tab", id="fragment"),
     ],
 )
 async def test_a_link_from_anywhere_else_is_still_rejected(reference) -> None:
