@@ -320,6 +320,14 @@ Nginx (port 2026) ← Unified entry point
    git push origin feature/your-feature-name
    ```
 
+Please don't include changes to `CHANGELOG.md` or `CHANGELOG_zh.md` in your
+pull request. Maintainers add the changelog entry at merge time: this keeps
+the Unreleased section's structure and entry ordering consistent and its
+English and Chinese files in sync, and it avoids conflicts with other
+in-flight merges, where the Unreleased section changes frequently. If your
+PR touches the changelog, a reviewer will ask you to drop that hunk — the
+rest of the PR is unaffected.
+
 ## AI assistance disclosure
 
 DeerFlow is an AI project and we welcome AI-assisted contributions. To help

@@ -954,7 +954,12 @@ async def task_tool(
     # caller can retry safely. The context_mode guard is the first branch
     # executed inside the helper, and catalog discovery was moved after the
     # guard so an invalid mode never triggers a managed-subagent store access.
-    preflight_config, preflight_error = _preflight_delegation_checks(
+    # The helper sweeps the managed-definition store for its signature (file
+    # stats, or a SQL query) on every TTL miss, and the sandbox-policy check
+    # may read config files, so it resolves on the assembly pool like every
+    # other blocking hop below (issue #5172).
+    preflight_config, preflight_error = await run_assembly(
+        _preflight_delegation_checks,
         subagent_type=subagent_type,
         context_mode=context_mode,
         runtime_app_config=runtime_app_config,
