@@ -78,6 +78,7 @@ from deerflow.runtime.goal import is_active_goal
 from deerflow.runtime.runs.store.base import format_run_cursor_created_at, normalize_run_created_at_iso
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.utils.llm_text import strip_leading_think_blocks
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
 from deerflow.utils.thread_id import ThreadId
@@ -1881,7 +1882,10 @@ async def create_run_artifact_archive(
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
-    app_config = await safe_app_config_async()
+    try:
+        app_config = await safe_app_config_async()
+    except SandboxAuthorizationError as exc:
+        raise HTTPException(status_code=503, detail="Artifact archive is temporarily unavailable") from exc
     custom_tool_output_dir = getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
     extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
     paths = get_paths()
