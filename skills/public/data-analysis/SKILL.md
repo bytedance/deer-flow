@@ -32,7 +32,9 @@ zeros in text identifiers) and treating empty cells as nulls. DuckDB infers tabl
 types from all rows in the sheet, restoring the connection's original dataframe
 sampling setting after materialization, including on failure. Completely empty
 sheets are skipped. The `.xlsx` reader
-continues to use openpyxl and DuckDB's spatial extension.
+continues to use openpyxl and DuckDB's spatial extension. A legacy workbook that
+cannot be opened is reported and skipped so remaining inputs can still be
+analyzed. The command fails if no input produces a table.
 
 ## Core Capabilities
 

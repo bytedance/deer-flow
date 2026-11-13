@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 duckdb = pytest.importorskip("duckdb")
-pytest.importorskip("openpyxl")
+openpyxl = pytest.importorskip("openpyxl")
 pytest.importorskip("pandas")
 pytest.importorskip("xlrd")
 ROOT = Path(__file__).resolve().parents[2]
@@ -195,13 +195,28 @@ def test_legacy_xls_restores_sampling_when_table_creation_fails(
         ).fetchone() == (17,)
 
 
-def test_legacy_xls_cli_runs_offline_with_empty_extension_directory(tmp_path):
+@pytest.mark.parametrize("unreadable_kind", [None, "corrupt", "renamed-xlsx"])
+def test_legacy_xls_cli_runs_offline_with_empty_extension_directory(
+    tmp_path, unreadable_kind
+):
     """An XLS-only cold import must not install DuckDB's XLSX reader."""
     extension_dir = tmp_path / "extensions"
     extension_dir.mkdir()
     repository = tmp_path / "empty-extension-repository"
     repository.mkdir()
     cache = tmp_path / "cache"
+    files = [str(FIXTURE)]
+    if unreadable_kind:
+        unreadable = tmp_path / "unreadable.xls"
+        if unreadable_kind == "corrupt":
+            unreadable.write_bytes(b"not an Excel workbook")
+        else:
+            workbook = openpyxl.Workbook()
+            workbook.active.append(["value"])
+            workbook.active.append([99])
+            workbook.save(unreadable)
+            workbook.close()
+        files.insert(0, str(unreadable))
     # Configure a real connection in a fresh interpreter. An empty local
     # repository makes extension installation fail without any network request;
     # all CLI parsing, XLS reads, SQL and cache publication remain production code.
@@ -235,7 +250,7 @@ module["main"]()
         str(repository),
         str(cache),
         "--files",
-        str(FIXTURE),
+        *files,
     ]
     inspected = subprocess.run(
         [*command, "--action", "inspect"],
@@ -246,6 +261,10 @@ module["main"]()
         check=False,
     )
     assert inspected.returncode == 0, inspected.stderr
+    assert "Traceback" not in inspected.stderr
+    if unreadable_kind:
+        assert "Failed to load workbook" in inspected.stderr
+        assert str(unreadable) in inspected.stderr
     assert "owner's sales" in inspected.stdout
     assert "Mixed" in inspected.stdout
 

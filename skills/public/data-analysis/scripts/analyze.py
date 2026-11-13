@@ -312,7 +312,13 @@ def _load_legacy_excel(
             "environment with: python -m pip install pandas xlrd"
         ) from None
 
-    with pandas.ExcelFile(file_path, engine="xlrd") as workbook:
+    try:
+        workbook = pandas.ExcelFile(file_path, engine="xlrd")
+    except Exception as exc:
+        logger.warning(f"  Failed to load workbook '{file_path}': {exc}")
+        return
+
+    with workbook:
         for sheet_name in workbook.sheet_names:
             alias, table_name = _allocate_table_names(sheet_name, table_map)
             try:
