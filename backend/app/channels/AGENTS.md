@@ -37,6 +37,9 @@ make test-blocking-io                                  # channels share the Gate
 - **Final reply before dedupe release.** Publish the final outbound message before
   you release the inbound dedupe key. A provider redelivery can otherwise overtake
   the reply.
+- **Goal handoff pins the saved thread.** Recheck the conversation binding after
+  confirmation delivery and run preparation. Use run-admission evidence when
+  reporting a rejected start or a response lost after submission.
 - **Telegram photo fallback is narrow.** Only a photo `BadRequest` with
   `PHOTO_INVALID_DIMENSIONS` or `IMAGE_PROCESS_FAILED` is retried, once, as a
   document with the same bytes, file name and reply target. Other errors and

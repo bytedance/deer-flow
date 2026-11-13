@@ -132,7 +132,8 @@ Press `Ctrl+C` again to quit at once; the unfinished step is then not saved.
 If a run cannot start, the TUI reports an error and returns to idle so you can retry.
 
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
-`/goal clear` to clear it.
+`/goal clear` to clear it. `/goal from-chat` is an IM entry point for now; the
+TUI reports that it is not supported and points to `/goal <condition>`.
 
 ## Architecture
 

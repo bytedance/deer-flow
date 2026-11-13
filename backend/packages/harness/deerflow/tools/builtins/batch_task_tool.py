@@ -35,6 +35,7 @@ from deerflow.subagents.batch_runtime import (
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
+from deerflow.utils.assembly_io import run_assembly
 
 
 class BatchTaskItem(BaseModel):
@@ -215,8 +216,11 @@ async def batch_task(
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
-    available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
-    config = get_subagent_config(subagent_type, app_config=app_config)
+    # Registry reads sweep the managed-definition store for its signature
+    # (file stats, or a SQL query) on every TTL miss; resolve them on the
+    # assembly pool so they cannot stall the streaming event loop (issue #5172).
+    available = await run_assembly(get_available_subagent_names, app_config=app_config, allowed_subagents=allowed_subagents)
+    config = await run_assembly(get_subagent_config, subagent_type, app_config=app_config)
     if config is None or subagent_type not in available:
         names = ", ".join(available) if available else "none"
         return _result(
