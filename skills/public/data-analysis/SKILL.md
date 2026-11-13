@@ -17,7 +17,7 @@ Prepare the Python environment before running analyses. Install the required pac
 python -m pip install duckdb openpyxl
 ```
 
-If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's existing spatial-extension setup for loading files is unchanged.
+If either package is missing, the script exits with a setup instruction; it does not invoke an installer or modify the environment. DuckDB's spatial extension is initialized only for `.xlsx` input. CSV and legacy `.xls` analysis do not install or load it, so they can run offline with an empty extension cache.
 
 Legacy Excel 97–2003 (`.xls`) workbooks additionally require:
 

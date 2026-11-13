@@ -48,7 +48,9 @@ The **data-analysis** skill reads legacy Excel 97–2003 (`.xls`) workbooks with
 optional `pandas` and `xlrd` packages. It preserves literal text such as `NA`
 and leading-zero identifiers while importing cell values into DuckDB. See the
 [data-analysis setup instructions](../../skills/public/data-analysis/SKILL.md)
-for the additional dependencies. The existing `.xlsx` reader is unchanged.
+for the additional dependencies. Legacy `.xls` and CSV input do not require
+DuckDB extensions and can be analyzed offline with an empty extension cache.
+The `.xlsx` reader continues to use the spatial extension.
 
 Administrators can see **Could not load** warnings in Capability Center > Skills
 when their own custom skill's `SKILL.md` contains invalid YAML. Warnings show the

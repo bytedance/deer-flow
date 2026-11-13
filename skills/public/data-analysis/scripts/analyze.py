@@ -239,7 +239,6 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
     Returns unique lookup aliases mapped to their canonical SQL table names.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
@@ -267,6 +266,7 @@ def _load_excel(
         _load_legacy_excel(con, file_path, table_map)
         return
 
+    con.execute("INSTALL spatial; LOAD spatial;")
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)

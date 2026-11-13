@@ -3,9 +3,10 @@
 import builtins
 import datetime
 import gzip
-import os
 import runpy
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,27 +90,9 @@ def test_failed_legacy_sheet_does_not_reserve_an_alias(analysis):
         assert con.execute("DESCRIBE owner_s_sales").fetchone()[0] == "existing"
 
 
-@pytest.fixture
-def spatial_connection_directory(monkeypatch):
-    extension_dir = os.environ.get("DEERFLOW_TEST_SPATIAL_DIRECTORY")
-    if not extension_dir:
-        pytest.skip(
-            "set DEERFLOW_TEST_SPATIAL_DIRECTORY for real cache/spatial integration"
-        )
-    connect = duckdb.connect
-    monkeypatch.setattr(
-        duckdb,
-        "connect",
-        lambda *a, **kw: connect(
-            *a, **kw, config={"extension_directory": extension_dir}
-        ),
-    )
-
-
 def test_legacy_xls_cache_reopens_complete_read_only_tables(
     analysis,
     tmp_path,
-    spatial_connection_directory,
     monkeypatch,
 ):
     scope = analysis["main"].__globals__
@@ -133,7 +116,6 @@ def test_legacy_xls_cache_reopens_complete_read_only_tables(
 def test_missing_legacy_dependency_cleans_unpublished_cache(
     analysis,
     tmp_path,
-    spatial_connection_directory,
     monkeypatch,
 ):
     scope = analysis["main"].__globals__
@@ -211,3 +193,77 @@ def test_legacy_xls_restores_sampling_when_table_creation_fails(
         assert con.execute(
             "SELECT current_setting('pandas_analyze_sample')"
         ).fetchone() == (17,)
+
+
+def test_legacy_xls_cli_runs_offline_with_empty_extension_directory(tmp_path):
+    """An XLS-only cold import must not install DuckDB's XLSX reader."""
+    extension_dir = tmp_path / "extensions"
+    extension_dir.mkdir()
+    repository = tmp_path / "empty-extension-repository"
+    repository.mkdir()
+    cache = tmp_path / "cache"
+    # Configure a real connection in a fresh interpreter. An empty local
+    # repository makes extension installation fail without any network request;
+    # all CLI parsing, XLS reads, SQL and cache publication remain production code.
+    bootstrap = """
+import functools
+import runpy
+import sys
+import duckdb
+
+script, extensions, repository, cache, *arguments = sys.argv[1:]
+duckdb.connect = functools.partial(
+    duckdb.connect,
+    config={
+        "extension_directory": extensions,
+        "custom_extension_repository": repository,
+        "autoinstall_known_extensions": False,
+        "autoload_known_extensions": False,
+    },
+)
+module = runpy.run_path(script)
+module["main"].__globals__["CACHE_DIR"] = cache
+sys.argv = [script, *arguments]
+module["main"]()
+"""
+    command = [
+        sys.executable,
+        "-c",
+        bootstrap,
+        str(SCRIPT),
+        str(extension_dir),
+        str(repository),
+        str(cache),
+        "--files",
+        str(FIXTURE),
+    ]
+    inspected = subprocess.run(
+        [*command, "--action", "inspect"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    assert "owner's sales" in inspected.stdout
+    assert "Mixed" in inspected.stdout
+
+    # A second process reopens the published cache and reads the actual cells.
+    queried = subprocess.run(
+        [
+            *command,
+            "--action",
+            "query",
+            "--sql",
+            'SELECT SUM(amount) AS total FROM "owner\'s sales"',
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert queried.returncode == 0, queried.stderr
+    assert queried.stdout.splitlines()[2].strip() == "10"
+    assert not list(extension_dir.rglob("*"))
