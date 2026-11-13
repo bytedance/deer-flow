@@ -871,7 +871,7 @@ class TestLoopDetection:
             mw._apply(_make_state(tool_calls=call), runtime)
 
         assert len(mw._history[_scope_key()]) <= 4
-        assert set(mw._warned[_scope_key()]).issubset(set(mw._history[_scope_key()]))
+        assert set(mw._warned[_scope_key()]).issubset({entry.key for entry in mw._history[_scope_key()]})
         assert len(mw._warned[_scope_key()]) <= 4
 
     def test_pending_warning_keys_are_capped(self):
