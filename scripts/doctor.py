@@ -718,32 +718,63 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "browserless": "token",
             },
         }
+        # Browserless treats a configured token field as authoritative, blank or
+        # not, and reads BROWSERLESS_TOKEN only when the field is omitted
+        # (community/browserless/tools.py). The other providers fall back to
+        # their variable whenever the configured value gives no key.
+        authoritative_key_providers = {"browserless"}
+        # Keyless providers that still send their variable when it holds a key.
+        free_provider_keys = {"youcom": "YDC_API_KEY", "jina_ai": "JINA_API_KEY"}
 
         def _is_placeholder(value: object) -> bool:
             # Ask the runtime's owner of the rule: providers drop an .env.example
-            # value, so doctor must not report it as a configured key. Imported
-            # here so free providers still diagnose without the harness.
-            from deerflow.community.provider_credentials import is_template_placeholder
-
+            # value, so doctor must not report it as a configured key. Without
+            # the harness, the config checks already fail with the fix.
+            try:
+                from deerflow.community.provider_credentials import is_template_placeholder
+            except ImportError:
+                return False
             return isinstance(value, str) and is_template_placeholder(value)
 
         def _real_key(value: object) -> bool:
             return isinstance(value, str) and bool(value.strip()) and not _is_placeholder(value)
 
-        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key") -> tuple[Status, str] | None:
+        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key", *, authoritative: bool = False) -> tuple[Status, str] | None:
             configured_key = tool.get(key_field)
             if _real_key(configured_key):
                 key = configured_key.strip()
-                if key.startswith("$"):
-                    env_name = key[1:]
-                    if _real_key(os.environ.get(env_name)):
-                        return ("ok", f"{env_name} set from config")
-                    # The referenced var is unset; fall through to the default
-                    # env var below, which tools use as a runtime fallback.
-                else:
+                if not key.startswith("$"):
                     return ("warn", f"literal {key_field} set in config")
-
+                env_name = key[1:]
+                if _real_key(os.environ.get(env_name)):
+                    return ("ok", f"{env_name} set from config")
+            if authoritative and key_field in tool:
+                return None
+            # The configured value gives no key; the tool falls back to its
+            # default variable at runtime.
             return ("ok", f"{default_var} set") if _real_key(os.environ.get(default_var)) else None
+
+        def _config_source(tool: dict, key_field: str) -> tuple[str, object]:
+            """The configured key's name in a message, and its value after a ``$VAR`` reference."""
+            value = tool.get(key_field)
+            if isinstance(value, str) and value.strip().startswith("$"):
+                name = value.strip()[1:]
+                return name, os.environ.get(name)
+            return f"{key_field} in config", value
+
+        def _missing_key_reason(tool: dict, var: str, key_field: str, *, authoritative: bool) -> tuple[str, bool]:
+            """Why no key reaches the provider, and whether a placeholder is the cause."""
+            name, value = _config_source(tool, key_field)
+            if authoritative and key_field in tool:
+                if _is_placeholder(value):
+                    return f"{name} still holds the .env.example placeholder", True
+                if name == var:
+                    return f"{var} not set", False
+                return f"{name} is empty, and {var} is read only when {key_field} is omitted", False
+            for source, candidate in ((name, value), (var, os.environ.get(var))):
+                if _is_placeholder(candidate):
+                    return f"{source} still holds the .env.example placeholder", True
+            return f"{var} not set", False
 
         def _browserless_self_hosted(tool: dict) -> bool:
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
@@ -800,6 +831,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
+                    var = free_provider_keys.get(provider)
+                    if var and _is_placeholder(os.environ.get(var)):
+                        detail = f"{detail}; {var} holds the .env.example placeholder and is ignored"
                     return CheckResult(label, "ok", detail)
 
         for tool in tool_entries:
@@ -807,7 +841,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
                     key_field = key_fields.get(tool_name, {}).get(provider, "api_key")
-                    key_status = _configured_key_detail(tool, var, key_field=key_field)
+                    authoritative = provider in authoritative_key_providers
+                    key_status = _configured_key_detail(tool, var, key_field=key_field, authoritative=authoritative)
                     if key_status:
                         status, detail = key_status
                         if status == "warn":
@@ -818,14 +853,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                                 fix=f"Move the {key_field} to .env as {var}=<your-key> and reference it as ${var}",
                             )
                         return CheckResult(label, "ok", f"{provider} ({detail})")
-                    if tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
+                    reason, placeholder = _missing_key_reason(tool, var, key_field, authoritative=authoritative)
+                    if not placeholder and tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
                         return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
-                    unset = "still holds the .env.example placeholder" if _is_placeholder(os.environ.get(var)) else "not set"
                     return CheckResult(
                         label,
                         "warn",
-                        f"{provider} configured but {var} {unset}",
-                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'",
+                        f"{provider} configured but {reason}",
+                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'" if not (authoritative and key_field in tool) else f"Set {key_field} to ${var} with the real token in .env, or remove {key_field} to use {var}",
                     )
 
         for tool in tool_entries:

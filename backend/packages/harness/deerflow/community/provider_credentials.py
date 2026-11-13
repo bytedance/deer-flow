@@ -23,26 +23,70 @@ the contract: provider tests and operators' log grep patterns assert on them.
 
 from __future__ import annotations
 
-import re
-
 from pydantic import AnyHttpUrl, SecretStr
 
 REDACTION_MARKER = "[REDACTED]"
 URL_USERINFO_ERROR = "base_url must not contain username or password information"
 
-# Example values from ``.env.example`` (``your-jina-api-key``, ``your-github-token``).
-# ``key``, ``token`` or ``secret`` is a whole hyphen-separated word, so a real
-# value such as ``your-monkey`` is not mistaken for one.
-_ENV_TEMPLATE_PLACEHOLDER = re.compile(r"your-(?:[a-z0-9-]*-)?(?:key|token|secret)", re.IGNORECASE)
+# Every ``your-...`` example value ``.env.example`` ships, matched exactly. A rule
+# that guesses at the shape would also drop a token an operator chose, such as a
+# self-hosted Browserless ``TOKEN`` named ``your-review-team-token``.
+# ``tests/test_provider_credentials_single_owner.py`` keeps this set equal to the
+# template's values.
+ENV_TEMPLATE_PLACEHOLDERS = frozenset(
+    {
+        "your-anthropic-auth-token",
+        "your-claude-code-oauth-token",
+        "your-deepseek-api-key",
+        "your-dingtalk-client-id",
+        "your-dingtalk-client-secret",
+        "your-discord-bot-token",
+        "your-e2b-api-key",
+        "your-exa-api-key",
+        "your-feishu-app-id",
+        "your-feishu-app-secret",
+        "your-fernet-key",
+        "your-firecrawl-api-key",
+        "your-gemini-api-key",
+        "your-github-token",
+        "your-image-generation-api-key",
+        "your-infoquest-api-key",
+        "your-jina-api-key",
+        "your-langsmith-api-key",
+        "your-langsmith-project",
+        "your-minimax-api-key",
+        "your-novita-api-key",
+        "your-openai-api-key",
+        "your-openviking-user-api-key",
+        "your-opper-api-key",
+        "your-provisioner-api-key",
+        "your-serper-api-key",
+        "your-serply-api-key",
+        "your-shared-internal-token",
+        "your-slack-app-token",
+        "your-slack-bot-token",
+        "your-sofya-api-key",
+        "your-specstream-api-key",
+        "your-stepfun-api-key",
+        "your-tavily-api-key",
+        "your-telegram-bot-token",
+        "your-unbrowse-api-key",
+        "your-vllm-api-key",
+        "your-volcengine-api-key",
+        "your-webz-api-key",
+        "your-wecom-bot-id",
+        "your-wecom-bot-secret",
+    }
+)
 
 
 def is_template_placeholder(value: str) -> bool:
     """Whether ``value`` is an ``.env.example`` example value rather than a credential.
 
-    The whole value must match, ignoring case and surrounding whitespace: a real
-    key that merely contains ``your-`` (``sk-your-jina-api-key``) is a key.
+    Only the exact shipped value matches, ignoring surrounding whitespace: a key
+    that merely resembles one (``sk-your-jina-api-key``) is a key.
     """
-    return _ENV_TEMPLATE_PLACEHOLDER.fullmatch(value.strip()) is not None
+    return value.strip() in ENV_TEMPLATE_PLACEHOLDERS
 
 
 def resolve_api_key(raw: str | SecretStr | None) -> str | None:

@@ -112,7 +112,6 @@ def test_resolve_api_key_normalizes_without_rejecting(raw: Any, expected: str | 
     [
         "your-jina-api-key",
         "  your-tavily-api-key\n",
-        "YOUR-EXA-API-KEY",
         SecretStr("your-infoquest-api-key"),
         "your-github-token",
         "your-feishu-app-secret",
@@ -123,18 +122,35 @@ def test_resolve_api_key_reads_an_env_template_placeholder_as_unset(raw: Any) ->
     assert owner.resolve_api_key(raw) is None
 
 
-@pytest.mark.parametrize("raw", ["sk-your-jina-api-key", "your-jina-api-key-2f9c", "jina_your-key", "yourkey", "your-monkey", "your-passkey"])
-def test_resolve_api_key_keeps_real_keys_that_mention_your(raw: str) -> None:
-    """``key``, ``token`` or ``secret`` must be a whole word: ``your-monkey`` is a key someone chose."""
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "sk-your-jina-api-key",
+        "your-jina-api-key-2f9c",
+        "jina_your-key",
+        "yourkey",
+        "your-monkey",
+        "your-key",
+        "YOUR-EXA-API-KEY",
+        "your-review-team-token",
+        "your-browserless-token",
+    ],
+)
+def test_resolve_api_key_keeps_values_the_template_does_not_ship(raw: str) -> None:
+    """Self-hosted Browserless and LightRAG take a token the operator chose, whatever it looks like."""
     assert owner.resolve_api_key(raw) == raw
     assert not owner.is_template_placeholder(raw)
 
 
-@pytest.mark.parametrize("raw", ["your-jina-api-key", "  your-tavily-api-key\n", "YOUR-EXA-API-KEY", "your-key", "your-github-token", "your-feishu-app-secret"])
-def test_is_template_placeholder_is_the_rule_resolve_api_key_applies(raw: str) -> None:
-    """``scripts/doctor.py`` asks the predicate; it must agree with what the runtime drops."""
-    assert owner.is_template_placeholder(raw)
-    assert owner.resolve_api_key(raw) is None
+def test_placeholders_are_exactly_the_values_env_example_ships() -> None:
+    """A new template value must be added here, or an install copied from it sends the placeholder again."""
+    template = (COMMUNITY_ROOT.parents[4] / ".env.example").read_text(encoding="utf-8")
+    shipped = set(re.findall(r"=(your-[a-z0-9-]+)", template))
+    assert shipped, "found no example values in .env.example"
+    assert shipped == owner.ENV_TEMPLATE_PLACEHOLDERS
+    for value in shipped:
+        assert owner.is_template_placeholder(value)
+        assert owner.resolve_api_key(value) is None
 
 
 @pytest.mark.parametrize(
@@ -207,14 +223,18 @@ def _tool_config(extra: dict[str, Any]):
     return SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra=dict(extra)))
 
 
+# Values ``.env.example`` ships: an install copied from the old template holds them.
+TEMPLATE_CONFIG_VALUE = "your-tavily-api-key"
+TEMPLATE_ENV_VALUE = "your-serper-api-key"
+
 # provider module, environment variable, how the provider resolves its key
 ENV_KEY_READERS = [
     ("brave", "BRAVE_SEARCH_API_KEY", lambda tools: tools._get_api_key("web_search")),
-    ("serper", "SERPER_API_KEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": "your-serper-api-key"})),
+    ("serper", "SERPER_API_KEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": TEMPLATE_CONFIG_VALUE})),
     ("serply", "SERPLY_API_KEY", lambda tools: tools._get_api_key("web_search")),
     ("sofya", "SOFYA_API_KEY", lambda tools: tools._get_api_key("web_search")),
     ("specstream", "SPECSTREAM_API_KEY", lambda tools: tools._get_api_key("web_search")),
-    ("tencent_wsa", "TENCENTCLOUD_WSA_APIKEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": "your-tencent-api-key"})),
+    ("tencent_wsa", "TENCENTCLOUD_WSA_APIKEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": TEMPLATE_CONFIG_VALUE})),
     ("unbrowse", "UNBROWSE_API_KEY", lambda tools: tools._get_api_key("web_fetch")),
     ("youcom", "YDC_API_KEY", lambda tools: tools._resolve_tool_settings("web_search")[0]),
 ]
@@ -224,9 +244,9 @@ ENV_KEY_READERS = [
 def test_search_and_fetch_providers_drop_the_env_template_placeholder(provider: str, env_name: str, read_key, monkeypatch: pytest.MonkeyPatch) -> None:
     """An ``.env`` made from the old template still holds ``your-...-api-key``; it must read as unset, not be sent."""
     tools = importlib.import_module(f"deerflow.community.{provider}.tools")
-    monkeypatch.setattr(tools, "get_app_config", lambda: _tool_config({"api_key": "your-config-api-key"}))
+    monkeypatch.setattr(tools, "get_app_config", lambda: _tool_config({"api_key": TEMPLATE_CONFIG_VALUE}))
 
-    monkeypatch.setenv(env_name, "your-provider-api-key")
+    monkeypatch.setenv(env_name, TEMPLATE_ENV_VALUE)
     assert read_key(tools) is None
 
     monkeypatch.setenv(env_name, f" {PROVIDER_KEY}\n")
