@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select, text
+from sqlalchemy.engine import make_url
 
+from deerflow.config.subagents_config import SubagentsAppConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.managed_subagents import (
     ManagedSubagentDefinition,
@@ -19,6 +25,8 @@ from deerflow.persistence.managed_subagents.base import normalize_managed_subage
 from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
 from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
 from deerflow.persistence.managed_subagents.sql import SqlManagedSubagentStore
+from deerflow.persistence.postgres_schema import dsn_with_search_path
+from deerflow.subagents import registry
 
 
 def _definition(name: str = "researcher", **changes) -> ManagedSubagentDefinition:
@@ -38,12 +46,35 @@ def file_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def sql_store(tmp_path):
-    url = f"sqlite:///{tmp_path}/managed.db"
-    engine = create_engine(url)
-    Base.metadata.create_all(engine, tables=[ManagedSubagentRow.__table__])
-    engine.dispose()
-    return SqlManagedSubagentStore(url)
+def sql_store(tmp_path, request):
+    if getattr(request, "param", "sqlite") == "sqlite":
+        store = SqlManagedSubagentStore(f"sqlite:///{tmp_path}/managed.db")
+        engine = store._Session.kw["bind"]
+        try:
+            Base.metadata.create_all(engine, tables=[ManagedSubagentRow.__table__])
+            yield store
+        finally:
+            engine.dispose()
+        return
+
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("requires TEST_POSTGRES_URI (managed subagents on PostgreSQL)")
+    schema = f"managed_subagents_{uuid.uuid4().hex}"
+    admin = create_engine(make_url(uri).set(drivername="postgresql+psycopg"))
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    url = make_url(dsn_with_search_path(uri, schema)).set(drivername="postgresql+psycopg")
+    store = SqlManagedSubagentStore(url.render_as_string(hide_password=False))
+    engine = store._Session.kw["bind"]
+    try:
+        Base.metadata.create_all(engine, tables=[ManagedSubagentRow.__table__])
+        yield store
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
 
 
 @pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])
@@ -107,6 +138,98 @@ def test_sql_signature_detects_update_behind_existing_max_timestamp(sql_store):
 
     assert sql_store.get("writer").description == "Updated by a trailing node"
     assert sql_store.signature() != before
+
+
+def test_sql_signature_changes_when_the_clock_does_not_advance(sql_store, monkeypatch):
+    """An update inside one clock tick must still invalidate peer snapshots."""
+    sql_store.create(_definition())
+    fixed = datetime.now(UTC)
+
+    # Pin the stored timestamp, then freeze the wall clock at exactly that
+    # value. The ORM onupdate callback writes the very same timestamp back,
+    # so without the fix the row's (id, updated_at) pair never moves.
+    with sql_store._Session() as session:
+        row = session.execute(select(ManagedSubagentRow).where(ManagedSubagentRow.name == "researcher")).scalar_one()
+        row.updated_at = fixed.replace(tzinfo=None)  # SQLite persists naive datetimes
+        session.commit()
+
+    before = sql_store.signature()
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.model.datetime", FrozenDatetime)
+    # The store's own clock only exists once the fix is in place; raising=False
+    # keeps this test a behavioural check against unpatched code too.
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.sql.datetime", FrozenDatetime, raising=False)
+
+    sql_store.update(_definition().model_copy(update={"description": "second"}))
+
+    assert sql_store.get("researcher").description == "second"
+    assert sql_store.signature() != before
+
+
+@pytest.mark.parametrize("sql_store", ["sqlite", "postgresql"], indirect=True)
+def test_concurrent_sql_updates_invalidate_the_registry_after_each_commit(sql_store, monkeypatch):
+    fixed = datetime(2026, 1, 1, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed if tz is not None else fixed.replace(tzinfo=None)
+
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.model.datetime", FrozenDatetime)
+    monkeypatch.setattr("deerflow.persistence.managed_subagents.sql.datetime", FrozenDatetime)
+    definition = _definition()
+    sql_store.create(definition)
+    original_signature = sql_store.signature()
+    first = definition.model_copy(update={"description": "First commit"})
+    second = definition.model_copy(update={"description": "Second commit"})
+
+    observer = SqlManagedSubagentStore(sql_store._url)
+    monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: observer)
+    monkeypatch.setattr(registry, "_managed_definitions_cache", {})
+    registry_clock = SimpleNamespace(monotonic=lambda: 0.0)
+    monkeypatch.setattr(registry, "time", registry_clock)
+    config = SubagentsAppConfig()
+
+    writer_ready = Event()
+    resume_writer = Event()
+    reader_thread = get_ident()
+
+    def pause_before_write(_conn, _cursor, statement, _params, _context, _executemany):
+        if get_ident() == reader_thread:
+            return
+        if statement.startswith(("BEGIN IMMEDIATE", "UPDATE ")) or " FOR UPDATE" in statement:
+            writer_ready.set()
+            if not resume_writer.wait(timeout=10):
+                raise TimeoutError("Second writer was not released")
+
+    # Pause the second writer just before it takes a lock or issues its UPDATE.
+    # The old code has already read the timestamp when it reaches this point.
+    engine = sql_store._Session.kw["bind"]
+    event.listen(engine, "before_cursor_execute", pause_before_write)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(sql_store.update, second)
+            try:
+                assert writer_ready.wait(timeout=10)
+                sql_store.update(first)
+                first_signature = observer.signature()
+                assert first_signature[0][1] == original_signature[0][1] + timedelta(microseconds=1)
+                assert registry.get_subagent_config(definition.name, app_config=config).description == first.description
+            finally:
+                resume_writer.set()
+            pending.result(timeout=10)
+    finally:
+        event.remove(engine, "before_cursor_execute", pause_before_write)
+
+    assert observer.get(definition.name).description == second.description
+    registry_clock.monotonic = lambda: registry._MANAGED_SIGNATURE_TTL_SECONDS
+    assert registry.get_subagent_config(definition.name, app_config=config).description == second.description
+    assert observer.signature()[0][1] == first_signature[0][1] + timedelta(microseconds=1)
 
 
 @pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])

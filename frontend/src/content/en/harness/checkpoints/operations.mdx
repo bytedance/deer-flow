@@ -128,13 +128,13 @@ The dependency floor is what keeps the removed saver bug out, so the floors are 
 
 | Distribution | Floor | Why |
 | --- | --- | --- |
-| `langgraph-checkpoint` | `>=4.2.0,<5.0` | 4.2.0 fixes the dropped first post-migration write (upstream #8526). A 4.1.x resolution would silently reintroduce it, and `langgraph`'s own `langgraph-checkpoint>=4.1.0` constraint does not exclude that version |
-| `langgraph-checkpoint-postgres` | `>=3.1.2,<3.2` | 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.1 walks past them to the thread root |
-| `langgraph-checkpoint-sqlite` | `>=3.1.1,<3.2` | Pinned alongside the other savers |
+| `langgraph-checkpoint` | `>=4.3.0,<5.0` | 4.2.0 fixes the dropped first post-migration write (upstream #8526); 4.3.0 preserves live task-path order when replaying parallel same-superstep writes (upstream #8544) |
+| `langgraph-checkpoint-postgres` | `>=3.1.3,<3.2` | 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.3 fixes the paged ancestor-walk cursor (upstream #8556) |
+| `langgraph-checkpoint-sqlite` | `>=3.1.2,<3.2` | Matches the checkpoint replay-order fix |
 
-The regression gate is `backend/tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`: it fails when the 4.2.0 fix is absent, and a full-to-delta migration must keep replaying on the same thread. The pinned environment resolves `langgraph 1.2.9`, `langgraph-checkpoint 4.2.0`, and `langgraph-checkpoint-postgres 3.1.2`.
+The regression gates in `backend/tests/test_delta_channel_checkpointers.py` cover full-to-delta migration, parallel-write replay order, and paged ancestor walks. The locked environment resolves `langgraph 1.2.14`, `langgraph-checkpoint 4.3.0`, and `langgraph-checkpoint-postgres 3.1.3`.
 
-There is no runtime version check or warning. The only version signal an operator sees is a trigger-skipped test naming the pinned version, for example the `#8448` Postgres skip or the `#8382` replay-order skip.
+There is no runtime version check or warning. The dependency floors exclude affected versions, and all three regression contracts fail rather than skip when a defect returns.
 
 ## Running the benchmarks
 

@@ -1,0 +1,4 @@
+node_modules/
+!deerflow_extension_office_preview/static/dist/
+!deerflow_extension_office_preview/static/dist/**
+*.egg-info/
