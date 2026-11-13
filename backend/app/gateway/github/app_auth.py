@@ -262,4 +262,7 @@ def _clear_token_cache_for_tests() -> None:
     global _signing_key
     _token_cache.clear()
     _install_locks.clear()
-    _signing_key = None
+    # Under the lock, so a mint parsing in a worker thread finishes first
+    # instead of storing its key after the reset.
+    with _signing_key_lock:
+        _signing_key = None

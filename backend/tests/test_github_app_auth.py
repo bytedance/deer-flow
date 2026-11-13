@@ -125,6 +125,45 @@ def test_mint_app_jwt_parses_the_private_key_once(set_github_env: None, monkeypa
         jwt.decode(token, public_pem, algorithms=["RS256"], options={"verify_exp": False, "verify_iat": False})
 
 
+def test_concurrent_mint_app_jwt_calls_parse_the_key_once(set_github_env: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async mints run ``mint_app_jwt`` in worker threads; a cold race still parses once."""
+    import threading
+
+    import jwt.algorithms
+
+    parses = 0
+    second_parse = threading.Event()
+    load_pem_private_key = jwt.algorithms.load_pem_private_key
+
+    def slow_counting_load(*args, **kwargs):
+        nonlocal parses
+        parses += 1
+        if parses == 1:
+            # Hold the first parse open long enough for the other thread to
+            # start its own parse, which only the lock prevents.
+            second_parse.wait(timeout=0.5)
+        else:
+            second_parse.set()
+        return load_pem_private_key(*args, **kwargs)
+
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", slow_counting_load)
+    barrier = threading.Barrier(2)
+    tokens: list[str] = []
+
+    def mint() -> None:
+        barrier.wait()
+        tokens.append(mint_app_jwt())
+
+    threads = [threading.Thread(target=mint) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(tokens) == 2
+    assert parses == 1
+
+
 def test_mint_app_jwt_uses_a_rotated_inline_key(set_github_env: None, monkeypatch: pytest.MonkeyPatch, private_key_pem: str) -> None:
     import jwt
 
