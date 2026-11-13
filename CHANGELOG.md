@@ -11,16 +11,29 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
-- **hitl:** Optional human-in-the-loop approval for high-risk tool calls.
-  `hitl_approval.tools` (host-owned) pauses matching calls via LangGraph
-  `interrupt()`; the run enters `waiting_for_input` and the Web UI shows an
-  approval card with per-field argument summaries. Approve executes the call,
-  reject returns the reason to the model without executing. IM channels,
-  GitHub runs, and scheduled tasks follow `hitl_approval.non_interactive`
-  (`deny` by default, `allow` opt-in). Subagents and runtimes without resume
-  support always reject matching calls regardless of that setting.
-  `hitl_approval.max_actions` configures the approval-batch count limit
-  (default 32; 0 disables it). HITL is disabled by default; `config_version` 65.
+- **summarization:** The built-in compaction prompt guides the summarizer to
+  preserve active user requirements, literal approval phrases, action conditions,
+  and explicit revisions. Explicit `summarization.summary_prompt` configurations
+  continue to take precedence. ([#8114](https://github.com/bytedance/deer-flow/pull/8114))
+
+- **sandbox:** Short ranged `read_file` calls on uploaded and workspace files
+  display source line numbers when the result contains 1–40 lines and the
+  labeled view fits the output budget. ([#8109](https://github.com/bytedance/deer-flow/pull/8109))
+
+- **projects:** Owner-scoped project memory with automatic-extraction, delete and
+  move-to-instructions controls. Project facts share DeerMem's extraction call
+  while remaining isolated from user facts. New shelf documents receive
+  best-effort summaries by default. ([#8117])
+
+- **hitl:** Optional Ask, Auto and Full tool-permission modes, independent of
+  reasoning mode. Auto uses a separate tool-free review call with an existing
+  model profile; uncertain or high-risk operations require a human. Cards show
+  complete arguments and support approve, reject, edit and exact-operation chat
+  grants with revocation. Root approvals survive restart through checkpoints;
+  interactive subagents wait through an owner-scoped channel with cancellation
+  and expiry. Mandatory deployment rules and account permissions apply in every
+  mode. Personal/platform MCP connections, policy and arguments bind approvals.
+  Disabled by default; see the configuration guide. `config_version` 66.
 
 - **knowledge:** The WeKnora retrieval extension offers opt-in shared read-only
   access for authenticated users, without maintaining a per-user allowlist.
@@ -45,7 +58,101 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### Changed
+
+- **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
+  4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
+  could reorder parallel writes during replay or lose paged ancestor history.
+  The ordering and Postgres pagination contracts now fail on regression instead
+  of skipping. ([#8139])
+
 ### Fixed
+
+- **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
+  `parents` or `counters_since_delta_snapshot` in its metadata no longer
+  leaves the thread broken. Those keys used to land on the thread's first
+  checkpoint, so a bad `parents` made the thread's history fail with 500 for
+  good, and a bad `step` or delta counter made every later turn fail. A
+  `deerflow_agent_name` key was also copied into the next state update as if
+  the server had set it. The first checkpoint now takes none of these keys
+  from the request. ([#8019])
+  
+- **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
+  exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
+  declarations reached the model and the provider silently kept only one.
+  Duplicate bound names are now dropped with a warning naming the surviving
+  server, in enabled-server declaration order. Note the surviving server is
+  stable only while its discovery keeps succeeding: if the winner's discovery
+  fails transiently, the later duplicate becomes served again, so the
+  implementation behind a bound name can alternate across cache generations
+  with server health.
+  ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
+  
+- **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
+  adapter capped image uploads at 2 MB — the voice limit in the same protocol —
+  so a larger chart was skipped before upload and the turn arrived without it.
+  The cap now matches the platform's 10 MB for images; the 20 MB file limit is
+  unchanged. ([#8174])
+
+- **threads:** Deleting a conversation on Windows no longer fails with
+  `Failed to delete local thread data.` when the workspace holds a file whose
+  path exceeds `MAX_PATH`. The thread directory is now resolved through the
+  Windows extended-length namespace before removal.
+  ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
+
+- **channels:** A WeCom group command that follows the bot mention now runs as a
+  command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
+  the classifier required a bare leading `/`, so `/new` and `/status` sent in a
+  group became chat turns. Leading mentions are skipped for the command lookup
+  only; ordinary chat keeps them and `/connect` is unchanged. Mirrors the Feishu
+  and DingTalk handling. ([#8118])
+  
+- **subagents:** Apply tool allowlists and denylists to middleware-declared
+  tools even when global authorization is disabled, including the default
+  denial of `task`. Restricted subagents reject non-Sequence declarations
+  explicitly, and invalid declarations report middleware-specific configuration
+  guidance. Final graph assembly checks both explicit and middleware tools;
+  framework-generated discovery helpers retain their filtered catalogs.
+  ([#8136](https://github.com/bytedance/deer-flow/pull/8136))
+
+- **frontend:** **Share** in a sidebar chat's menu now copies a link to the
+  deployment you are using. On `localhost` and `127.0.0.1`, the default
+  `make dev` and Docker addresses, it copied a link to the hosted demo
+  (`deer-flow-v2.vercel.app`) instead. That link never opened the
+  conversation, and opening it sent the thread id to an outside host.
+  ([#8126])
+
+- **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
+  worker that had lost its run to a peer could put the row back. Its assembly
+  evidence write was an unconditional full-row upsert, so after a peer
+  reclaimed the run it reset the row to `running` and erased the takeover
+  error. The run could then finish as `success` after the peer had already
+  reported it failed, or be reclaimed a second time. The evidence is now merged
+  into the row's metadata only while the worker still holds a live lease on an
+  active run (`RunStore.merge_owned_metadata()`); otherwise the worker stops
+  the run before executing it. Custom `RunStore` implementations used with
+  heartbeats must implement that method. ([#8046])
+
+- **subagents:** Concurrent creates for the same managed-subagent name in shared
+  file storage now preserve the winning definition and return HTTP 409 to the
+  losing request instead of reporting two successes and overwriting one definition.
+  Gateway startup also probes hard-link support and warns if the storage volume
+  cannot support managed subagent creation. ([#8132](https://github.com/bytedance/deer-flow/pull/8132))
+
+- **agents:** A high-risk tool call without a usable id no longer wedges the
+  thread when `hitl_approval` is enabled. A provider that omits a tool-call id
+  (`None`) or repeats one within a response made the middleware pause with an
+  approval payload the Gateway can never validate: every resume answered 422
+  and every new run stayed 409-blocked, all-reject included. An empty id was
+  technically resumable but is denied as well, since strict providers reject it
+  when the conversation is replayed. Such calls are now removed from the model
+  response with a visible rejection note instead of pausing, and deny paths no
+  longer build an invalid `ToolMessage` for a null id. A call whose id an
+  ordinary call also carries is stripped before it can be answered by result,
+  so the next request cannot advertise the id twice with two results.
+  A pause stored before
+  this change stays unresolvable; in-place recovery is tracked in [#8071].
+  ([#8069])
 
 - **runtime:** A HITL rejection, including the all-reject escape after approval is
   disabled or the gated tools change during a pause, now reaches the thread's
@@ -63,6 +170,9 @@ This section accumulates work toward the **2.3.0** milestone
   database error. The 409 points callers at `PUT` on the same route, which
   updates the existing feedback. ([#8064])
   
+- **frontend:** Reopening a conversation restores successfully handed-off shared
+  artifacts in the Artifacts sidebar. ([#8080](https://github.com/bytedance/deer-flow/pull/8080))
+
 - **sandbox:** AIO commands from independent subagents now run concurrently when
   they carry per-call environment variables, including Lark CLI commands.
   Commands within one subagent remain ordered and client cleanup drains them.
@@ -92,6 +202,11 @@ This section accumulates work toward the **2.3.0** milestone
   the surviving row back bypassing the owner scope so the cross-owner case
   mirrors `ThreadOwnershipConflictError`; a duplicate key with no surviving row
   is still surfaced as a 500. ([#8057])
+
+- **models:** Cancelling a Codex-backed run now closes its upstream HTTP/SSE
+  connection, including while waiting for response headers, and retry waits
+  are cancellable. Local resources are released; the remote service may still
+  continue generation. ([#8053](https://github.com/bytedance/deer-flow/pull/8053))
 
 - **middleware:** With PII redaction enabled, a long run of text without
   spaces (such as a pasted hex dump) no longer stalls the Gateway. The email
@@ -137,6 +252,16 @@ This section accumulates work toward the **2.3.0** milestone
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
   
+- **models:** A Claude model using a Claude Code OAuth token no longer fails
+  every request once the request carries `betas`. The OAuth betas
+  (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
+  header, and the SDK sends a request's `betas` as that header instead, so a
+  configured `betas` list (even `[]`), per-call `betas`, or a server tool for
+  which langchain-anthropic adds a beta left them out and Anthropic rejected
+  the token. The OAuth betas now lead any request `betas` and any
+  `anthropic-beta` in `extra_headers`.
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
@@ -207,6 +332,13 @@ This section accumulates work toward the **2.3.0** milestone
   group binding, which covers every group of the bot, starts a new one in
   each group. ([#7794])
   
+- **memory:** DeerMem rejects backups with duplicate fact IDs before replacing
+  saved memory, regardless of entry order. ([#8151])
+
+- **memory:** Importing a backup without a `facts` array now returns HTTP 422
+  and preserves saved memory. An explicit empty array still clears the selected
+  fact bucket. ([#8131])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
@@ -278,6 +410,13 @@ This section accumulates work toward the **2.3.0** milestone
   there. Retrying in a completed, failed, running or paused batch is
   unchanged. ([#7792])
 
+- **gateway:** A run that names a missing or invalid custom agent now says so.
+  Messaging a chat whose custom agent was deleted, or passing a malformed
+  `agent_name`, returned the 422 detail "knowledge_scope assistant configuration
+  could not be resolved" even when no knowledge scope was involved. The 422 now
+  reports `Agent '<name>' not found`, an invalid `agent_name`, or an agent
+  config that could not be loaded. ([#8087])
+
 - **agents:** `PUT /api/agents/{name}` with `"description": null` now resets the
   description to empty. It used to store the null, which the agent config
   rejects, so the agent then failed every load: the update, GET and repair
@@ -328,6 +467,19 @@ This section accumulates work toward the **2.3.0** milestone
   `config.yaml`, then `extensions_config.json` — so a config edit landing just
   before a thread view stalled the Gateway event loop that runs, streams and
   every other thread share. The response is unchanged. ([#7727])
+
+- **community:** The shared SSRF guard now returns its documented `Error: ...`
+  rejection for malformed URLs instead of raising `ValueError`.
+  `validate_public_http_url` and `validate_delegated_backend_url` called
+  `urlparse()` unguarded, so an authority it rejects, such as the unmatched
+  IPv6 bracket in `http://[::1/api`, escaped to the caller. That surfaced as an
+  unhandled 500 from the personal MCP router and as generic exception text in
+  the crawl4ai and fastCRW `web_fetch` tools. Both validators now reject any
+  malformed authority before the scheme check and the private-address escape
+  hatches, including a raw bracket in userinfo, which RFC 3986 forbids and
+  Python versions disagree on. This is a fail-closed contract fix plus
+  version-drift hardening: no host reachable through a well-formed URL becomes
+  blocked. ([#8079])
 
 ## [2.2.0] — 2026-10-29
 
@@ -16260,8 +16412,20 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8069]: https://github.com/bytedance/deer-flow/issues/8069
+[#8071]: https://github.com/bytedance/deer-flow/issues/8071
 [#8072]: https://github.com/bytedance/deer-flow/pull/8072
-
+[#8079]: https://github.com/bytedance/deer-flow/pull/8079
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
+[#8117]: https://github.com/bytedance/deer-flow/pull/8117
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8131]: https://github.com/bytedance/deer-flow/pull/8131
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8151]: https://github.com/bytedance/deer-flow/pull/8151
+[#8174]: https://github.com/bytedance/deer-flow/pull/8174

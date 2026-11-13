@@ -98,6 +98,7 @@ export interface Translations {
       refreshHint: string;
     };
     catalog: Record<
+      | "officePreview"
       | "workflows"
       | "reportSections"
       | "agentTeams"
@@ -329,6 +330,12 @@ export interface Translations {
   };
 
   artifactPreview: {
+    preparingDownload: string;
+    retryDownload: string;
+    downloadFailed: string;
+    downloadRequested: string;
+    retry: string;
+    unavailable: string;
     loadingPreview: string;
     resourcesUnavailable: string;
     limited: (previewSize: string, totalSize?: string) => string;
@@ -676,7 +683,15 @@ export interface Translations {
     viewTrash: string;
     documentsLoadFailed: string;
     threadFilesLoadFailed: string;
-    interimMemoryNotice: string;
+    memoryTitle: string;
+    memoryAutoExtract: string;
+    memoryDescription: string;
+    memoryEmpty: string;
+    memoryPromote: string;
+    memoryPromoted: string;
+    memorySaveFirst: string;
+    memoryLoadFailed: string;
+    memoryActionFailed: string;
   };
 
   // Trash view (Projects Phase 2)
@@ -1621,6 +1636,21 @@ export interface Translations {
     selectPlaceholder: string;
     answeredValue: (value: string) => string;
     approval: {
+      modeLabel: string;
+      modeAsk: string;
+      modeAuto: string;
+      modeFull: string;
+      askDescription: string;
+      autoDescription: string;
+      fullDescription: string;
+      approveThread: string;
+      grantScope: string;
+      editArguments: string;
+      fullArguments: string;
+      invalidArguments: string;
+      revokeGrants: string;
+      grantsRevoked: string;
+      childApproval: string;
       title: string;
       description: string;
       waiting: string;
@@ -1643,6 +1673,19 @@ export interface Translations {
 
   // Uploads
   uploads: {
+    status: {
+      pending: string;
+      uploading: string;
+      uploaded: string;
+      failed: string;
+      cancelled: string;
+    };
+    cancelUpload: string;
+    retryUpload: string;
+    notReady: string;
+    attachment: string;
+    image: string;
+    removeAttachment: (filename: string) => string;
     uploading: string;
     uploadingFiles: string;
     limitsHint: (

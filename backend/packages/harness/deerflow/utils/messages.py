@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage
 
 ORIGINAL_USER_CONTENT_KEY = "original_user_content"
 SUMMARY_MESSAGE_NAME = "summary"
+SUBAGENT_RESULT_MESSAGE_NAME = "subagent-result"
 
 #: Server-owned mark the Gateway stamps on an untrusted caller's message when it
 #: carries a framework marker (``hide_from_ui``, a ``summary`` name) that would
