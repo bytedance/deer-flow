@@ -22,6 +22,11 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Trust boundary
 
+- **Share tokens grant only snapshot reads.** Keep their method-aware public
+  allowlist separate from authenticated Fork and owner management routes.
+  Capture files under thread admission; public reads must use frozen database
+  bytes. Fork imports visible content into a fresh default-agent thread, never
+  the source's execution state. See [sharing](../../../docs/guide/sharing.md).
 - **Server-owned run context.** A client can send run context in `body.context`
   and in `body.config`. Admit server-owned keys only from internally authenticated
   callers and strip them from both places for everyone else. When you add a
