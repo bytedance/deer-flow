@@ -120,7 +120,7 @@ def _make_app(
     checkpointer = InMemorySaver()
     app.state.checkpointer = checkpointer
     app.state.run_manager = run_manager or _FromChatRunManager()
-    monkeypatch.setattr(threads, "get_config", lambda: SimpleNamespace(pii_redaction=None))
+    app.dependency_overrides[threads.get_config] = lambda: SimpleNamespace(pii_redaction=None)
     if stub_model_authz:
         # The route enforces model:use on the deployment default before the
         # synthesis call; authz wiring itself is covered by the RBAC tests

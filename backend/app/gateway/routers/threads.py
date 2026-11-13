@@ -12,6 +12,7 @@ matching the LangGraph Platform wire format expected by the
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import shutil
@@ -19,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -53,6 +54,7 @@ from app.gateway.services import (
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.human_input import extract_unanswered_human_input_request
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
+from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
@@ -1591,7 +1593,7 @@ async def set_thread_goal(thread_id: ThreadId, body: ThreadGoalRequest, request:
 
 @router.post("/{thread_id}/goal/from-chat", response_model=ThreadGoalResponse)
 @require_permission("threads", "write", owner_check=True)
-async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoalFromChatRequest, request: Request) -> ThreadGoalResponse:
+async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoalFromChatRequest, request: Request, app_config: AppConfig = Depends(get_config)) -> ThreadGoalResponse:
     """Synthesize a goal objective from the thread's recent conversation and save it.
 
     The flow the #7050 first slice agreed on: a busy pre-check runs **before**
@@ -1654,7 +1656,6 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
         # The agreement is incomplete: the user still owes the assistant an
         # answer. Running now would force the model to guess that decision.
         raise HTTPException(status_code=422, detail={"code": "pending_clarification"})
-    app_config = get_config()
     summary_text = values.get("summary_text")
     # Redaction is part of the builder so it runs before the budget can split
     # an identifier; synthesize_goal_objective redacts the composed prompt once
@@ -1674,7 +1675,7 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     # Checked ahead of the model call, not at save time: a denied profile
     # must never receive the conversation even transiently.
     user = await get_current_user_from_request(request)
-    authorize_model_use(user, None, is_internal=_is_internal_caller(request, user), app_config=app_config)
+    await asyncio.to_thread(authorize_model_use, user, None, is_internal=_is_internal_caller(request, user), app_config=app_config)
 
     # The synthesis call runs outside every lock/reservation: a model call can
     # take tens of seconds and must not hold the thread's write admission.

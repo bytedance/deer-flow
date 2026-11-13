@@ -24,7 +24,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import HTTPException
-from langgraph_sdk.errors import ConflictError
+from langgraph_sdk.errors import APIStatusError, ConflictError
 
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
@@ -142,7 +142,7 @@ _LIVE_RUN_STATUSES = frozenset({"pending", "running"})
 
 @dataclass
 class _RunAdmission:
-    """How far one inbound message's run request got, for dedupe release.
+    """How far one inbound message's run request got, for dedupe and goal replies.
 
     ``requested`` flips right before the run request leaves the manager;
     ``confirmed`` once the Gateway proved it admitted the run (a run id, a
@@ -151,6 +151,7 @@ class _RunAdmission:
 
     requested: bool = False
     confirmed: bool = False
+    error: BaseException | None = None
 
 
 _RUN_ADMISSION: ContextVar[_RunAdmission | None] = ContextVar("deerflow_channel_run_admission", default=None)
@@ -171,6 +172,10 @@ _GOAL_FROM_CHAT_TIMEOUT = httpx.Timeout(10.0, read=120.0)
 
 class _RunFailedFrame(RuntimeError):
     """The stream's ``error`` frame: the run ended, so a retry is not a duplicate."""
+
+
+class _ConversationSwitched(RuntimeError):
+    """The chat no longer points at the thread whose goal was saved."""
 
 
 @contextmanager
@@ -201,6 +206,11 @@ def _note_run_confirmed() -> None:
     if (admission := _RUN_ADMISSION.get()) is not None:
         admission.requested = True
         admission.confirmed = True
+
+
+def _note_run_error(error: BaseException) -> None:
+    if (admission := _RUN_ADMISSION.get()) is not None:
+        admission.error = error
 
 
 # Recovery replies must say the turn was dropped: the run was rejected before
@@ -3299,6 +3309,7 @@ class ChannelManager:
         extra_context: dict[str, Any] | None = None,
         *,
         bound_identity_checked: bool = False,
+        expected_thread_id: str | None = None,
     ) -> None:
         # Normal entry paths already run the bound-identity check in
         # _handle_message() or _handle_command(). Keep this default False so
@@ -3315,7 +3326,10 @@ class ChannelManager:
         # first message for the chat. topic_id may be None (e.g. Telegram
         # private chats) — the store handles this by using the "channel:chat_id"
         # key without a topic suffix.
-        thread_id, created = await self._get_or_create_thread(client, msg)
+        if expected_thread_id is None:
+            thread_id, created = await self._get_or_create_thread(client, msg)
+        else:
+            thread_id, created = expected_thread_id, False
         if not created:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
@@ -3355,6 +3369,7 @@ class ChannelManager:
                 thread_id,
                 extra_context=extra_context,
                 storage_user_id=storage_user_id,
+                check_thread_binding=expected_thread_id is not None,
             )
         finally:
             self._finish_serialized_thread_run(
@@ -3372,6 +3387,7 @@ class ChannelManager:
         *,
         extra_context: dict[str, Any] | None = None,
         storage_user_id: str | None = None,
+        check_thread_binding: bool = False,
     ) -> None:
         if storage_user_id is None:
             storage_user_id = _channel_storage_user_id(msg)
@@ -3410,6 +3426,11 @@ class ChannelManager:
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
         human_message = _human_input_message_with_channel_response(msg.text, metadata=msg.metadata, original_content=original_text, files=uploaded or None, message_id=human_message_id)
+
+        # Metadata loading, queueing and file preparation may have awaited a
+        # /new. Keep the saved thread pinned and check its binding at handoff.
+        if check_thread_binding and await self._lookup_thread_id(msg) != thread_id:
+            raise _ConversationSwitched
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -3461,6 +3482,7 @@ class ChannelManager:
                 # behaviorally identical to the previous bare ``await``.
                 result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
             except Exception as exc:
+                _note_run_error(exc)
                 if _is_admitted_run_conflict(exc):
                     # An earlier delivery's run; it posts its own outcome.
                     _note_run_confirmed()
@@ -3501,6 +3523,7 @@ class ChannelManager:
                 **run_kwargs,
             )
         except Exception as exc:
+            _note_run_error(exc)
             if _is_admitted_run_conflict(exc):
                 _note_run_confirmed()
                 logger.info("[Manager] run already admitted for this message: thread_id=%s (%s)", thread_id, exc)
@@ -3514,6 +3537,7 @@ class ChannelManager:
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             if step_limit_text := _step_limit_text(exc):
+                _note_run_confirmed()
                 logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
                 await self._send_error(msg, step_limit_text)
                 # The run ended, as after a terminal error frame: release the key
@@ -3714,6 +3738,8 @@ class ChannelManager:
                 pin_recovery = await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id)
                 pin_recovery_text = pin_recovery.text if pin_recovery else None
         finally:
+            if stream_error is not None:
+                _note_run_error(stream_error)
             if replay_gap and last_values is None and not latest_text and stream_error is None:
                 last_values = await self._admitted_turn(client, msg, thread_id)
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
@@ -4228,9 +4254,9 @@ class ChannelManager:
         so the user is shown what was saved before the run streams its output.
         Saving and the busy/409 guard stay on the Gateway route; this only
         reports the outcome and hands the saved objective to ``_handle_chat``.
-        Before handing off, the conversation binding is re-checked: synthesis
-        takes seconds, and a ``/new`` during that window would otherwise make
-        ``_handle_chat`` start the old task in the freshly switched thread.
+        Run handoff keeps this thread pinned and re-checks the binding after
+        confirmation delivery and preparation. Admission evidence distinguishes
+        rejected starts from requests whose response was lost.
         """
         if not thread_id:
             return await self._goal_reply(msg, "from_chat_no_thread")
@@ -4246,48 +4272,42 @@ class ChannelManager:
             logger.warning("Goal from-chat returned no usable objective")
             return await self._goal_reply(msg, "from_chat_failed")
 
-        # The conversation may have been switched (``/new``) while synthesis
-        # waited: the goal is saved in the thread we addressed, but the chat's
-        # binding now points elsewhere, and ``_handle_chat`` would resolve the
-        # current binding and start the old task in the new conversation. A
-        # failing lookup falls through to the run start: ``_handle_chat``'s own
-        # thread resolution would fail the same way and report honestly.
-        try:
-            current_thread_id = await self._lookup_thread_id(msg)
-        except Exception:
-            logger.warning("[Manager] goal from-chat could not re-check the conversation binding; starting the run", exc_info=True)
-            current_thread_id = thread_id
-        if current_thread_id != thread_id:
-            logger.info(
-                "[Manager] goal from-chat saved in thread_id=%s but the conversation switched to %s; not starting the run",
-                thread_id,
-                current_thread_id or "<unbound>",
-            )
-            return (await self._goal_reply(msg, "from_chat_conversation_switched")).format(objective=objective)
-
-        # Show the synthesized objective, then start exactly one run with it as
-        # the task text (same run path as the literal set branch). This must be
-        # a final outbound: on Feishu/Telegram a non-final update is folded into
-        # the run's stream card and overwritten by its output, and QQ/DingTalk
-        # card mode drop non-final updates before a stream exists.
-        locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
-        try:
-            await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective), is_final=True)
-        except Exception:
-            # The goal is already saved; a failed confirmation card must not
-            # keep the run from starting.
-            logger.warning("Goal from-chat saved but the confirmation card failed", exc_info=True)
-
         from dataclasses import replace as _dc_replace
 
         chat_msg = _dc_replace(msg, text=objective, msg_type=InboundMessageType.CHAT)
-        try:
-            await self._handle_chat(chat_msg, bound_identity_checked=True)
-        except Exception:
-            # The goal is already saved; report that honestly instead of hiding
-            # it behind a generic failure or claiming the task is running.
-            logger.exception("Goal from-chat saved but the run did not start")
-            return await self._goal_reply(msg, "from_chat_saved_but_not_started")
+        reply = None
+        may_be_running = False
+        with _run_admission_scope() as admission:
+            try:
+                if await self._lookup_thread_id(msg) != thread_id:
+                    raise _ConversationSwitched
+                locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+                try:
+                    # A separate final outbound keeps the saved objective visible
+                    # alongside the run's stream on every IM provider.
+                    await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective), is_final=True)
+                except Exception:
+                    logger.warning("Goal from-chat saved but the confirmation card failed", exc_info=True)
+                await self._handle_chat(chat_msg, bound_identity_checked=True, expected_thread_id=thread_id)
+            except _ConversationSwitched:
+                reply = (await self._goal_reply(msg, "from_chat_conversation_switched")).format(objective=objective)
+            except Exception as exc:
+                _note_run_error(exc)
+                logger.warning("Goal from-chat run handoff failed", exc_info=True)
+
+            if reply is None and admission.error is not None and not admission.confirmed:
+                error = admission.error
+                rejected = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                if isinstance(error, (httpx.HTTPStatusError, APIStatusError)):
+                    rejected = 400 <= error.response.status_code < 500
+                may_be_running = admission.requested and not rejected
+                reply = await self._goal_reply(msg, "from_chat_run_status_unknown" if may_be_running else "from_chat_saved_but_not_started")
+            if reply is not None:
+                # Use the saved thread even when its conversation binding cannot
+                # be read. Deliver the recovery advice before releasing dedupe.
+                await self._publish_progress_update(msg, thread_id, reply, is_final=True)
+                if admission.error is not None and not may_be_running:
+                    await self._release_inbound_dedupe_key(msg)
         return None
 
     async def _goal_from_chat_error_reply(self, msg: InboundMessage, exc: Exception) -> str:

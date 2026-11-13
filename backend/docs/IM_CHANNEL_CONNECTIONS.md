@@ -31,6 +31,8 @@ Because selecting an agent always creates a new thread instead of mutating the c
 
 The synthesis model call is subject to the same model-use authorization as other model-backed routes: a role denied the deployment default model gets the route's 403 and the conversation is never sent to that model. The save is a compare-and-swap against the checkpoint the synthesis read — a goal or checkpoint write that lands during the model call rejects the stale objective with a 409, and the channel replies that the conversation changed and nothing was saved. If the chat switches conversations (`/new`) while synthesis is in flight, the goal stays saved in the original thread but the manager does not start a run in the new conversation; the reply says so and carries the saved objective.
 
+Run handoff stays pinned to the thread where the goal was saved and checks the conversation binding again after confirmation delivery and run preparation. A rejected start gets an explicit goal-saved, task-not-started reply. If the response is lost after submission, the reply says the task may still be running and asks the user to check the conversation in DeerFlow before retrying.
+
 DeerFlow's own replies here and to `/connect` use the binding owner's web UI language (the `locale` user preference), else `channel_connections.notification_locale` (`en-US` by default). A reply with no known owner, such as one to an invalid or expired code, uses the configured default. Agent replies are not translated.
 
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.

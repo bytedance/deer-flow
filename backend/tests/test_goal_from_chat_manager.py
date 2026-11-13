@@ -16,6 +16,7 @@ a failed confirmation card does not strand the saved objective.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from dataclasses import replace
@@ -25,6 +26,7 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from langgraph_sdk._async import LangGraphClient
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
@@ -105,7 +107,7 @@ def test_from_chat_success_confirms_objective_then_starts_one_run(monkeypatch):
     started = chat.await_args.args[0]
     assert started.text == objective
     assert started.msg_type == InboundMessageType.CHAT
-    assert chat.await_args.kwargs == {"bound_identity_checked": True}
+    assert chat.await_args.kwargs == {"bound_identity_checked": True, "expected_thread_id": "t-1"}
 
 
 def test_from_chat_confirmation_card_failure_still_starts_the_run(monkeypatch):
@@ -237,10 +239,9 @@ def test_from_chat_saved_but_run_not_started_is_reported(monkeypatch):
 
     result = _run(manager._handle_goal_command(_msg("/goal from-chat"), "from-chat"))
 
-    # The confirmation was already published; the returned reply must say the
-    # run did not start rather than claim a fresh failure or stay silent.
-    assert len(replies) == 1 and "Ship it." in replies[0].text
-    assert result is not None and "did not start" in result
+    # Keep the saved objective visible and report the rejected start.
+    assert len(replies) == 2 and "Ship it." in replies[0].text
+    assert result is None and "did not start" in replies[-1].text
 
 
 def test_from_chat_conversation_switched_during_synthesis_does_not_start_the_run(monkeypatch):
@@ -260,29 +261,28 @@ def test_from_chat_conversation_switched_during_synthesis_does_not_start_the_run
 
     # The save still addressed the original thread.
     assert calls[0].url.path == "/api/threads/t-1/goal/from-chat"
-    # No run started, and no confirmation card claimed one would.
+    # The saved thread receives an explicit recovery reply.
     chat.assert_not_awaited()
-    assert replies == []
-    assert result is not None
-    assert "switched to a new conversation" in result
-    assert objective in result
+    assert result is None
+    assert len(replies) == 1 and replies[0].thread_id == "t-1"
+    assert "switched to a new conversation" in replies[0].text
+    assert objective in replies[0].text
 
 
-def test_from_chat_binding_recheck_failure_falls_through_to_run_start(monkeypatch):
-    # A failing lookup must not strand a saved goal behind a missing reply:
-    # fall through to _handle_chat, whose own resolution fails honestly.
+def test_from_chat_binding_recheck_failure_preserves_goal_without_starting(monkeypatch):
     objective = "Ship it."
     manager, _ = _make_manager(monkeypatch, respond=lambda r: httpx.Response(200, json={"goal": {"objective": objective, "status": "active"}}))
-    _captured_replies(manager)
+    replies = _captured_replies(manager)
     chat = AsyncMock()
     monkeypatch.setattr(manager, "_handle_chat", chat)
-    lookups = iter(["t-1"])
-    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(side_effect=lambda msg: next(lookups) if lookups else (_ for _ in ()).throw(RuntimeError("store down"))))
+    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(side_effect=["t-1", RuntimeError("store down")]))
 
     result = _run(manager._handle_goal_command(_msg("/goal from-chat"), "from-chat"))
 
     assert result is None
-    chat.assert_awaited_once()
+    chat.assert_not_awaited()
+    assert len(replies) == 1 and replies[0].thread_id == "t-1"
+    assert "Goal saved" in replies[0].text and "did not start" in replies[0].text
 
 
 def test_from_chat_zh_locale_confirmation_is_chinese(monkeypatch):
@@ -297,3 +297,94 @@ def test_from_chat_zh_locale_confirmation_is_chinese(monkeypatch):
     assert len(replies) == 1
     assert replies[0].text.startswith("已从对话设置目标：")
     assert objective in replies[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_at", ["synthesis", "confirmation", "preload"])
+async def test_from_chat_switch_during_handoff_never_runs_in_new_thread(monkeypatch, tmp_path, pause_at):
+    entered, release = asyncio.Event(), asyncio.Event()
+    objective = "Reconcile the original conversation."
+
+    async def respond(request):
+        path = request.url.path
+        if path.endswith("/goal/from-chat"):
+            if pause_at == "synthesis":
+                entered.set()
+                await release.wait()
+            return httpx.Response(200, json={"goal": {"objective": objective, "status": "active"}})
+        if request.method == "POST" and path == "/threads":
+            return httpx.Response(200, json={"thread_id": "t-2"})
+        if request.method == "GET" and pause_at == "preload":
+            entered.set()
+            await release.wait()
+        return httpx.Response(200, json={"metadata": {}})
+
+    manager, calls = _make_manager(monkeypatch, respond=respond)
+    monkeypatch.delattr(manager, "_lookup_thread_id")
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    await manager.store.set_thread_id("feishu", "C1", "t-1", user_id="U1")
+    replies = _captured_replies(manager)
+
+    async def pause_confirmation(message):
+        if pause_at == "confirmation" and message.text.startswith("Goal set from the conversation"):
+            entered.set()
+            await release.wait()
+
+    manager.bus.subscribe_outbound(pause_confirmation)
+    async with httpx.AsyncClient(base_url="http://gateway:8001") as http:
+        manager._client = LangGraphClient(http)
+        pending = asyncio.create_task(manager._handle_message(_msg("/goal from-chat")))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            await manager._handle_message(_msg("/new"))
+            release.set()
+            await asyncio.wait_for(pending, timeout=5)
+        finally:
+            release.set()
+            if not pending.done():
+                pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+
+    assert await manager.store.get_thread_id("feishu", "C1") == "t-2"
+    assert calls[0].url.path == "/api/threads/t-1/goal/from-chat"
+    assert not any("/runs/" in request.url.path for request in calls)
+    assert any("switched to a new conversation" in message.text and objective in message.text for message in replies)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", ["feishu", "dingtalk"])
+@pytest.mark.parametrize("failure", [None, 403, 409, "timeout"])
+async def test_from_chat_reports_actual_run_admission(monkeypatch, tmp_path, channel, failure):
+    def respond(request):
+        path = request.url.path
+        if path.endswith("/goal/from-chat"):
+            return httpx.Response(200, json={"goal": {"objective": "Ship it.", "status": "active"}})
+        if "/runs/" in path:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("Response lost after sending the request", request=request)
+            if failure is not None:
+                return httpx.Response(failure, json={"detail": "Run admission rejected"})
+            values = {"messages": [{"type": "ai", "content": "Done."}]}
+            if path.endswith("/stream"):
+                return httpx.Response(200, headers={"content-type": "text/event-stream"}, content="event: values\ndata: " + json.dumps(values) + "\n\n")
+            return httpx.Response(200, json=values)
+        return httpx.Response(200, json={"metadata": {}})
+
+    manager, calls = _make_manager(monkeypatch, respond=respond)
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    replies = _captured_replies(manager)
+    msg = replace(_msg("/goal from-chat"), channel_name=channel, metadata={"message_id": "goal-1", "conversation_id": "C1"})
+    assert await manager._claim_inbound(msg)
+    async with httpx.AsyncClient(base_url="http://gateway:8001") as http:
+        manager._client = LangGraphClient(http)
+        await manager._handle_message(msg)
+
+    assert len([request for request in calls if "/runs/" in request.url.path]) == 1
+    if failure is None:
+        assert replies[-1].text == "Done."
+    elif failure == "timeout":
+        assert "may still be running" in replies[-1].text
+        assert "did not start" not in replies[-1].text
+    else:
+        assert "Goal saved" in replies[-1].text and "did not start" in replies[-1].text
+    assert await manager._is_duplicate_inbound(msg) is (failure in (None, "timeout"))
