@@ -225,9 +225,8 @@ def test_read_before_write_content_changes_when_only_line_endings_change(tmp_pat
     [(r"\s$", [(2, "trailing ")]), (r"[^a-z]$", [(2, "trailing ")]), (r"\n", [])],
 )
 def test_grep_does_not_match_the_line_terminator(tmp_path, pattern, expected) -> None:
-    # Like grep(1) and the remote providers, a line is matched without its
-    # terminator: a trailing-whitespace search must not hit every line that
-    # merely ends in "\n" (or "\r\n").
+    # LocalSandbox excludes LF and CRLF terminators from regex matching, so
+    # a trailing-whitespace search only matches whitespace in the line text.
     path = tmp_path / "ws.txt"
     path.write_bytes(b"clean\ntrailing \r\nalso clean\r\nlast clean")
 
