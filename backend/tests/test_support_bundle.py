@@ -1057,14 +1057,15 @@ def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, va
     user_home.mkdir()
     monkeypatch.setenv("HOME", str(user_home))
     if os.name == "nt":
-        # Git Bash expands "~" from HOME, but Python's expanduser() reads USERPROFILE
-        # on Windows; pin both so the two resolution paths stay comparable.
-        monkeypatch.setenv("USERPROFILE", str(user_home))
-    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
-    if variable == "DEER_FLOW_HOME":
-        home = _local_launcher_home(project)
+        # The inherited POSIX HOME must not override Windows' native profile.
+        platform_home = tmp_path / "windows-profile"
+        platform_home.mkdir()
+        monkeypatch.setenv("USERPROFILE", str(platform_home))
     else:
-        home = (project / "~/runtime-data" if value.startswith(("'", '"')) else user_home / "runtime-data") / ".deer-flow"
+        platform_home = user_home
+    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
+    expanded = project / "~/runtime-data" if value.startswith(("'", '"')) else platform_home / "runtime-data"
+    home = expanded if variable == "DEER_FLOW_HOME" else expanded / ".deer-flow"
     (home / "threads" / "tilde" / "user-data").mkdir(parents=True)
     original = dict(os.environ)
 
