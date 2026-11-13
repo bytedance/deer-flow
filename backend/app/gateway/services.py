@@ -787,7 +787,11 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
         elif channel == "tool_artifacts":
-            stripped[channel] = _normalize_external_tool_artifacts(value, location="values.tool_artifacts")
+            normalized_tool_artifacts = _normalize_external_tool_artifacts(value, location="values.tool_artifacts")
+            # Registry entries are rich dicts, so keep the per-entry metadata
+            # strip the generic list branch applied: a caller-crafted entry must
+            # not smuggle server-owned message metadata into the checkpoint.
+            stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:

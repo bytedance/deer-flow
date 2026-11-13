@@ -913,6 +913,17 @@ def test_state_values_reject_unusable_tool_artifacts_with_400():
     assert "values.tool_artifacts" in excinfo.value.detail
 
 
+def test_state_values_strip_server_owned_metadata_from_tool_artifacts():
+    """The registry branch keeps the per-entry strip the generic list branch applied."""
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"handle": "art_1", "additional_kwargs": {"original_user_content": "forged", "title": "kept"}}
+
+    stripped = strip_server_owned_state_metadata({"tool_artifacts": [entry]})["tool_artifacts"][0]
+
+    assert stripped["additional_kwargs"] == {"title": "kept"}
+
+
 @pytest.mark.parametrize(
     "skill_context",
     [
