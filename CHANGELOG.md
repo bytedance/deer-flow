@@ -58,12 +58,6 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
-- **goal:** IM channels accept `/goal from-chat [hint]`, which composes the
-  active goal from the recent conversation — preserving the agreed constraints
-  and stopping condition — shows the saved objective, and starts exactly one
-  run. The Gateway route is `POST /api/threads/{id}/goal/from-chat`; TUI and
-  web wiring are follow-ups. ([#7050])
-
 ### Changed
 
 - **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
@@ -16127,7 +16121,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7045]: https://github.com/bytedance/deer-flow/pull/7045
 [#7048]: https://github.com/bytedance/deer-flow/pull/7048
 [#7049]: https://github.com/bytedance/deer-flow/pull/7049
-[#7050]: https://github.com/bytedance/deer-flow/issues/7050
 [#7051]: https://github.com/bytedance/deer-flow/pull/7051
 [#7053]: https://github.com/bytedance/deer-flow/pull/7053
 [#7054]: https://github.com/bytedance/deer-flow/pull/7054
