@@ -311,12 +311,16 @@ def find_grep_matches(
                 continue
             # newline="\n" ends lines where LocalSandbox.read_file does, so a
             # hit's line_number is the start_line that reads it back; a bare
-            # "\r" stays content. A CRLF terminator still reads as "\n", so $
-            # anchors match as before.
+            # "\r" stays content. The terminator (LF or CRLF) is stripped
+            # before matching, so $ anchors at the end of the line text.
             with file_path.open(encoding="utf-8", errors="replace", newline="\n") as handle:
                 for line_number, line in enumerate(handle, start=1):
+                    # Match the line without its terminator, as grep(1) does:
+                    # otherwise \s$ or [^x]$ hit every newline-ended line.
                     if line.endswith("\r\n"):
-                        line = line[:-2] + "\n"
+                        line = line[:-2]
+                    elif line.endswith("\n"):
+                        line = line[:-1]
                     if not literal and len(line) > _max_line_chars:
                         continue
                     if matches_line(line):
