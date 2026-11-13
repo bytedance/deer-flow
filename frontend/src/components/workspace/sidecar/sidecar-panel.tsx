@@ -527,6 +527,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   const discardDraftAndClose = useCallback(() => {
+    sidecar.clearArtifactEdit();
     sidecar.clearActiveReferences();
     sidecar.setSidecarThreadId(null);
     sidecar.close();

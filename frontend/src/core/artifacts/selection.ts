@@ -41,8 +41,8 @@ export function applyArtifactSelectionDraft(
 export const MAX_SELECTION_LENGTH = 12_000;
 export const MAX_REPLACEMENT_LENGTH = 64_000;
 
-// Rendered Markdown can omit markup or repeat the same words. Only an exact,
-// unique occurrence within the selected source blocks is safe to replace.
+// A unique text match can locate a quotation, but does not prove which
+// Markdown source span produced the rendered text.
 export function locateArtifactSelection(
   source: string,
   text: string,
@@ -59,9 +59,27 @@ export function locateArtifactSelection(
 }
 
 export function selectionLines(source: string, from: number, to: number) {
-  const startLine = source.slice(0, from).split("\n").length;
-  const last = source[to - 1] === "\n" ? to - 1 : to;
-  return { startLine, endLine: source.slice(0, last).split("\n").length };
+  const lineBreak = /\r\n?|\n/;
+  const startLine = source.slice(0, from).split(lineBreak).length;
+  const endLine = source
+    .slice(0, to)
+    .replace(/(?:\r\n?|\n)$/, "")
+    .split(lineBreak).length;
+  return { startLine, endLine };
+}
+
+// CodeMirror represents each CRLF as one position. Shift each endpoint for
+// the CRLFs it has already passed in the original source.
+export function sourceSelectionOffsets(
+  source: string,
+  { from, to }: SourceSelection,
+): SourceSelection {
+  for (const match of source.matchAll(/\r\n/g)) {
+    if (match.index >= to) break;
+    if (match.index < from) from++;
+    to++;
+  }
+  return { from, to };
 }
 
 export function replaceArtifactSelection(
@@ -87,13 +105,15 @@ export function artifactSelectionContext(
   filepath: string,
   source: string,
   text: string,
-  range: SourceSelection,
+  range: SourceSelection | null,
 ): SidecarContext {
-  const { startLine, endLine } = selectionLines(source, range.from, range.to);
+  const lines = range && selectionLines(source, range.from, range.to);
   return {
     type: "referenced_message",
     role: "assistant",
-    label: `${filepath}:L${startLine}-L${endLine}`,
+    label: lines
+      ? `${filepath}:L${lines.startLine}-L${lines.endLine}`
+      : filepath,
     content: text,
   };
 }

@@ -20,7 +20,7 @@ contribution; see the [plugin contract](../full-stack-plugins.md#artifact-previe
 Select text in a Markdown artifact or its source editor to open the selection
 toolbar. **Add to conversation** attaches the passage to the main composer;
 **Ask in side chat** opens a follow-up alongside the conversation. Both carry
-the file path and inclusive source line range with the selected text. You can
+the selected text and file path, plus the source line range when available. You can
 add several quotations before sending your question. Assistant replies already
 offer the same two quotation actions.
 
@@ -38,12 +38,12 @@ check. Everything before and after the selected range stays unchanged.
 The edit survives switching from the artifact panel to side chat. Changing
 the draft, changing its saved revision, or starting a run prevents stale edits
 from being applied or saved. Edits stay in memory for the current conversation;
-switching conversations clears the pending rewrite. Nothing writes to the file
-until you explicitly save it.
+switching conversations or discarding the side chat clears the pending rewrite.
+Nothing writes to the file until you explicitly save it.
 
 Selections support up to 12,000 characters. Markdown may hide formatting markers,
-so a rendered selection is rewritable only when it maps exactly and uniquely
-inside its source blocks. For other selections, quote the passage or switch to
+so a rendered selection is rewritable only when the renderer can verify its
+exact source range. For other selections, quote the passage or switch to
 **View source** to choose an exact range. HTML and CSV/TSV use source selections;
 binary previews do not expose text selections. Truncated previews can be quoted
 but require **Load full file** before rewriting. Read-only artifacts, demos,

@@ -1,5 +1,5 @@
 import type { Root } from "hast";
-import { visit } from "unist-util-visit";
+import { SKIP, visit } from "unist-util-visit";
 
 import { locateArtifactSelection } from "./selection";
 
@@ -18,7 +18,49 @@ export function rehypeArtifactSourceRanges({ source }: { source: string }) {
         node.properties.dataArtifactTo = to;
       }
     });
+    visit(tree, (node, index, parent) => {
+      // The renderer can replace code/math with its own DOM. Only plain text
+      // nodes with a literal source span get an exact offset.
+      if (
+        node.type === "element" &&
+        (node.tagName === "code" || node.tagName === "pre")
+      )
+        return SKIP;
+      if (node.type !== "text" || index === undefined || !parent) return;
+      const from = node.position?.start.offset;
+      const to = node.position?.end.offset;
+      if (
+        from === undefined ||
+        to === undefined ||
+        !node.value ||
+        source.slice(from, to) !== node.value
+      )
+        return;
+      parent.children[index] = {
+        type: "element",
+        tagName: "span",
+        properties: { dataArtifactTextFrom: from },
+        children: [node],
+      };
+      return SKIP;
+    });
   };
+}
+
+function exactTextRange(source: string, range: Range, text: string) {
+  const node = range.startContainer;
+  if (node.nodeType !== Node.TEXT_NODE || node !== range.endContainer)
+    return null;
+  const offset = node.parentElement?.dataset.artifactTextFrom;
+  if (offset === undefined) return null;
+  const start = Number(offset);
+  const from = start + range.startOffset;
+  const to = start + range.endOffset;
+  return Number.isInteger(start) &&
+    start >= 0 &&
+    source.slice(from, to) === text
+    ? { from, to }
+    : null;
 }
 
 export function readArtifactSelection(container: HTMLElement, source: string) {
@@ -38,16 +80,20 @@ export function readArtifactSelection(container: HTMLElement, source: string) {
   const start = block(range.startContainer);
   const end = block(range.endContainer);
   const text = selection.toString();
+  const rect = range.getBoundingClientRect();
+  const exact = exactTextRange(source, range, text);
   if (
     !start ||
     !end ||
     !container.contains(start) ||
     !container.contains(end)
   ) {
-    const exact = locateArtifactSelection(source, text);
-    return exact
-      ? { text, range: exact, exact, rect: range.getBoundingClientRect() }
-      : null;
+    return {
+      text,
+      range: exact ?? locateArtifactSelection(source, text),
+      exact,
+      rect,
+    };
   }
   const from = Number(start.dataset.artifactFrom);
   const to = Number(end.dataset.artifactTo);
@@ -62,7 +108,7 @@ export function readArtifactSelection(container: HTMLElement, source: string) {
   return {
     text,
     range: { from, to },
-    exact: locateArtifactSelection(source, text, from, to),
-    rect: range.getBoundingClientRect(),
+    exact,
+    rect,
   };
 }

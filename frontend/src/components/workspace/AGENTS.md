@@ -76,9 +76,9 @@ pnpm catalog:sync   # after a change to the capability catalog
 - **Artifact rewrite state outlives its panel.** Opening side chat unmounts the
   file detail. Keep the source range and revision in the sidecar provider, apply
   through the shared draft store, and preserve the revision-checked Save path.
-- **Rendered text is not a source offset.** Markdown selection offsets require
-  the complete static parse and unchanged preprocessing; otherwise use an exact
-  unique source match or offer quotation without replacement.
+- **Verify the source span before rewriting Markdown.** Use positions from the
+  complete static parse with unchanged preprocessing and literal rendered text.
+  For other rendered selections, offer quotation and direct rewrites to View source.
 
 ## Delimited preview
 

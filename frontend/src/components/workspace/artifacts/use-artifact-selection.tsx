@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import {
   artifactSelectionContext,
   MAX_SELECTION_LENGTH,
+  sourceSelectionOffsets,
   type SourceSelection,
 } from "@/core/artifacts/selection";
 import { readArtifactSelection } from "@/core/artifacts/selection-dom";
@@ -23,7 +24,7 @@ import { useMaybeSidecar } from "../sidecar/context";
 
 type Selection = {
   text: string;
-  range: SourceSelection;
+  range: SourceSelection | null;
   exact: SourceSelection | null;
   rect: { left: number; bottom: number };
 };
@@ -125,17 +126,16 @@ export function useArtifactSelection(options: {
         : undefined,
     onSourceSelection: (
       next: (SourceSelection & { rect: Selection["rect"] }) | null,
-    ) =>
-      accept(
-        next
-          ? {
-              text: options.source.slice(next.from, next.to),
-              range: next,
-              exact: next,
-              rect: next.rect,
-            }
-          : null,
-      ),
+    ) => {
+      if (!next) return accept(null);
+      const exact = sourceSelectionOffsets(options.source, next);
+      accept({
+        text: options.source.slice(exact.from, exact.to),
+        range: exact,
+        exact,
+        rect: next.rect,
+      });
+    },
     toolbar:
       selection && context && sidecar && options.enabled
         ? createPortal(

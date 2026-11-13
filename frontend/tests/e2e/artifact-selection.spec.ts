@@ -32,7 +32,7 @@ async function setup(page: Page, source = original) {
           {
             type: "ai",
             id: "report",
-            content: "The report is ready.",
+            content: "",
             tool_calls: [
               {
                 id: "present",
@@ -40,6 +40,11 @@ async function setup(page: Page, source = original) {
                 args: { filepaths: [filepath] },
               },
             ],
+          },
+          {
+            type: "ai",
+            id: "report-answer",
+            content: "The report is ready.",
           },
         ],
       },
@@ -263,3 +268,105 @@ test("formatted text can be quoted without guessing a replacement span", async (
     "1 selected text fragment",
   );
 });
+
+test("the source editor quotes the exact text after a CRLF", async ({
+  page,
+}) => {
+  await setup(page, "# Quarterly report\r\n\r\nTarget paragraph\r\n");
+  let submitted: unknown;
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    submitted = route.request().postDataJSON();
+    return handleRunStream(route);
+  });
+  await page.locator("#artifacts").getByLabel("View source").click();
+  const editor = page.locator("#artifacts .cm-content");
+  await editor.getByText("Target paragraph", { exact: true }).dblclick({
+    position: { x: 12, y: 8 },
+  });
+  expect(await page.evaluate(() => window.getSelection()?.toString())).toBe(
+    "Target",
+  );
+  await page
+    .getByTestId("artifact-selection-toolbar")
+    .getByRole("button", { name: "Rewrite selection" })
+    .click();
+  const review = page.getByTestId("artifact-rewrite-review");
+  await expect(review).toContainText(`${filepath}:L3-L3`);
+  const composer = page.getByPlaceholder(/deeper follow-up/i);
+  await composer.fill("Update this word");
+  await composer
+    .locator("xpath=ancestor::form")
+    .getByRole("button", { name: "Submit", exact: true })
+    .click();
+  await expect.poll(() => JSON.stringify(submitted)).toContain("Target");
+});
+
+test("a rendered link label cannot match the hidden URL for rewriting", async ({
+  page,
+}) => {
+  await setup(page, original.replace(selected, "[Budg&#101;t](/files/Budget)"));
+  await select(page, "Budget");
+  const toolbar = page.getByTestId("artifact-selection-toolbar");
+  await expect(
+    toolbar.getByRole("button", { name: "Rewrite selection" }),
+  ).toBeDisabled();
+  await expect(
+    toolbar.getByRole("button", { name: "Ask in side chat" }),
+  ).toBeEnabled();
+});
+
+for (const discard of ["close draft", "delete thread"] as const) {
+  test(`ordinary side-chat questions omit a discarded rewrite after ${discard}`, async ({
+    page,
+  }) => {
+    await setup(page);
+    let submitted: unknown;
+    await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+      submitted = route.request().postDataJSON();
+      return handleRunStream(route);
+    });
+    await select(page, selected);
+    await page
+      .getByTestId("artifact-selection-toolbar")
+      .getByRole("button", { name: "Rewrite selection" })
+      .click();
+    const composer = page.getByPlaceholder(/deeper follow-up/i);
+    const submit = async (text: string) => {
+      await composer.fill(text);
+      await composer
+        .locator("xpath=ancestor::form")
+        .getByRole("button", { name: "Submit", exact: true })
+        .click();
+    };
+    if (discard === "delete thread") {
+      await submit("Rewrite this line");
+      await expect
+        .poll(() => JSON.stringify(submitted))
+        .toContain("artifact_selection_edit");
+      await page.getByTestId("sidecar-delete-button").click();
+      await page.getByTestId("sidecar-delete-confirm-button").click();
+    } else {
+      await page.getByTestId("sidecar-close-button").click();
+    }
+    await expect(page.getByTestId("sidecar-panel")).toBeHidden();
+    await page
+      .getByText("The report is ready.", { exact: true })
+      .evaluate((paragraph) => {
+        const range = document.createRange();
+        range.selectNodeContents(paragraph);
+        window.getSelection()?.removeAllRanges();
+        window.getSelection()?.addRange(range);
+        paragraph.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      });
+    await page
+      .locator("[data-sidecar-selection-toolbar]")
+      .getByRole("button", { name: "Ask in side chat" })
+      .click();
+    await submit("Explain the report");
+    await expect
+      .poll(() => JSON.stringify(submitted))
+      .toContain("Explain the report");
+    expect(JSON.stringify(submitted)).not.toContain("artifact_selection_edit");
+    expect(JSON.stringify(submitted)).not.toContain(selected);
+  });
+}
