@@ -10,9 +10,14 @@ Pins the design decisions from the first-PR discussion on #7050:
 * an unclear synthesis is a 422 ``unclear``; the model's reason never appears
   in the response body and is not logged verbatim either;
 * a failed synthesis is a 502 ``synthesis_failed``;
+* model admission runs **before** the synthesis call: a role denied the
+  deployment default model gets the suggestions route's 403 and the
+  conversation is never sent to it;
 * success saves through the same reservation path as ``PUT /goal``
   (``reserve_checkpoint_write`` + ``write_thread_goal``), and a save-time
-  race is a 409, not a silent overwrite.
+  race is a 409, not a silent overwrite — including a checkpoint that
+  advanced during the model call, which the compare-and-swap against the
+  synthesis source head rejects as 409 ``goal_changed``.
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ from deerflow.runtime.goal_synthesis import GoalSynthesisError, GoalSynthesisUnc
 from deerflow.runtime.runs.manager import ConflictError
 
 _PUT_BUSY_DETAIL = "Thread has a run in flight. Set the goal after the run finishes."
+
+# ``checkpoint_id`` sentinel for _make_app: the fake accessor reports the real
+# head of the seeded checkpointer, so the route's compare-and-swap save sees
+# the same id a production snapshot would carry.
+_SEEDED_HEAD = "__seeded_head__"
 
 _MESSAGES = [
     {"type": "user", "content": "Reconcile the invoices: vendor A 12,400 CNY, vendor B 8,900 CNY."},
@@ -95,7 +105,15 @@ class _FakeAccessor:
 
 
 def _make_app(
-    monkeypatch, *, values: dict | None = None, checkpoint_id: str | None = "cp-1", run_manager: _FromChatRunManager | None = None, owner_check_passes: bool = True, seed_checkpoint: bool = False, accessor_error: Exception | None = None
+    monkeypatch,
+    *,
+    values: dict | None = None,
+    checkpoint_id: str | None = _SEEDED_HEAD,
+    run_manager: _FromChatRunManager | None = None,
+    owner_check_passes: bool = True,
+    seed_checkpoint: bool = False,
+    accessor_error: Exception | None = None,
+    stub_model_authz: bool = True,
 ):
     app = make_authed_test_app(owner_check_passes=owner_check_passes)
     app.include_router(threads.router)
@@ -103,15 +121,24 @@ def _make_app(
     app.state.checkpointer = checkpointer
     app.state.run_manager = run_manager or _FromChatRunManager()
     monkeypatch.setattr(threads, "get_config", lambda: SimpleNamespace(pii_redaction=None))
+    if stub_model_authz:
+        # The route enforces model:use on the deployment default before the
+        # synthesis call; authz wiring itself is covered by the RBAC tests
+        # below and by test_suggestions_model_authorization.
+        monkeypatch.setattr(threads, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace(id="user-1")))
+        monkeypatch.setattr(threads, "authorize_model_use", lambda *_args, **_kwargs: None)
+
+    seeded_ids: list[str] = []
+    if seed_checkpoint:
+        seeded_ids = put_thread(checkpointer, "t-fc", ["2026-11-09T00:00:00+00:00"])
+    effective_checkpoint_id = seeded_ids[-1] if checkpoint_id == _SEEDED_HEAD and seeded_ids else (None if checkpoint_id == _SEEDED_HEAD else checkpoint_id)
 
     async def build_accessor(request, *, thread_id, **kwargs):
         if accessor_error is not None:
             raise accessor_error
-        return _FakeAccessor(dict(values or {}), checkpoint_id=checkpoint_id), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+        return _FakeAccessor(dict(values or {}), checkpoint_id=effective_checkpoint_id), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
 
     monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(side_effect=build_accessor))
-    if seed_checkpoint:
-        put_thread(checkpointer, "t-fc", ["2026-11-09T00:00:00+00:00"])
     return app, checkpointer
 
 
@@ -375,6 +402,79 @@ def test_from_chat_save_conflict_409s_like_put(monkeypatch):
     assert response.status_code == 409
     assert response.json()["detail"] == _PUT_BUSY_DETAIL
     assert asyncio.run(threads.read_thread_goal(checkpointer, "t-fc")) is None
+
+
+def test_from_chat_denied_model_is_rejected_before_synthesis(monkeypatch):
+    # The synthesis call sends thread context to the deployment default model.
+    # A role denied that model must get the same 403 the suggestions route
+    # returns — before the model call, so the conversation never reaches the
+    # denied profile even transiently.
+    from fastapi import HTTPException as _HTTPException
+
+    synthesis = _mock_synthesis(monkeypatch)
+    run_manager = _FromChatRunManager()
+    app, checkpointer = _make_app(monkeypatch, values={"messages": _MESSAGES}, run_manager=run_manager, seed_checkpoint=True, stub_model_authz=False)
+    monkeypatch.setattr(threads, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace(id="user-1", system_role="user")))
+    seen: list = []
+
+    def _deny(user, model_name, *, is_internal, app_config):
+        seen.append((model_name, is_internal))
+        raise _HTTPException(status_code=403, detail="Model 'restricted' is not available for your role")
+
+    monkeypatch.setattr(threads, "authorize_model_use", _deny)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/t-fc/goal/from-chat", json={})
+
+    assert response.status_code == 403
+    # The check is for the factory default (model_name None), same as the
+    # suggestions route's default-model admission.
+    assert seen == [(None, False)]
+    synthesis.assert_not_awaited()
+    assert run_manager.reservations == 0
+    assert asyncio.run(threads.read_thread_goal(checkpointer, "t-fc")) is None
+
+
+def test_from_chat_allowed_model_reaches_synthesis(monkeypatch):
+    # The admission check must not block the ordinary allowed path.
+    synthesis = _mock_synthesis(monkeypatch)
+    app, _ = _make_app(monkeypatch, values={"messages": _MESSAGES}, seed_checkpoint=True, stub_model_authz=False)
+    monkeypatch.setattr(threads, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace(id="user-1", system_role="user")))
+    monkeypatch.setattr(threads, "authorize_model_use", lambda *_args, **_kwargs: None)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/t-fc/goal/from-chat", json={})
+
+    assert response.status_code == 200, response.text
+    synthesis.assert_awaited_once()
+
+
+def test_from_chat_checkpoint_moved_during_synthesis_409s_goal_changed(monkeypatch):
+    # The reviewer's repro: a goal (or any checkpoint write) lands while the
+    # model call is in flight, moving the head. The save is a compare-and-swap
+    # against the head the synthesis read, so the stale objective is rejected
+    # instead of clobbering the newer state.
+    run_manager = _FromChatRunManager()
+    app, checkpointer = _make_app(monkeypatch, values={"messages": _MESSAGES}, run_manager=run_manager, seed_checkpoint=True)
+
+    newer_goal_objective = "The user set a newer goal mid-synthesis."
+
+    async def _synthesis_side_effect(**kwargs):
+        # Simulate PUT /goal landing during the model call: the real head
+        # advances past what the route read, and a newer goal exists.
+        await threads.write_thread_goal(checkpointer, "t-fc", threads.build_goal_state(newer_goal_objective), as_node="goal")
+        return "The stale synthesized objective."
+
+    monkeypatch.setattr(threads, "synthesize_goal_objective", AsyncMock(side_effect=_synthesis_side_effect))
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads/t-fc/goal/from-chat", json={})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"code": "goal_changed"}
+    # The user's newer goal survived: the stale objective was never written.
+    saved = asyncio.run(threads.read_thread_goal(checkpointer, "t-fc"))
+    assert saved is not None and saved["objective"] == newer_goal_objective
 
 
 def test_from_chat_owner_check_denies(monkeypatch):

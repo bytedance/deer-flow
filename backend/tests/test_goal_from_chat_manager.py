@@ -200,6 +200,7 @@ def test_from_chat_no_thread_short_circuits_without_http(monkeypatch):
         pytest.param(422, {"detail": {"code": "unclear"}}, "I couldn't form a clear goal from this conversation. Try adding a hint, e.g. /goal from-chat focus on the vendor totals.", id="unclear"),
         pytest.param(422, {"detail": {"code": "no_context"}}, "There is no conversation content to build a goal from yet. Discuss the task first, or set it directly with /goal <objective>.", id="no-context"),
         pytest.param(422, {"detail": {"code": "pending_clarification"}}, "The assistant is still waiting for your answer in this conversation. Reply to it first, then retry /goal from-chat.", id="pending-clarification"),
+        pytest.param(409, {"detail": {"code": "goal_changed"}}, "The conversation changed while the goal was being composed, so nothing was saved. Retry /goal from-chat, or set it directly with /goal <objective>.", id="goal-changed"),
         pytest.param(502, {"detail": {"code": "synthesis_failed"}}, "Failed to compose the goal from the conversation. Try again, or set it directly with /goal <objective>.", id="synthesis-failed"),
         pytest.param(500, {"detail": "Failed to set thread goal"}, "Failed to compose the goal from the conversation. Try again, or set it directly with /goal <objective>.", id="server-error"),
     ],
@@ -240,6 +241,48 @@ def test_from_chat_saved_but_run_not_started_is_reported(monkeypatch):
     # run did not start rather than claim a fresh failure or stay silent.
     assert len(replies) == 1 and "Ship it." in replies[0].text
     assert result is not None and "did not start" in result
+
+
+def test_from_chat_conversation_switched_during_synthesis_does_not_start_the_run(monkeypatch):
+    # The reviewer's repro: ``/new`` arrives while synthesis waits. The goal is
+    # saved in the original thread, but the chat's binding now points at the
+    # new thread — starting the run would execute the old task there.
+    objective = "Reconcile vendors A and B."
+    manager, calls = _make_manager(monkeypatch, respond=lambda r: httpx.Response(200, json={"goal": {"objective": objective, "status": "active"}}))
+    replies = _captured_replies(manager)
+    chat = AsyncMock()
+    monkeypatch.setattr(manager, "_handle_chat", chat)
+    # First lookup (command dispatch) → t-1; the post-save re-check → t-2.
+    lookups = iter(["t-1", "t-2"])
+    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(side_effect=lambda msg: next(lookups)))
+
+    result = _run(manager._handle_goal_command(_msg("/goal from-chat"), "from-chat"))
+
+    # The save still addressed the original thread.
+    assert calls[0].url.path == "/api/threads/t-1/goal/from-chat"
+    # No run started, and no confirmation card claimed one would.
+    chat.assert_not_awaited()
+    assert replies == []
+    assert result is not None
+    assert "switched to a new conversation" in result
+    assert objective in result
+
+
+def test_from_chat_binding_recheck_failure_falls_through_to_run_start(monkeypatch):
+    # A failing lookup must not strand a saved goal behind a missing reply:
+    # fall through to _handle_chat, whose own resolution fails honestly.
+    objective = "Ship it."
+    manager, _ = _make_manager(monkeypatch, respond=lambda r: httpx.Response(200, json={"goal": {"objective": objective, "status": "active"}}))
+    _captured_replies(manager)
+    chat = AsyncMock()
+    monkeypatch.setattr(manager, "_handle_chat", chat)
+    lookups = iter(["t-1"])
+    monkeypatch.setattr(manager, "_lookup_thread_id", AsyncMock(side_effect=lambda msg: next(lookups) if lookups else (_ for _ in ()).throw(RuntimeError("store down"))))
+
+    result = _run(manager._handle_goal_command(_msg("/goal from-chat"), "from-chat"))
+
+    assert result is None
+    chat.assert_awaited_once()
 
 
 def test_from_chat_zh_locale_confirmation_is_chinese(monkeypatch):

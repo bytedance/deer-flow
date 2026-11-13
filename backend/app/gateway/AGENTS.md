@@ -59,7 +59,11 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
   compaction, `POST /threads/{id}/state`, both goal routes (`PUT` / `DELETE
   /threads/{id}/goal`), and the `/goal from-chat` save (`POST
   /threads/{id}/goal/from-chat`) — use `services.reserve_checkpoint_write()`.
-  `PUT /goal` creates a missing checkpoint; from-chat does not.
+  `PUT /goal` creates a missing checkpoint; from-chat does not. From-chat
+  saves with `expected_checkpoint_id` pinned to the head its synthesis read:
+  a write that landed during the model call rejects the stale objective
+  instead of clobbering the newer state, and the model call itself passes the
+  same `authorize_model_use` admission as the suggestions route.
 - **Several workers.** In-memory run records exist only on the worker that owns the
   run. Cancel, takeover and orphan recovery are compare-and-set operations on the
   run store; use the store's claim and cancel primitives so that a lease renewal

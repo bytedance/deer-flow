@@ -25,7 +25,7 @@ from langgraph.types import Overwrite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -37,7 +37,7 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
-from app.gateway.deps import get_checkpointer, get_config, get_run_event_store, get_run_manager, get_run_store
+from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -71,6 +71,7 @@ from deerflow.runtime.events.message_seq import stamp_messages_with_seq
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     GOAL_OUTCOME_CHANNEL,
+    GoalWriteConflict,
     build_goal_state,
     ensure_thread_checkpoint,
     goal_thread_lock,
@@ -1609,6 +1610,9 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     synthesizing anyway lets the model invent the missing decision. A pending
     tool approval is a 409 like the other goal mutations, and the save
     suppresses subagent-batch continuations queued under the previous goal.
+    The save is a compare-and-swap against the checkpoint the synthesis read:
+    a goal or checkpoint write that landed during the model call rejects the
+    stale objective with a 409 ``goal_changed`` instead of clobbering it.
     The synthesis is read-only until the save; the caller starts the run through
     its own existing run path.
     """
@@ -1639,7 +1643,8 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     except Exception:
         logger.exception("Failed to read thread %s state for goal synthesis", sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to read thread state") from None
-    if not (snapshot.config or {}).get("configurable", {}).get("checkpoint_id"):
+    source_checkpoint_id = (snapshot.config or {}).get("configurable", {}).get("checkpoint_id")
+    if not source_checkpoint_id:
         raise HTTPException(status_code=422, detail={"code": "no_context"})
 
     values = snapshot.values or {}
@@ -1661,6 +1666,15 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     )
     if not context.strip():
         raise HTTPException(status_code=422, detail={"code": "no_context"})
+
+    # Model admission before the synthesis call: the route sends thread
+    # context to the deployment's default model (the same factory default
+    # run_oneshot_llm resolves when model_name is None), so a role denied
+    # that model must get the same 403 the suggestions route returns.
+    # Checked ahead of the model call, not at save time: a denied profile
+    # must never receive the conversation even transiently.
+    user = await get_current_user_from_request(request)
+    authorize_model_use(user, None, is_internal=_is_internal_caller(request, user), app_config=app_config)
 
     # The synthesis call runs outside every lock/reservation: a model call can
     # take tens of seconds and must not hold the thread's write admission.
@@ -1684,12 +1698,18 @@ async def synthesize_thread_goal_from_chat(thread_id: ThreadId, body: ThreadGoal
     goal = build_goal_state(objective)
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
-            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal")
+            # Compare-and-swap against the head the synthesis read: a goal (or
+            # any checkpoint write) that landed during the model call means the
+            # objective was composed from a conversation that is no longer
+            # current, and saving it would silently clobber the newer state.
+            await write_thread_goal(checkpointer, thread_id, goal, as_node="goal", expected_checkpoint_id=source_checkpoint_id)
             # Match PUT/DELETE /goal: a new goal supersedes queued subagent-batch
             # continuations that were scheduled under the previous one.
             batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
             if batch_repo is not None:
                 await batch_repo.suppress_thread_continuations(thread_id)
+    except GoalWriteConflict:
+        raise HTTPException(status_code=409, detail={"code": "goal_changed"}) from None
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Set the goal after the run finishes.") from None
     except HTTPException:

@@ -4228,6 +4228,9 @@ class ChannelManager:
         so the user is shown what was saved before the run streams its output.
         Saving and the busy/409 guard stay on the Gateway route; this only
         reports the outcome and hands the saved objective to ``_handle_chat``.
+        Before handing off, the conversation binding is re-checked: synthesis
+        takes seconds, and a ``/new`` during that window would otherwise make
+        ``_handle_chat`` start the old task in the freshly switched thread.
         """
         if not thread_id:
             return await self._goal_reply(msg, "from_chat_no_thread")
@@ -4242,6 +4245,25 @@ class ChannelManager:
         if not isinstance(objective, str) or not objective.strip():
             logger.warning("Goal from-chat returned no usable objective")
             return await self._goal_reply(msg, "from_chat_failed")
+
+        # The conversation may have been switched (``/new``) while synthesis
+        # waited: the goal is saved in the thread we addressed, but the chat's
+        # binding now points elsewhere, and ``_handle_chat`` would resolve the
+        # current binding and start the old task in the new conversation. A
+        # failing lookup falls through to the run start: ``_handle_chat``'s own
+        # thread resolution would fail the same way and report honestly.
+        try:
+            current_thread_id = await self._lookup_thread_id(msg)
+        except Exception:
+            logger.warning("[Manager] goal from-chat could not re-check the conversation binding; starting the run", exc_info=True)
+            current_thread_id = thread_id
+        if current_thread_id != thread_id:
+            logger.info(
+                "[Manager] goal from-chat saved in thread_id=%s but the conversation switched to %s; not starting the run",
+                thread_id,
+                current_thread_id or "<unbound>",
+            )
+            return (await self._goal_reply(msg, "from_chat_conversation_switched")).format(objective=objective)
 
         # Show the synthesized objective, then start exactly one run with it as
         # the task text (same run path as the literal set branch). This must be
@@ -4273,9 +4295,9 @@ class ChannelManager:
 
         Only the known in-flight conflict, a client-side timeout, and the
         structured synthesis outcomes (``unclear``, ``no_context``,
-        ``pending_clarification``) get their own wording; anything else
-        degrades to the generic retry reply. The model's ``reason`` is never
-        read here, and the Gateway does not log it verbatim either.
+        ``pending_clarification``, ``goal_changed``) get their own wording;
+        anything else degrades to the generic retry reply. The model's ``reason``
+        is never read here, and the Gateway does not log it verbatim either.
         """
         if self._is_goal_in_flight_error(exc):
             return await self._goal_reply(msg, "busy")
@@ -4299,6 +4321,10 @@ class ChannelManager:
             return await self._goal_reply(msg, "from_chat_no_context")
         if code == "pending_clarification":
             return await self._goal_reply(msg, "from_chat_pending_clarification")
+        if code == "goal_changed":
+            # The save's compare-and-swap found a newer checkpoint: another
+            # goal (or write) landed during synthesis, so nothing was saved.
+            return await self._goal_reply(msg, "from_chat_changed")
         logger.warning("Goal from-chat failed through gateway", exc_info=True)
         return await self._goal_reply(msg, "from_chat_failed")
 
