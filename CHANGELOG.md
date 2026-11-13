@@ -68,10 +68,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **doctor:** Model credentials that still contain an obvious sample value or
-  only whitespace no longer make `make doctor` report the model as ready.
-  ([#8184](https://github.com/bytedance/deer-flow/pull/8184))
-
 - **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
   exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
   declarations reached the model and the provider silently kept only one.
