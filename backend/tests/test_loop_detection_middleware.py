@@ -717,20 +717,6 @@ class TestLoopDetection:
 
         assert mw.consume_stop_reason("test-run") is None
 
-    def test_tool_frequency_hard_stop_stamps_loop_capped(self):
-        """The per-tool frequency hard-stop also stamps ``loop_capped`` — it is
-        the same hard-stop path, just a different detector catching the same
-        tool *type* called many times with varying arguments."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        # Same tool type, varying args -> frequency detector, not hash detector.
-        for i in range(3):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            if i < 2:
-                assert result is None, f"unexpected hard stop at call {i}"
-
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-
     def test_hard_stop_stamps_loop_capped_with_explicit_none_run_id(self):
         """Regression: a subagent whose ``run_id`` is genuinely ``None`` must
         still round-trip its ``loop_capped`` stop reason.
@@ -1003,24 +989,6 @@ class TestRunScopedTracking:
         assert len(mw._warned[_scope_key("shared-thread", "run-1")]) == 1
         assert len(mw._warned[_scope_key("shared-thread", "run-2")]) == 1
 
-    def test_tool_frequency_warning_suppression_is_run_scoped(self):
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=100,
-        )
-
-        for run_id in ("run-1", "run-2"):
-            runtime = _make_runtime("shared-thread", run_id)
-            for suffix in ("first", "second"):
-                assert mw._apply(_make_state(tool_calls=[_bash_call(f"{run_id}-{suffix}")]), runtime) is None
-            assert mw._pending_warnings.get(_pending_key("shared-thread", run_id))
-            mw.after_agent({"messages": []}, runtime)
-
-        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-1")] == {"bash"}
-        assert mw._tool_freq_warned[_scope_key("shared-thread", "run-2")] == {"bash"}
-
     def test_reset_thread_clears_every_run_scope_and_preserves_other_threads(self):
         mw = LoopDetectionMiddleware(
             warn_threshold=2,
@@ -1046,7 +1014,7 @@ class TestRunScopedTracking:
             mw._warned,
             mw._tool_name_history,
             mw._tool_name_counter,
-            mw._tool_freq_warned,
+            mw._tool_freq_reported,
             mw._pending_warnings,
             mw._pending_warning_touch_order,
         ):
@@ -1221,75 +1189,6 @@ class TestLoopDetectionRunEvents:
             "is_subagent": False,
             "agent_id": None,
             "detection_layer": "identical_call_set",
-            "tool_names": ["bash"],
-            "count": 3,
-            "threshold": 3,
-        }
-
-    def test_tool_frequency_warning_records_once(self):
-        journal = MagicMock()
-        runtime = self._runtime_with_journal(journal)
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=10,
-        )
-
-        # Vary the arguments so the identical-call detector cannot fire.
-        for index in range(3):
-            result = mw._apply(
-                _make_state(tool_calls=[_bash_call(f"command-{index}")]),
-                runtime,
-            )
-            assert result is None
-
-        journal.record_middleware.assert_called_once()
-        recorded = journal.record_middleware.call_args
-
-        assert recorded.kwargs["action"] == "warn"
-        assert recorded.kwargs["changes"] == {
-            "is_subagent": False,
-            "agent_id": None,
-            "detection_layer": "tool_frequency",
-            "tool_names": ["bash"],
-            "count": 2,
-            "threshold": 2,
-        }
-
-    def test_tool_frequency_hard_stop_records_event(self):
-        journal = MagicMock()
-        runtime = self._runtime_with_journal(journal)
-        mw = LoopDetectionMiddleware(
-            warn_threshold=100,
-            hard_limit=200,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=3,
-        )
-
-        for index in range(2):
-            assert (
-                mw._apply(
-                    _make_state(tool_calls=[_bash_call(f"command-{index}")]),
-                    runtime,
-                )
-                is None
-            )
-
-        result = mw._apply(
-            _make_state(tool_calls=[_bash_call("command-2")]),
-            runtime,
-        )
-
-        assert result is not None
-        assert journal.record_middleware.call_count == 2
-
-        recorded = journal.record_middleware.call_args_list[-1]
-        assert recorded.kwargs["action"] == "hard_stop"
-        assert recorded.kwargs["changes"] == {
-            "is_subagent": False,
-            "agent_id": None,
-            "detection_layer": "tool_frequency",
             "tool_names": ["bash"],
             "count": 3,
             "threshold": 3,
@@ -1743,319 +1642,110 @@ class TestHardStopWithListContent:
 
 
 class TestToolFrequencyDetection:
-    """Tests for per-tool-type frequency detection (Layer 2).
-
-    This catches the case where an agent calls the same tool type many times
-    with *different* arguments (e.g. read_file on 40 different files), which
-    bypasses hash-based detection.
-    """
+    """Tool-name frequency is an observability metric, never a loop decision."""
 
     def _read_call(self, path):
         return {"name": "read_file", "id": f"call_read_{path}", "args": {"path": path}}
 
-    def test_below_freq_warn_returns_none(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+    def test_thresholds_are_observed_without_warning_or_stop(self, caplog):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=5)
         runtime = _make_runtime()
 
-        for i in range(4):
-            result = mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-            assert result is None
+        with caplog.at_level("INFO"):
+            for i in range(6):
+                result = mw._apply(
+                    _make_state(tool_calls=[self._read_call(f"/file_{i}.py")]),
+                    runtime,
+                )
+                assert result is None
 
-    def test_freq_warn_at_threshold(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
+        assert not mw._pending_warnings
+        assert not mw._stop_reason
+        assert mw._tool_name_counter[_scope_key()]["read_file"] == 6
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.metric, record.threshold, record.action) for record in records] == [
+            ("warn", 3, "observe_only"),
+            ("hard_limit", 5, "observe_only"),
+        ]
+
+    def test_window_decay_rearms_each_metric(self, caplog):
+        mw = LoopDetectionMiddleware(
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+            window_size=4,
+        )
         runtime = _make_runtime()
 
-        for i in range(4):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+        with caplog.at_level("INFO"):
+            sequence = [
+                ("read_file", 0),
+                ("read_file", 1),
+                ("read_file", 2),
+                ("bash", 0),
+                ("bash", 1),
+                ("bash", 2),
+                ("bash", 3),
+                ("read_file", 3),
+                ("read_file", 4),
+                ("read_file", 5),
+            ]
+            for name, value in sequence:
+                call = self._read_call(f"/{value}.py") if name == "read_file" else _bash_call(str(value))
+                assert mw._apply(_make_state(tool_calls=[call]), runtime) is None
 
-        # 5th call queues a per-tool-type frequency warning; state untouched.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_4.py")]), runtime)
-        assert result is None
-        queued = mw._pending_warnings.get(_pending_key(), [])
-        assert queued
-        assert "read_file" in queued[0]
-        assert "LOOP DETECTED" in queued[0]
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.tool_name, record.metric) for record in records] == [
+            ("read_file", "warn"),
+            ("read_file", "hard_limit"),
+            ("bash", "warn"),
+            ("bash", "hard_limit"),
+            ("read_file", "warn"),
+            ("read_file", "hard_limit"),
+        ]
 
-    def test_freq_warn_only_queued_once(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
+    def test_different_tools_and_runs_are_isolated(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=5)
+        runtime_a = _make_runtime("thread-A", "run-A")
+        runtime_b = _make_runtime("thread-B", "run-B")
 
         for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
+            assert mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a) is None
+            assert mw._apply(_make_state(tool_calls=[_bash_call(f"b_{i}")]), runtime_b) is None
 
-        # 3rd queues a frequency warning.
-        mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert len(mw._pending_warnings[_pending_key()]) == 1
+        assert mw._tool_name_counter[_scope_key("thread-A", "run-A")]["read_file"] == 2
+        assert mw._tool_name_counter[_scope_key("thread-B", "run-B")]["bash"] == 2
+        assert _scope_key("thread-B", "run-B") not in mw._tool_name_counter or "read_file" not in mw._tool_name_counter[_scope_key("thread-B", "run-B")]
 
-        # 4th: same tool name, no additional enqueue.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_3.py")]), runtime)
-        assert result is None
-        assert len(mw._pending_warnings[_pending_key()]) == 1
-
-    def test_freq_hard_stop_at_limit(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=6)
-        runtime = _make_runtime()
-
-        for i in range(5):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 6th call triggers hard stop
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_5.py")]), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert msg.tool_calls == []
-        assert "FORCED STOP" in msg.content
-        assert "read_file" in msg.content
-
-    def test_windowed_frequency_decay_avoids_hard_stop_when_interleaved(self):
-        """More than ``window_size`` total calls to one tool type must NOT hard-stop
-        as long as they are spread out.
-
-        Interleaving read_file with another tool keeps the per-window count under
-        the hard limit, so the windowed counter decays instead of accumulating
-        monotonically. The old monotonic counter would hard-stop on the 4th
-        read_file regardless of spacing.
-        """
-        mw = LoopDetectionMiddleware(tool_freq_warn=100, tool_freq_hard_limit=4, window_size=5)
-        runtime = _make_runtime()
-
-        # Alternate read_file with bash. In any window of 5 consecutive calls the
-        # read_file count peaks at 3 (< hard_limit=4), so no hard stop fires even
-        # though total read_file calls (8) exceeds window_size (5). Distinct args
-        # keep the Layer-1 hash detector from firing, isolating Layer 2.
-        read_count = 0
-        for i in range(8):
-            result = mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-            assert result is None, f"read call {i} unexpectedly hard-stopped"
-            read_count += 1
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"bash call {i} unexpectedly hard-stopped"
-
-        assert read_count == 8  # more than window_size total read_file calls, no hard stop
-
-    def test_rapid_identical_tool_type_in_one_window_still_hard_stops(self):
-        """The decay must not weaken the guard: ``window_size``+ rapid calls to the
-        same tool type within one window still trip the frequency hard-stop."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=100, tool_freq_hard_limit=4, window_size=5)
-        runtime = _make_runtime()
-
-        # Distinct args each call -> the hash-based (Layer 1) detector never fires,
-        # isolating the per-tool-type frequency layer.
-        for i in range(3):
-            assert mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}.py")]), runtime) is None
-
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/f_3.py")]), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert msg.tool_calls == []
-        assert "FORCED STOP" in msg.content
-        assert "read_file" in msg.content
-
-    def test_different_tools_tracked_independently(self):
-        """read_file and bash should have independent frequency counters."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        # 2 read_file calls
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 2 bash calls — should not trigger (bash count = 2, read_file count = 2)
-        for i in range(2):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None
-
-        # 3rd read_file triggers — warning is queued (state unchanged).
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert result is None
-        assert "read_file" in mw._pending_warnings[_pending_key()][0]
-
-    def test_freq_reset_clears_state(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        mw.reset()
-
-        # After reset, count restarts — should not trigger
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_new.py")]), runtime)
-        assert result is None
-
-    def test_freq_reset_per_thread_clears_only_target(self):
-        """reset(thread_id=...) should clear frequency state for that thread only."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime_a = _make_runtime("thread-A")
-        runtime_b = _make_runtime("thread-B")
-
-        # 2 calls on each thread
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/a_{i}.py")]), runtime_a)
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/b_{i}.py")]), runtime_b)
-
-        # Reset only thread-A
-        mw.reset(thread_id="thread-A")
-
-        assert _scope_key("thread-A") not in mw._tool_name_history
-
-        # thread-B state should still be intact — 3rd call queues a warn.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/b_2.py")]), runtime_b)
-        assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-B")][0]
-
-        # thread-A restarted from 0 — should not trigger
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/a_new.py")]), runtime_a)
-        assert result is None
-
-    def test_freq_per_thread_isolation(self):
-        """Frequency counts should be independent per thread."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime_a = _make_runtime("thread-A")
-        runtime_b = _make_runtime("thread-B")
-
-        # 2 calls on thread A
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime_a)
-
-        # 2 calls on thread B — should NOT push thread A over threshold
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/other_{i}.py")]), runtime_b)
-
-        # 3rd call on thread A — queues a warning (count=3 for thread A only).
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime_a)
-        assert result is None
-        assert "LOOP DETECTED" in mw._pending_warnings[_pending_key("thread-A")][0]
-        assert not mw._pending_warnings.get(_pending_key("thread-B"))
-
-    def test_freq_counter_cleared_on_eviction(self):
-        """LRU eviction must drop the per-tool frequency counter along with the
-        window deque. Otherwise a reused thread id resumes from a stale count
-        and its first fresh tool call is force-stopped as if the evicted calls
-        never rotated out.
-        """
+    def test_reset_and_lru_eviction_clear_metric_state(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3, max_tracked_threads=2)
-        evicted = _make_runtime("thread-evicted")
-
-        # Build the thread's frequency counter up toward the hard limit.
+        evicted = _make_runtime("evicted", "run")
         for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), evicted)
+            mw._apply(_make_state(tool_calls=[self._read_call(f"/old_{i}.py")]), evicted)
+        mw._apply(_make_state(tool_calls=[_bash_call("a")]), _make_runtime("a", "run"))
+        mw._apply(_make_state(tool_calls=[_bash_call("b")]), _make_runtime("b", "run"))
+        assert _scope_key("evicted", "run") not in mw._tool_freq_reported
 
-        # Two other threads push it out of the LRU window (max_tracked_threads=2).
-        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-a"))
-        mw._apply(_make_state(tool_calls=[_bash_call("ls")]), _make_runtime("thread-b"))
-        assert _scope_key("thread-evicted") not in mw._tool_name_history
-        assert _scope_key("thread-evicted") not in mw._tool_name_counter
+        mw.reset(thread_id="a")
+        assert _scope_key("a", "run") not in mw._tool_freq_reported
+        mw.reset()
+        assert not mw._tool_freq_reported
 
-        # Thread id reused: its first fresh read_file must not force-stop.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), evicted)
-        assert result is None
-
-    def test_freq_counter_cleared_on_reset(self):
-        """reset() must clear the per-tool frequency counter, not just the
-        window deque, so a restarted thread counts from zero.
-        """
-        # Per-thread reset.
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime("thread-A")
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-        mw.reset(thread_id="thread-A")
-        assert _scope_key("thread-A") not in mw._tool_name_counter
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime)
-        assert result is None
-
-        # Full reset.
-        mw2 = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime2 = _make_runtime("thread-B")
-        for i in range(2):
-            mw2._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}.py")]), runtime2)
-        mw2.reset()
-        assert not mw2._tool_name_counter
-        result = mw2._apply(_make_state(tool_calls=[self._read_call("/fresh.py")]), runtime2)
-        assert result is None
-
-    def test_multi_tool_single_response_counted(self):
-        """When a single response has multiple tool calls, each is counted."""
-        mw = LoopDetectionMiddleware(tool_freq_warn=5, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-
-        # Response 1: 2 read_file calls → count = 2
-        call = [self._read_call("/a.py"), self._read_call("/b.py")]
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is None
-
-        # Response 2: 2 more → count = 4
-        call = [self._read_call("/c.py"), self._read_call("/d.py")]
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is None
-
-        # Response 3: 1 more → count = 5 → queues warn.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/e.py")]), runtime)
-        assert result is None
-        assert "read_file" in mw._pending_warnings[_pending_key()][0]
-
-    def test_override_tool_uses_override_thresholds(self):
-        """A tool in tool_freq_overrides uses its own thresholds, not the global ones."""
+    def test_overrides_only_change_observation_thresholds(self, caplog):
         mw = LoopDetectionMiddleware(
-            tool_freq_warn=5,
-            tool_freq_hard_limit=10,
-            tool_freq_overrides={"bash": (50, 100)},
+            tool_freq_warn=2,
+            tool_freq_hard_limit=3,
+            tool_freq_overrides={"bash": (4, 6)},
         )
         runtime = _make_runtime()
-
-        # 10 bash calls — would hit global hard_limit=10, but bash override is 100
-        for i in range(10):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"unexpected trigger on call {i + 1}"
-
-    def test_non_override_tool_falls_back_to_global(self):
-        """A tool NOT in tool_freq_overrides uses the global warn/hard_limit."""
-        mw = LoopDetectionMiddleware(
-            tool_freq_warn=3,
-            tool_freq_hard_limit=6,
-            tool_freq_overrides={"bash": (50, 100)},
-        )
-        runtime = _make_runtime()
-
-        for i in range(2):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/file_{i}.py")]), runtime)
-
-        # 3rd read_file call hits global warn=3 (read_file has no override).
-        # Warning delivery is deferred to wrap_model_call so the just-emitted
-        # AIMessage(tool_calls=...) is not mutated before ToolMessages exist.
-        result = mw._apply(_make_state(tool_calls=[self._read_call("/file_2.py")]), runtime)
-        assert result is None
-        queued = mw._pending_warnings.get(_pending_key(), [])
-        assert queued
-        assert "read_file" in queued[0]
-
-    def test_hash_detection_takes_priority(self):
-        """Hash-based hard stop fires before frequency check for identical calls."""
-        mw = LoopDetectionMiddleware(
-            warn_threshold=2,
-            hard_limit=3,
-            tool_freq_warn=100,
-            tool_freq_hard_limit=200,
-        )
-        runtime = _make_runtime()
-        call = [self._read_call("/same_file.py")]
-
-        for _ in range(2):
-            mw._apply(_make_state(tool_calls=call), runtime)
-
-        # 3rd identical call → hash hard_limit=3 fires (not freq)
-        result = mw._apply(_make_state(tool_calls=call), runtime)
-        assert result is not None
-        msg = result["messages"][0]
-        assert isinstance(msg, AIMessage)
-        assert _HARD_STOP_MSG in msg.content
+        with caplog.at_level("INFO"):
+            for i in range(6):
+                assert mw._apply(_make_state(tool_calls=[_bash_call(f"cmd-{i}")]), runtime) is None
+        records = [r for r in caplog.records if r.message == "Tool frequency metric reached"]
+        assert [(r.metric, r.threshold) for r in records] == [("warn", 4), ("hard_limit", 6)]
 
 
 class TestToolCallBatchDecisions:
-    """A soft warning must not skip accounting or mask a hard stop in a batch."""
+    """Frequency accounting must not mask identical-call detection."""
 
     @staticmethod
     def _call(name, value):
@@ -2067,179 +1757,48 @@ class TestToolCallBatchDecisions:
             args = {"value": value}
         return {"name": name, "id": f"call_{name}_{value}", "args": args}
 
-    def test_single_batch_crossing_both_thresholds_hard_stops(self):
+    def test_batch_counts_all_tool_names_without_creating_decision(self, caplog):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        journal = MagicMock()
-        runtime.context["__run_journal"] = journal
-        calls = [self._call("read_file", i) for i in range(3)]
-
-        result = mw.after_model(_make_state(tool_calls=calls), runtime)
-
-        assert result is not None
-        assert result["messages"][0].tool_calls == []
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
-        assert not mw._pending_warnings
-        assert not mw._tool_freq_warned.get(_scope_key())
-        journal.record_middleware.assert_called_once()
-        recorded = journal.record_middleware.call_args.kwargs
-        assert recorded["action"] == "hard_stop"
-        assert recorded["changes"]["detection_layer"] == "tool_frequency"
-        assert recorded["changes"]["count"] == 3
-
-    @pytest.mark.parametrize("hard_stop_first", [False, True])
-    def test_one_tools_warning_cannot_mask_another_tools_hard_stop(self, hard_stop_first):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        mw._apply(_make_state(tool_calls=[self._call("bash", 0)]), runtime)
-        mw._apply(_make_state(tool_calls=[self._call("read_file", 0), self._call("bash", 1)]), runtime)
-        calls = [self._call("read_file", 1), self._call("bash", 2)]
-        if hard_stop_first:
-            calls.reverse()
-
-        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert decision is not None and decision.hard_stop
-        assert decision.tool_names == ("bash",)
-        assert decision.count == 3
-        assert "read_file" not in mw._tool_freq_warned[_scope_key()]
-
-    def test_identical_call_warning_cannot_mask_frequency_hard_stop(self):
-        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=5, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [self._call("read_file", 0), self._call("read_file", 1)]
-        mw._apply(_make_state(tool_calls=calls), runtime)
-
-        decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert decision is not None and decision.hard_stop
-        assert decision.detection_layer == "tool_frequency"
-        assert decision.count == 3
-        assert not mw._warned.get(_scope_key())
-
-    def test_warning_batch_counts_all_calls_and_only_marks_selected_warning(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=10)
         runtime = _make_runtime()
         calls = [self._call("read_file", i) for i in range(3)] + [self._call("bash", i) for i in range(2)]
 
-        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+        with caplog.at_level("INFO"):
+            decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
-        assert first is not None and first.action == "warn"
-        assert first.tool_names == ("read_file",)
+        assert decision is None
         assert list(mw._tool_name_history[_scope_key()]) == ["read_file"] * 3 + ["bash"] * 2
         assert dict(mw._tool_name_counter[_scope_key()]) == {"read_file": 3, "bash": 2}
-        assert mw._tool_freq_warned[_scope_key()] == {"read_file"}
+        assert not mw._pending_warnings
+        assert {record.tool_name for record in caplog.records if record.message == "Tool frequency metric reached"} == {"read_file", "bash"}
 
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("bash", 2)]), runtime)
-        assert second is not None and second.action == "warn"
-        assert second.tool_names == ("bash",)
-        assert second.count == 3
+    def test_identical_call_detection_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=3, tool_freq_warn=1, tool_freq_hard_limit=2)
+        runtime = _make_runtime()
+        calls = [self._call("read_file", 0)]
+        mw._apply(_make_state(tool_calls=calls), runtime)
+        mw._apply(_make_state(tool_calls=calls), runtime)
 
-    def test_hash_warning_preserves_frequency_accounting_and_pending_warning(self):
+        result = mw._apply(_make_state(tool_calls=calls), runtime)
+
+        assert result is not None
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_hash_warning_preserves_frequency_metrics(self, caplog):
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=10, tool_freq_warn=2, tool_freq_hard_limit=5)
         runtime = _make_runtime()
         calls = [self._call("read_file", 0)]
         assert mw._track_and_check(_make_state(tool_calls=calls), runtime) is None
 
-        hash_warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
+        with caplog.at_level("INFO"):
+            warning = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
-        assert hash_warning is not None and hash_warning.detection_layer == "identical_call_set"
+        assert warning is not None and warning.detection_layer == "identical_call_set"
         assert mw._tool_name_counter[_scope_key()]["read_file"] == 2
-        assert not mw._tool_freq_warned.get(_scope_key())
-
-        freq_warning = mw._track_and_check(_make_state(tool_calls=[self._call("read_file", 1)]), runtime)
-        assert freq_warning is not None and freq_warning.detection_layer == "tool_frequency"
-        assert freq_warning.count == 3
-
-    def test_warning_that_decays_within_batch_can_warn_on_next_burst(self):
-        mw = LoopDetectionMiddleware(window_size=4, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-        calls = [self._call(name, i) for i, name in enumerate(["a", "b", "a", "c", "d"])]
-
-        first = mw._track_and_check(_make_state(tool_calls=calls), runtime)
-
-        assert first is not None and first.tool_names == ("a",)
-        assert mw._tool_name_counter[_scope_key()]["a"] == 1
-        assert "a" not in mw._tool_freq_warned[_scope_key()]
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("a", 5)]), runtime)
-        assert second is not None and second.action == "warn"
-        assert second.tool_names == ("a",)
-
-    def test_other_tool_eviction_rearms_frequency_warning(self):
-        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
-        runtime = _make_runtime()
-
-        first = mw._track_and_check(
-            _make_state(tool_calls=[self._call(name, i) for i, name in enumerate(["a", "b", "a"])]),
-            runtime,
-        )
-        assert first is not None and first.tool_names == ("a",)
-
-        second = mw._track_and_check(_make_state(tool_calls=[self._call("b", 3)]), runtime)
-        assert second is not None and second.tool_names == ("b",)
-        assert mw._tool_name_counter[_scope_key()]["a"] == 1
-        assert "a" not in mw._tool_freq_warned[_scope_key()]
-
-        third = mw._track_and_check(_make_state(tool_calls=[self._call("a", 4)]), runtime)
-        assert third is not None and third.tool_names == ("a",)
-
-    def test_cross_tool_eviction_rearms_at_evicted_tools_override_threshold(self):
-        mw = LoopDetectionMiddleware(
-            window_size=3,
-            tool_freq_warn=2,
-            tool_freq_hard_limit=5,
-            tool_freq_overrides={"bash": (3, 4)},
-        )
-        runtime = _make_runtime()
-
-        first = mw._track_and_check(
-            _make_state(tool_calls=[self._call("bash", i) for i in range(3)]),
-            runtime,
-        )
-        assert first is not None and first.tool_names == ("bash",)
-        assert mw._tool_freq_warned[_scope_key()] == {"bash"}
-
-        second = mw._track_and_check(
-            _make_state(tool_calls=[self._call("read_file", i) for i in range(3)]),
-            runtime,
-        )
-        assert second is not None and second.tool_names == ("read_file",)
-        assert mw._tool_name_counter[_scope_key()]["bash"] == 2
-        assert "bash" not in mw._tool_freq_warned[_scope_key()]
-
-        third = mw._track_and_check(
-            _make_state(tool_calls=[self._call("bash", i) for i in range(3, 6)]),
-            runtime,
-        )
-        assert third is not None and third.tool_names == ("bash",)
-        assert third.count == 3
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("use_async", [False, True])
-    async def test_batch_hard_stop_prevents_tool_execution_in_real_agent_graph(self, use_async):
-        executed = []
-
-        @as_tool
-        def read_file(path: str) -> str:
-            """Read a fake file without touching the filesystem."""
-            executed.append(path)
-            return path
-
-        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(3)]
-        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
-        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
-        graph = create_agent(model=model, tools=[read_file], middleware=[mw])
-        inputs = {"messages": [("user", "inspect these files")]}
-        kwargs = {"context": {"thread_id": "batch-thread", "run_id": "batch-run"}, "config": {"recursion_limit": 10}}
-
-        result = await graph.ainvoke(inputs, **kwargs) if use_async else graph.invoke(inputs, **kwargs)
-
-        assert executed == []
-        assert len(model.seen_messages) == 1
-        assert result["messages"][-1].tool_calls == []
-        assert "FORCED STOP" in result["messages"][-1].content
-        assert mw.consume_stop_reason("batch-run") == "loop_capped"
-        assert not mw._pending_warnings
+        assert ("read_file", "warn") in mw._tool_freq_reported[_scope_key()]
+        metric_records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.tool_name, record.metric, record.threshold) for record in metric_records] == [
+            ("read_file", "warn", 2),
+        ]
 
 
 class TestFromConfig:
@@ -2301,31 +1860,30 @@ class TestFromConfig:
         mw = LoopDetectionMiddleware.from_config(self._config(tool_freq_overrides={"bash": {"warn": 60, "hard_limit": 120}}))
         assert mw._tool_freq_window >= 120
 
-    def test_tight_burst_hard_stops_under_default_config(self):
-        """Under the real default config, one tool type called many times with
-        *distinct* args (which Layer 1's name+args hash never catches) must still
-        be hard-stopped by Layer 2. This fails if the freq window is capped at
-        ``window_size`` (20) below the hard limit (50)."""
+    def test_tight_burst_records_metric_under_default_config(self, caplog):
+        """The default frequency threshold is observable and never stops work."""
         mw = LoopDetectionMiddleware.from_config(self._config())
         runtime = _make_runtime()
         hard = mw.tool_freq_hard_limit  # 50 by default
 
         # Distinct args every call -> unique hashes -> Layer 1 (hash) never trips.
-        # Only Layer 2 (per-tool-type frequency) can catch this tight burst.
-        for i in range(hard - 1):
-            result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
-            assert result is None, f"unexpected hard stop before the limit at call {i}"
+        with caplog.at_level("INFO"):
+            for i in range(hard):
+                result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{i}")]), runtime)
+                assert result is None, f"frequency metric unexpectedly changed control flow at call {i}"
 
-        # The call that pushes freq_count to the hard limit fires the stop.
-        result = mw._apply(_make_state(tool_calls=[_bash_call(f"cmd_{hard}")]), runtime)
-        assert result is not None
-        assert mw.consume_stop_reason("test-run") == "loop_capped"
+        records = [record for record in caplog.records if record.message == "Tool frequency metric reached"]
+        assert [(record.metric, record.threshold, record.action) for record in records] == [
+            ("warn", mw.tool_freq_warn, "observe_only"),
+            ("hard_limit", hard, "observe_only"),
+        ]
+        assert mw.consume_stop_reason("test-run") is None
 
 
 class TestWarningLetsAgentSaveResultsFirst:
     """F67: a warn-level loop message must not make a subagent drop the
     file it was asked to write. The warning asks for one last save through a
-    file-writing tool before the final answer; the hard stop is unchanged."""
+    file-writing tool before the final answer."""
 
     @staticmethod
     def _write_call(path="/mnt/user-data/workspace/out.md"):
@@ -2346,44 +1904,31 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert "write_file" in warning
         assert warning.index("write what you have collected") < warning.index("produce your final answer")
 
-    def test_freq_warning_names_the_looping_tool_and_allows_saving(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
+    def test_save_call_after_hash_warning_is_not_stripped(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=10)
         runtime = _make_runtime()
-        for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
-        warning = mw._pending_warnings[_pending_key()][0]
-        assert "Stop calling read_file" in warning
-        assert "Stop calling tools and produce your final answer now" not in warning
-        assert "write_file" in warning
-
-    def test_save_call_after_warning_is_not_stripped(self):
-        mw = LoopDetectionMiddleware(tool_freq_warn=3, tool_freq_hard_limit=10)
-        runtime = _make_runtime()
-        for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._read_call(f"/f_{i}")]), runtime)
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         assert mw._pending_warnings[_pending_key()]
-        # The follow-up write is a different tool and a different call set:
-        # neither detection layer acts on it, so the write reaches the tools node.
+        # The follow-up write is a different tool and call set, so it reaches the tools node.
         assert mw._apply(_make_state(tool_calls=[self._write_call()]), runtime) is None
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_warning_allows_a_bounded_read_before_write_recovery(self, layer):
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+    def test_warning_allows_a_bounded_read_before_write_recovery(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "read-before-write" in warning
         assert "read the target file" in warning
         assert "retry the save once" in warning
         assert warning.index("retry the save once") < warning.index("produce your final answer")
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_looping_writer_requires_an_alternative_or_an_unsaved_result(self, layer):
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+    def test_looping_writer_requires_an_alternative_or_an_unsaved_result(self):
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[self._write_call("/out.md" if layer == "hash" else f"/out_{i}.md")]), runtime)
+            mw._apply(_make_state(tool_calls=[self._write_call("/out.md")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "unless it is the looping tool" in warning
         assert "different available file-writing tool" in warning
@@ -2391,14 +1936,13 @@ class TestWarningLetsAgentSaveResultsFirst:
         assert "include the collected results in your final answer" in warning
         assert "file was not saved" in warning
 
-    @pytest.mark.parametrize("layer", ["hash", "frequency"])
-    def test_warning_asks_to_present_created_outputs_before_answering(self, layer):
+    def test_warning_asks_to_present_created_outputs_before_answering(self):
         # Told only to stop calling tools, agents skipped present_files for
         # outputs they had already created, so the run failed its delivery check.
-        mw = LoopDetectionMiddleware(warn_threshold=3 if layer == "hash" else 10, hard_limit=20, tool_freq_warn=3 if layer == "frequency" else 10, tool_freq_hard_limit=20)
+        mw = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20)
         runtime = _make_runtime()
         for i in range(3):
-            mw._apply(_make_state(tool_calls=[_bash_call("ls" if layer == "hash" else f"cmd_{i}")]), runtime)
+            mw._apply(_make_state(tool_calls=[_bash_call("ls")]), runtime)
         warning = mw._pending_warnings[_pending_key()][0]
         assert "If present_files is available" in warning
         assert "already created in /mnt/user-data/outputs" in warning
@@ -2466,8 +2010,8 @@ class TestWarningLetsAgentSaveResultsFirst:
             presented.extend(filepaths)
             return "presented"
 
-        loop = LoopDetectionMiddleware(warn_threshold=10, hard_limit=20, tool_freq_warn=3, tool_freq_hard_limit=10)
-        calls = [dict(_bash_call(f"python build_{i}.py"), id=f"build_{i}") for i in range(3)]
+        loop = LoopDetectionMiddleware(warn_threshold=3, hard_limit=20, tool_freq_warn=10, tool_freq_hard_limit=20)
+        calls = [dict(_bash_call("python build.py"), id=f"build_{i}") for i in range(3)]
         calls.append({"name": "present_files", "id": "present", "args": {"filepaths": ["/mnt/user-data/outputs/report.docx"]}})
         model = _CapturingFakeMessagesListChatModel(responses=[*[AIMessage(content="", tool_calls=[call]) for call in calls], AIMessage(content="The report is ready.")])
         graph = create_agent(model=model, tools=[bash, present_files], middleware=[loop])
@@ -2483,7 +2027,6 @@ class TestWarningLetsAgentSaveResultsFirst:
         "name,expected",
         [
             ("_HARD_STOP_MSG", "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."),
-            ("_TOOL_FREQ_HARD_STOP_MSG", "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."),
         ],
     )
     def test_hard_stop_message_unchanged(self, name, expected):

@@ -187,7 +187,7 @@ async def test_repeated_result_cycle_still_stops():
 
 
 @pytest.mark.asyncio
-async def test_changing_results_remain_subject_to_tool_frequency_budget():
+async def test_changing_results_are_not_stopped_by_tool_frequency_metrics():
     executions = []
 
     @tool
@@ -196,16 +196,17 @@ async def test_changing_results_remain_subject_to_tool_frequency_budget():
         executions.append(len(executions))
         return str(executions[-1])
 
-    model = _ScriptedModel(responses=[AIMessage(content="", tool_calls=[_call("inspect_job", {"job": "demo"})]) for _ in range(8)])
+    model = _ScriptedModel(responses=[AIMessage(content="", tool_calls=[_call("inspect_job", {"job": "demo"})]) for _ in range(8)] + [AIMessage(content="Done.")])
     loop = LoopDetectionMiddleware(tool_freq_warn=4, tool_freq_hard_limit=6)
     graph = create_agent(model=model, tools=[inspect_job], middleware=[loop])
     context = {"thread_id": "budget", "run_id": "budget"}
 
-    await _invoke(graph, True, context)
+    result = await _invoke(graph, True, context)
 
-    assert len(executions) == 5
-    assert len(_warnings(model)) == 1
-    assert context["stop_reason"] == "loop_capped"
+    assert len(executions) == 8
+    assert result["messages"][-1].content == "Done."
+    assert not _warnings(model)
+    assert context.get("stop_reason") is None
 
 
 @pytest.mark.asyncio

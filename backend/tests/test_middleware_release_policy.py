@@ -128,6 +128,7 @@ def test_loop_result_aware_policy_changes_release_identity():
     policies = collect_release_policies([_make_loop_detection_middleware()])
     parameters = policies["LoopDetectionMiddleware"]
     assert parameters["repetition_key"] == "call_and_result_v1"
+    assert parameters["frequency_action"] == "observe_only"
     legacy = {"LoopDetectionMiddleware": {key: value for key, value in parameters.items() if key != "repetition_key"}}
     assert canonical_hash(policies) != canonical_hash(legacy)
 
