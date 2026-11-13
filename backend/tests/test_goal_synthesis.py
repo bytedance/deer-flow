@@ -309,6 +309,24 @@ async def test_synthesize_code_fenced_json_is_accepted(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("literal", ["<think>literal content</think>", "<think>"])
+async def test_synthesize_preserves_reasoning_tags_in_objective(monkeypatch, literal):
+    objective = f'Document the "{literal}" syntax.'
+    _mock_llm(monkeypatch, "<think>Drafting the objective.</think>\n" + _verdict(objective))
+    assert await synthesize_goal_objective(context="c", guidance="", app_config=_PLAIN_CONFIG) == objective
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("literal", ["<think>literal content</think>", "<think>"])
+async def test_synthesize_preserves_reasoning_tags_in_unclear_reason(monkeypatch, literal):
+    reason = f'Clarify the intended handling of "{literal}".'
+    _mock_llm(monkeypatch, _verdict("", unclear=True, reason=reason))
+    with pytest.raises(GoalSynthesisUnclear) as raised:
+        await synthesize_goal_objective(context="c", guidance="", app_config=_PLAIN_CONFIG)
+    assert str(raised.value) == reason
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "payload",
     [

@@ -27,7 +27,7 @@ from typing import Any
 from deerflow.agents.human_input import read_human_input_response
 from deerflow.runtime.goal import GOAL_CARD_ANSWER_PREFIX, _additional_kwargs, _is_visible_message, _message_type
 from deerflow.utils.goal_objective import normalize_goal_objective
-from deerflow.utils.llm_text import strip_markdown_code_fence, strip_think_blocks
+from deerflow.utils.llm_text import strip_markdown_code_fence, strip_think_blocks_outside_json_strings
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
@@ -199,7 +199,7 @@ def build_synthesis_context(
 
 def _parse_synthesis_response(text: str) -> str:
     """Parse the synthesis model's JSON verdict into a normalized objective."""
-    candidate = strip_markdown_code_fence(strip_think_blocks(text or ""))
+    candidate = strip_markdown_code_fence(strip_think_blocks_outside_json_strings(text or ""))
     start = candidate.find("{")
     end = candidate.rfind("}")
     if start == -1 or end <= start:
