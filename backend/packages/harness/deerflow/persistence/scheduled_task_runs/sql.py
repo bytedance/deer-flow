@@ -511,7 +511,10 @@ class ScheduledTaskRunRepository:
             ),
         ]
         if created_after is not None:
-            older_conditions.append(older.created_at > created_after)
+            # The timeout cutoff only removes expired queue entries. A running
+            # or launching occurrence remains a same-thread FIFO blocker no
+            # matter how long it has been active.
+            older_conditions.append(or_(older.status != "queued", older.created_at > created_after))
         older_same_thread = exists(select(older.id).where(*older_conditions))
         executing_run = aliased(ScheduledTaskRunRow)
         executing_task = aliased(ScheduledTaskRow)
