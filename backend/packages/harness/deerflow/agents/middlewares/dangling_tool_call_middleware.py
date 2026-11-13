@@ -41,9 +41,10 @@ _SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
 
 # Middleware producers spell an absent provider ID differently: "" is the canonical
 # spelling, but ``str(tool_call.get("id", ""))`` yields "None" once the key is present
-# with a null value, and the artifact/deferred/knowledge middlewares fall back to
-# "missing_tool_call_id". They all answer the same call, so pairing treats them alike.
-_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id"})
+# with a null value, the artifact/deferred/knowledge middlewares fall back to
+# "missing_tool_call_id", and the sandbox-audit and guardrail middlewares fall back to
+# "missing_id". They all answer the same call, so pairing treats them alike.
+_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id", "missing_id"})
 
 
 def _canonical_tool_call_id(tool_call_id: object) -> object:

@@ -92,3 +92,21 @@ def test_producer_sentinels_complete_a_parallel_turn_in_input_order():
     assert patched is not None
     assert [message.content for message in patched[1:]] == ["FIRST", "SECOND"]
     assert [message.tool_call_id for message in patched[1:]] == [tc["id"] for tc in patched[0].tool_calls]
+
+
+def test_sandbox_audit_block_for_a_null_call_id_survives_pairing():
+    """SandboxAuditMiddleware spells a missing ID "missing_id"; its block reason must reach the model."""
+    from types import SimpleNamespace
+
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+
+    call = AIMessage(content="", tool_calls=[{"name": "bash", "id": None, "args": {"command": "rm -rf /"}}])
+    request = SimpleNamespace(tool_call=call.tool_calls[0])
+    result = SandboxAuditMiddleware()._build_block_message(request, "destructive command")
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, result])
+
+    assert patched is not None
+    assert len(patched) == 2
+    assert patched[1].content == result.content
+    wire_call, wire_result = map(_convert_message_to_dict, patched)
+    assert wire_call["tool_calls"][0]["id"] == wire_result["tool_call_id"]
