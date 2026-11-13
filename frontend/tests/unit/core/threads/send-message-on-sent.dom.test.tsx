@@ -8,6 +8,7 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { DEFAULT_LOCAL_SETTINGS } from "@/core/settings/local";
 import type { UploadResponse } from "@/core/uploads/api";
+import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
 
 // onSent tells callers they may drop one-time composer state (quotes,
 // references, staged files, the stored draft). It must not fire for a send
@@ -16,7 +17,10 @@ import type { UploadResponse } from "@/core/uploads/api";
 const mocks = rs.hoisted(() => ({
   events: [] as string[],
   submit: rs.fn(async () => undefined),
+  toastError: rs.fn(),
 }));
+
+rs.mock("sonner", () => ({ toast: { error: mocks.toastError } }));
 
 rs.mock("@langchain/langgraph-sdk/react", () => ({
   useStream: () => ({
@@ -120,10 +124,48 @@ async function renderThreadStream() {
 
 beforeEach(() => {
   mocks.events = [];
+  mocks.toastError.mockReset();
   mocks.submit.mockReset();
   mocks.submit.mockImplementation(async () => {
     mocks.events.push("submit");
   });
+});
+
+test("does not replace a file failure whose message matches a session diagnostic", async () => {
+  stubUploadFetch(async () => new Response("{}"));
+  const { result } = await renderThreadStream();
+  const cause = new Error("Attachments are not ready");
+  const attachmentUploads = new AttachmentUploadSession(async () => {
+    throw cause;
+  });
+  const onSent = rs.fn();
+  await act(async () => {
+    await expect(
+      result.current.sendMessage("thread-1", MESSAGE_WITH_FILE, undefined, {
+        attachmentUploads,
+        onSent,
+      }),
+    ).rejects.toMatchObject({ code: "failed", cause });
+  });
+  expect(mocks.toastError).toHaveBeenCalledWith(cause.message);
+  expect(mocks.submit).not.toHaveBeenCalled();
+  expect(onSent).not.toHaveBeenCalled();
+});
+
+test("localizes a session state error using its type", async () => {
+  stubUploadFetch(async () => new Response("{}"));
+  const { result } = await renderThreadStream();
+  const attachmentUploads = new AttachmentUploadSession();
+  attachmentUploads.deactivate();
+  await act(async () => {
+    await expect(
+      result.current.sendMessage("thread-1", MESSAGE_WITH_FILE, undefined, {
+        attachmentUploads,
+      }),
+    ).rejects.toMatchObject({ code: "inactive" });
+  });
+  expect(mocks.toastError).toHaveBeenCalledWith(enUS.uploads.notReady);
+  expect(mocks.submit).not.toHaveBeenCalled();
 });
 
 afterEach(() => {

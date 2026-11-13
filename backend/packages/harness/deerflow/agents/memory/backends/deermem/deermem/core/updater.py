@@ -40,6 +40,10 @@ from .storage import (
 logger = logging.getLogger(__name__)
 
 
+class DuplicateFactIdError(ValueError):
+    """A backup contains more than one entry for a fact ID."""
+
+
 # Thread pool for offloading sync memory updates when called from an async
 # context.  Unlike the previous asyncio.run() approach, this runs *sync*
 # model.invoke() calls — no event loop is created, so the langchain async
@@ -1000,6 +1004,15 @@ class MemoryUpdater:
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
                 raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
+        # Duplicate detection must cover BOTH storage paths (the apply_changes
+        # override and the base save() path) and run before capacity selection,
+        # which can drop one of two same-id entries and hide the duplicate.
+        seen_import_ids: set[str] = set()
+        for fact in memory_data.get("facts", []):
+            fact_id = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+            if fact_id in seen_import_ids:
+                raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+            seen_import_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
