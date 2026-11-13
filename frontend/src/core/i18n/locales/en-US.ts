@@ -267,6 +267,7 @@ export const enUS: Translations = {
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    scrollToBottom: "Scroll to bottom",
     showingOf: (loaded, total) => `Showing ${loaded} of ${total}`,
     download: "Download",
     thinking: "Thinking",
