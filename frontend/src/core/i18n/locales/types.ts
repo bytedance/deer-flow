@@ -225,6 +225,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    scrollToBottom: string;
     showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
