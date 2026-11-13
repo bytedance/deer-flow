@@ -254,6 +254,11 @@ This section accumulates work toward the **2.3.0** milestone
   is now paused with the reason as its last error, and resuming it reports
   the problem until the schedule is fixed. ([#7993])
   
+- **scheduler:** An `end_at` whose local time falls past the end of Python's
+  datetime range when converted to UTC is rejected as `422 invalid_request`
+  naming `end_at`, instead of raising an unhandled `OverflowError`. This covers
+  creating, editing and resuming a task. ([#8219])
+
 - **models:** A Claude model using a Claude Code OAuth token no longer fails
   every request once the request carries `betas`. The OAuth betas
   (`oauth-2025-04-20`, …) were only the client's default `anthropic-beta`
@@ -16431,3 +16436,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8219]: https://github.com/bytedance/deer-flow/issues/8219

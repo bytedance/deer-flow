@@ -1779,6 +1779,40 @@ async def test_http_rejects_nonexistent_local_time_without_writing(http, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "update", "resume"])
+async def test_end_at_utc_overflow_is_coded_invalid_request_without_writing(http, operation):
+    end_at = "9999-12-31T23:59:00"
+    if operation == "create":
+        response = await http.client.post(
+            "/api/scheduled-tasks",
+            json={**_CREATE, "timezone": "America/New_York", "end_at": end_at},
+        )
+    else:
+        await _seed(
+            http.repo,
+            timezone="America/New_York",
+            next_run_at=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+        if operation == "resume":
+            await http.repo.update("task-l", user_id=OWNER, updates={"status": "paused"})
+        before = await http.repo.get("task-l", user_id=OWNER)
+        if operation == "update":
+            response = await http.client.patch("/api/scheduled-tasks/task-l", json={"end_at": end_at})
+        else:
+            response = await http.client.post("/api/scheduled-tasks/task-l/resume", json={"end_at": end_at})
+
+    detail = coded(response, 422, "invalid_request")
+    assert detail["message"].startswith("end_at: ")
+    assert "cannot be represented in UTC" in detail["message"]
+    assert "America/New_York" in detail["message"]
+    if operation == "create":
+        assert await http.repo.list_by_user(OWNER) == []
+    else:
+        assert await http.repo.get("task-l", user_id=OWNER) == before
+    assert http.launches == []
+
+
+@pytest.mark.asyncio
 async def test_create_keeps_the_prompt_and_stores_the_stop_condition_apart(http):
     response = await http.client.post(
         "/api/scheduled-tasks",

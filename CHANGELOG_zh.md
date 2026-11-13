@@ -84,6 +84,10 @@
   之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
   在修复计划之前，恢复该任务会提示具体问题。([#7993])
 
+- **调度器：** `end_at` 的本地时间转换为 UTC 时若超出 Python 支持的日期范围，现在返回
+  422 `invalid_request` 并指出 `end_at`，不再抛出未处理的 `OverflowError`。创建、编辑和
+  恢复任务均适用。([#8219])
+
 - **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
   都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
   `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
@@ -12911,3 +12915,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8219]: https://github.com/bytedance/deer-flow/issues/8219

@@ -72,6 +72,17 @@ async def test_shared_admission_rejects_nonexistent_wall_time(timezone, wall_tim
     assert timezone in caught.value.detail["message"]
 
 
+@pytest.mark.parametrize("end_at", ["9999-12-31T23:59:00", "9999-12-31T23:59:00-05:00"])
+def test_end_at_rejects_a_utc_range_overflow(end_at):
+    with pytest.raises(HTTPException) as caught:
+        resolve_end_at(end_at, "America/New_York")
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "invalid_request"
+    assert caught.value.detail["message"].startswith("end_at: ")
+    assert "cannot be represented in UTC" in caught.value.detail["message"]
+    assert "America/New_York" in caught.value.detail["message"]
+
+
 @pytest.mark.parametrize(("timezone", "wall_time"), GAPS)
 def test_resume_rejects_nonexistent_end_at(timezone, wall_time):
     with pytest.raises(HTTPException) as caught:

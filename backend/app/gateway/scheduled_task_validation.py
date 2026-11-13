@@ -61,10 +61,13 @@ def _as_datetime(value: datetime | str | None) -> datetime | None:
 
 def _resolve_local_datetime(value: datetime, timezone: str) -> datetime:
     """Resolve a submitted wall time without silently moving it across a clock gap."""
-    if value.tzinfo is not None:
-        return value.astimezone(UTC)
-    zone = ZoneInfo(timezone)
-    resolved = value.replace(tzinfo=zone).astimezone(UTC)
+    try:
+        if value.tzinfo is not None:
+            return value.astimezone(UTC)
+        zone = ZoneInfo(timezone)
+        resolved = value.replace(tzinfo=zone).astimezone(UTC)
+    except OverflowError as exc:
+        raise ValueError(f"Local time {value.isoformat()} in timezone {timezone} cannot be represented in UTC; choose an earlier time") from exc
     if resolved.astimezone(zone).replace(tzinfo=None) != value:
         raise ValueError(f"Local time {value.isoformat()} does not exist in timezone {timezone}; choose a valid local time or an explicit instant with a UTC offset")
     return resolved
