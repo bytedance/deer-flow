@@ -414,6 +414,31 @@ def _table_text(value: Any) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
 
 
+def failed_evaluation_result(issue: dict[str, Any], error: Exception) -> dict[str, Any]:
+    """Keep failed workers in the report without exposing response/error contents."""
+    return {
+        "number": issue.get("number"),
+        "title": issue.get("title") or "",
+        "url": issue.get("url") or "",
+        "kind": "unknown",
+        "existing_labels": [],
+        "llm": {},
+        "usage": {},
+        "scoring": {
+            "kind": "unknown",
+            "area": "unknown",
+            "priority": "Needs-Info",
+            "route": "needs_info",
+            "action_zh": ROUTE_LABELS_ZH["needs_info"],
+            "needs_review": True,
+            "validation_errors": [
+                f"评估异常（{type(error).__name__}），请重新评估此条 issue"
+            ],
+            "suggested_labels": [],
+        },
+    }
+
+
 def render_markdown_report(results: list[dict[str, Any]]) -> str:
     lines = [
         "# DeerFlow Issue 优先级与分流建议",
@@ -676,12 +701,13 @@ def main(argv: list[str] | None = None) -> int:
 
     declared = load_declared_labels(LABELS_FILE)
     results: list[dict[str, Any]] = []
+    failed_numbers: list[Any] = []
 
     try:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, args.workers)
         ) as pool:
-            futures = [
+            futures = {
                 pool.submit(
                     evaluate_issue,
                     issue,
@@ -692,11 +718,16 @@ def main(argv: list[str] | None = None) -> int:
                     api_format=args.api_format,
                     reasoning_effort=args.reasoning_effort,
                     declared_labels=declared,
-                )
+                ): issue
                 for issue in issues
-            ]
+            }
             for fut in concurrent.futures.as_completed(futures):
-                results.append(fut.result())
+                try:
+                    results.append(fut.result())
+                except Exception as err:
+                    issue = futures[fut]
+                    failed_numbers.append(issue.get("number"))
+                    results.append(failed_evaluation_result(issue, err))
     except Exception as err:
         print(f"Error scoring issues: {err}", file=sys.stderr)
         return 1
@@ -725,6 +756,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_md:
         args.output_md.write_text(md_report, encoding="utf-8")
     print(md_report, end="")
+    if failed_numbers:
+        print(
+            "Error evaluating issues: "
+            + ", ".join(f"#{number}" for number in failed_numbers),
+            file=sys.stderr,
+        )
 
     if label_issues:
         failures = 0
@@ -740,7 +777,7 @@ def main(argv: list[str] | None = None) -> int:
         if failures:
             return 1
 
-    return 0
+    return 1 if failed_numbers else 0
 
 
 if __name__ == "__main__":

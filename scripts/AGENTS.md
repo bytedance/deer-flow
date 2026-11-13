@@ -88,3 +88,8 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
   findings to a diff.
 - **`detect-thread-boundaries --runtime-config` imports configured tools and
   models.** It does not call models or external services.
+
+`score_issues.py` is an opt-in maintainer triage CLI. Keep issue text in the
+untrusted input message, retain evidence and failed entries in reports, and
+exclude invalid assessments from label writes. See the
+[triage guide](../docs/guide/issue-triage.md) for usage and validation boundaries.

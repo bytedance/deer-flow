@@ -16,6 +16,9 @@ python scripts/score_issues.py --repo bytedance/deer-flow --limit 20 \
 python scripts/score_issues.py --input-json issues.json --output-md report.md
 ```
 
+Prefer the environment variables over `--api-key`, since command-line arguments
+may be visible in process listings.
+
 The default is one Responses API call per issue using `gpt-6.1-terra` with
 `medium` reasoning and a strict eight-field schema. The full title and body are
 sent; author, labels and formatting signals are not added to the model input.
@@ -59,6 +62,9 @@ report with **需人工复核**, `scoring.needs_review: true`, and specific
 `scoring.validation_errors`. Returned facts remain under `llm`, including
 invalid quotes, so a maintainer can inspect what went wrong. Failed or
 incomplete API responses are also visible as unassessed entries.
+An unexpected per-issue exception also retains that issue and all completed
+results in both reports. The CLI lists affected issue numbers on stderr and
+exits with status 1 after writing the reports; it never labels those entries.
 
 Passing these checks establishes source provenance and structural consistency.
 It does not establish that the priority is correct or that a named extension

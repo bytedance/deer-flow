@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import http.client
 import importlib.util
 import io
 import json
@@ -278,6 +279,47 @@ def test_missing_key_requires_explicit_offline_preview(scorer, monkeypatch, caps
     monkeypatch.delenv("TRIAGE_LLM_API_KEY", raising=False)
     assert scorer.main([]) == 1
     assert "Missing API key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure_first", [True, False])
+@pytest.mark.parametrize("error_type", [http.client.IncompleteRead, ConnectionResetError])
+def test_batch_retains_successes_and_failed_issue_on_unexpected_read_error(scorer, monkeypatch, tmp_path, issue, facts, capsys, failure_first, error_type):
+    failed = {**issue, "number": 43, "url": "https://github.com/bytedance/deer-flow/issues/43", "title": "读取中断"}
+    items = [failed, issue] if failure_first else [issue, failed]
+    source = tmp_path / "issues.json"
+    output = tmp_path / "results.json"
+    report = tmp_path / "report.md"
+    source.write_text(json.dumps(items), encoding="utf-8")
+    calls = []
+
+    class BrokenResponse(io.BytesIO):
+        def read(self, *args, **kwargs):
+            raise error_type(b"secret-from-response")
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        calls.append(title)
+        return BrokenResponse() if title == failed["title"] else io.BytesIO(json.dumps(response(facts)).encode())
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    status = scorer.main(["--input-json", str(source), "--output-json", str(output), "--output-md", str(report), "--api-key", "test-key", "--repo", "bytedance/deer-flow", "--dry-run", "--workers", "1"])
+    assert status == 1
+    assert calls == [item["title"] for item in items]
+    assert output.is_file() and report.is_file()
+    results = {item["number"]: item for item in json.loads(output.read_text(encoding="utf-8"))}
+    assert results[42]["llm"] == facts
+    assert not results[42]["scoring"]["needs_review"]
+    assert results[43]["scoring"]["needs_review"]
+    assert results[43]["scoring"]["priority"] == "Needs-Info"
+    assert results[43]["scoring"]["suggested_labels"] == []
+    text = report.read_text(encoding="utf-8")
+    assert "读取中断" in text and "工具调用失败" in text
+    assert error_type.__name__ in text
+    captured = capsys.readouterr()
+    assert "#43" in captured.err
+    commands = [line for line in captured.out.splitlines() if line.startswith("[dry-run]")]
+    assert len(commands) == 1 and "/issues/42 " in commands[0]
+    assert "secret-from-response" not in text + captured.out + captured.err
 
 
 @pytest.mark.parametrize("issue_number", [None, 42])
