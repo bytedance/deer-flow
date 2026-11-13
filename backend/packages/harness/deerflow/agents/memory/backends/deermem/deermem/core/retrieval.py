@@ -99,6 +99,42 @@ def _is_advanced_query(query: str) -> bool:
     return bool(_FTS5_ADVANCED_RE.search(query))
 
 
+def _carries_unindexable_cjk_run(text: str) -> bool:
+    """Whether *text* holds a CJK run the index stores as more than one token.
+
+    Advanced queries reach ``MATCH`` verbatim, so FTS5's own ``unicode61``
+    tokenizer keeps each CJK run whole, while the index holds whatever
+    ``_tokenize`` produced for it. When those disagree the verbatim term cannot
+    match anything. Asking ``_tokenize`` about the run itself is what makes this
+    precise rather than a character count: without jieba a two-character run is
+    one bigram and stays expressible, so ``思考 AND 无关`` still means AND (and a
+    genuine miss stays a miss); with jieba the unit is the word, and the same
+    test follows it.
+    """
+    return any(len(_tokenize(run)) > 1 for run in _CJK_RUN_RE.findall(text or ""))
+
+
+# A phrase span, so a quoted ``"NOT"`` is read as the term it is rather than the
+# operator. Doubled quotes inside a phrase close the span early; that only makes
+# this guard stricter, never looser.
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+_BARE_NEGATION_RE = re.compile(r"\bNOT\b")
+
+
+def _has_bare_negation(query: str) -> bool:
+    """Whether the advanced query uses FTS5's binary ``NOT`` operator.
+
+    ``_build_fallback_query`` OR-joins its tokens, so retrying a negated query
+    returns exactly the rows it was asked to exclude -- and the surviving
+    literal ``"NOT"`` token also matches an English ``not`` under unicode61
+    case folding. A negation cannot be expressed as an OR of bigrams, so the
+    genuine miss the verbatim query produced is the honest answer. Only the
+    uppercase spelling is the operator, which is why the check is
+    case-sensitive.
+    """
+    return bool(_BARE_NEGATION_RE.search(_QUOTED_SPAN_RE.sub(" ", query or "")))
+
+
 def _quote_fallback_token(token: str) -> str:
     """Quote one token for the OR query, prefixing single CJK characters.
 
@@ -138,7 +174,13 @@ class FTS5Retrieval:
     Query strategy:
       1. Advanced FTS5 syntax -> pass through to MATCH
       2. Natural language -> jieba tokenize + OR join
-      3. Syntax error -> fall back to tokenized OR query
+      3. Advanced syntax error, or an advanced query with CJK that matched
+         nothing -> retry as a tokenized OR query. The index stores CJK as
+         character bigrams while a passed-through FTS5 term keeps its CJK run
+         whole, so such a query cannot match; an empty result is a tokenizer
+         mismatch, not evidence of absence. Queries using the binary ``NOT``
+         are excluded from this retry: an OR cannot express a negation, and
+         would return the rows the query excluded.
       4. Still fails -> return empty
 
     Ranking:
@@ -195,7 +237,9 @@ class FTS5Retrieval:
 
         Must stay aligned with the query side (``_build_fallback_query``); both
         go through ``_tokenize`` so index and query agree on Chinese without
-        jieba.
+        jieba. The advanced branch of ``search`` is the one path that cannot be
+        aligned -- the query reaches FTS5 verbatim -- which is why a zero-hit
+        advanced query carrying CJK is retried through the fallback.
         """
         if not content:
             return ""
@@ -396,15 +440,26 @@ class FTS5Retrieval:
         # Try search
         results = self._execute_search(fts5_query, scope_user, scope_agent, category, top_k)
         if results is not None:
-            logger.debug(
-                "FTS5Retrieval.search: strategy=%r returned %d results in %.1fms",
-                strategy,
-                len(results),
-                (time.perf_counter() - _t0) * 1000,
-            )
-            return results
+            # An empty advanced query is not a verdict: the query string reaches
+            # MATCH verbatim, so a CJK run inside it is one unicode61 token while
+            # the index holds that run's own tokens. Treat "advanced, no hits, and
+            # a run the index cannot hold whole" like a syntax error and let the
+            # aligned tokenized query below answer instead of reporting nothing.
+            # A negated query is excluded: the tokenized query is an OR, so it
+            # would return the rows the user asked to exclude. Its empty result
+            # stays a miss.
+            if results or strategy != "advanced" or _has_bare_negation(query) or not _carries_unindexable_cjk_run(query):
+                logger.debug(
+                    "FTS5Retrieval.search: strategy=%r returned %d results in %.1fms",
+                    strategy,
+                    len(results),
+                    (time.perf_counter() - _t0) * 1000,
+                )
+                return results
+            logger.debug("FTS5Retrieval.search: advanced query with CJK matched nothing; retrying with the tokenized query")
 
-        # Fallback: advanced syntax error -> tokenized OR
+        # Fallback: advanced syntax error, or an advanced CJK query the
+        # bigram index cannot express -> tokenized OR
         if strategy == "advanced":
             fallback = _build_fallback_query(query)
             if fallback and fallback != fts5_query:
