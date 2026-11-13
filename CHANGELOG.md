@@ -68,10 +68,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **setup:** Local commands use the pnpm version pinned by the frontend when a
-  different global pnpm is on `PATH`, falling back to Corepack or reporting an
-  actionable mismatch before installation. ([#8183](https://github.com/bytedance/deer-flow/pull/8183))
-
 - **mcp:** Two enabled MCP servers could bind the same tool name (server `a`
   exposing `b_x` and server `a_b` exposing `x` both bind `a_b_x`). Both
   declarations reached the model and the provider silently kept only one.
