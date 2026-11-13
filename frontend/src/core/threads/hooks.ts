@@ -52,6 +52,10 @@ import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  AttachmentUploadError,
+  type AttachmentUploadSession,
+} from "../uploads/attachment-upload-session";
 import { uuid } from "../utils/uuid";
 
 import {
@@ -133,6 +137,7 @@ export type ThreadStreamOptions = {
 };
 
 type SendMessageOptions = {
+  attachmentUploads?: AttachmentUploadSession;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
@@ -3133,28 +3138,32 @@ export function useThreadStream({
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
-            );
-
-            const conversionResults = await Promise.all(filePromises);
-            const files = conversionResults.filter(
-              (file): file is File => file !== null,
-            );
-            const failedConversions = conversionResults.length - files.length;
-
-            if (failedConversions > 0) {
-              throw new Error(
-                `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
-              );
-            }
-
             if (!threadId) {
               throw new Error("Thread is not ready for file upload.");
             }
 
-            if (files.length > 0) {
-              const uploadResponse = await uploadFiles(threadId, files);
+            {
+              let uploadResponse;
+              if (options?.attachmentUploads) {
+                uploadResponse = {
+                  files: await options.attachmentUploads.uploadAll(
+                    threadId,
+                    message.files,
+                  ),
+                };
+              } else {
+                const converted = await Promise.all(
+                  message.files.map((part) => promptInputFilePartToFile(part)),
+                );
+                const files = converted.filter(
+                  (file): file is File => file !== null,
+                );
+                if (files.length !== converted.length)
+                  throw new Error(
+                    "Failed to prepare attachments for upload. Please retry.",
+                  );
+                uploadResponse = await uploadFiles(threadId, files);
+              }
               uploadedFiles = uploadResponse.files.map((info) => ({
                 filename: info.filename,
                 size: info.size,
@@ -3185,7 +3194,11 @@ export function useThreadStream({
               error instanceof Error
                 ? error.message
                 : "Failed to upload files.";
-            toast.error(errorMessage);
+            toast.error(
+              error instanceof AttachmentUploadError && error.code !== "failed"
+                ? t.uploads.notReady
+                : errorMessage,
+            );
             setOptimisticMessages([]);
             setOptimisticThreadId(null);
             setLiveMessagesThreadId(null);
@@ -3251,6 +3264,7 @@ export function useThreadStream({
     [
       thread,
       t.uploads.uploadingFiles,
+      t.uploads.notReady,
       locale,
       context,
       queryClient,

@@ -77,6 +77,9 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/projects/[^/]+$")),
     (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/(archive|restore)$")),
     (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/threads$")),
+    (frozenset({"GET", "PATCH"}), re.compile(r"^/api/projects/[^/]+/memory$")),
+    (frozenset({"DELETE"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+/promote$")),
     # Project document shelf (Phase 2 Slice B): enumerated per implemented
     # route — list/upload on the collection, content and trash on the item.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/projects/[^/]+/documents$")),

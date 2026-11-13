@@ -63,6 +63,18 @@ describe("resolveArtifactOpenURL", () => {
     );
   });
 
+  test("opens an installed binary preview in the authenticated reader", () => {
+    const filepath = "/mnt/user-data/outputs/quarterly-report.xlsx";
+    const params = viewerParams(
+      resolveArtifactOpenURL({ filepath, threadId, hasPluginPreview: true }),
+    );
+    expect(params.get("path")).toBe(filepath);
+    expect(params.get("thread_id")).toBe(threadId);
+    expect(resolveArtifactOpenURL({ filepath, threadId })).toBe(
+      urlOfArtifact({ filepath, threadId }),
+    );
+  });
+
   test("carries the mock flag into the viewer URL", () => {
     const params = viewerParams(
       resolveArtifactOpenURL({

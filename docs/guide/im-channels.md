@@ -55,6 +55,10 @@ become visible only after the complete copy is published.
 Feishu and DingTalk attachment transfers return standalone temporary sandboxes
 to the pool after synchronization, without interrupting an active run.
 
+Feishu desktop posts can include a caption and files. Commands use the caption,
+and a command that starts a chat turn, such as `/goal <condition>`, passes the
+files to that turn.
+
 **Configuration in `config.yaml`:**
 
 Discord's `channels.discord.allowed_guilds` accepts one positive numeric guild
