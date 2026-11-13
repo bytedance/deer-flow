@@ -16,4 +16,7 @@ run in Skill Review CI, independent of package review.
 - **Skill script tests run offline.** Test a dependency fallback with the
   optional import unavailable, and mock the HTTP transport.
 - **A skill CLI exits non-zero on failure**, with diagnostics on stderr and
-  result URLs on stdout.
+  result URLs on stdout. ppt-generation composition failures, including a
+  missing or invalid plan and a missing slide image, follow that contract:
+  diagnostics go to stderr and the process exits 1, while a successful
+  composition prints its result on stdout and exits 0.
