@@ -91,12 +91,6 @@
   请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
   ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
 
-- **网页抓取：** 全新安装后默认的 `web_fetch` 不再失效。`make config` 和 `make setup` 会把
-  `.env.example` 复制成 `.env`（Compose 部署也读取这个文件），其中九个服务的 Key 被设成了
-  `JINA_API_KEY=your-jina-api-key` 这样的示例值。无需 Key 的 Jina Reader 把这段文字当作 Key
-  发送，每次抓取都返回 401。现在模板把这些行注释掉；通过共享凭据规则读取 Key 的服务也会把
-  `your-...-key` / `-token` / `-secret` 形式的值视为未配置，已有的 `.env` 无需修改即可正常使用。
-
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用

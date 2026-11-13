@@ -256,15 +256,6 @@ This section accumulates work toward the **2.3.0** milestone
   `anthropic-beta` in `extra_headers`.
   ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
 
-- **web fetch:** A fresh install no longer breaks the default `web_fetch`.
-  `make config` and `make setup` copy `.env.example` into `.env` (which the
-  Compose stacks also read), and that set nine provider keys to example values such as
-  `JINA_API_KEY=your-jina-api-key`. The keyless Jina Reader sent that text as a
-  key and every fetch failed with 401. The template now leaves those lines
-  commented, and providers that resolve keys through the shared credential rule
-  treat a `your-...-key` / `-token` / `-secret` value as unset, so existing
-  `.env` files work without editing.
-
 - **community:** A search or fetch API key that ends in a newline no longer
   leaks into the conversation. GroundRoute (`GROUNDROUTE_API_KEY`), InfoQuest,
   Tavily, Exa, Jina, Firecrawl, fastCRW and Crawl4AI put the key into an HTTP
