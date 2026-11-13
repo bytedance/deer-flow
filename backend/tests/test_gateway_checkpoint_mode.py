@@ -117,6 +117,40 @@ def test_thread_state_endpoints_are_mode_invariant(_stub_app_config, monkeypatch
 
 
 @pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_before_cursor_continues_the_walk(mode: str, _stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``before`` pages the graph path like the degraded raw path: anchor plus older entries."""
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store = MemoryThreadMetaStore(store)
+    app.state.checkpoint_channel_mode = mode
+    app.state.run_event_store = SimpleNamespace()
+    app.include_router(threads.router)
+
+    graph = _build_reply_graph(mode, checkpointer)
+    monkeypatch.setattr(gateway_services, "resolve_agent_factory", lambda assistant_id=None: lambda config: graph)
+
+    config: dict[str, Any] = {"configurable": {"thread_id": _THREAD_ID}}
+    inject_checkpoint_mode(config, mode)
+    for i in range(2):
+        asyncio.run(graph.ainvoke({"messages": [HumanMessage(content=f"question-{i}", id=f"h{i}")]}, config))
+
+    with TestClient(app) as client:
+        full_page = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 10})
+        assert full_page.status_code == 200, full_page.text
+        all_ids = [entry["checkpoint_id"] for entry in full_page.json()]
+        assert len(all_ids) >= 4
+
+        anchor_id = all_ids[1]
+        paged = client.post(f"/api/threads/{_THREAD_ID}/history", json={"limit": 10, "before": anchor_id})
+
+    assert paged.status_code == 200, paged.text
+    assert [entry["checkpoint_id"] for entry in paged.json()] == all_ids[1:]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
 def test_context_usage_reads_materialized_messages_in_both_modes(
     mode: str,
     _stub_app_config,
