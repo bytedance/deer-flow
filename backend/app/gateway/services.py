@@ -676,6 +676,32 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
     return normalized
 
 
+def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject skill references the durable-context reducer cannot read.
+
+    ``skill_context`` is a checkpointed reducer channel a caller may Overwrite.
+    ``merge_skill_context`` normalizes each entry with ``entry.get(...)`` and
+    ``str(entry["path"])``, so a non-object entry or a missing path raises while
+    the state update merges — failing the run with an unhandled
+    ``AttributeError``/``KeyError`` instead of a 400 at this boundary. The other
+    fields are optional: the reducer coerces ``name``/``description`` and
+    ``loaded_at`` itself, so only the path needs to be usable here.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of skill reference objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].path must be a non-empty string")
+        normalized.append({**entry, "name": str(entry.get("name") or "")})
+    return normalized
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
@@ -730,6 +756,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
             stripped[channel] = _normalize_input_messages(value, location="values.messages")
         elif channel == "delegations" and isinstance(value, list):
             stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif channel == "skill_context":
+            normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
+            stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -798,6 +827,8 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
             cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
             if cleaned != delegations:
                 result = {**result, "delegations": cleaned}
+        if "skill_context" in result:
+            result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
@@ -991,6 +1022,7 @@ _DEFAULT_ASSISTANT_ID = "lead_agent"
 _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     {
         "model_name",
+        "tool_approval_mode",
         "mode",
         "thinking_enabled",
         "reasoning_effort",
@@ -1030,6 +1062,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_promotion_recorder",
             "__run_tool_progress_recorder",
             "__run_input_control",
+            "__tool_approval_runtime",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             THREAD_INCARNATION_METADATA_GUARD_KEY,
@@ -1420,11 +1453,17 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
-def custom_agent_name(assistant_id: str | None) -> str | None:
+# Error details echo caller-supplied agent names; bound them so an oversized
+# value cannot bloat the response or any log line that records the detail.
+_MAX_ECHOED_AGENT_NAME_CHARS = 200
+
+
+def custom_agent_name(assistant_id: str | None, *, field: str = "assistant_id") -> str | None:
     """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
 
     Custom names are normalized (trimmed, lowercased, ``_`` to ``-``) and must
-    then contain only letters, digits and hyphens.
+    then contain only letters, digits and hyphens. *field* names the request
+    field in the error message.
 
     Raises:
         ValueError: *assistant_id* cannot name an agent.
@@ -1433,7 +1472,7 @@ def custom_agent_name(assistant_id: str | None) -> str | None:
         return None
     normalized = assistant_id.strip().lower().replace("_", "-")
     if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-        raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        raise ValueError(f"Invalid {field} {assistant_id!r:.{_MAX_ECHOED_AGENT_NAME_CHARS}}: must contain only letters, digits, and hyphens after normalization.")
     return normalized
 
 
@@ -2166,20 +2205,30 @@ async def _load_scope_agent_config(
 ) -> Any | None:
     if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
         return None
+    # The caller's config/context ``agent_name`` arrives here unvalidated, and
+    # every run that names a custom agent passes through, with or without a
+    # knowledge scope, so each rejection says what is wrong with the agent.
+    if not isinstance(assistant_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid agent_name: expected a string, got {type(assistant_id).__name__}.",
+        )
     try:
-        # The caller's config/context ``agent_name`` arrives here unvalidated.
-        if not isinstance(assistant_id, str):
-            raise ValueError("agent_name must be a string")
-        normalized = assistant_id.strip().lower().replace("_", "-")
+        normalized = custom_agent_name(assistant_id, field="agent_name")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         return await asyncio.to_thread(
             load_agent_config,
             normalized,
             user_id=user_id,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=422, detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' not found") from exc
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail="knowledge_scope assistant configuration could not be resolved",
+            detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' configuration could not be loaded",
         ) from exc
 
 
@@ -2407,6 +2456,9 @@ async def start_run(
                     enabled=get_app_config().hitl_approval.enabled,
                     body=body,
                 )
+                resume_map = getattr(validated_approval_request_ids, "resume_map", None)
+                if isinstance(resume_map, dict):
+                    graph_input = Command(resume=resume_map)
         else:
             if admitted_run is None:
                 await reject_new_run_when_approval_pending(request, thread_id)
@@ -2455,6 +2507,12 @@ async def start_run(
         # that carries agent configuration (model_name, thinking_enabled, etc.).
         # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
         merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
+        from deerflow.approvals.policy import resolve_mode
+
+        try:
+            resolve_mode(get_app_config().hitl_approval, config.get("context") or {})
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
             # ``body.config`` is free-form and copied verbatim by
             # ``build_run_config``; scrub internal-only keys smuggled there.

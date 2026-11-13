@@ -24,14 +24,40 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
+### 变更
+
+- **Checkpoint：** DeltaChannel 部署现在要求 `langgraph-checkpoint` 4.3.0、
+  SQLite saver 3.1.2 和 Postgres saver 3.1.3，排除会在重放时重排并行写入或
+  丢失分页祖先历史的版本。顺序和 Postgres 分页契约在回归时现在会直接失败，
+  不再跳过。([#8139])
+
 ### 修复
 
-- **网页抓取：** 全新安装后默认的 `web_fetch` 不再失效。`make config` 和 `make setup` 会把
-  `.env.example` 复制成 `.env`（Compose 部署也读取这个文件），其中九个服务的 Key 被设成了
-  `JINA_API_KEY=your-jina-api-key` 这样的示例值。无需 Key 的 Jina Reader 把这段文字当作 Key
-  发送，每次抓取都返回 401。现在模板把这些行注释掉；通过共享凭据规则读取 Key 的服务也会把
-  `your-...-key` / `-token` / `-secret` 形式的值视为未配置，已有的 `.env` 无需修改即可正常使用。
+- **网关：** 创建对话时在元数据中带上 `step`、`parents`、`counters_since_delta_snapshot`
+  等由检查点自身维护的键，不再让该对话损坏。此前这些键会写入对话的首个检查点，错误的 `parents`
+  会让该对话的历史记录永久返回 500，错误的 `step` 或增量计数器会让之后每一轮对话都失败；
+  `deerflow_agent_name` 还会被当作服务端写入的值复制到下一次状态更新中。现在首个检查点不再从
+  请求中接收这些键。([#8019])
+  
+- **通道：** 企业微信不再丢弃 2–10 MB 的图片。此前适配器把图片上限定为 2 MB（同一协议中语音的限制），
+  超出即在上传前被跳过，消息到达时缺少图片。现在图片上限与平台的 10 MB 对齐；普通文件 20 MB 的限制不变。([#8174])
 
+- **通道：** WeCom 群聊中 `@机器人 /new` 这类带提及的命令现在按命令执行。WeCom 会把提及保留在
+  正文里，而命令识别要求裸的前导 `/`，于是群里的 `/new`、`/status` 被当成聊天轮次。现在仅在命令
+  识别时跳过前导提及；普通聊天保留提及，`/connect` 行为不变。与飞书、钉钉的处理一致。([#8118])
+  
+- **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
+  `127.0.0.1`（`make dev` 与 Docker 的默认地址）上，复制的是托管演示站
+  （`deer-flow-v2.vercel.app`）的链接：该链接无法打开对话，打开时还会把线程 ID 发送到外部主机。
+  ([#8126])
+
+- **运行时：** 多 Worker 模式（`run_ownership.heartbeat_enabled`）下，已被其他 Worker
+  接管的运行不再被原 Worker 恢复。此前装配证据通过无条件的整行 upsert 写入，在对端接管后会把
+  行改回 `running` 并清除接管错误；运行可能在对端已报告失败后以 `success` 结束，或被再次接管。
+  现在仅当该 Worker 仍持有活跃运行的有效租约时，才将证据合并到行元数据
+  （`RunStore.merge_owned_metadata()`），否则在执行前停止该运行。启用心跳的自定义
+  `RunStore` 实现必须实现该方法。([#8046])
+  
 - **网关：** 同一用户对同一次运行重复提交反馈时，现在返回 409 而不是 500。
   `POST /api/threads/{id}/runs/{run_id}/feedback` 每个用户每次运行只允许一条反馈；此前重试，
   或对同一次运行的另一条消息提交反馈，会触发该唯一约束，Gateway 因未处理的数据库错误而失败。
@@ -43,6 +69,9 @@
   `/goal` 读取残留的标题和消息，所有者也无法重试。现在删除会返回 500 并保留线程，所有者
   可以再次删除。([#7992])
 
+- **模型：** 取消使用 Codex 的任务时，会关闭上游 HTTP/SSE 连接，包括等待响应头期间；
+  重试等待也可取消。本地资源会释放，远端服务仍可能继续生成。([#8053](https://github.com/bytedance/deer-flow/pull/8053))
+
 - **中间件：** 启用 PII 脱敏时，不含空格的长文本（例如粘贴的十六进制转储）不再让 Gateway
   卡住。此前邮箱检测器的耗时与这类文本长度呈平方关系，而脱敏会在每次模型调用时重新扫描全部
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
@@ -53,6 +82,21 @@
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
   之后每次轮询都会在接纳到期任务之前失败。现在该任务会被暂停，并把原因记录为最近错误；
   在修复计划之前，恢复该任务会提示具体问题。([#7993])
+
+- **模型：** 使用 Claude Code OAuth token 的 Claude 模型，不再在请求带有 `betas` 时每次
+  都失败。此前 OAuth 所需的 beta（`oauth-2025-04-20` 等）只放在客户端默认的
+  `anthropic-beta` 请求头里，而 SDK 会用请求自身的 `betas` 替换这个请求头；因此只要配置了
+  `betas`（即使是 `[]`）、调用时传入 `betas`，或使用了 langchain-anthropic 会为其追加 beta
+  的服务端工具，OAuth beta 就会丢失，Anthropic 随即拒绝该 token。现在 OAuth beta 会排在
+  请求 `betas` 以及 `extra_headers` 中 `anthropic-beta` 的最前面。
+  ([#8061](https://github.com/bytedance/deer-flow/pull/8061))
+
+- **网页抓取：** 全新安装后默认的 `web_fetch` 不再失效。`make config` 和 `make setup` 会把
+  `.env.example` 复制成 `.env`（Compose 部署也读取这个文件），其中九个服务的 Key 被设成了
+  `JINA_API_KEY=your-jina-api-key` 这样的示例值。无需 Key 的 Jina Reader 把这段文字当作 Key
+  发送，每次抓取都返回 401。现在模板把这些行注释掉；通过共享凭据规则读取 Key 的服务也会把
+  `your-...-key` / `-token` / `-secret` 形式的值视为未配置，已有的 `.env` 无需修改即可正常使用。
+
 - **社区工具：** 以换行结尾的搜索或抓取 API 密钥不再泄露到对话中。GroundRoute
   （`GROUNDROUTE_API_KEY`）、InfoQuest、Tavily、Exa、Jina、Firecrawl、fastCRW 和
   Crawl4AI 此前把读取到的密钥原样写入 HTTP 请求头；从文件读取的密钥（例如用
@@ -123,6 +167,11 @@
   批次的重试路由返回 409，包括 SQLite 上取消在重试进行中提交的情况；工作区也不再
   为这些条目显示重试按钮。在已完成、失败、运行中或已暂停批次中重试的行为不变。
   ([#7792])
+
+- **网关：** 运行指定的自定义智能体不存在或名称无效时，现在会明确说明原因。此前向一个
+  自定义智能体已被删除的对话发消息，或传入格式错误的 `agent_name`，即使与知识库范围无关，
+  也会返回 422 和 "knowledge_scope assistant configuration could not be resolved"。现在
+  422 会提示 `Agent '<name>' not found`、`agent_name` 无效，或智能体配置无法加载。([#8087])
 
 - **智能体：** `PUT /api/agents/{name}` 传入 `"description": null` 时现在会把描述重置为
   空。此前会把 null 原样保存，而智能体配置不接受该值，导致之后每次加载都失败：更新本身、
@@ -370,13 +419,12 @@
   选择器缺失、是目录或不可读时会在调用 Docker 之前直接失败，而文件删除后
   `make down` 仍能停止整个栈；不设置或为空的选择器保持可选的仓库根 `.env`
   默认值。([#6522])
-- **HITL：** 可选的高风险工具调用人工审批。`hitl_approval.tools`（由宿主管理）通过
-  LangGraph `interrupt()` 暂停匹配的调用，运行进入 `waiting_for_input`，Web UI 展示
-  带逐字段参数摘要的审批卡片。批准后执行调用；拒绝则不执行，并将原因返回给模型。
-  IM 渠道、GitHub 运行和定时任务遵循 `hitl_approval.non_interactive`（默认 `deny`，
-  可选 `allow`）。子代理及不支持 resume 的运行环境无论该设置如何，始终拒绝匹配的
-  调用。`hitl_approval.max_actions` 配置审批批次的调用数量上限（默认 32，0 表示关闭）。
-  默认关闭；`config_version` 65。
+- **HITL：** 新增独立于推理模式的 Ask、Auto、Full 工具权限模式。Auto 通过单独的
+  无工具模型调用审核具体操作，默认复用现有模型配置；不确定或高风险操作转人工审批。
+  卡片展示完整参数，支持批准、拒绝、修改参数及可撤销的会话精确授权。主代理审批通过
+  checkpoint 支持重启恢复；交互式子代理通过属主限定的通道等待，并处理取消和过期。
+  所有模式均保留部署规则和账户权限，个人/平台 MCP 连接、参数和策略均参与授权绑定。
+  默认关闭；`config_version` 66。
 
 - **MCP：** 按未变更的服务器缓存完成包装的工具，仅在绑定对账后重新发现缺失或配置
   发生变化的服务器。将成功但未发现工具的结果与发现失败分开保存，并保留代际、共享
@@ -12858,5 +12906,12 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
+[#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
+[#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8064]: https://github.com/bytedance/deer-flow/pull/8064
+[#8087]: https://github.com/bytedance/deer-flow/pull/8087
+[#8118]: https://github.com/bytedance/deer-flow/pull/8118
+[#8126]: https://github.com/bytedance/deer-flow/pull/8126
+[#8139]: https://github.com/bytedance/deer-flow/pull/8139
+[#8174]: https://github.com/bytedance/deer-flow/pull/8174

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "catalog/screening",
+  "locales": {
+    "zh-CN": {
+      "title": "内容风险提示",
+      "description": "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
+      "usage": [
+        {
+          "title": "按平常方式搜索与读取",
+          "description": "启用后，在 Agent 获取网页、搜索或 MCP 工具结果时自动检查部分内容。"
+        },
+        {
+          "title": "结合提示判断内容",
+          "description": "检测到可疑指令时，会在工具结果中增加风险提示。它提供提醒，不阻断工具，也不保证识别所有风险。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置 TypeSafe Jev 服务；待检查的内容片段会发送给该服务。"
+      ]
+    },
+    "en-US": {
+      "title": "Content risk warnings",
+      "description": "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
+      "usage": [
+        {
+          "title": "Search and read as usual",
+          "description": "Once enabled, the middleware checks bounded excerpts of fetched pages, search results and MCP tool output."
+        },
+        {
+          "title": "Review advisory warnings",
+          "description": "Suspicious instructions add a warning to the tool result. Screening is advisory; it does not block tools or guarantee detection."
+        }
+      ],
+      "requirements": [
+        "An administrator must configure TypeSafe Jev. Content excerpts are sent to that service for screening."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-screening#readme"
+}

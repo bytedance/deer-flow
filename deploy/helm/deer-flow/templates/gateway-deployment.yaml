@@ -51,17 +51,19 @@ spec:
       # API updates land in the home volume (PVC or pod-local emptyDir).
       initContainers:
         - name: init-home
-          image: busybox:1.36
+          image: {{ include "deer-flow.initImage" . }}
           command: ["sh", "-c", "mkdir -p /home-pvc/deer-flow/data /home-pvc/deer-flow/extensions-config"]
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.gateway.initContainers.resources | nindent 12 }}
           volumeMounts:
             - name: home
               mountPath: /home-pvc
         - name: init-extensions
-          image: busybox:1.36
+          image: {{ include "deer-flow.initImage" . }}
           command: ["sh", "-c"]
           args:
             - |
@@ -73,6 +75,8 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.gateway.initContainers.resources | nindent 12 }}
           volumeMounts:
             - name: extensions-seed
               mountPath: /extensions-seed
