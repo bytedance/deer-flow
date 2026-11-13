@@ -215,6 +215,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         self,
         *,
         metadata: dict[str, Any] | None = None,
+        query: str | None = None,
         status: str | None = None,
         archived: bool | None = None,
         project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
@@ -268,10 +269,31 @@ class ThreadMetaRepository(ThreadMetaStore):
             else:
                 stmt = stmt.where(ThreadMetaRow.project_id == project_id)
 
-        stmt = stmt.limit(limit).offset(offset)
+        needle = query.strip().casefold() if query else ""
         async with self._sf() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_dict(r) for r in result.scalars()]
+            if not needle:
+                result = await session.execute(stmt.limit(limit).offset(offset))
+                return [self._row_to_dict(r) for r in result.scalars()]
+            # Casefold is dialect-independent (including ß -> ss). Scan bounded
+            # metadata batches and stop as soon as the requested page is full.
+            matches = []
+            scanned, skipped = 0, 0
+            while len(matches) < limit:
+                result = await session.execute(stmt.limit(200).offset(scanned))
+                batch = list(result.scalars())
+                for row in batch:
+                    if needle not in (row.display_name or "").casefold():
+                        continue
+                    if skipped < offset:
+                        skipped += 1
+                    else:
+                        matches.append(self._row_to_dict(row))
+                        if len(matches) == limit:
+                            break
+                if len(batch) < 200:
+                    break
+                scanned += len(batch)
+            return matches
 
     async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
         """Return True if the row exists and is owned (or filter bypassed)."""

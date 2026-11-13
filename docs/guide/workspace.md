@@ -30,6 +30,17 @@ Dismissing the drawer returns keyboard focus to the control that opened it.
 The Agents gallery header wraps to the available width so its import and create
 actions remain visible beside the compact sidebar on narrow screens.
 
+## Search conversations and messages
+
+Use **Search** in the sidebar or **⌘K / Ctrl+K** to find conversation titles and
+visible user/assistant message text, including code. Filter by conversations or
+messages and include archived chats. Results show matching excerpts; selecting a
+message opens its historical context, with earlier/later navigation and a **Return
+to latest messages** button. Type `>` for new chat, settings and keyboard commands.
+Title search is built in. Enable message search with the packaged
+[workspace search extension](../../examples/deerflow-extension-workspace-search/README.md).
+Its first search backfills existing history and shows progress while indexing.
+
 ## Chat Archive
 
 Deleting a chat from the sidebar requires confirmation showing its title. Deletion removes the conversation and its files and cannot be undone.

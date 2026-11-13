@@ -2283,6 +2283,38 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > section for details. Scheduled-task launches use
 > `scheduler.recursion_limit` from `config.yaml` instead of a client body.
 
+## Workspace search
+
+`POST /api/threads/search` additionally accepts an optional `query` (up to 256
+characters). It matches a trimmed, case-insensitive literal substring of the
+conversation title before pagination, preserving the existing array response.
+
+`POST /api/search` requires `threads:read` and returns grouped title/message
+matches for the current user. Message results additionally require `runs:read`
+and an installed `workspace_search` extension provider.
+
+```json
+{"query":"报告","types":["thread","message"],"archived":null,"limit":20,"cursor":null}
+```
+
+`types` defaults to both kinds; `limit` is 1–100. `archived` is a nullable boolean;
+`project_id` omitted includes every project, explicit null selects unassigned
+threads. Blank queries return recent titles. The response is
+`{items, cursor, indexing, messages_available}`. Each item carries `type`,
+`thread_id`, `title`, `agent_name`, `archived`, `project_id`, `updated_at` and
+`snippet` (plain-text `{text, matched?}` segments). Message hits also carry the
+canonical `message_id`, thread-global `seq` and `role`. Preserve the query and
+filters with each opaque cursor; invalid cursors return 400. When `indexing` is
+true, retry the current page until historical backfill completes. Provider errors
+return 503; without a provider, title search stays available.
+
+`GET /api/threads/{thread_id}/messages/around?message_id=...&seq=...&limit=20`
+requires `runs:read` and thread ownership. `seq` is an optional exact version hint;
+`limit` (1–50) bounds each side of the target. The response contains `messages`,
+`target_seq`, `has_before` and `has_after`. Hidden/superseded targets and stale
+version hints return 404. Earlier/later navigation uses the boundary message as
+the next anchor. The UI keeps these windows separate from live history.
+
 ## Chat archive and restore
 
 `POST /api/threads/search` accepts `archived: true` for archived chats or

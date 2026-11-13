@@ -277,10 +277,10 @@ tools:
   - name: web_fetch
     group: web
     use: deerflow.community.jina_ai.tools:web_fetch_tool
-    api_key: $JINA_API_KEY # optional; anonymous usage has rate limits
 ```
 Converts web pages to clean Markdown. Works without an API key at reduced rate
-limits.
+limits; set `JINA_API_KEY` in `.env` for higher limits. The tool reads only that
+variable, not an `api_key` field.
   </Tabs.Tab>
   <Tabs.Tab>
 ```yaml

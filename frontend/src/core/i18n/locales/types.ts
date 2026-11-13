@@ -140,6 +140,7 @@ export interface Translations {
     };
     catalog: Record<
       | "officePreview"
+      | "workspaceSearch"
       | "workflows"
       | "reportSections"
       | "agentTeams"
@@ -266,6 +267,7 @@ export interface Translations {
     more: string;
     search: string;
     loadMore: string;
+    scrollToBottom: string;
     showingOf: (loaded: number, total: number) => string;
     download: string;
     thinking: string;
@@ -1789,6 +1791,37 @@ export interface Translations {
   };
 
   // Shortcuts
+  workspaceSearch: {
+    title: string;
+    description: string;
+    placeholder: string;
+    open: string;
+    all: string;
+    threads: string;
+    messages: string;
+    includeArchived: string;
+    archived: string;
+    recent: string;
+    searching: string;
+    indexing: string;
+    unavailable: string;
+    unsupported: string;
+    error: string;
+    empty: string;
+    more: string;
+    retry: string;
+    hint: string;
+    user: string;
+    assistant: string;
+    context: string;
+    returnToLatest: string;
+    loadingContext: string;
+    messageUnavailable: string;
+    matchedMessage: string;
+    earlier: string;
+    later: string;
+    untitled: string;
+  };
   shortcuts: {
     searchActions: string;
     noResults: string;

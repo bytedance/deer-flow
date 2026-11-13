@@ -49,6 +49,7 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
+    search,
     shares,
     skill_mutations,
     skills,
@@ -1380,6 +1381,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(uploads.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
+    app.include_router(search.router)
     app.include_router(threads.router)
     app.include_router(shares.router)
 

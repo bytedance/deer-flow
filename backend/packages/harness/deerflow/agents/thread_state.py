@@ -398,9 +398,16 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     by_handle: dict[str, ArtifactEntry] = {}
     order: list[str] = []
     for entry in [*(existing or []), *new]:
-        if not isinstance(entry, dict) or "handle" not in entry:
+        if not isinstance(entry, dict):
             continue
-        handle = entry["handle"]
+        # The state-update route persists reducer values with ``Overwrite``, so
+        # a checkpoint can carry an entry whose handle is missing or unhashable
+        # without this reducer ever seeing it. Skip such an entry instead of
+        # raising on the dict key: one bad write must not fail every later
+        # artifact capture on the thread.
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            continue
         if handle not in by_handle:
             order.append(handle)
         by_handle[handle] = entry

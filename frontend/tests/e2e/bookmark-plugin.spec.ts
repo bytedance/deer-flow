@@ -274,11 +274,12 @@ for (const source of ["default", "custom-toolbar", "custom-sidebar"]) {
     await page
       .getByRole("searchbox", { name: "Search bookmarks", exact: true })
       .fill("ORCHID");
-    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const bookmarkSearch = page
+      .getByRole("region", { name: "Bookmarks", exact: true })
+      .getByRole("button", { name: "Search", exact: true });
+    await bookmarkSearch.click();
     await expect(page.getByText(/1 saved/)).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: "Search", exact: true }),
-    ).toBeEnabled();
+    await expect(bookmarkSearch).toBeEnabled();
     await page
       .getByRole("button", { name: "Open conversation", exact: true })
       .click();

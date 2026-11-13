@@ -19,6 +19,7 @@ rs.mock("@/components/workspace/messages/message-group", () => ({
   getMessageGroupReasoningMessage: selectReasoning,
 }));
 rs.mock("@/components/ai-elements/conversation", () => ({
+  ConversationScrollButton: () => null,
   Conversation: ({ children }: { children: ReactNode }) => (
     <div>{children}</div>
   ),
