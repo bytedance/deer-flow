@@ -10,6 +10,7 @@ from typing import Literal
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
@@ -112,9 +113,7 @@ async def web_search_tool(
 
     # Lazy configuration resolution can read files; keep it off the event loop.
     options = await asyncio.to_thread(_options)
-    key = options.get("api_key")
-    key = key.strip() if isinstance(key, str) else ""
-    key = key or os.getenv("WEBZ_API_KEY", "").strip()
+    key = resolve_api_key(options.get("api_key")) or resolve_api_key(os.getenv("WEBZ_API_KEY"))
     if not key:
         return json.dumps({"error": "Webz API key is missing; configure api_key or WEBZ_API_KEY"})
     count = _count(max_results if max_results is not None else options.get("max_results", 5))

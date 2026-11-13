@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url as _safe_public_url
@@ -45,13 +46,7 @@ def _get_api_key(tool_name: str, *, extras: Mapping[str, object] | None = None) 
     if extras is None:
         config = get_app_config().get_tool_config(tool_name)
         extras = config.model_extra if config is not None else {}
-    api_key = extras.get("api_key")
-    if isinstance(api_key, str) and api_key.strip():
-        return api_key.strip()
-    env_key = os.getenv("SERPER_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    return resolve_api_key(extras.get("api_key")) or resolve_api_key(os.getenv("SERPER_API_KEY"))
 
 
 def _count_for_request(value: object) -> int:

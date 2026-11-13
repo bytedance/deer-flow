@@ -719,22 +719,31 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             },
         }
 
+        def _is_placeholder(value: object) -> bool:
+            # Ask the runtime's owner of the rule: providers drop an .env.example
+            # value, so doctor must not report it as a configured key. Imported
+            # here so free providers still diagnose without the harness.
+            from deerflow.community.provider_credentials import is_template_placeholder
+
+            return isinstance(value, str) and is_template_placeholder(value)
+
+        def _real_key(value: object) -> bool:
+            return isinstance(value, str) and bool(value.strip()) and not _is_placeholder(value)
+
         def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key") -> tuple[Status, str] | None:
             configured_key = tool.get(key_field)
-            if isinstance(configured_key, str) and configured_key.strip():
+            if _real_key(configured_key):
                 key = configured_key.strip()
                 if key.startswith("$"):
                     env_name = key[1:]
-                    val = os.environ.get(env_name)
-                    if val and val.strip():
+                    if _real_key(os.environ.get(env_name)):
                         return ("ok", f"{env_name} set from config")
                     # The referenced var is unset; fall through to the default
                     # env var below, which tools use as a runtime fallback.
                 else:
                     return ("warn", f"literal {key_field} set in config")
 
-            val = os.environ.get(default_var)
-            return ("ok", f"{default_var} set") if val and val.strip() else None
+            return ("ok", f"{default_var} set") if _real_key(os.environ.get(default_var)) else None
 
         def _browserless_self_hosted(tool: dict) -> bool:
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
@@ -811,10 +820,11 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                         return CheckResult(label, "ok", f"{provider} ({detail})")
                     if tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
                         return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
+                    unset = "still holds the .env.example placeholder" if _is_placeholder(os.environ.get(var)) else "not set"
                     return CheckResult(
                         label,
                         "warn",
-                        f"{provider} configured but {var} not set",
+                        f"{provider} configured but {var} {unset}",
                         fix=f"Add {var}=<your-key> to .env, or run 'make setup'",
                     )
 

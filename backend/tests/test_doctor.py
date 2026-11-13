@@ -591,6 +591,33 @@ class TestCheckWebSearch:
         assert result.fix is not None
         assert "make setup" in result.fix
 
+    def test_tavily_with_env_template_placeholder_warns(self, tmp_path, monkeypatch):
+        """The runtime drops an ``.env.example`` value, so doctor must not call it configured."""
+        monkeypatch.setenv("TAVILY_API_KEY", "your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n    api_key: $TAVILY_API_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "tavily configured but TAVILY_API_KEY still holds the .env.example placeholder"
+        assert "TAVILY_API_KEY" in (result.fix or "")
+
+    def test_literal_placeholder_in_config_falls_back_to_the_env_key(self, tmp_path, monkeypatch):
+        """``resolve_api_key`` drops the literal placeholder and the provider reads the environment instead."""
+        monkeypatch.setenv("SERPER_API_KEY", "real-serper-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: your-serper-api-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert result.detail == "serper (SERPER_API_KEY set)"
+
+    def test_key_that_only_mentions_your_is_configured(self, tmp_path, monkeypatch):
+        """Doctor and the runtime share one rule: ``sk-your-...`` is a key both of them use."""
+        monkeypatch.setenv("TAVILY_API_KEY", "sk-your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+
     def test_brave_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
         cfg = tmp_path / "config.yaml"

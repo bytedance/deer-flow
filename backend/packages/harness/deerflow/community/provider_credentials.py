@@ -13,6 +13,10 @@ trailing newline, and putting that raw value into a header makes the HTTP
 transport refuse it with an error that quotes the whole header, key included
 (``tests/test_provider_api_key_whitespace.py``).
 
+``is_template_placeholder`` is the one definition of an ``.env.example`` example
+value. ``scripts/doctor.py`` asks it too, so the diagnosis and the runtime agree
+on which keys count as configured.
+
 The marker and the message are module constants because the strings are part of
 the contract: provider tests and operators' log grep patterns assert on them.
 """
@@ -27,7 +31,18 @@ REDACTION_MARKER = "[REDACTED]"
 URL_USERINFO_ERROR = "base_url must not contain username or password information"
 
 # Example values from ``.env.example`` (``your-jina-api-key``, ``your-github-token``).
-_ENV_TEMPLATE_PLACEHOLDER = re.compile(r"your-[a-z0-9-]*(?:key|token|secret)", re.IGNORECASE)
+# ``key``, ``token`` or ``secret`` is a whole hyphen-separated word, so a real
+# value such as ``your-monkey`` is not mistaken for one.
+_ENV_TEMPLATE_PLACEHOLDER = re.compile(r"your-(?:[a-z0-9-]*-)?(?:key|token|secret)", re.IGNORECASE)
+
+
+def is_template_placeholder(value: str) -> bool:
+    """Whether ``value`` is an ``.env.example`` example value rather than a credential.
+
+    The whole value must match, ignoring case and surrounding whitespace: a real
+    key that merely contains ``your-`` (``sk-your-jina-api-key``) is a key.
+    """
+    return _ENV_TEMPLATE_PLACEHOLDER.fullmatch(value.strip()) is not None
 
 
 def resolve_api_key(raw: str | SecretStr | None) -> str | None:
@@ -43,8 +58,7 @@ def resolve_api_key(raw: str | SecretStr | None) -> str | None:
     """
     value = raw.get_secret_value() if isinstance(raw, SecretStr) else raw
     if isinstance(value, str) and value.strip():
-        value = value.strip()
-        return None if _ENV_TEMPLATE_PLACEHOLDER.fullmatch(value) else value
+        return None if is_template_placeholder(value) else value.strip()
     return None
 
 

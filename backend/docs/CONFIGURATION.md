@@ -2112,6 +2112,8 @@ models:
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
+Search, fetch and capture providers treat an `.env.example` example value (`your-...-key`, `your-...-token` or `your-...-secret`, as the whole value) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. `make doctor` applies the same rule and names a variable that still holds the placeholder.
+
 ## Backend dotenv selection
 
 Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**
