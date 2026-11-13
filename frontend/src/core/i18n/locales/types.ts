@@ -316,6 +316,19 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
+  };
+
   artifactEditing: {
     unsaved: string;
     saving: string;

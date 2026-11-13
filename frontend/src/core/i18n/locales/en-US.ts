@@ -367,6 +367,20 @@ export const enUS: Translations = {
     linkCopied: "Link copied to clipboard",
   },
 
+  artifactSelection: {
+    rewrite: "Rewrite selection",
+    instructions:
+      "Describe how to rewrite this passage in the side chat. Review the answer before applying it to the draft.",
+    exactRequired: "Switch to source to select an exact range for rewriting.",
+    review: "Review replacement",
+    original: "Selected passage",
+    replacement: "Replacement",
+    apply: "Apply to draft",
+    applied: "Selection replaced in the draft. Review and save the artifact.",
+    changed: "The file or draft changed. Select the passage again.",
+    limit: "Select up to 12,000 characters.",
+  },
+
   artifactEditing: {
     unsaved: "Unsaved",
     saving: "Saving...",

@@ -71,6 +71,15 @@ pnpm catalog:sync   # after a change to the capability catalog
   `@`. Typed slash text is still submitted as a normal message, which the backend
   and the IM channels rely on.
 
+## Artifact selection
+
+- **Artifact rewrite state outlives its panel.** Opening side chat unmounts the
+  file detail. Keep the source range and revision in the sidecar provider, apply
+  through the shared draft store, and preserve the revision-checked Save path.
+- **Rendered text is not a source offset.** Markdown selection offsets require
+  the complete static parse and unchanged preprocessing; otherwise use an exact
+  unique source match or offer quotation without replacement.
+
 ## Delimited preview
 
 - **CSV parsing runs in the worker only**, with bounded input, cancellation of

@@ -70,6 +70,7 @@ import {
   buildParentConversationContext,
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
+  isSameSidecarContext,
 } from "@/core/sidecar";
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
@@ -98,6 +99,7 @@ import {
 } from "../model-picker-content";
 import { Tooltip } from "../tooltip";
 
+import { ArtifactRewriteReview } from "./artifact-rewrite-review";
 import { type SidecarReference, useSidecar } from "./context";
 import { ReferenceAttachmentSummary } from "./reference-attachments";
 
@@ -346,14 +348,28 @@ export function SidecarPanel({ className }: { className?: string }) {
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
-      const contexts = references.map((reference) => reference.context);
+      const artifactEdit = sidecar.artifactEdit;
+      const referencedContexts = references.map(
+        (reference) => reference.context,
+      );
+      const contexts = artifactEdit
+        ? [
+            artifactEdit.context,
+            ...referencedContexts.filter(
+              (context) => !isSameSidecarContext(context, artifactEdit.context),
+            ),
+          ]
+        : referencedContexts;
       const parentConversation = buildParentConversationContext(
         parentThread.messages,
       );
-      const hiddenContextPrompt =
+      let hiddenContextPrompt =
         contexts.length > 0 || parentConversation.length > 0
           ? buildSidecarContextPrompt(contexts, { parentConversation })
           : null;
+      if (artifactEdit) {
+        hiddenContextPrompt = `${hiddenContextPrompt ?? ""}\n\nRewrite only the first referenced passage (the artifact selection) according to the user's request. Other references provide context. Return the replacement text itself, without explanations or an enclosing code fence. Preserve surrounding Markdown structure when relevant. The user will review the replacement and apply it to the original file's draft; do not write or recreate that file in this side chat.`;
+      }
       await sendMessage(threadId, message, undefined, {
         additionalInputMessages: hiddenContextPrompt
           ? [
@@ -365,6 +381,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           : [],
         additionalKwargs: {
           sidecar_visible_message: true,
+          ...(artifactEdit ? { artifact_selection_edit: artifactEdit.id } : {}),
           ...(contexts.length > 0
             ? buildReferenceMessageMetadata(contexts)
             : {}),
@@ -373,7 +390,12 @@ export function SidecarPanel({ className }: { className?: string }) {
         onSent,
       });
     },
-    [parentThread.messages, sendMessage, sidecar.parentThreadId],
+    [
+      parentThread.messages,
+      sendMessage,
+      sidecar.parentThreadId,
+      sidecar.artifactEdit,
+    ],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -626,6 +648,15 @@ export function SidecarPanel({ className }: { className?: string }) {
         )}
       </div>
 
+      {sidecar.artifactEdit && (
+        <ArtifactRewriteReview
+          key={sidecar.artifactEdit.id}
+          edit={sidecar.artifactEdit}
+          messages={thread.messages}
+          disabled={disabled || !!thread.error || parentThread.isLoading}
+          onCancel={() => sidecar.clearArtifactEdit()}
+        />
+      )}
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
         <PromptInputProvider key={sidecar.parentThreadId}>
           <PromptInput

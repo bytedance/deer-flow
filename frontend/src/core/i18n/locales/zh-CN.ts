@@ -352,6 +352,19 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  artifactSelection: {
+    rewrite: "改写选区",
+    instructions: "在侧边追问中描述如何改写这段内容，检查回答后再应用到草稿。",
+    exactRequired: "切换到源码，选择准确范围后即可改写。",
+    review: "预览替换内容",
+    original: "选中段落",
+    replacement: "替换内容",
+    apply: "应用到草稿",
+    applied: "选区已替换到草稿，请检查后保存文件。",
+    changed: "文件或草稿已变化，请重新选择段落。",
+    limit: "请选择不超过 12,000 个字符。",
+  },
+
   artifactEditing: {
     unsaved: "未保存",
     saving: "正在保存...",
