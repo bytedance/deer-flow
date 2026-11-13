@@ -24,12 +24,6 @@
 - **模型：** 管理员可在 **设置 → 模型** 中选择 StepFun（阶跃星辰），
   填写 API Key 和模型 ID 即可接入普通 API。([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
-- **插件：** 新增 `deerflow-extension-skill-evolution` 示例扩展：通过已合入的
-  `SkillMutationService` 走完 propose → evaluate → apply → rollback，只在评估结论为
-  `justified` 时携带 `AssessmentRef` 提交，将报告绑定到确切的候选哈希与基线版本，回滚保持追加式记录。
-  演示路由把每个操作绑定到调用者身份。该扩展为可选安装，未授予
-  `host_access.skill_mutations` 时不执行任何操作。([#7984])
-
 ### 修复
 
 - **前端：** 侧边栏对话菜单中的 **分享** 现在复制指向当前部署的链接。此前在 `localhost` 和
@@ -12866,7 +12860,6 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
-[#7984]: https://github.com/bytedance/deer-flow/pull/7984
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006

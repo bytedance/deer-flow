@@ -53,14 +53,6 @@ This section accumulates work toward the **2.3.0** milestone
   connect an ordinary StepFun API account with an API key and model ID.
   ([#7988](https://github.com/bytedance/deer-flow/pull/7988))
 
-- **plugins:** Add the `deerflow-extension-skill-evolution` example extension:
-  it drives the merged `SkillMutationService` through propose → evaluate →
-  apply → rollback, commits only a `justified` verdict with an `AssessmentRef`
-  binding the report to the exact candidate hash and base revision, and keeps
-  revert append-only. Its walkthrough routes bind every action to the caller's
-  principal. Opt-in; it does nothing without an operator
-  `host_access.skill_mutations` grant. ([#7984])
-
 ### Fixed
 
 - **frontend:** **Share** in a sidebar chat's menu now copies a link to the
@@ -16306,7 +16298,6 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953
 [#7958]: https://github.com/bytedance/deer-flow/pull/7958
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
-[#7984]: https://github.com/bytedance/deer-flow/pull/7984
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
