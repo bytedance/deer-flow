@@ -27,6 +27,15 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LABELS_FILE = REPO_ROOT / ".github" / "labels.yml"
+PRIORITY_LABELS = {"p0", "p1", "p2"}
+ISSUE_URL_RE = re.compile(
+    r"https://(?P<host>[a-z0-9.-]+)/(?P<repo>[a-z0-9-]+/[a-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)",
+    re.IGNORECASE | re.ASCII,
+)
+REPO_RE = re.compile(
+    r"(?:(?P<host>[a-z0-9.-]+)/)?(?P<repo>[a-z0-9-]+/[a-z0-9_.-]+)",
+    re.IGNORECASE | re.ASCII,
+)
 DECLARED_NAME_RE = re.compile(r"^\s*-\s+name:\s*(?P<value>.+?)\s*$")
 REPO_PATH_RE = re.compile(
     r"(?:backend|frontend|deerflow|scripts|skills|docker|\.github)/[A-Za-z0-9_./-]+"
@@ -302,6 +311,8 @@ def compute_bug_score(
     # edge cases never inflate into P1 regardless of formatting completeness.
     if evidence == "missing":
         priority = "Needs-Info"
+    elif realism == "synthetic_or_micro_window":
+        priority = "P3"
     elif impact == "critical" and realism == "default_or_common_user_path":
         priority = "P0"
     elif impact == "critical" or (
@@ -702,7 +713,7 @@ def fetch_issues_via_gh(
     limit: int,
     label: str | None,
 ) -> list[dict[str, Any]]:
-    fields = "number,title,body,labels,assignees,author,authorAssociation,url"
+    fields = "number,title,body,labels,assignees,author,url"
     if issue_number is not None:
         cmd = ["gh", "issue", "view", str(issue_number), "--json", fields]
         if repo:
@@ -735,25 +746,62 @@ def fetch_issues_via_gh(
     return json.loads(res.stdout)
 
 
+def validate_label_targets(issues: list[dict[str, Any]], repo: str | None) -> None:
+    target = REPO_RE.fullmatch(repo) if repo else None
+    if repo and not target:
+        raise ValueError("--repo must be [HOST/]OWNER/REPO")
+    for issue in issues:
+        if not isinstance(issue, dict):
+            raise ValueError("Each issue must be a JSON object")
+        number = issue.get("number")
+        url = issue.get("url")
+        match = ISSUE_URL_RE.fullmatch(url) if isinstance(url, str) else None
+        if type(number) is not int or not match or match["number"] != str(number):
+            raise ValueError(f"Issue #{number} must have a matching HTTPS issue URL")
+        if target:
+            host = target["host"] or os.environ.get("GH_HOST") or "github.com"
+            if (
+                match["host"].lower() != host.lower()
+                or match["repo"].lower() != target["repo"].lower()
+            ):
+                raise ValueError(f"Issue #{number} URL does not match --repo {repo}")
+
+
 def apply_issue_labels(
-    issue_number: int,
+    issue_url: str,
     labels: list[str],
-    repo: str | None,
+    existing_labels: list[str],
     dry_run: bool,
 ) -> bool:
     if not labels:
         return True
-    cmd = ["gh", "issue", "edit", str(issue_number), "--add-label", ",".join(labels)]
-    if repo:
-        cmd += ["--repo", repo]
+    if any(label.lower() in PRIORITY_LABELS for label in labels):
+        if not dry_run:
+            current = subprocess.run(
+                ["gh", "issue", "view", issue_url, "--json", "labels"],
+                capture_output=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if current.returncode != 0:
+                print(f"  ✗ {issue_url}: {current.stderr.strip()}", file=sys.stderr)
+                return False
+            existing_labels = [
+                label["name"] for label in json.loads(current.stdout)["labels"]
+            ]
+        if any(label.lower() in PRIORITY_LABELS for label in existing_labels):
+            labels = [label for label in labels if label.lower() not in PRIORITY_LABELS]
+    if not labels:
+        return True
+    cmd = ["gh", "issue", "edit", issue_url, "--add-label", ",".join(labels)]
     if dry_run:
         print(f"[dry-run] {' '.join(cmd)}")
         return True
     res = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
     if res.returncode != 0:
-        print(f"  ✗ #{issue_number}: {res.stderr.strip()}", file=sys.stderr)
+        print(f"  ✗ {issue_url}: {res.stderr.strip()}", file=sys.stderr)
         return False
-    print(f"  ✓ #{issue_number}: {', '.join(labels)}")
+    print(f"  ✓ {issue_url}: {', '.join(labels)}")
     return True
 
 
@@ -770,7 +818,9 @@ def _configure_stdio() -> None:
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", help="Target repository as OWNER/NAME")
+    parser.add_argument(
+        "--repo", help="Target [HOST/]OWNER/REPO (required to label JSON input)"
+    )
     parser.add_argument("--issue", type=int, help="Score a single issue by number")
     parser.add_argument(
         "--limit", type=int, default=20, help="Number of open issues to fetch"
@@ -822,21 +872,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--apply-labels",
         action="store_true",
-        help="Apply suggested priority and area labels via gh issue edit",
+        help="Add suggested labels while preserving an existing live priority",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print gh label commands without executing them",
+        help="Print gh label commands using the input labels without writing to GitHub",
     )
     args = parser.parse_args(argv)
+    label_issues = args.apply_labels or args.dry_run
 
     try:
         if args.input_json:
+            if label_issues and not args.repo:
+                raise ValueError("--repo is required to label issues from --input-json")
             raw_data = json.loads(args.input_json.read_text(encoding="utf-8"))
             issues = raw_data if isinstance(raw_data, list) else [raw_data]
         else:
             issues = fetch_issues_via_gh(args.repo, args.issue, args.limit, args.label)
+        if label_issues:
+            validate_label_targets(issues, args.repo)
     except Exception as err:
         print(f"Error loading issues: {err}", file=sys.stderr)
         return 1
@@ -886,12 +941,13 @@ def main(argv: list[str] | None = None) -> int:
         args.output_md.write_text(md_report, encoding="utf-8")
     print(md_report, end="")
 
-    if args.apply_labels or args.dry_run:
+    if label_issues:
         failures = 0
         for item in results:
-            num = item.get("number")
             labels = item["scoring"].get("suggested_labels", [])
-            if num and not apply_issue_labels(num, labels, args.repo, args.dry_run):
+            if not apply_issue_labels(
+                item["url"], labels, item["stage0"]["existing_labels"], args.dry_run
+            ):
                 failures += 1
         if failures:
             return 1

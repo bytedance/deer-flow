@@ -60,7 +60,15 @@ def test_extract_stage0_verifies_existing_repo_paths_and_harness_fallback(scorer
     assert stage0["is_maintainer_author"] is True
 
 
-def test_bug_scoring_caps_synthetic_micro_window_at_p3_while_preserving_fast_track(scorer):
+@pytest.mark.parametrize(
+    ("impact", "evidence", "priority"),
+    [
+        ("low", "unit_or_code_trace_only", "P3"),
+        ("critical", "unit_or_code_trace_only", "P3"),
+        ("critical", "missing", "Needs-Info"),
+    ],
+)
+def test_bug_scoring_caps_synthetic_micro_window_at_p3_while_preserving_fast_track(scorer, impact, evidence, priority):
     declared = scorer.load_declared_labels()
     stage0 = {
         "title_has_code_fence": False,
@@ -70,9 +78,9 @@ def test_bug_scoring_caps_synthetic_micro_window_at_p3_while_preserving_fast_tra
     }
     llm = {
         "issue_type": "bug",
-        "impact": "low",
+        "impact": impact,
         "trigger_realism": "synthetic_or_micro_window",
-        "evidence_quality": "unit_or_code_trace_only",
+        "evidence_quality": evidence,
         "change_surface": "localized_1_to_2_files",
         "scope_fit": "core",
         "routing_track": "fast_track_bug",
@@ -80,9 +88,9 @@ def test_bug_scoring_caps_synthetic_micro_window_at_p3_while_preserving_fast_tra
         "summary_zh": "同一微秒时钟冲突仅在单测冻结时间下触发，但补丁局部清晰。",
     }
     res = scorer.compute_bug_score(stage0, llm, declared_labels=declared)
-    assert res["priority"] == "P3"
-    assert res["fast_track_ready"] is True
-    assert res["action_zh"] == "可直接提PR"
+    assert res["priority"] == priority
+    assert res["fast_track_ready"] is (evidence != "missing")
+    assert res["action_zh"] == ("需补充复现信息" if evidence == "missing" else "可直接提PR")
     assert "P3" not in res["suggested_labels"]
     assert set(res["suggested_labels"]) == {"bug", "area:backend"}
 
@@ -198,6 +206,8 @@ def test_cli_offline_and_dry_run_work_under_ascii_stdout(tmp_path: Path):
             str(SCRIPT_PATH),
             "--input-json",
             str(input_file),
+            "--repo",
+            "bytedance/deer-flow",
             "--output-json",
             str(output_json),
             "--output-md",
@@ -212,11 +222,117 @@ def test_cli_offline_and_dry_run_work_under_ascii_stdout(tmp_path: Path):
     )
     assert res.returncode == 0, res.stderr
     assert b"UnicodeEncodeError" not in res.stderr
-    assert b"[dry-run] gh issue edit 8094" in res.stdout
+    assert b"[dry-run] gh issue edit https://github.com/bytedance/deer-flow/issues/8094" in res.stdout
     assert output_json.is_file()
     assert output_md.is_file()
     parsed = json.loads(output_json.read_text(encoding="utf-8"))
     assert len(parsed) == 2
+
+
+@pytest.mark.parametrize("issue_number", [None, 42])
+def test_live_fetch_uses_supported_fields(scorer, monkeypatch, issue_number):
+    record = {"number": 42, "url": "https://github.com/bytedance/deer-flow/issues/42"}
+    calls = []
+
+    def fake_gh(cmd, **kwargs):
+        calls.append(cmd)
+        fields = cmd[cmd.index("--json") + 1].split(",")
+        if "authorAssociation" in fields:
+            return subprocess.CompletedProcess(cmd, 1, "", "Unknown JSON field: authorAssociation")
+        result = record if issue_number else [record]
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(result), "")
+
+    monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
+    assert scorer.fetch_issues_via_gh("bytedance/deer-flow", issue_number, 20, "bug") == [record]
+    assert len(calls) == 1
+    assert calls[0][:3] == ["gh", "issue", "view" if issue_number else "list"]
+    assert calls[0][-2:] == (["--repo", "bytedance/deer-flow"] if issue_number else ["--label", "bug"])
+
+
+@pytest.mark.parametrize(
+    ("repo", "url"),
+    [
+        (None, "https://github.com/bytedance/deer-flow/issues/42"),
+        ("bytedance/deer-flow", "https://github.com/example-fork/deer-flow/issues/42"),
+        ("bytedance/deer-flow", "https://github.com/bytedance/deer-flow/issues/43"),
+        ("bytedance/deer-flow", "https://example.com/bytedance/deer-flow/issues/42"),
+        ("bytedance/deer-flow", ""),
+    ],
+)
+def test_label_apply_rejects_entire_invalid_export_before_any_gh_call(scorer, monkeypatch, tmp_path, repo, url):
+    input_file = tmp_path / "issues.json"
+    input_file.write_text(
+        json.dumps(
+            [
+                {"number": 41, "url": "https://github.com/bytedance/deer-flow/issues/41", "title": "[bug] Startup failure"},
+                {"number": 42, "url": url, "title": "[bug] Startup failure"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_gh(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
+    args = ["--input-json", str(input_file), "--offline", "--apply-labels"]
+    if repo:
+        args += ["--repo", repo]
+    assert scorer.main(args) == 1
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("live_labels", "suggested_labels"),
+    [
+        (["P0"], "bug,area:backend"),
+        ([], "bug,area:backend,P2"),
+    ],
+)
+def test_label_apply_uses_live_priority_and_verified_issue_url(scorer, monkeypatch, tmp_path, live_labels, suggested_labels):
+    url = "https://github.com/bytedance/deer-flow/issues/42"
+    input_file = tmp_path / "issues.json"
+    input_file.write_text(
+        json.dumps(
+            {
+                "number": 42,
+                "url": url,
+                "title": "[bug] Startup failure",
+                "body": "It crashes on startup and fails every time. See stack trace for the default flow.",
+                "labels": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_gh(cmd, **kwargs):
+        calls.append(cmd)
+        response = {"labels": [{"name": label} for label in live_labels]}
+        return subprocess.CompletedProcess(cmd, 0, json.dumps(response), "")
+
+    monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
+    assert (
+        scorer.main(
+            [
+                "--repo",
+                "bytedance/deer-flow",
+                "--input-json",
+                str(input_file),
+                "--mode",
+                "bug",
+                "--offline",
+                "--apply-labels",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        ["gh", "issue", "view", url, "--json", "labels"],
+        ["gh", "issue", "edit", url, "--add-label", suggested_labels],
+    ]
 
 
 def test_uses_max_completion_tokens_for_reasoning_and_gpt6_models(scorer):
