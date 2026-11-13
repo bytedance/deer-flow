@@ -201,3 +201,12 @@ def test_cli_offline_and_dry_run_work_under_ascii_stdout(tmp_path: Path):
     assert output_md.is_file()
     parsed = json.loads(output_json.read_text(encoding="utf-8"))
     assert len(parsed) == 2
+
+
+def test_uses_max_completion_tokens_for_reasoning_and_gpt6_models(scorer):
+    assert scorer._uses_max_completion_tokens("gpt-6.1-terra") is True
+    assert scorer._uses_max_completion_tokens("gpt-6-luna") is True
+    assert scorer._uses_max_completion_tokens("openai/gpt-5-mini") is True
+    assert scorer._uses_max_completion_tokens("o3-mini") is True
+    assert scorer._uses_max_completion_tokens("deepseek/deepseek-v4.1-flash-1017") is False
+    assert scorer._uses_max_completion_tokens("gpt-4o-mini") is False
