@@ -106,6 +106,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         self,
         *,
         metadata: dict[str, Any] | None = None,
+        query: str | None = None,
         status: str | None = None,
         archived: bool | None = None,
         project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
@@ -150,6 +151,9 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             records = [record for record in records if isinstance(record.get("metadata"), dict) and all(json_value_matches(record["metadata"], key, value) for key, value in metadata.items())]
         if archived is not None:
             records = [record for record in records if ((record.get("metadata") or {}).get(THREAD_ARCHIVED_METADATA_KEY) is True) == archived]
+        if query and query.strip():
+            needle = query.strip().casefold()
+            records = [record for record in records if needle in (record.get("display_name") or "").casefold()]
         records.sort(key=self._sort_key, reverse=True)
         return records[offset : offset + limit]
 

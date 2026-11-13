@@ -3724,6 +3724,15 @@ authorization:
 # See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
+#   - name: workspace-search
+#     package: deerflow-extension-workspace-search
+#     use: deerflow_workspace_search:install
+#     table_prefix: extension_workspace_search_
+#     enabled: true
+#     # Install examples/deerflow-extension-workspace-search first; restart Gateway.
+#     # SQLite/Postgres reuse the application database. Memory deployments use:
+#     config:
+#       path: .deer-flow/workspace-search.db
 #   - name: example                       # PEP 621 entry-point name
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install

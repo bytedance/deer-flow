@@ -23,12 +23,10 @@ import {
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
 import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
-import {
-  MessageList,
-  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-} from "@/components/workspace/messages";
+import { MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
+import { SearchableMessageList as MessageList } from "@/components/workspace/search-message-window";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -371,6 +369,17 @@ export default function AgentChatPage() {
       }
       const executionOptions = {
         ...scopedOptions,
+        onSent: () => {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("message");
+          url.searchParams.delete("message_seq");
+          history.replaceState(
+            null,
+            "",
+            `${url.pathname}${url.search}${url.hash}`,
+          );
+          scopedOptions?.onSent?.();
+        },
         additionalKwargs: {
           ...scopedOptions?.additionalKwargs,
           ...modelInput.additionalKwargs,
