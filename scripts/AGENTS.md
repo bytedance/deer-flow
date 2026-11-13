@@ -57,6 +57,8 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
   files mark the env files optional so a fresh checkout still starts and stops.
 - **Support bundles export no secrets** and show an external runtime home as
   `{DEER_FLOW_HOME}`.
+- **Doctor does not echo model credentials.** Obvious sample key values fail the
+  model readiness check even when the environment variable is nonempty.
 
 ## Start, stop, clean
 

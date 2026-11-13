@@ -497,6 +497,12 @@ def _memory_backend_config_fix(detail: str) -> str | None:
     return None
 
 
+def _looks_like_key_placeholder(value: str) -> bool:
+    """Recognize sample key values without logging or transmitting them."""
+    normalized = value.strip().lower()
+    return normalized.startswith(("your-", "replace-with-", "sk-your-", "sk-replace-with-"))
+
+
 def check_llm_api_key(config_path: Path) -> list[CheckResult]:
     """Check that each model's env var is set in the environment."""
     if not config_path.exists():
@@ -532,14 +538,15 @@ def check_llm_api_key(config_path: Path) -> list[CheckResult]:
             model_name = model.get("name", "default")
             for var in env_refs:
                 label = f"{var} set (model: {model_name})"
-                if os.environ.get(var):
+                value = os.environ.get(var)
+                if value and value.strip() and not _looks_like_key_placeholder(value):
                     results.append(CheckResult(label, "ok"))
                 else:
                     results.append(
                         CheckResult(
                             label,
                             "fail",
-                            fix=f"Add {var}=<your-key> to your .env file",
+                            fix=f"Set {var} to a real key in your .env file",
                         )
                     )
     except Exception as exc:
