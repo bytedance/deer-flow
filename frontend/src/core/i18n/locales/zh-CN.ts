@@ -116,6 +116,7 @@ export const zhCN: Translations = {
       refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
     },
     catalog: {
+      officePreview: bundledCopy("deerflow-extension-office-preview", "zh-CN"),
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
       context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
@@ -369,6 +370,12 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "正在准备下载…",
+    retryDownload: "重试下载",
+    downloadFailed: "下载失败，请重试。",
+    downloadRequested: "已交给浏览器下载",
+    retry: "重新预览",
+    unavailable: "当前格式暂无可用预览，可下载原始文件查看。",
     loadingPreview: "正在准备预览...",
     resourcesUnavailable:
       "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
@@ -811,8 +818,16 @@ export const zhCN: Translations = {
     viewTrash: "回收站",
     documentsLoadFailed: "无法加载项目文档",
     threadFilesLoadFailed: "无法加载对话文件",
-    interimMemoryNotice:
-      "记忆目前仍为全局：在第三阶段之前，项目中讨论的内容仍可能进入你的全局记忆。",
+    memoryTitle: "项目记忆",
+    memoryAutoExtract: "自动提取",
+    memoryDescription:
+      "从项目对话中提炼长期有效的事实，仅用于本项目。关闭自动提取会保留已有记忆；不再需要的内容可直接删除。自动提取需开启全局记忆功能。",
+    memoryEmpty: "还没有项目记忆。项目对话中形成的约定和经验会显示在这里。",
+    memoryPromote: "转入指令",
+    memoryPromoted: "已转入项目指令",
+    memorySaveFirst: "请先保存上方的指令修改，再转入记忆。",
+    memoryLoadFailed: "无法加载项目记忆。",
+    memoryActionFailed: "项目记忆更新失败，请刷新后重试。",
   },
 
   trash: {
@@ -1852,6 +1867,19 @@ export const zhCN: Translations = {
   },
 
   uploads: {
+    status: {
+      pending: "待发送",
+      uploading: "上传中…",
+      uploaded: "上传成功",
+      failed: "上传失败",
+      cancelled: "已取消",
+    },
+    cancelUpload: "取消上传",
+    retryUpload: "重试上传",
+    notReady: "附件尚未就绪。请重试失败项或将其移除，然后重新发送。",
+    attachment: "附件",
+    image: "图片",
+    removeAttachment: (filename) => `移除附件：${filename}`,
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>

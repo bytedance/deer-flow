@@ -1453,11 +1453,17 @@ def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> in
     return min(value, max_limit)
 
 
-def custom_agent_name(assistant_id: str | None) -> str | None:
+# Error details echo caller-supplied agent names; bound them so an oversized
+# value cannot bloat the response or any log line that records the detail.
+_MAX_ECHOED_AGENT_NAME_CHARS = 200
+
+
+def custom_agent_name(assistant_id: str | None, *, field: str = "assistant_id") -> str | None:
     """Return the custom agent *assistant_id* selects, or ``None`` for the lead agent.
 
     Custom names are normalized (trimmed, lowercased, ``_`` to ``-``) and must
-    then contain only letters, digits and hyphens.
+    then contain only letters, digits and hyphens. *field* names the request
+    field in the error message.
 
     Raises:
         ValueError: *assistant_id* cannot name an agent.
@@ -1466,7 +1472,7 @@ def custom_agent_name(assistant_id: str | None) -> str | None:
         return None
     normalized = assistant_id.strip().lower().replace("_", "-")
     if not normalized or not re.fullmatch(r"[a-z0-9-]+", normalized):
-        raise ValueError(f"Invalid assistant_id {assistant_id!r}: must contain only letters, digits, and hyphens after normalization.")
+        raise ValueError(f"Invalid {field} {assistant_id!r:.{_MAX_ECHOED_AGENT_NAME_CHARS}}: must contain only letters, digits, and hyphens after normalization.")
     return normalized
 
 
@@ -2199,20 +2205,30 @@ async def _load_scope_agent_config(
 ) -> Any | None:
     if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
         return None
+    # The caller's config/context ``agent_name`` arrives here unvalidated, and
+    # every run that names a custom agent passes through, with or without a
+    # knowledge scope, so each rejection says what is wrong with the agent.
+    if not isinstance(assistant_id, str):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid agent_name: expected a string, got {type(assistant_id).__name__}.",
+        )
     try:
-        # The caller's config/context ``agent_name`` arrives here unvalidated.
-        if not isinstance(assistant_id, str):
-            raise ValueError("agent_name must be a string")
-        normalized = assistant_id.strip().lower().replace("_", "-")
+        normalized = custom_agent_name(assistant_id, field="agent_name")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
         return await asyncio.to_thread(
             load_agent_config,
             normalized,
             user_id=user_id,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=422, detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' not found") from exc
+    except ValueError as exc:
         raise HTTPException(
             status_code=422,
-            detail="knowledge_scope assistant configuration could not be resolved",
+            detail=f"Agent '{normalized:.{_MAX_ECHOED_AGENT_NAME_CHARS}}' configuration could not be loaded",
         ) from exc
 
 

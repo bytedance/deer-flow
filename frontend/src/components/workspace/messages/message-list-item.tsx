@@ -1,7 +1,6 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import {
   CheckIcon,
-  FileIcon,
   Loader2Icon,
   PencilIcon,
   ThumbsDownIcon,
@@ -60,11 +59,14 @@ import { pathOfThread } from "@/core/threads/utils";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
+import { useArtifacts } from "../artifacts/context";
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { KnowledgeSourcesPanel } from "../citations/knowledge-source";
 import { ConversationReferenceChip } from "../conversation-references/conversation-reference-chip";
 import { CopyButton } from "../copy-button";
+import { FileName } from "../file-name";
+import { FileTypeIcon } from "../file-type-icon";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
@@ -763,6 +765,7 @@ function RichFileCard({
   threadId: string;
 }) {
   const { t } = useI18n();
+  const { select, setOpen } = useArtifacts();
   const isUploading = file.status === "uploading";
   const isImage = isImageFile(file.filename);
 
@@ -771,12 +774,10 @@ function RichFileCard({
       <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 opacity-60 shadow-sm">
         <div className="flex items-start gap-2">
           <Loader2Icon className="text-muted-foreground mt-0.5 size-4 shrink-0 animate-spin" />
-          <span
-            className="text-foreground truncate text-sm font-medium"
-            title={file.filename}
-          >
-            {file.filename}
-          </span>
+          <FileName
+            filename={file.filename}
+            className="text-foreground text-sm font-medium"
+          />
         </div>
         <div className="flex items-center justify-between gap-2">
           <Badge
@@ -817,28 +818,26 @@ function RichFileCard({
   }
 
   return (
-    <div className="bg-background border-border/40 flex max-w-50 min-w-30 flex-col gap-1 rounded-lg border p-3 shadow-sm">
-      <div className="flex items-start gap-2">
-        <FileIcon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
-        <span
-          className="text-foreground truncate text-sm font-medium"
-          title={file.filename}
-        >
-          {file.filename}
+    <button
+      type="button"
+      aria-label={`${file.filename} ${getFileTypeLabel(file.filename)} · ${formatBytes(file.size)}`}
+      onClick={() => {
+        select(file.path!);
+        setOpen(true);
+      }}
+      className="bg-background border-border hover:bg-accent focus-visible:ring-ring flex max-w-64 min-w-40 items-center gap-3 rounded-xl border p-3 text-left transition-colors outline-none focus-visible:ring-2"
+    >
+      <FileTypeIcon filename={file.filename} />
+      <span className="min-w-0">
+        <FileName
+          filename={file.filename}
+          className="text-foreground text-sm font-medium"
+        />
+        <span className="text-muted-foreground mt-1 block text-xs">
+          {getFileTypeLabel(file.filename)} · {formatBytes(file.size)}
         </span>
-      </div>
-      <div className="flex items-center justify-between gap-2">
-        <Badge
-          variant="secondary"
-          className="rounded px-1.5 py-0.5 text-[10px] font-normal"
-        >
-          {getFileTypeLabel(file.filename)}
-        </Badge>
-        <span className="text-muted-foreground text-[10px]">
-          {formatBytes(file.size)}
-        </span>
-      </div>
-    </div>
+      </span>
+    </button>
   );
 }
 
