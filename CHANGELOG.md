@@ -68,6 +68,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **frontend:** Cron presets in the task form now require minute 0-59, hour
+  0-23 and day of month 1-31, so an out-of-range expression such as
+  `0 24 * * *` stays a custom schedule. It used to be shown as the nearest
+  preset and saved back as that rewritten time; it now keeps the typed text and
+  saving it surfaces the Gateway's `422`. ([#8020])
+
 - **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
   `parents` or `counters_since_delta_snapshot` in its metadata no longer
   leaves the thread broken. Those keys used to land on the thread's first
@@ -16415,6 +16421,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
+[#8020]: https://github.com/bytedance/deer-flow/pull/8020
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
 [#8046]: https://github.com/bytedance/deer-flow/pull/8046
 [#8057]: https://github.com/bytedance/deer-flow/pull/8057
