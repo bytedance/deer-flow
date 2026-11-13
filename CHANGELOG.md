@@ -60,11 +60,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Changed
 
-- **subagents:** Ordinary `task` calls deliver progress and terminal results
-  through publication notifications instead of five-second polling. The waiting
-  deadline stays fixed, and result delivery does not wait for background cleanup.
-  ([#8169](https://github.com/bytedance/deer-flow/pull/8169))
-
 - **checkpoint:** DeltaChannel deployments now require `langgraph-checkpoint`
   4.3.0, SQLite saver 3.1.2, and Postgres saver 3.1.3, excluding versions that
   could reorder parallel writes during replay or lose paged ancestor history.
@@ -83,7 +78,7 @@ This section accumulates work toward the **2.3.0** milestone
   implementation behind a bound name can alternate across cache generations
   with server health.
   ([#8135](https://github.com/bytedance/deer-flow/pull/8135))
-
+  
 - **channels:** WeCom no longer drops images between 2 MB and 10 MB. The
   adapter capped image uploads at 2 MB — the voice limit in the same protocol —
   so a larger chart was skipped before upload and the turn arrived without it.
