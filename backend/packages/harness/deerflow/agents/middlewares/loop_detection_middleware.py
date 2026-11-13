@@ -5,8 +5,10 @@ arguments indefinitely until the recursion limit kills the run.
 
 Detection strategy:
   1. After each model response, hash the tool calls (name + args).
-  2. Track recent hashes in a sliding window.
-  3. If the same hash appears >= warn_threshold times, queue a
+  2. Reconcile the preceding batch with its results, then track call/result
+     fingerprints in a sliding window. A pending call uses its last observed
+     result; changed successful results count separately, including file versions.
+  3. If the same fingerprint appears >= warn_threshold times, queue a
      "you are repeating yourself — wrap up" warning for the current
      thread/run. The warning is **injected at the next model call** (in
      ``wrap_model_call``) as a ``HumanMessage`` appended to the message
@@ -67,14 +69,14 @@ import logging
 import threading
 import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
@@ -82,7 +84,9 @@ from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     resolve_audit_recorder,
 )
+from deerflow.agents.middlewares.tool_call_args import pair_tool_call_results
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
 from deerflow.runtime.events.catalog import MIDDLEWARE_LOOP_DETECTION_TAG
 
 if TYPE_CHECKING:
@@ -108,6 +112,7 @@ _OPEN_ENDED_READ = "end"
 _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
+type _ObservationKey = tuple[str, str | None]
 
 # Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
 _UNSERIALIZABLE_ARGS = "<unserializable>"
@@ -243,6 +248,68 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
+@dataclass(frozen=True, slots=True)
+class _CallObservation:
+    """Bounded process state; result fingerprints are never persisted or logged."""
+
+    call_hash: str
+    message_id: str | None
+    result_hash: str | None = None
+
+    @property
+    def key(self) -> _ObservationKey:
+        return self.call_hash, self.result_hash
+
+
+def _tool_result_hash(result: ToolMessage) -> str | None:
+    """Fingerprint successful data, ignoring receipt IDs and diagnostic churn."""
+    metadata = result.additional_kwargs if isinstance(result.additional_kwargs, dict) else {}
+    meta = metadata.get(TOOL_META_KEY)
+    # Repeated failures are not progress, even if diagnostics or classifications
+    # change. Read structured producer status, never infer errors from prose.
+    if result.status == "error" or (isinstance(meta, dict) and meta.get("status") == "error"):
+        return "error"
+
+    # Ranged reads may return identical lines while the rest of a file changes.
+    # Consume the gate's existing full-file version without importing its I/O code.
+    read_mark = metadata.get("deerflow_read_mark")
+    version = None
+    if isinstance(read_mark, dict):
+        path, digest = read_mark.get("path"), read_mark.get("hash")
+        if isinstance(path, str) and path and isinstance(digest, str) and len(digest) == 64 and all(char in "0123456789abcdefABCDEF" for char in digest):
+            version = (path, digest.lower())
+    try:
+        blob = json.dumps((result.content, version), sort_keys=True, allow_nan=False)
+    except (TypeError, ValueError, RecursionError):
+        return None
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _previous_observation(messages: Sequence) -> _CallObservation | None:
+    """Read only the preceding response's results, pairing reused IDs per turn."""
+    for index in range(len(messages) - 2, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        if not message.tool_calls or not isinstance(message.id, str) or not message.id:
+            return None
+        observation = _CallObservation(_hash_tool_calls(message.tool_calls), message.id)
+        occurrences = pair_tool_call_results(messages[index:-1])
+        # Unaddressable calls and incomplete batches cannot establish progress.
+        ids = [call.get("id") for call in message.tool_calls]
+        if len(occurrences) != len(ids) or any(not isinstance(call_id, str) or not call_id for call_id in ids) or len(set(ids)) != len(ids):
+            return observation
+        outcomes = []
+        for occurrence in occurrences:
+            result_hash = _tool_result_hash(occurrence.result) if occurrence.result is not None else None
+            if result_hash is None:
+                return observation
+            outcomes.append((_hash_tool_calls([occurrence.tool_call]), result_hash))
+        blob = json.dumps(sorted(outcomes))
+        return replace(observation, result_hash=hashlib.sha256(blob.encode()).hexdigest())
+    return None
+
+
 # Warn-level messages ask the agent to wrap up, but must not make it drop work
 # it was asked to persist: a subagent whose task names an output file would
 # otherwise stop *all* tool calls, including the write that delivers its
@@ -368,8 +435,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # after_agent releases normal invocations and the cap bounds abnormal ones.
         self._fallback_run_ids: OrderedDict[int, tuple[object, str]] = OrderedDict()
         self._max_fallback_run_ids = max(1, self.max_tracked_threads * 2)
-        self._history: OrderedDict[_RunScopeKey, list[str]] = OrderedDict()
-        self._warned: dict[_RunScopeKey, set[str]] = defaultdict(set)
+        self._history: OrderedDict[_RunScopeKey, list[_CallObservation]] = OrderedDict()
+        self._warned: dict[_RunScopeKey, set[_ObservationKey]] = defaultdict(set)
         # Windowed per-tool-type frequency: recent tool names per run scope,
         # trimmed to ``window_size`` so the count decays instead of growing
         # monotonically (replaces the old monotonic ``_tool_freq`` integer).
@@ -405,6 +472,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
+            "repetition_key": "call_and_result_v1",
             "warn_threshold": self.warn_threshold,
             "hard_limit": self.hard_limit,
             "window_size": self.window_size,
@@ -584,8 +652,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         """Track tool calls and check for loops.
 
         Two detection layers:
-          1. **Hash-based** (existing): catches identical tool call sets.
-          2. **Frequency-based** (new): catches the same *tool type* being
+          1. **Hash-based**: catches repeated call sets with unchanged results.
+          2. **Frequency-based**: catches the same *tool type* being
              called many times with varying arguments (e.g. ``read_file``
              on 40 different files).
 
@@ -600,15 +668,19 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if getattr(last_msg, "type", None) != "ai":
             return None
 
-        tool_calls = getattr(last_msg, "tool_calls", None)
-        if not tool_calls:
-            return None
-
         scope_key = self._run_scope_key(runtime)
         thread_id, run_id = scope_key
-        call_hash = _hash_tool_calls(tool_calls)
+        previous = _previous_observation(messages)
+        tool_calls = getattr(last_msg, "tool_calls", None)
+        call_hash = _hash_tool_calls(tool_calls) if tool_calls else ""
 
         with self._lock:
+            history = self._history.get(scope_key)
+            if history and previous is not None and history[-1].message_id == previous.message_id and history[-1].call_hash == previous.call_hash:
+                history[-1] = previous
+            if not tool_calls:
+                return None
+
             # Touch / create entry (move to end for LRU)
             if scope_key in self._history:
                 self._history.move_to_end(scope_key)
@@ -617,17 +689,25 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 self._evict_if_needed()
 
             history = self._history[scope_key]
-            history.append(call_hash)
+            # The current tools have not run. Predict their outcome from the
+            # most recent matching batch, then settle it on the next response.
+            # This preserves warning/stop timing for stagnant calls while a new
+            # successful outcome separates prior observations instead of resetting
+            # the entire budget (so repeated result cycles still accumulate).
+            result_hash = next((entry.result_hash for entry in reversed(history) if entry.call_hash == call_hash), None)
+            message_id = last_msg.id if isinstance(last_msg.id, str) and last_msg.id else None
+            observation = _CallObservation(call_hash, message_id, result_hash)
+            history.append(observation)
             if len(history) > self.window_size:
                 history[:] = history[-self.window_size :]
 
             warned_hashes = self._warned.get(scope_key)
             if warned_hashes is not None:
-                warned_hashes.intersection_update(history)
+                warned_hashes.intersection_update(entry.key for entry in history)
                 if not warned_hashes:
                     self._warned.pop(scope_key, None)
 
-            count = history.count(call_hash)
+            count = sum(entry.key == observation.key for entry in history)
             tool_names = [str(tc.get("name") or "?") for tc in tool_calls]
 
             # --- Layer 1: hash-based (identical call sets) ---
@@ -657,7 +737,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # admitted call has been checked. Only the selected warning is
             # marked/logged; a hard stop may supersede it below.
             warning: _LoopDecision | None = None
-            if count >= self.warn_threshold and call_hash not in self._warned.get(scope_key, set()):
+            if count >= self.warn_threshold and observation.key not in self._warned.get(scope_key, set()):
                 warning = _LoopDecision(
                     message=_WARNING_MSG,
                     action="warn",
@@ -735,7 +815,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
             if warning is not None:
                 if warning.detection_layer == "identical_call_set":
-                    self._warned[scope_key].add(call_hash)
+                    self._warned[scope_key].add(observation.key)
                     logger.warning(
                         "Repetitive tool calls detected — injecting warning",
                         extra={
