@@ -702,6 +702,33 @@ def _normalize_external_skill_context(value: Any, *, location: str) -> list[dict
     return normalized
 
 
+def _normalize_external_tool_artifacts(value: Any, *, location: str) -> list[dict[str, Any]] | None:
+    """Reject artifact-registry entries the reducer cannot key.
+
+    ``tool_artifacts`` is a checkpointed reducer channel a caller may Overwrite.
+    ``merge_tool_artifacts`` keys each entry by its ``handle``, so an entry whose
+    handle is missing or unhashable raises while the state update merges — a 500
+    instead of a 400 at this boundary. The thread-state route persists the value
+    with ``Overwrite`` before any reducer sees it, so the thread stays broken for
+    every later artifact capture. Require the registry's list-of-objects shape
+    with a non-empty string handle; the reducer also tolerates an already-poisoned
+    checkpoint.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(status_code=400, detail=f"{location} must be a list of artifact objects")
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(value):
+        if not isinstance(entry, Mapping):
+            raise HTTPException(status_code=400, detail=f"{location}[{index}] must be an object")
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].handle must be a non-empty string")
+        normalized.append(dict(entry))
+    return normalized
+
+
 def _normalize_external_goal(value: Any, *, location: str) -> dict[str, Any] | None:
     """Require usable goal text without rebuilding caller-supplied goal state."""
     if value is None:
@@ -759,6 +786,12 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
         elif channel == "skill_context":
             normalized_skill_context = _normalize_external_skill_context(value, location="values.skill_context")
             stripped[channel] = None if normalized_skill_context is None else [_strip_external_metadata_from_message_like(item) for item in normalized_skill_context]
+        elif channel == "tool_artifacts":
+            normalized_tool_artifacts = _normalize_external_tool_artifacts(value, location="values.tool_artifacts")
+            # Registry entries are rich dicts, so keep the per-entry metadata
+            # strip the generic list branch applied: a caller-crafted entry must
+            # not smuggle server-owned message metadata into the checkpoint.
+            stripped[channel] = None if normalized_tool_artifacts is None else [_strip_external_metadata_from_message_like(item) for item in normalized_tool_artifacts]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
@@ -829,6 +862,8 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 result = {**result, "delegations": cleaned}
         if "skill_context" in result:
             result = {**result, "skill_context": _normalize_external_skill_context(result["skill_context"], location="input.skill_context")}
+        if "tool_artifacts" in result:
+            result = {**result, "tool_artifacts": _normalize_external_tool_artifacts(result["tool_artifacts"], location="input.tool_artifacts")}
         # merge_goal ignores None, so only a goal value replaces the goal.
         if result.get("goal") is not None:
             normalized_goal = _normalize_external_goal(result["goal"], location="input.goal")
