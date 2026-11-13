@@ -2206,7 +2206,7 @@ class MemoryUpdater:
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:
@@ -2221,7 +2221,7 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:

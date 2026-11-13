@@ -357,6 +357,24 @@ class TestCheckLLMApiKey:
         assert all(r.fix is not None for r in failed)
         assert any("OPENAI_API_KEY" in (r.fix or "") for r in failed)
 
+    @pytest.mark.parametrize(
+        "placeholder",
+        ["your-openai-api-key", "replace-with-your-totokens-api-key", "   "],
+    )
+    def test_placeholder_key_is_not_reported_as_ready(self, tmp_path, monkeypatch, placeholder):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  - name: relay\n    use: langchain_openai:ChatOpenAI\n    model: gpt-6-luna\n    api_key: $RELAY_API_KEY\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("RELAY_API_KEY", placeholder)
+
+        results = doctor.check_llm_api_key(cfg)
+
+        assert len(results) == 1
+        assert results[0].status == "fail"
+        assert "RELAY_API_KEY" in (results[0].fix or "")
+
     def test_missing_config_returns_empty(self, tmp_path):
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
         assert results == []

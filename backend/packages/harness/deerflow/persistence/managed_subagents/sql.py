@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Hashable
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.agents.sql import get_sync_sessionmaker
@@ -58,11 +59,29 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
             raise ManagedSubagentExistsError(f"Managed subagent '{definition.name}' already exists") from exc
 
     def update(self, definition: ManagedSubagentDefinition) -> None:
+        document = definition.model_dump(mode="json")
+        stmt = select(ManagedSubagentRow).where(ManagedSubagentRow.name == definition.name)
         with self._Session() as session:
-            row = session.execute(select(ManagedSubagentRow).where(ManagedSubagentRow.name == definition.name)).scalar_one_or_none()
+            # Serialize writers before reading updated_at, so each sees the
+            # preceding commit's stamp even when both clocks return the same time.
+            if session.get_bind().dialect.name == "sqlite":
+                session.execute(text("BEGIN IMMEDIATE"))
+            else:
+                stmt = stmt.with_for_update()
+            row = session.execute(stmt).scalar_one_or_none()
             if row is None:
                 raise FileNotFoundError(f"Managed subagent not found: {definition.name}")
-            row.definition = definition.model_dump(mode="json")
+            row.definition = document
+            # Peer registries key their snapshots by (id, updated_at), so
+            # advance the stamp even when the wall clock stalls or moves back.
+            now = datetime.now(UTC)
+            current = row.updated_at
+            if current is not None:
+                if current.tzinfo is None:  # SQLite returns naive datetimes
+                    current = current.replace(tzinfo=UTC)
+                if now <= current:
+                    now = current + timedelta(microseconds=1)
+            row.updated_at = now
             session.commit()
 
     def delete(self, name: str) -> bool:
