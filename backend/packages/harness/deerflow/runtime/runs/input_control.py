@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME
+
 from .inputs import RunInputs
 from .schemas import GOAL_RUN_HARD_STOP_REASONS
 
@@ -64,12 +66,23 @@ class ChildInputGate:
                     return None
 
 
+def _dispatch_message_id(request) -> str | None:
+    """Return the id of the latest AIMessage in the tool request's state that issued its call."""
+    state = getattr(request, "state", None)
+    messages = state.get("messages") if isinstance(state, dict) else getattr(state, "messages", None)
+    call_id = request.tool_call["id"]
+    for message in reversed(messages or []):
+        if isinstance(message, AIMessage):
+            if any(isinstance(call, dict) and call.get("id") == call_id for call in message.tool_calls or ()):
+                return message.id if isinstance(message.id, str) and message.id else None
+    return None
+
+
 class RunInputControl:
     def __init__(self, inputs: RunInputs, *, agent_runs, thread_id: str, checkpointer, on_result=None, on_replan=None):
         self.inputs, self.agent_runs, self.thread_id, self.checkpointer = inputs, agent_runs, thread_id, checkpointer
         self.delivered: set[str] = set()
         self.acknowledged: set[str] = set()
-        self.calls: dict[str, dict] = {}
         self.delegations: list[dict] = []
         self.current_input: str | None = None
         self.steering_active = False
@@ -157,7 +170,11 @@ class RunInputControl:
             self.acknowledged.update(ids)
 
     async def wait_tool(self, request, handler):
-        self.calls[request.tool_call["id"]] = dict(request.tool_call)
+        # Name the dispatching AIMessage, as the graph's own capture does, so
+        # the steered entry and the captured one are the same delegation. Held
+        # per wait, not per call id: a later response reusing the id while this
+        # call is still observed must not take over its args or dispatch.
+        dispatch = AIMessage(content="", id=_dispatch_message_id(request), tool_calls=[dict(request.tool_call)])
         self.finished_calls.discard(request.tool_call["id"])
         # Create the gate before scheduling: an immediately available input
         # can arrive before the tool handler reaches the native executor.
@@ -173,7 +190,7 @@ class RunInputControl:
                     call_id = request.tool_call["id"]
                     self.pending_calls.add(call_id)
                     self.observed_tasks.add(native)
-                    watcher = asyncio.create_task(self._observe(native, call_id))
+                    watcher = asyncio.create_task(self._observe(native, call_id, dispatch))
                     self.tasks.add(watcher)
                     return ToolMessage(
                         id=gate.result_id,
@@ -189,7 +206,7 @@ class RunInputControl:
             await asyncio.gather(native, return_exceptions=True)
             raise
 
-    async def _observe(self, native, call_id):
+    async def _observe(self, native, call_id, dispatch):
         try:
             result = await native
             message = result.update["messages"][0] if hasattr(result, "update") else result
@@ -201,14 +218,14 @@ class RunInputControl:
         from deerflow.subagents.status_contract import SUBAGENT_TOKEN_USAGE_KEY, normalize_token_usage
 
         self.finished_calls.add(call_id)
-        self.delegations.extend({**entry, "run_id": self.inputs.run_id} for entry in extract_delegations([AIMessage(content="", tool_calls=[self.calls[call_id]]), message]))
+        self.delegations.extend({**entry, "run_id": self.inputs.run_id} for entry in extract_delegations([dispatch, message]))
         usage = normalize_token_usage(message.additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
         if usage:
             self.deferred_usage.append((call_id, usage))
         self.receipts.append(
             HumanMessage(
                 content=json.dumps({"source": "subagent", "task_call_id": call_id, "result": message.content}, ensure_ascii=False),
-                name="subagent-result",
+                name=SUBAGENT_RESULT_MESSAGE_NAME,
                 id="run-input-result-" + self.inputs.run_id + "-" + call_id,
                 additional_kwargs={"hide_from_ui": True, "untrusted_input": True, "origin_task_id": call_id, "run_id": self.inputs.run_id},
             )
