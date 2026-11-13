@@ -150,6 +150,22 @@ def test_feature_scoring_routes_extension_candidates_and_actionable_core_feature
     assert core_res["action_zh"] == "可Assign推进"
     assert set(core_res["suggested_labels"]) == {"enhancement", "area:frontend", "P1"}
 
+    vague_llm = {
+        "user_value": "core_pain_point",
+        "architecture_fit": "core_natural_fit",
+        "spec_clarity": "vague_one_liner",
+        "maintenance_lightness": "moderate_burden",
+        "feature_action": "需先对齐方案",
+        "suggested_area": "frontend",
+        "short_tag_scene_zh": "实为咨询提问",
+        "scope_label_zh": "无具体方案",
+        "summary_zh": "仅提问依赖体积与内存占用，无具体设计方案。",
+    }
+    vague_res = scorer.compute_feature_score(stage0, vague_llm, declared_labels=declared)
+    assert vague_res["priority"] == "P3"
+    assert vague_res["action_zh"] == "转Discussion或暂缓"
+    assert "P3" not in vague_res["suggested_labels"]
+
 
 def test_cli_offline_and_dry_run_work_under_ascii_stdout(tmp_path: Path):
     sample_issues = [
