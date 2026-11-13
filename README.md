@@ -105,7 +105,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
-| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md) |
+| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |
@@ -113,6 +113,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |
 | Scheduled tasks | [Scheduled Tasks](docs/guide/scheduled-tasks.md) |
 | Feishu, Slack, Telegram, Discord, DingTalk and other IM channels | [IM Channels](docs/guide/im-channels.md) |
+| File attachments, downloads and Office previews | [File Previews](docs/guide/file-previews.md) |
 | Token usage dashboard, workspace, chat archive | [Workspace UI](docs/guide/workspace.md) |
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |
 | Personal access tokens, stream actions, embedded Python client | [API Access and Python Client](docs/guide/api-and-client.md) |

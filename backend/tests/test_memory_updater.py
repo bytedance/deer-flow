@@ -4,6 +4,7 @@ import json
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
+    FileMemoryStorage,
     MemoryManifestRevisionConflict,
     MemoryStorage,
 )
@@ -1967,7 +1969,6 @@ class TestOutOfRangeExtractionConfidenceDoesNotBlockUpdates:
         assert normalized["confidence"] == confidence
 
     def test_update_memory_drops_the_bad_fact_and_keeps_the_rest(self, tmp_path) -> None:
-        from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
 
         response = {
             "user": {},
@@ -2044,3 +2045,90 @@ class TestParseMemoryUpdateFactsToRemoveGate:
         except json.JSONDecodeError:
             return
         raise AssertionError('decoy object {"user": "alice"} must be rejected')
+
+
+def _fact(content: str, fact_id: str, revision: int = 1) -> dict[str, object]:
+    return {
+        "id": fact_id,
+        "content": content,
+        "category": "context",
+        "confidence": 0.9,
+        "createdAt": "2026-03-20T00:00:00Z",
+        "source": "manual",
+        "revision": revision,
+    }
+
+
+@pytest.mark.parametrize("agent_name", [None, "researcher"])
+def test_import_duplicate_id_rejected_regardless_of_entry_order(tmp_path: Path, agent_name: str | None) -> None:
+    """A backup with two entries for the same fact id must be rejected whether
+    the first entry matches the stored fact or not - the outcome used to depend
+    on entry order because unchanged entries were skipped from the write map.
+    The seeded snapshot must survive the rejection in both orders."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
+
+    for order in ("unchanged-first", "edited-first"):
+        config = DeerMemConfig(storage_path=str(tmp_path / order), retrieval_adapter="")
+        storage = FileMemoryStorage(config)
+        updater = MemoryUpdater(config, storage)
+        seed = _make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")])
+        updater.import_memory_data(seed, agent_name=agent_name)
+
+        unchanged = _fact("Keep PostgreSQL", "fact_dup")
+        edited = _fact("Use SQLite instead", "fact_dup")
+        facts = [unchanged, edited] if order == "unchanged-first" else [edited, unchanged]
+
+        snapshot_after_seed = updater.get_memory_data(agent_name=agent_name)
+
+        with pytest.raises(DuplicateFactIdError, match="Duplicate fact id"):
+            updater.import_memory_data(_make_memory(facts=facts), agent_name=agent_name)
+
+        # The rejection must not have touched the seeded snapshot: compare
+        # against the pre-import read, not a post-rejection one (which could
+        # hide a partially applied duplicate).
+        assert storage.load(agent_name=agent_name) == snapshot_after_seed
+
+
+def test_import_duplicate_id_rejected_before_capacity_selection(tmp_path: Path) -> None:
+    """Capacity selection runs before the storage guard and can drop one of two
+    same-id entries, hiding the duplicate - validation must happen first
+    (Copilot review on #8153)."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.updater import DuplicateFactIdError
+
+    config = DeerMemConfig(storage_path=str(tmp_path / "over-capacity"), retrieval_adapter="", max_facts=10)
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage)
+
+    facts = [_fact(f"distinct {i}", f"fact_{i}") for i in range(9)]
+    facts.append(_fact("first copy", "fact_dup", revision=1))
+    facts.append(_fact("second copy", "fact_dup", revision=1))
+    assert len(facts) > 10  # over capacity
+
+    with pytest.raises(DuplicateFactIdError, match="Duplicate fact id"):
+        updater.import_memory_data(_make_memory(facts=facts), agent_name="researcher")
+
+
+def test_storage_apply_changes_rejects_unchanged_duplicate_first(tmp_path: Path) -> None:
+    """Pin the storage-level guard directly: _commit_changes_locked must reject
+    a duplicate whose first entry matches the stored fact (normalized equal, so
+    it is skipped from the prepared writes) - the updater gate alone does not
+    exercise this path."""
+    from deerflow.agents.memory.backends.deermem.deermem.core.storage import DeerMemConfig, FileMemoryStorage
+
+    config = DeerMemConfig(storage_path=str(tmp_path / "storage-guard"), retrieval_adapter="")
+    storage = FileMemoryStorage(config)
+    updater = MemoryUpdater(config, storage)
+    updater.import_memory_data(_make_memory(facts=[_fact("Keep PostgreSQL", "fact_dup")]), agent_name="researcher")
+    expected = storage.load(agent_name="researcher")
+
+    unchanged = _fact("Keep PostgreSQL", "fact_dup", revision=1)
+    edited = _fact("Use SQLite instead", "fact_dup", revision=1)
+    with pytest.raises(ValueError, match="Duplicate fact id"):
+        storage.apply_changes(
+            {"upserts": [unchanged, edited]},
+            user_id=None,
+            agent_name="researcher",
+        )
+    # The rejection must not partially apply the first entry.
+    assert storage.load(agent_name="researcher") == expected

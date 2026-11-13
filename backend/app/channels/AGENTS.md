@@ -60,6 +60,9 @@ make test-blocking-io                                  # channels share the Gate
   `/start <code>`) is handled before `allowed_users` on purpose, so that a new user
   can bind. The code is the secret: show it only in the browser that requested it
   and never echo it to the chat.
+- **Feishu post commands use the caption.** Add placeholders for top-level post
+  attachments after command detection. For commands that enter the chat path,
+  `receive_file` adds their placeholders after the manager parses the arguments.
 - **One active owner per external identity.** A partial unique index in the
   database enforces this. Application code alone cannot, because two workers can
   bind at the same time.
