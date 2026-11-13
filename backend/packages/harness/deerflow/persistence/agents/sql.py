@@ -25,7 +25,7 @@ from sqlalchemy import Engine, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from deerflow.config.agents_config import AgentConfig
+from deerflow.config.agents_config import AgentConfig, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
@@ -143,6 +143,10 @@ class SqlAgentStore(AgentStore):
         return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
+        # Mirror FileAgentStore.create: enforce the reserved-name rule at the
+        # store boundary so the SQL backend is not more permissive than the file
+        # backend for callers that bypass the Gateway router (see #7939).
+        name = validate_agent_name(name, for_creation=True)
         effective_user = user_id or get_effective_user_id()
         now = datetime.now(UTC)
         row = AgentRow(
@@ -163,6 +167,10 @@ class SqlAgentStore(AgentStore):
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+        # update() upserts (setup_agent and first-time writes mint a new agent),
+        # so it must enforce the same reserved-name rule as create() — otherwise
+        # a reserved name slips in through the SQL backend's upsert path.
+        name = validate_agent_name(name, for_creation=True)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)

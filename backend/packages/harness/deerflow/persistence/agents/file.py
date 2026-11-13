@@ -126,7 +126,7 @@ class FileAgentStore(AgentStore):
         return result
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
+        name = validate_agent_name(name, for_creation=True)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
@@ -151,7 +151,7 @@ class FileAgentStore(AgentStore):
             raise
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
+        name = validate_agent_name(name, for_creation=True)
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
         pre_existing = agent_dir.exists()

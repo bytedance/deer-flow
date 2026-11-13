@@ -89,6 +89,25 @@ def test_create_duplicate_raises_agent_exists(store):
         store.create("dup", {"name": "dup"}, "s2", user_id="u1")
 
 
+@pytest.mark.parametrize("bad_name", ["NUL", "nul", "COM1", "con", "PRN", "AUX", "LPT9", "CON.txt", "report. "])
+def test_create_rejects_reserved_device_names(store, bad_name):
+    # Mirrors FileAgentStore.create: the SQL backend must enforce the same
+    # reserved-name rule instead of letting callers that bypass the Gateway
+    # router mint a host-path-incompatible agent (see #7939).
+    with pytest.raises(ValueError):
+        store.create(bad_name, {"name": bad_name}, "s", user_id="u1")
+    assert not store.exists(bad_name, user_id="u1")
+
+
+@pytest.mark.parametrize("bad_name", ["NUL", "COM1", "PRN"])
+def test_update_upsert_rejects_reserved_device_names(store, bad_name):
+    # update() is an upsert (first-time writes mint a new agent), so a reserved
+    # name must be rejected here too, not just on the create() path.
+    with pytest.raises(ValueError):
+        store.update(bad_name, {"name": bad_name}, "s", user_id="u1")
+    assert not store.exists(bad_name, user_id="u1")
+
+
 def test_update_is_upsert_and_partial(store):
     # Upsert: update on a missing agent creates it.
     store.update("a", {"name": "a", "description": "first"}, "soul1", user_id="u1")

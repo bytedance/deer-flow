@@ -341,6 +341,20 @@ This section accumulates work toward the **2.3.0** milestone
   and preserves saved memory. An explicit empty array still clears the selected
   fact bucket. ([#8131])
 
+- **agents:** A custom agent name that is a Windows reserved device name
+  (`NUL`, `CON`, `COM1`, ...) is now rejected on create, update and import at
+  the shared `validate_agent_name()` boundary, and by the Gateway with a `422`.
+  The `^[A-Za-z0-9-]+$` grammar admitted such names, and `FileAgentStore.create`
+  then failed writing `config.yaml` under that directory on Windows hosts, which
+  the create route reported as an opaque `500`. The check reuses
+  `windows_incompatible_segment()` and applies on every platform. Both storage
+  backends enforce it symmetrically — `SqlAgentStore.create`/`update` now call
+  `validate_agent_name(..., for_creation=True)` too, so callers that bypass the
+  Gateway cannot mint a reserved-name agent under the `db` backend. Reading and
+  deleting an existing agent stay permissive, so an agent with a reserved-name
+  identifier that an older release created on a Linux host can still be
+  inspected and removed. ([#7939])
+
 - **memory:** An agent-scoped memory write whose `agent_name` is a Windows
   reserved device name (`NUL`, `CON`, `COM1`, ...) is now rejected with a `422`
   on the two routes that create that scope, `POST /memory/facts` and
@@ -402,7 +416,6 @@ This section accumulates work toward the **2.3.0** milestone
   returns as if it succeeded, so neither the text running reply nor the
   `sampleMarkdown` fallback for the final answer ever ran. The channel now
   sends card requests itself and falls back when one fails. ([#7781])
-  
 - **harness:** Retrying a failed item no longer reopens a cancelled durable
   subagent batch. `retry_item` kept only a paused batch as it was, so a failed
   item of a cancelled batch put the batch back to `queued`, the worker claimed
@@ -430,7 +443,6 @@ This section accumulates work toward the **2.3.0** milestone
   bash processes, including ordinary `nohup` children, before releasing the
   execution lease. Concurrent work and background services from successful
   earlier turns remain running. ([#7772])
-  
 - **agents:** A clarification no longer overwrites an earlier question when the
   provider reuses a tool-call ID across turns (for example `call_0` on every
   response). Its message ID, which is also the human-input `request_id`, named
@@ -16405,6 +16417,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7938]: https://github.com/bytedance/deer-flow/issues/7938
 [#7941]: https://github.com/bytedance/deer-flow/pull/7941
 [#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953

@@ -140,6 +140,12 @@ def update_agent(
         return _err("soul content is empty; refusing to update agent with an empty SOUL.md. Omit the soul field if you do not want to change it.")
 
     try:
+        # Deliberately permissive (no for_creation=True): update_agent only
+        # ever acts on an existing agent named by the running chat's context,
+        # so a reserved-name agent an older release created must stay editable.
+        # New-agent minting is covered separately — setup_agent uses
+        # for_creation=True, and both stores' create/update boundaries reject
+        # reserved names regardless of backend.
         agent_name = validate_agent_name(agent_name_raw)
     except ValueError as e:
         return _err(str(e))
