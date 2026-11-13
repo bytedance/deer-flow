@@ -164,6 +164,47 @@ async def test_queue_expiry_pauses_an_unschedulable_task(repos):
     await _assert_paused(tasks, "broken")
 
 
+async def test_queue_expiry_continues_after_one_storage_error(repos, monkeypatch, caplog):
+    tasks, runs, _run_store, factory = repos
+    now = datetime.now(UTC)
+    await _create_task(tasks, "a-poison", next_run_at=None)
+    await _create_task(tasks, "z-healthy", next_run_at=None)
+    await runs.create(
+        run_record_id="poison-occurrence",
+        task_id="a-poison",
+        thread_id="thread-a-poison",
+        scheduled_for=now,
+        trigger="scheduled",
+        status="queued",
+    )
+    await runs.create(
+        run_record_id="healthy-occurrence",
+        task_id="z-healthy",
+        thread_id="thread-z-healthy",
+        scheduled_for=now,
+        trigger="scheduled",
+        status="queued",
+    )
+    original_lock_task = ScheduledTaskRunRepository._lock_task
+
+    async def flaky_lock_task(session, task_id):
+        if task_id == "a-poison":
+            raise RuntimeError("parent row lock failed")
+        return await original_lock_task(session, task_id)
+
+    monkeypatch.setattr(ScheduledTaskRunRepository, "_lock_task", staticmethod(flaky_lock_task))
+    expired = await runs.expire_queued_runs(
+        created_before=now + timedelta(seconds=1),
+        error="queue timeout",
+        now=now,
+    )
+
+    assert [row["id"] for row in expired] == ["healthy-occurrence"]
+    assert [row["status"] for row in await runs.list_by_task("a-poison")] == ["queued"]
+    assert [row["status"] for row in await runs.list_by_task("z-healthy")] == ["failed"]
+    assert "Failed to expire queued scheduled occurrence poison-occurrence" in caplog.text
+
+
 async def test_failed_recovery_pass_does_not_block_admission(repos, monkeypatch):
     tasks, runs, run_store, _factory = repos
     now = datetime.now(UTC)

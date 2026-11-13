@@ -77,6 +77,7 @@
   用户消息，因此一次 100 KB 的粘贴会让每次模型调用阻塞所有线程约 6 秒。现在扫描为线性耗时，
   且脱敏的地址与此前完全相同。([#8006])
 
+- **调度器：** 队列超时扫描或队列排空中的单条记录出现异常时，调度器会记录该失败并继续处理剩余队列，以及同一轮启动的到期任务。过期记录会在所有者排名和批次限额之前被排除，启动领取还会再次检查同一截止时间，因此超时清理失败时遗留的排队记录既不会启动，也不会挤占正常排队工作的候选位置，只会继续等待超时恢复流程处理。([#7998])
 - **调度器：** 一个已保存的计划无法再计算的定时任务，不再让其他所有任务停止运行。此前
   已保存的时区或 cron 表达式失效时（例如升级后时区数据库中缺少该时区，或新版 croniter
   不再接受该表达式），在调度器轮询中计算其下一次运行时间会抛出异常；其启动租约过期后，
@@ -12899,6 +12900,7 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#7981]: https://github.com/bytedance/deer-flow/pull/7981
 [#7992]: https://github.com/bytedance/deer-flow/pull/7992
 [#7993]: https://github.com/bytedance/deer-flow/pull/7993
+[#7998]: https://github.com/bytedance/deer-flow/issues/7998
 [#8006]: https://github.com/bytedance/deer-flow/pull/8006
 [#8019]: https://github.com/bytedance/deer-flow/pull/8019
 [#8043]: https://github.com/bytedance/deer-flow/pull/8043
