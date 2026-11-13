@@ -1116,6 +1116,9 @@ class SubagentExecutor:
         self.assembly_descriptor: Any | None = None
         self._assembled_system_prompt = self.config.system_prompt or ""
         self._assembled_skills: list[Any] = []
+        # Only these exact, build-generated instances receive the discovery
+        # exemption in the final name-policy audit; names alone are insufficient.
+        self._policy_discovery_tools: tuple[BaseTool, ...] = ()
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -1268,6 +1271,14 @@ class SubagentExecutor:
         from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 
         _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False, model_name=self.model_name)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
+
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1280,6 +1291,14 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
+        verify_subagent_tool_policy(
+            bound_tools,
+            middlewares,
+            allowed=self.config.tools,
+            disallowed=self.config.disallowed_tools,
+            discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
+        )
         agent = create_agent(
             model=model,
             tools=bound_tools,
@@ -1607,6 +1626,7 @@ class SubagentExecutor:
             enabled=resolved_app_config.tool_search.enabled,
         )
         final_tools.extend(late_tools)
+        self._policy_discovery_tools = tuple(helper for helper in (deferred_setup.tool_search_tool, skill_setup.describe_skill_tool) if helper is not None and any(helper is tool for tool in final_tools))
 
         # Combine the system prompt and skill discovery metadata into a single
         # SystemMessage. Full SKILL.md bodies are loaded only when activated.

@@ -28,3 +28,11 @@ This expands the ownership index in `frontend/src/AGENTS.md`.
   frame, publishes through `useSyncExternalStore` at most once per animation
   frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
   frame path for older clients.
+
+# Sidebar customization
+
+`components/workspace/workspace-sidebar-frame.tsx`: rail/drawer mount one tree;
+`useWorkspaceSidebarExpanded` preserves desktop `SidebarProvider.open`. Keep
+polling/delete-dialog provider outside that tree. Reuse stock `Sidebar`; close
+before link navigation and on pathname changes, preserving page focus. Dismissal
+restores the opener or remounted rail trigger.

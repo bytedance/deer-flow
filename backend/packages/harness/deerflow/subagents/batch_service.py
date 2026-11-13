@@ -365,11 +365,18 @@ class SubagentBatchService:
 
     async def read_batch_item(self, *, batch_id: str, user_id: str, thread_id: str, position: int) -> dict[str, Any] | None:
         """Read one current-thread result; never expose worker execution context."""
+        if position < 0:
+            return None
         batch = await self._repository.get_batch(batch_id, user_id=user_id)
         if batch is None or batch["thread_id"] != thread_id:
             return None
         items = await self._repository.list_items(batch_id, user_id=user_id, offset=position, limit=1, include_result=True)
-        if not items:
+        # ``list_items(offset=position)`` only lands on ``position`` while item
+        # rows are dense; after any retention gap it returns the next surviving
+        # row. Serving it would attribute one item's report to another item key
+        # (``next_position`` advances from the wrong base too). Verify the row's
+        # position, same as the browser projection below.
+        if not items or items[0].get("position") != position:
             return None
         fields = ("id", "item_key", "position", "status", "attempt", "result", "result_truncated", "error", "stop_reason", "acceptance_criteria", "acceptance_verdict")
         return {key: items[0].get(key) for key in fields}

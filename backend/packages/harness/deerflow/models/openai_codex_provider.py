@@ -11,18 +11,20 @@ Supports:
 - Retry with exponential backoff
 """
 
+import asyncio
 import json
 import logging
 import time
 from typing import Any
 
 import httpx
-from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.callbacks import AsyncCallbackManagerForLLMRun, CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from deerflow.models.credential_loader import CodexCliCredential, load_codex_cli_credential
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,61 @@ def _build_usage_metadata(oai_usage: dict) -> dict:
 
 
 MAX_RETRIES = 3
+
+
+class _CodexResponseCollector:
+    """Shared terminal-event and output recovery semantics for both transports."""
+
+    def __init__(self) -> None:
+        self.completed_response: dict | None = None
+        self.output_items: dict[int, dict[str, Any]] = {}
+
+    def feed(self, data: dict[str, Any]) -> bool:
+        """Return True at completion, before requesting another transport read."""
+        event_type = data.get("type")
+        if event_type == "response.output_item.done":
+            output_index = data.get("output_index")
+            output_item = data.get("item")
+            if isinstance(output_index, int) and isinstance(output_item, dict):
+                self.output_items[output_index] = output_item
+        elif event_type == "response.completed":
+            self.completed_response = data["response"]
+            return True
+        elif event_type in ("response.failed", "response.incomplete", "error"):
+            response = data.get("response") or {}
+            if event_type == "error":
+                details = data.get("error") or data
+            elif not isinstance(response, dict):
+                details = response
+            elif event_type == "response.failed":
+                details = response.get("error") or {}
+            else:
+                details = response.get("incomplete_details") or {}
+            if not isinstance(details, dict):
+                details = {"message": str(details)}
+            code = details.get("code")
+            reason = details.get("message") or details.get("reason") or "No details provided"
+            code_suffix = f" ({code})" if code else ""
+            raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
+        return False
+
+    def finish(self) -> dict:
+        if not self.completed_response:
+            raise RuntimeError("Codex API stream ended without response.completed event")
+        completed = self.completed_response
+        # The completed response can omit content already emitted as done items.
+        if self.output_items:
+            response_output = completed.get("output")
+            merged = list(response_output) if isinstance(response_output, list) else []
+            max_index = max(max(self.output_items), len(merged) - 1)
+            if len(merged) <= max_index:
+                merged.extend([None] * (max_index + 1 - len(merged)))
+            for index, item in self.output_items.items():
+                if not isinstance(merged[index], dict):
+                    merged[index] = item
+            completed = dict(completed)
+            completed["output"] = [item for item in merged if isinstance(item, dict)]
+        return completed
 
 
 class CodexChatModel(BaseChatModel):
@@ -296,8 +353,8 @@ class CodexChatModel(BaseChatModel):
             responses_tools.append(converted)
         return responses_tools
 
-    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None, tool_choice: str | dict | bool | None = None) -> dict:
-        """Call the Codex Responses API and return the completed response."""
+    def _prepare_request(self, messages: list[BaseMessage], tools: list[dict] | None, tool_choice: str | dict | bool | None) -> tuple[dict, dict]:
+        """Build the same validated request for synchronous and async callers."""
         instructions, input_items = self._convert_messages(messages)
 
         payload = {
@@ -324,6 +381,11 @@ class CodexChatModel(BaseChatModel):
             "Accept": "text/event-stream",
             "originator": "codex_cli_rs",
         }
+        return headers, payload
+
+    def _call_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None, tool_choice: str | dict | bool | None = None) -> dict:
+        """Call the Codex Responses API and return the completed response."""
+        headers, payload = self._prepare_request(messages, tools, tool_choice)
 
         last_error = None
         for attempt in range(1, self.retry_max_attempts + 1):
@@ -344,73 +406,49 @@ class CodexChatModel(BaseChatModel):
 
         raise last_error
 
+    async def _acall_codex_api(self, messages: list[BaseMessage], tools: list[dict] | None = None, tool_choice: str | dict | bool | None = None) -> dict:
+        """Own the HTTP operation in the caller task, including retry waits."""
+        headers, payload = self._prepare_request(messages, tools, tool_choice)
+        for attempt in range(1, self.retry_max_attempts + 1):
+            try:
+                return await self._astream_response(headers, payload)
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code not in (429, 500, 529) or attempt >= self.retry_max_attempts:
+                    raise
+                wait_ms = _calc_backoff_ms(attempt, error)
+                logger.warning(f"Codex API error {error.response.status_code}, retrying {attempt}/{self.retry_max_attempts} after {wait_ms}ms")
+                await asyncio.sleep(wait_ms / 1000)
+        raise RuntimeError("Codex API retry attempts exhausted")
+
     def _stream_response(self, headers: dict, payload: dict) -> dict:
         """Stream SSE from Codex API and collect the final response."""
-        completed_response = None
-        streamed_output_items: dict[int, dict[str, Any]] = {}
-
+        collector = _CodexResponseCollector()
         with httpx.Client(timeout=300) as client:
             with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
                     data = self._parse_sse_data_line(line)
-                    if not data:
-                        continue
-
-                    event_type = data.get("type")
-                    if event_type == "response.output_item.done":
-                        output_index = data.get("output_index")
-                        output_item = data.get("item")
-                        if isinstance(output_index, int) and isinstance(output_item, dict):
-                            streamed_output_items[output_index] = output_item
-                    elif event_type == "response.completed":
-                        completed_response = data["response"]
-                        # A terminal event completes the request even if the server
-                        # keeps the connection open. Do not let a later read timeout
-                        # replace the completed output with a transport error.
+                    if data and collector.feed(data):
                         break
-                    elif event_type in ("response.failed", "response.incomplete", "error"):
-                        response = data.get("response") or {}
-                        if event_type == "error":
-                            details = data.get("error") or data
-                        elif not isinstance(response, dict):
-                            details = response
-                        elif event_type == "response.failed":
-                            details = response.get("error") or {}
-                        else:
-                            details = response.get("incomplete_details") or {}
+        return collector.finish()
 
-                        if not isinstance(details, dict):
-                            details = {"message": str(details)}
-                        code = details.get("code")
-                        reason = details.get("message") or details.get("reason") or "No details provided"
-                        code_suffix = f" ({code})" if code else ""
-                        raise RuntimeError(f"Codex API {event_type}{code_suffix}: {reason}")
-
-        if not completed_response:
-            raise RuntimeError("Codex API stream ended without response.completed event")
-
-        # ChatGPT Codex can emit the final assistant content only in stream events.
-        # When response.completed arrives, response.output may still be empty.
-        if streamed_output_items:
-            merged_output = []
-            response_output = completed_response.get("output")
-            if isinstance(response_output, list):
-                merged_output = list(response_output)
-
-            max_index = max(max(streamed_output_items), len(merged_output) - 1)
-            if max_index >= 0 and len(merged_output) <= max_index:
-                merged_output.extend([None] * (max_index + 1 - len(merged_output)))
-
-            for output_index, output_item in streamed_output_items.items():
-                existing_item = merged_output[output_index]
-                if not isinstance(existing_item, dict):
-                    merged_output[output_index] = output_item
-
-            completed_response = dict(completed_response)
-            completed_response["output"] = [item for item in merged_output if isinstance(item, dict)]
-
-        return completed_response
+    async def _astream_response(self, headers: dict, payload: dict) -> dict:
+        """Consume SSE asynchronously so cancellation closes the owned stream."""
+        # Loading the default TLS trust store performs filesystem I/O. Do it
+        # before constructing a client: cancellation here owns no HTTP handles.
+        verify = await asyncio.to_thread(httpx.create_ssl_context)
+        collector = _CodexResponseCollector()
+        client = httpx.AsyncClient(timeout=300, verify=verify)
+        try:
+            async with client.stream("POST", f"{CODEX_BASE_URL}/responses", headers=headers, json=payload) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    data = self._parse_sse_data_line(line)
+                    if data and collector.feed(data):
+                        break
+        finally:
+            await await_drained(client.aclose())
+        return collector.finish()
 
     @staticmethod
     def _parse_sse_data_line(line: str) -> dict[str, Any] | None:
@@ -533,6 +571,17 @@ class CodexChatModel(BaseChatModel):
         """Generate a response using Codex Responses API."""
         tools = kwargs.get("tools", None)
         response = self._call_codex_api(messages, tools=tools, tool_choice=kwargs.get("tool_choice"))
+        return self._parse_response(response)
+
+    async def _agenerate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: AsyncCallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Generate without leaving synchronous HTTP work in an executor."""
+        response = await self._acall_codex_api(messages, tools=kwargs.get("tools"), tool_choice=kwargs.get("tool_choice"))
         return self._parse_response(response)
 
     def bind_tools(self, tools: list, *, tool_choice: str | dict | bool | None = None, **kwargs: Any) -> Any:
