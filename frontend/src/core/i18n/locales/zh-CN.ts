@@ -254,6 +254,7 @@ export const zhCN: Translations = {
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
+    scrollToBottom: "滚动到底部",
     showingOf: (loaded, total) => `已显示 ${loaded} / 共 ${total}`,
     download: "下载",
     thinking: "思考",
