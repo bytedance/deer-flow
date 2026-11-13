@@ -28,27 +28,36 @@ from deerflow.utils.file_io import run_file_io
 def _write_fork_files(owner: str, thread_id: str, artifacts: list[dict]) -> None:
     """A fresh UUID directory, descriptor-confined descendants and exclusive files."""
     root = get_paths().sandbox_outputs_dir(thread_id, user_id=owner)
-    root.mkdir(parents=True, exist_ok=False)
-    root.chmod(0o777)
-    for artifact in artifacts:
-        parts = artifact_path(artifact["path"]).split("/")
-        directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            for part in parts[:-1]:
-                try:
-                    os.mkdir(part, 0o755, dir_fd=directory)
-                except FileExistsError:
-                    pass
-                following = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    root_fd = os.open(root, directory_flags)
+    try:
+        for artifact in artifacts:
+            parts = artifact_path(artifact["path"]).split("/")
+            directory = os.dup(root_fd)
+            try:
+                for part in parts[:-1]:
+                    try:
+                        os.mkdir(part, 0o700, dir_fd=directory)
+                    except FileExistsError:
+                        pass
+                    following = os.open(part, directory_flags, dir_fd=directory)
+                    os.close(directory)
+                    directory = following
+                    os.fchmod(directory, 0o777)
+                fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                with os.fdopen(fd, "wb") as target:
+                    target.write(artifact["content"])
+                    target.flush()
+                    os.fchmod(target.fileno(), 0o666)
+                    os.fsync(target.fileno())
+            finally:
                 os.close(directory)
-                directory = following
-            fd = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=directory)
-            with os.fdopen(fd, "wb") as target:
-                target.write(artifact["content"])
-                target.flush()
-                os.fsync(target.fileno())
-        finally:
-            os.close(directory)
+        # The bind mount is writable by the sandbox UID even when Gateway runs
+        # under a different UID or a restrictive umask.
+        os.fchmod(root_fd, 0o777)
+    finally:
+        os.close(root_fd)
 
 
 @asynccontextmanager
@@ -94,6 +103,11 @@ async def fork_share(request: Request, repo: ThreadShareRepository, token: str, 
         if await repo.get_public(token) is None:
             raise HTTPException(404, "Share unavailable")
         async with _reserve_import(request, thread_id, owner) as reservation:
+            existing = await threads.get(thread_id, user_id=owner)
+            if existing is not None:
+                if existing.get("metadata", {}).get("share_import_complete") is True:
+                    return {"thread_id": thread_id}
+                raise HTTPException(409, "The previous import did not finish; create a new copy")
             created = False
             try:
                 record = await threads.create(thread_id, user_id=owner, display_name=title)

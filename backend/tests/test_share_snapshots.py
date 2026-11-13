@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from support.postgres import asyncpg_test_url
 
@@ -122,3 +122,20 @@ async def test_active_link_remains_revocable_after_many_inactive_links(repositor
     assert (await repo.list_owned("source", "alice"))[0]["share_id"] == active["share_id"]
     await repo.revoke("source", active["share_id"], "alice")
     assert await repo.count_active("source", "alice") == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_snapshot_remains_listed_and_revocation_purges_its_copy(repository):
+    repo, factory = repository
+    expired = await create_share(repo, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    for _ in range(101):
+        current = await create_share(repo)
+        assert await repo.revoke("source", current["share_id"], "alice")
+    assert (await repo.list_owned("source", "alice"))[0]["share_id"] == expired["share_id"]
+    assert await repo.revoke("source", expired["share_id"], "alice")
+    async with factory() as session:
+        row = await session.get(ThreadShareRow, expired["share_id"])
+        assert row.revoked_at is not None
+        assert row.snapshot == {}
+        assert await session.scalar(select(ShareArtifactRow).where(ShareArtifactRow.share_id == expired["share_id"])) is None
+        assert (await session.get(ThreadMetaRow, "source")).incarnation == "original"

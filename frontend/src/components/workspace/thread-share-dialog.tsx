@@ -167,9 +167,7 @@ function ShareControls({ threadId }: { threadId: string }) {
           <p className="text-muted-foreground text-sm">{labels.noLinks}</p>
         ) : (
           links.map((item) => {
-            const inactive =
-              Boolean(item.revoked_at) ||
-              Date.parse(item.expires_at) <= Date.now();
+            const expired = Date.parse(item.expires_at) <= Date.now();
             return (
               <div
                 key={item.share_id}
@@ -182,12 +180,12 @@ function ShareControls({ threadId }: { threadId: string }) {
                   <p className="text-muted-foreground">
                     {item.revoked_at
                       ? labels.revoked
-                      : inactive
+                      : expired
                         ? labels.expired
                         : `${labels.expires} ${new Date(item.expires_at).toLocaleString(locale)}`}
                   </p>
                 </div>
-                {!inactive && (
+                {!item.revoked_at && (
                   <Button
                     size="sm"
                     variant="outline"

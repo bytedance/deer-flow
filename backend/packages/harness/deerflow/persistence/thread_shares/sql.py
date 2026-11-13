@@ -80,10 +80,11 @@ class ThreadShareRepository:
     async def list_owned(self, thread_id: str, owner_id: str) -> list[dict]:
         async with self._sf() as session:
             active = ThreadShareRow.revoked_at.is_(None) & (ThreadShareRow.expires_at > datetime.now(UTC))
+            unrevoked = ThreadShareRow.revoked_at.is_(None)
             rows = await session.execute(
                 select(ThreadShareRow.share_id, ThreadShareRow.checkpoint_id, ThreadShareRow.seq, ThreadShareRow.created_at, ThreadShareRow.expires_at, ThreadShareRow.revoked_at)
                 .where(ThreadShareRow.thread_id == thread_id, ThreadShareRow.owner_id == owner_id)
-                .order_by(case((active, 0), else_=1), ThreadShareRow.created_at.desc())
+                .order_by(case((active, 0), (unrevoked, 1), else_=2), ThreadShareRow.created_at.desc())
                 .limit(100)
             )
             return [self._summary(row) for row in rows]

@@ -95,3 +95,22 @@ test("closing the dialog aborts its pending list request", async () => {
   view.rerender(dialog("first", false));
   expect(listSignal?.aborted).toBe(true);
 });
+
+test("an expired link can be revoked to remove the stored snapshot", async () => {
+  const deleted: string[] = [];
+  const expired = { ...link, expires_at: "2000-01-01T00:00:00Z" };
+  rs.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+    if (init?.method === "DELETE") {
+      deleted.push(url instanceof Request ? url.url : url.toString());
+      return new Response(null, { status: 204 });
+    }
+    return Response.json([expired]);
+  });
+  render(dialog("first"));
+  await screen.findByText("Expired");
+  fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  await screen.findByText("Revoked");
+  expect(deleted).toHaveLength(1);
+  expect(deleted[0]).toContain("/api/threads/first/shares/one");
+  expect(screen.queryByRole("button", { name: "Revoke" })).toBeNull();
+});

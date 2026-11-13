@@ -44,8 +44,8 @@ Links expire after 7 days by default; the supported range is 1 hour to 30 days.
 A conversation can have 10 active links. Each snapshot allows 10,000 visible
 history rows, 10 MiB of transcript JSON, and 64 artifacts, with limits of 20 MiB
 per file and 100 MiB total. Exceeding a limit rejects the whole snapshot. Revoking
-a link deletes its stored transcript and file bytes. Expired records remain until
-revoked or the source conversation is deleted.
+a link deletes its stored transcript and file bytes. You can revoke an expired
+link from the same dialog to remove its stored copy.
 
 Treat share URLs as access credentials, including in proxy access logs. The
 server stores only a hash of the random token; a token is returned once on
@@ -58,7 +58,7 @@ All paths below are relative to `/api`.
 | Method and path | Access and behavior |
 | --- | --- |
 | `POST /threads/{id}/shares` | Owner with `threads:write` and `runs:read`; creates the snapshot. Body: optional `expires_in_seconds` and `checkpoint_id`. Returns `201`, token and snapshot coordinates. |
-| `GET /threads/{id}/shares` | Owner with `threads:read`; returns up to 100 link summaries, active links first. Tokens are never listed. |
+| `GET /threads/{id}/shares` | Owner with `threads:read`; returns up to 100 link summaries, with active links first and expired links awaiting cleanup before revoked links. Tokens are never listed. |
 | `DELETE /threads/{id}/shares/{share_id}` | Owner with `threads:write`; revokes access and removes stored snapshot bytes. |
 | `GET /shares/{token}` | Anonymous capability read; returns visible messages, artifact manifest, checkpoint and sequence. |
 | `GET`, `HEAD /shares/{token}/artifacts/{path}` | Reads only a copied manifest entry. Supports byte ranges and `?download=true`. |
