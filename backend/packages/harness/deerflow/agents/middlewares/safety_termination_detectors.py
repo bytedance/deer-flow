@@ -163,6 +163,30 @@ class AnthropicRefusalDetector:
         )
 
 
+class CodexRefusalDetector:
+    """OpenAI Codex Responses ``refusal`` content signal.
+
+    The bundled ``CodexChatModel`` surfaces a completed Responses message's
+    ``refusal`` content part as ``additional_kwargs["refusal"]`` (see
+    ``openai_codex_provider._parse_response``). A refusal is a normal,
+    completed model turn that carries no ``output_text``, so without this
+    detector it would be misclassified as an empty response and retried.
+    """
+
+    name = "codex_refusal"
+
+    def detect(self, message: AIMessage) -> SafetyTermination | None:
+        value = _get_metadata_value(message, "refusal")
+        if value is None:
+            return None
+        return SafetyTermination(
+            detector=self.name,
+            reason_field="refusal",
+            reason_value="refusal",
+            extras={"refusal": value},
+        )
+
+
 class GeminiSafetyDetector:
     """Gemini / Vertex AI safety-related finish reasons.
 
@@ -243,12 +267,14 @@ def default_detectors() -> list[SafetyTerminationDetector]:
         OpenAICompatibleContentFilterDetector(),
         OpenAIResponsesContentFilterDetector(),
         AnthropicRefusalDetector(),
+        CodexRefusalDetector(),
         GeminiSafetyDetector(),
     ]
 
 
 __all__ = [
     "AnthropicRefusalDetector",
+    "CodexRefusalDetector",
     "GeminiSafetyDetector",
     "OpenAICompatibleContentFilterDetector",
     "OpenAIResponsesContentFilterDetector",

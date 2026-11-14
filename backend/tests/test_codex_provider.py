@@ -135,6 +135,65 @@ def test_parse_response_reasoning_content():
     assert msg.additional_kwargs["reasoning_content"] == "I reasoned about this."
 
 
+def test_parse_response_refusal_content():
+    """A completed message carrying a refusal content part must preserve the
+    explanation and a distinguishable refusal signal instead of being parsed
+    as an empty response."""
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "refusal", "refusal": "I cannot help with that request."}],
+            }
+        ],
+        "usage": {},
+        "model": "gpt-5.4",
+    }
+    result = model._parse_response(response)
+    msg = result.generations[0].message
+    assert msg.content == ""
+    assert msg.additional_kwargs["refusal"] == "I cannot help with that request."
+    assert msg.response_metadata["finish_reason"] == "refusal"
+
+
+def test_parse_response_refusal_sets_finish_reason():
+    """The refusal-only message must stamp finish_reason="refusal" so the
+    empty-response guard sees a refusal termination instead of an empty stop."""
+    from deerflow.agents.middlewares.model_response import finish_reason
+
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "refusal", "refusal": "I cannot help with that request."}],
+            }
+        ],
+        "usage": {},
+    }
+    msg = model._parse_response(response).generations[0].message
+    assert finish_reason(msg) == "refusal"
+
+
+def test_parse_response_ordinary_text_has_no_finish_reason():
+    """A normal output_text turn must not carry a spurious refusal finish_reason."""
+    model = _make_model()
+    response = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hello world"}],
+            }
+        ],
+        "usage": {},
+    }
+    msg = model._parse_response(response).generations[0].message
+    assert "finish_reason" not in msg.response_metadata
+
+
 def test_parse_response_tool_call():
     model = _make_model()
     response = {
