@@ -11,7 +11,7 @@ You.com also uses this shared coercion, then applies its 100-result cap to
 the normalized count before sending the request.
 
 Other providers retain local normalization, including Exa's generic integer
-helper and SearXNG's inline validation; Tavily passes configured values through.
+helper; Tavily passes configured values through.
 ``tests/test_search_max_results_single_owner.py`` tracks the known helper and
 inline coercion patterns, rather than proving arbitrary provider semantics.
 

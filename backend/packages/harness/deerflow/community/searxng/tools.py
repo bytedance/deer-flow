@@ -4,6 +4,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
@@ -62,20 +63,8 @@ async def web_search_tool(query: str, time_range: SearchTimeRange | None = None)
         # Config resolution stats and hashes the config files; keep it off the
         # event loop, and build the client from the same read.
         cfg = await asyncio.to_thread(_get_tool_config, "web_search")
-        max_results = 5
-        if cfg is not None:
-            raw = cfg.get("max_results", max_results)
-            if isinstance(raw, int):
-                max_results = raw
-            else:
-                try:
-                    max_results = int(raw)
-                except (TypeError, ValueError, OverflowError):
-                    logger.warning(
-                        "Invalid SearXNG max_results=%r; using default %s",
-                        raw,
-                        max_results,
-                    )
+        raw = DEFAULT_MAX_RESULTS if cfg is None else cfg.get("max_results", DEFAULT_MAX_RESULTS)
+        max_results = coerce_max_results(raw, provider="SearXNG", logger=logger)
 
         client = _get_searxng_client(cfg)
         search_kwargs: dict[str, object] = {"max_results": max_results}
