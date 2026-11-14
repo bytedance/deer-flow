@@ -234,7 +234,8 @@ export function withContextUsageWindow(
     contextWindow: window,
     // Keep the same precision as contextUsageShare so the formatter can still
     // render a real but tiny share as "<0.1%" instead of "0%".
-    percentage: window != null ? contextUsageShare(breakdown.totalTokens, window) : null,
+    percentage:
+      window != null ? contextUsageShare(breakdown.totalTokens, window) : null,
     remainingTokens:
       window != null ? Math.max(window - breakdown.totalTokens, 0) : null,
   };

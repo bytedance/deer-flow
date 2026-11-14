@@ -322,7 +322,7 @@ export function ContextUsageRing({
           sideOffset={8}
           aria-label={t.contextUsage.breakdownTitle}
           data-testid="context-usage-popover"
-          className="bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 origin-(--radix-popover-content-transform-origin) z-50 w-80 max-w-[calc(100vw-2rem)] rounded-lg border p-3 shadow-lg outline-none"
+          className="bg-popover text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 z-50 w-80 max-w-[calc(100vw-2rem)] origin-(--radix-popover-content-transform-origin) rounded-lg border p-3 shadow-lg outline-none"
         >
           <div className="mb-2 flex items-baseline justify-between gap-2">
             <span className="text-sm font-medium">

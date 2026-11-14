@@ -330,7 +330,8 @@ test("withContextUsageWindow recomputes percentages and remaining space", () => 
 
 test("withContextUsageWindow keeps sub-tenth precision for the formatter", () => {
   expect(
-    withContextUsageWindow({ ..._breakdown, totalTokens: 1 }, 20_000).percentage,
+    withContextUsageWindow({ ..._breakdown, totalTokens: 1 }, 20_000)
+      .percentage,
   ).toBeCloseTo(0.005, 6);
 });
 
