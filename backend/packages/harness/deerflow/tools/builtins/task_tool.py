@@ -8,7 +8,8 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import replace
-from functools import partial
+from functools import partial, wraps
+from inspect import signature
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -815,7 +816,43 @@ def _task_result_command(
     )
 
 
+def _with_child_invocation(func):
+    """Give direct callers the same invocation lifetime as graph tool handlers.
+
+    The graph already bound its invocation before scheduling this coroutine.
+    Embedded callers can bypass that middleware, including with positional
+    arguments, so bind the original signature without changing the tool schema.
+    Only the owner closes the gate: a borrowed invocation may still need the
+    graph's observer to collect its result after this coroutine returns.
+    """
+    call_signature = signature(func)
+
+    @wraps(func)
+    async def wrapped(*args, **kwargs):
+        from deerflow.runtime.runs.input_control import run_input_control
+
+        arguments = call_signature.bind(*args, **kwargs).arguments
+        runtime = arguments["runtime"]
+        control = run_input_control(getattr(runtime, "context", None))
+        if control is None:
+            return await func(*args, **kwargs)
+        call_id = arguments["tool_call_id"]
+        if control.current_invocation(call_id) is not None:
+            return await func(*args, **kwargs)
+
+        child = control.create_invocation(call_id)
+        with control.invocation_scope(child):
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                child.finished = True
+                child.gate.close()
+
+    return wrapped
+
+
 @tool("task", parse_docstring=True)
+@_with_child_invocation
 async def task_tool(
     runtime: Runtime,
     prompt: str,
@@ -941,7 +978,10 @@ async def task_tool(
     parent_context = getattr(runtime, "context", None)
     parent_context = parent_context if isinstance(parent_context, dict) else {}
     input_control = run_input_control(parent_context)
-    input_gate = input_control.child(tool_call_id) if input_control is not None else None
+    invocation = input_control.current_invocation(tool_call_id) if input_control is not None else None
+    input_gate = invocation.gate if invocation is not None else None
+    if input_control is not None and invocation is not None:
+        input_control.ensure_invocation_active(invocation)
     result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else _task_result_command
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -1168,13 +1208,15 @@ async def task_tool(
         executor_kwargs["execution_capacity"] = explicit_capacity
     if input_gate is not None:
         executor_kwargs["input_gate"] = input_gate
+    if input_control is not None and invocation is not None:
+        # Assembly above yields. Do not launch replaced work, or an embedded
+        # direct call whose parent closed while it was preparing the executor.
+        input_control.ensure_invocation_active(invocation)
     executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
     execution_id = executor.execute_async(prompt, task_id=tool_call_id)
-    if input_control is not None:
-        input_control.bind_execution(tool_call_id, execution_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -1185,8 +1227,12 @@ async def task_tool(
 
     logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
-    writer = get_stream_writer()
     try:
+        # Binding belongs to the guarded executor lifetime too: a failure here
+        # must cancel and collect this execution, never leave an orphan behind.
+        if input_control is not None and invocation is not None:
+            input_control.bind_execution(invocation, execution_id)
+        writer = get_stream_writer()
         # Send Task Started message. This is a real await point (registered
         # handlers run here), so it belongs inside the guarded region: an emit
         # failure must take the same cooperative-cancel + deferred-cleanup
