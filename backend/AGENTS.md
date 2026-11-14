@@ -61,3 +61,5 @@ default suite needs no network and no API key.
   [run interaction policy](docs/RUN_INTERACTION_POLICY.md#hitl-tool-approval).
 - **Add a schema change with `make migrate-rev MSG="..."`** and follow the
   migrations guide.
+
+- **Notification preferences are a send-time trust boundary.** Malformed provider or per-event resolver output must fail closed and remain retryable without consuming an attempt; never treat malformed data as opt-in.
