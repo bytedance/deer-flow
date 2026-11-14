@@ -17,6 +17,7 @@ import pytest
 from fastapi import HTTPException
 from langchain_core.messages import HumanMessage
 from pydantic import ValidationError
+from starlette.datastructures import URL
 
 from app.gateway.authz import AuthContext
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES, RunCreateRequest
@@ -172,7 +173,7 @@ def test_start_run_grants_through_context_without_forwarding_the_key(monkeypatch
         request.state.user = user
         request.state.auth = AuthContext(user, ["runs:create", "runs:read"])
         request.state.auth_source = "session"
-        request.url = "https://deerflow.example/api/threads/current/runs"
+        request.url = URL("https://deerflow.example/api/threads/current/runs")
         await threads.create("source", user_id="alice")
         captured = []
 
