@@ -359,6 +359,9 @@ async def _persist_delivery_receipt(
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
 
 
@@ -1929,6 +1932,17 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # The run record is terminal `error`, so the stream must say the
+                # same thing: the web UI raises its run-failure toast only for an
+                # `error` frame, and streaming IM channels mark a turn failed only
+                # on that frame. Without it they report a successful turn while
+                # the record (and /wait) report the failure.
+                delivery_frame = {"message": delivery_error, "name": _RUN_ERROR_NAME}
+                if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                    await bridge.publish(run_id, "error", delivery_frame)
+                else:
+                    terminal_error_frame = delivery_frame
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2106,6 +2120,11 @@ async def run_agent(
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                        # Same invariant as the completion branch: the record is now
+                        # `error`, so the stream must not end as a success. Frames
+                        # already deferred and published below the finalizer run
+                        # before END.
+                        terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:
