@@ -14,6 +14,8 @@ from langgraph.prebuilt import ToolNode
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.extensions.plugin_tools import build_plugin_tools
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def bookmarks(tmp_path, monkeypatch):

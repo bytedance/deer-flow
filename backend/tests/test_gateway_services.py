@@ -862,6 +862,69 @@ def test_normalize_input_rejects_malformed_message_with_400():
 
 
 @pytest.mark.parametrize(
+    "tool_artifacts",
+    [
+        "oops",
+        ["oops"],
+        [{"display_name": "report.md"}],
+        [{"handle": 3}],
+        [{"handle": ["h"]}],
+        {"type": "__overwrite__", "value": []},
+    ],
+    ids=["non-list", "non-object-entry", "missing-handle", "non-string-handle", "unhashable-handle", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_tool_artifacts_with_400(tool_artifacts):
+    """An entry the registry reducer cannot key must be a 400 here.
+
+    ``merge_tool_artifacts`` keys each entry by ``handle``; a missing or
+    unhashable handle raised while the state update merged, and the state route
+    persists reducer values with ``Overwrite``, so the thread stayed broken for
+    every later artifact capture.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"tool_artifacts": tool_artifacts})
+
+    assert excinfo.value.status_code == 400
+    assert "input.tool_artifacts" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_tool_artifacts():
+    from app.gateway.services import normalize_input
+
+    entry = {"handle": "art_00000001", "display_name": "report.md", "artifact_type": "file"}
+
+    assert normalize_input({"tool_artifacts": [entry]})["tool_artifacts"] == [entry]
+
+
+def test_state_values_reject_unusable_tool_artifacts_with_400():
+    """The thread-state update route shares the artifact-registry boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"tool_artifacts": [{"handle": ["h"]}]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.tool_artifacts" in excinfo.value.detail
+
+
+def test_state_values_strip_server_owned_metadata_from_tool_artifacts():
+    """The registry branch keeps the per-entry strip the generic list branch applied."""
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"handle": "art_1", "additional_kwargs": {"original_user_content": "forged", "title": "kept"}}
+
+    stripped = strip_server_owned_state_metadata({"tool_artifacts": [entry]})["tool_artifacts"][0]
+
+    assert stripped["additional_kwargs"] == {"title": "kept"}
+
+
+@pytest.mark.parametrize(
     "skill_context",
     [
         "oops",

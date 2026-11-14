@@ -22,21 +22,22 @@ logger = logging.getLogger(__name__)
 _SCRIPT = r"""
 import base64, hashlib, json, os, stat, sys
 p = json.loads(sys.argv[1])
+limit = p.get('max_bytes', 2097152)
 directory = None
 def stamp(s):
     return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
 def opened(name):
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     s = os.fstat(fd)
-    if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_size > 2097152:
+    if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_size > limit:
         os.close(fd)
         raise ValueError('Unsafe or oversized file')
     return os.fdopen(fd, 'rb'), s
 def digest(name):
     source, before = opened(name)
     with source:
-        data = source.read(2097153)
-        if len(data) > 2097152 or stamp(before) != stamp(os.fstat(source.fileno())):
+        data = source.read(limit + 1)
+        if len(data) > limit or stamp(before) != stamp(os.fstat(source.fileno())):
             raise ValueError('File changed during snapshot')
         return hashlib.sha256(data).hexdigest(), len(data)
 try:
@@ -65,7 +66,7 @@ try:
         fd = os.open(p['temporary'], flags, 0o600, dir_fd=directory)
         with os.fdopen(fd, 'ab') as target:
             s = os.fstat(target.fileno())
-            if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_size != p['offset'] or s.st_size + len(data) > 2097152:
+            if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_size != p['offset'] or s.st_size + len(data) > limit:
                 raise ValueError('Staging file changed')
             target.write(data)
             target.flush()
@@ -132,23 +133,23 @@ def validate_snapshot_support(sandbox: Sandbox) -> None:
     _call(sandbox, "probe")
 
 
-def publish_snapshot(sandbox: Sandbox, filename: str, content: bytes) -> None:
-    """Publish at most 2 MiB into uploads, reusing only identical regular files.
+def publish_snapshot(sandbox: Sandbox, filename: str, content: bytes, *, area: str = "uploads", max_bytes: int = MAX_BYTES) -> None:
+    """Publish bounded bytes, reusing only identical regular files.
 
     Unsafe paths, changed existing files or rejected remote operations raise
     AgentRunError(422). Existing edits are retained; staging cleanup is attempted
     even on failure. Run this synchronous command sequence off the event loop.
     """
-    if not isinstance(content, bytes) or len(content) > MAX_BYTES:
-        raise AgentRunError(422, "Artifact exceeds 2 MiB")
+    if area not in {"uploads", "outputs"} or not isinstance(content, bytes) or len(content) > max_bytes:
+        raise AgentRunError(422, "Artifact exceeds the snapshot size limit")
     temporary = ".artifact-" + uuid.uuid4().hex + ".part"
     try:
         for offset in range(0, max(1, len(content)), CHUNK_BYTES):
-            _call(sandbox, "append", area="uploads", name=filename, temporary=temporary, offset=offset, data=base64.b64encode(content[offset : offset + CHUNK_BYTES]).decode("ascii"))
-        _call(sandbox, "publish", area="uploads", name=filename, temporary=temporary, sha256=hashlib.sha256(content).hexdigest(), size=len(content))
+            _call(sandbox, "append", area=area, max_bytes=max_bytes, name=filename, temporary=temporary, offset=offset, data=base64.b64encode(content[offset : offset + CHUNK_BYTES]).decode("ascii"))
+        _call(sandbox, "publish", area=area, max_bytes=max_bytes, name=filename, temporary=temporary, sha256=hashlib.sha256(content).hexdigest(), size=len(content))
     finally:
         try:
-            _call(sandbox, "cleanup", area="uploads", name=filename, temporary=temporary)
+            _call(sandbox, "cleanup", area=area, name=filename, temporary=temporary)
         except Exception:
             logger.warning("Failed to clean remote artifact staging file", exc_info=True)
 
@@ -158,20 +159,20 @@ def verify_snapshot(sandbox: Sandbox, filename: str, sha256: str, size: int) -> 
     _call(sandbox, "verify", area="uploads", name=filename, sha256=sha256, size=size)
 
 
-def read_snapshot(sandbox: Sandbox, relative_path: str) -> bytes:
-    """Read at most 2 MiB from outputs with file identity checked across chunks.
+def read_snapshot(sandbox: Sandbox, relative_path: str, *, max_bytes: int = MAX_BYTES) -> bytes:
+    """Read bounded output bytes with file identity checked across chunks.
 
     Raise AgentRunError(422) for unsafe paths, changed files or invalid remote
     replies. Run this synchronous command sequence off the event loop.
     """
     content, stamp = bytearray(), None
     while True:
-        result = _call(sandbox, "read", area="outputs", name=relative_path, offset=len(content), stamp=stamp)
+        result = _call(sandbox, "read", area="outputs", name=relative_path, offset=len(content), stamp=stamp, max_bytes=max_bytes)
         try:
             data = base64.b64decode(result["data"], validate=True)
             size = result["size"]
             current_stamp = result["stamp"]
-            valid = type(size) is int and 0 <= size <= MAX_BYTES and len(data) <= CHUNK_BYTES and len(content) + len(data) <= size
+            valid = type(size) is int and 0 <= size <= max_bytes and len(data) <= CHUNK_BYTES and len(content) + len(data) <= size
             if not valid or (stamp is not None and stamp != current_stamp) or (not data and len(content) != size):
                 raise ValueError("Invalid remote snapshot")
         except (ValueError, KeyError, TypeError) as exc:

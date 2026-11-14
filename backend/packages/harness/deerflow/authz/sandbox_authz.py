@@ -22,28 +22,68 @@ from typing import Any
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, peek_loaded_app_config
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
 logger = logging.getLogger(__name__)
 
 
-def safe_app_config() -> AppConfig | None:
-    """Load the global AppConfig, returning None when unavailable.
+_authorization_config_loaded = False
 
-    Authorization can only be enabled via config, so no readable config ⇒ the
-    sandbox gate is a no-op (``authorize_sandbox_execution`` treats a ``None``
-    app_config the same as ``authorization.enabled: false``). This keeps the
-    gate safe in environments without a ``config.yaml`` (e.g. CI runners and
-    direct-call tests) where ``get_app_config`` would raise ``FileNotFoundError``.
+
+def _authorization_enabled(config: AppConfig | None) -> bool:
+    authz_config = getattr(config, "authorization", None)
+    return getattr(authz_config, "enabled", None) is True
+
+
+def safe_app_config() -> AppConfig | None:
+    """Load the global AppConfig, returning None only before authorization is configured.
+
+    ``None`` is reserved for a process that has never loaded an
+    authorization-enabled configuration (CI runners and direct-call tests).
+    Once authorization has been enabled, a later config read failure means the
+    policy is unknown, not absent, so the sandbox gate fails closed instead of
+    silently no-oping.
+
+    This fail-closed decision is intentionally unconditional: when the config
+    itself cannot be read, the ``authorization.fail_closed`` value is part of
+    the unavailable policy and cannot be trusted to permit the call. On a read
+    failure we also consult ``peek_loaded_app_config()``, because gateway
+    startup and upload paths can load an authorization-enabled config through
+    the ordinary loader before this helper is ever called. The error
+    deliberately says the sandbox is temporarily unavailable rather than
+    claiming a role denial; the cause is logged.
     """
+    global _authorization_config_loaded
+
     try:
         from deerflow.config import get_app_config
 
-        return get_app_config()
-    except Exception:
-        logger.debug("App config unavailable; sandbox:execute gate is a no-op", exc_info=True)
+        config = get_app_config()
+    except Exception as exc:
+        if not _authorization_config_loaded:
+            try:
+                loaded_config = peek_loaded_app_config()
+            except Exception:
+                loaded_config = None
+            if _authorization_enabled(loaded_config):
+                _authorization_config_loaded = True
+
+        if _authorization_config_loaded:
+            logger.warning(
+                "Authorization config became unavailable; denying sandbox:execute (%s)",
+                type(exc).__name__,
+            )
+            raise SandboxAuthorizationError("Sandbox execution is temporarily unavailable") from None
+        logger.debug(
+            "App config unavailable; sandbox:execute gate is a no-op (%s)",
+            type(exc).__name__,
+        )
         return None
+
+    if _authorization_enabled(config):
+        _authorization_config_loaded = True
+    return config
 
 
 async def safe_app_config_async() -> AppConfig | None:
