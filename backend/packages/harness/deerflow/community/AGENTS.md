@@ -29,7 +29,8 @@ make test-blocking-io
   credentials and payload values stay out of logs.
 - **Resolve API keys through `provider_credentials.resolve_api_key`.**
 - **Build the HTTPX client off the event loop.** TLS setup is synchronous.
-  Requests and cleanup stay on the loop.
+  Requests and cleanup stay on the loop. Own construction as a shielded task
+  and drain it on cancellation so a late-built client can still be closed.
 - **Test the real tool through an offline HTTPX transport.** Patch the
   provider's own `httpx` reference and leave the shared `httpx.Client` unchanged.
   A test that mocks the normalizer or the tool's final output proves nothing

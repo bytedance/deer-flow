@@ -11,6 +11,7 @@ from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url, validate_delegated_backend_url, validate_public_http_url
 from deerflow.config import get_app_config
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,24 @@ def _get_firecrawl_client(
     return AsyncFirecrawlApp(**kwargs)  # type: ignore[arg-type]
 
 
+async def _open_firecrawl_client(tool_name: str, *, cfg: dict, api_url: str | None = None) -> AsyncFirecrawlApp:
+    # Own construction so cancellation still closes the pool returned by the worker.
+    construction = asyncio.create_task(asyncio.to_thread(_get_firecrawl_client, tool_name, cfg=cfg, api_url=api_url))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_after_construction() -> None:
+            try:
+                client = await construction
+                await _aclose_firecrawl_client(client)
+            except Exception as exc:
+                logger.error("Firecrawl client cleanup after cancellation failed (%s)", type(exc).__name__)
+
+        await await_drained(close_after_construction())
+        raise
+
+
 @tool("web_search", parse_docstring=True)
 async def web_search_tool(query: str) -> str:
     """Search the web.
@@ -110,7 +129,7 @@ async def web_search_tool(query: str) -> str:
         cfg = await asyncio.to_thread(_get_tool_config_extra, "web_search")
         max_results = coerce_max_results(cfg.get("max_results", DEFAULT_MAX_RESULTS), provider="Firecrawl", logger=logger)
 
-        client = _get_firecrawl_client("web_search", cfg=cfg)
+        client = await _open_firecrawl_client("web_search", cfg=cfg)
         result = await client.search(query, limit=max_results)
 
         # result.web contains list of SearchResultWeb objects
@@ -156,7 +175,7 @@ async def web_fetch_tool(url: str) -> str:
             backend_error = await asyncio.to_thread(_validate_backend_base_url, cfg, api_url)
             if backend_error:
                 return backend_error
-        client = _get_firecrawl_client("web_fetch", cfg=cfg, api_url=api_url)
+        client = await _open_firecrawl_client("web_fetch", cfg=cfg, api_url=api_url)
         result = await client.scrape(url, formats=["markdown"])
 
         markdown_content = result.markdown or ""

@@ -59,6 +59,10 @@ establish that a package is valid or readable. The scope note remains visible
 even when there are no YAML warnings; check Gateway logs for other load failures.
 Parsing remains strict and invalid skills stay unavailable to agents.
 
+Firecrawl search and fetch initialize their HTTP client in a worker thread,
+keeping synchronous TLS certificate loading off the agent event loop.
+Cancellation during setup waits for construction and closes the resulting client.
+
 ## Read-only knowledge sources
 
 Three retrieval tools can be configured independently in `tools[]`: document
