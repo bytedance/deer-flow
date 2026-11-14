@@ -91,3 +91,6 @@ client or the real storage, because the payload shape is the contract.
 - `memory.injection_enabled: false` and the per-agent opt-out remove the injected
   block completely. Date reminders and real user messages stay.
 - Gateway startup schedules retrieval warm-up without delaying readiness.
+
+The opening `memory-json` marker must be on its own line (up to three leading
+spaces). Quoted examples before that block do not replace or hide the saved summary.

@@ -182,3 +182,6 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
+
+The opening `memory-json` marker must be on its own line (up to three leading
+spaces). Quoted examples before that block do not replace or hide the saved summary.
