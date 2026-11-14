@@ -454,26 +454,44 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return int(result.scalar() or 0)
 
-    async def list_queued_runs(self, *, limit: int, per_user_max_concurrent_runs: int = 0) -> list[dict[str, Any]]:
+    async def list_queued_runs(
+        self,
+        *,
+        limit: int,
+        per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         """The next bounded drain batch, fair to task owners (see ``_fair_queue_statement``)."""
-        stmt = self._fair_queue_statement(limit=limit, per_user_max_concurrent_runs=per_user_max_concurrent_runs)
+        stmt = self._fair_queue_statement(
+            limit=limit,
+            per_user_max_concurrent_runs=per_user_max_concurrent_runs,
+            created_after=created_after,
+        )
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
     @staticmethod
-    def _fair_queue_statement(*, limit: int, per_user_max_concurrent_runs: int = 0):
+    def _fair_queue_statement(
+        *,
+        limit: int,
+        per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
+    ):
         """SELECT for the next bounded drain batch, fair to task owners.
 
         Only same-thread FIFO heads are eligible (an older active row on the
-        same thread hides every newer one). Eligible rows are ranked within
-        their owner by ``attempt_count, created_at, id`` and the batch is
-        ordered by that rank first, so every owner's head comes before any
-        owner's second row: one owner's backlog cannot fill the batch. With a
-        per-owner cap, an owner only contributes as many rows as it has free
-        slots (``cap - executing``), and owners already at the cap drop out
-        before the limit is applied. With a single owner the order equals the
-        plain ``attempt_count, created_at, id`` order.
+        same thread hides every newer one). Rows at or before ``created_after``
+        are already due for timeout and are removed before FIFO checks, owner
+        ranking, and the batch limit; they must not occupy another row's slot.
+        Eligible rows are ranked within their owner by
+        ``attempt_count, created_at, id`` and the batch is ordered by that rank
+        first, so every owner's head comes before any owner's second row: one
+        owner's backlog cannot fill the batch. With a per-owner cap, an owner
+        only contributes as many rows as it has free slots
+        (``cap - executing``), and owners already at the cap drop out before
+        the limit is applied. With a single owner the order equals the plain
+        ``attempt_count, created_at, id`` order.
 
         Rows whose task is gone (deleted while queued) have no owner. They are
         never launched (the drain marks them interrupted), so the cap does not
@@ -481,19 +499,20 @@ class ScheduledTaskRunRepository:
         """
         candidate = aliased(ScheduledTaskRunRow)
         older = aliased(ScheduledTaskRunRow)
-        older_same_thread = exists(
-            select(older.id).where(
-                older.thread_id == candidate.thread_id,
-                older.status.in_(ACTIVE_RUN_STATUSES),
-                or_(
-                    older.created_at < candidate.created_at,
-                    and_(
-                        older.created_at == candidate.created_at,
-                        older.id < candidate.id,
-                    ),
+        older_conditions = [
+            older.thread_id == candidate.thread_id,
+            older.status.in_(ACTIVE_RUN_STATUSES),
+            or_(
+                older.created_at < candidate.created_at,
+                and_(
+                    older.created_at == candidate.created_at,
+                    older.id < candidate.id,
                 ),
-            )
-        )
+            ),
+        ]
+        if created_after is not None:
+            older_conditions.append(older.created_at > created_after)
+        older_same_thread = exists(select(older.id).where(*older_conditions))
         executing_run = aliased(ScheduledTaskRunRow)
         executing_task = aliased(ScheduledTaskRow)
         executing = (
@@ -505,6 +524,9 @@ class ScheduledTaskRunRepository:
             .subquery("executing")
         )
         owner_task = aliased(ScheduledTaskRow)
+        eligible_conditions = [candidate.status == "queued", ~older_same_thread]
+        if created_after is not None:
+            eligible_conditions.append(candidate.created_at > created_after)
         eligible = (
             select(
                 candidate.id.label("id"),
@@ -522,7 +544,7 @@ class ScheduledTaskRunRepository:
             .select_from(candidate)
             .outerjoin(owner_task, owner_task.id == candidate.task_id)
             .outerjoin(executing, executing.c.owner == owner_task.user_id)
-            .where(candidate.status == "queued", ~older_same_thread)
+            .where(*eligible_conditions)
             .subquery("eligible")
         )
         stmt = select(ScheduledTaskRunRow).join(eligible, eligible.c.id == ScheduledTaskRunRow.id)
@@ -566,12 +588,16 @@ class ScheduledTaskRunRepository:
         lease_seconds: int,
         global_max_concurrent_runs: int,
         per_user_max_concurrent_runs: int = 0,
+        created_after: datetime | None = None,
     ) -> dict[str, Any] | None:
         """Atomically move one waiting row into the lease-fenced launch phase.
 
         Both budgets are checked under the same database-wide budget lock, so
         the per-owner cap is as atomic across workers and instances as the
         global one. A row rejected by either budget stays ``queued``.
+
+        ``created_after`` is the queue-age cutoff. Rows at or before it are
+        due for timeout and must stay waiting even if the timeout sweep failed.
         """
         async with self._sf() as session:
             dialect = session.get_bind().dialect.name
@@ -637,13 +663,16 @@ class ScheduledTaskRunRepository:
                     ),
                 )
             )
+            claim_conditions = [
+                ScheduledTaskRunRow.id == run_record_id,
+                ScheduledTaskRunRow.status == "queued",
+                ~older_same_thread,
+            ]
+            if created_after is not None:
+                claim_conditions.append(ScheduledTaskRunRow.created_at > created_after)
             result = await session.execute(
                 update(ScheduledTaskRunRow)
-                .where(
-                    ScheduledTaskRunRow.id == run_record_id,
-                    ScheduledTaskRunRow.status == "queued",
-                    ~older_same_thread,
-                )
+                .where(*claim_conditions)
                 .values(
                     status="launching",
                     lease_owner=lease_owner,
@@ -719,48 +748,57 @@ class ScheduledTaskRunRepository:
 
         expired: list[dict[str, Any]] = []
         for row_id, task_id in candidate_keys:
-            async with self._sf() as session:
-                task = await self._lock_task(session, task_id)
-                row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
-                if row is None or row.status != "queued":
-                    await session.rollback()
-                    continue
+            try:
+                async with self._sf() as session:
+                    task = await self._lock_task(session, task_id)
+                    row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
+                    if row is None or row.status != "queued":
+                        await session.rollback()
+                        continue
 
-                row.status = "failed"
-                row.error = error
-                row.finished_at = now
-                row.lease_owner = None
-                row.lease_expires_at = None
+                    row.status = "failed"
+                    row.error = error
+                    row.finished_at = now
+                    row.lease_owner = None
+                    row.lease_expires_at = None
 
-                if task is not None and can_project(task, row):
-                    if task.status == "paused":
-                        # A concurrent/later pause owns the parent presentation.
-                        task.lease_owner = None
-                        task.lease_expires_at = None
-                    else:
-                        schedule_error = None
-                        if row.trigger == "manual":
-                            next_at = task.next_run_at
-                            task_status = task.status or "enabled"
+                    if task is not None and can_project(task, row):
+                        if task.status == "paused":
+                            # A concurrent/later pause owns the parent presentation.
+                            task.lease_owner = None
+                            task.lease_expires_at = None
                         else:
-                            next_at, schedule_error = stored_next_run_at(
-                                task.schedule_type,
-                                task.schedule_spec,
-                                task.timezone,
-                                now=now,
-                            )
-                            task_status = "failed" if task.schedule_type == "once" else "enabled"
-                        task.status = task_status
-                        task.next_run_at = next_at
-                        task.last_thread_id = row.thread_id
-                        task.last_error = error
-                        task.lease_owner = None
-                        task.lease_expires_at = None
-                        pause_unschedulable(task, schedule_error)
-                    task.updated_at = datetime.now(UTC)
+                            schedule_error = None
+                            if row.trigger == "manual":
+                                next_at = task.next_run_at
+                                task_status = task.status or "enabled"
+                            else:
+                                next_at, schedule_error = stored_next_run_at(
+                                    task.schedule_type,
+                                    task.schedule_spec,
+                                    task.timezone,
+                                    now=now,
+                                )
+                                task_status = "failed" if task.schedule_type == "once" else "enabled"
+                            task.status = task_status
+                            task.next_run_at = next_at
+                            task.last_thread_id = row.thread_id
+                            task.last_error = error
+                            task.lease_owner = None
+                            task.lease_expires_at = None
+                            pause_unschedulable(task, schedule_error)
+                        task.updated_at = datetime.now(UTC)
 
-                await session.commit()
-                expired.append(self._row_to_dict(row))
+                    await session.commit()
+                    expired.append(self._row_to_dict(row))
+            except Exception:
+                # The session above rolls back this row's uncommitted changes.
+                # Keep the remaining candidates eligible for this pass instead
+                # of letting one damaged parent block every queue-timeout write.
+                logger.exception(
+                    "Failed to expire queued scheduled occurrence %s; continuing with the remaining queue",
+                    row_id,
+                )
         return expired
 
     async def fail_launching_run(

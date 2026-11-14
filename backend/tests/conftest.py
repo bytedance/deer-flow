@@ -79,6 +79,22 @@ def provisioner_module():
 
 
 @pytest.fixture(autouse=True)
+def _reset_sandbox_authz_config_state():
+    """Reset the process-global authorization-config flag between tests.
+
+    Several suites exercise the real ``safe_app_config()`` with an
+    authorization-enabled config, while config-less suites rely on its no-op
+    branch. Reset the flag for every test so collection order and pytest shard
+    ordering cannot leak authorization state across modules.
+    """
+    from deerflow.authz import sandbox_authz
+
+    sandbox_authz._authorization_config_loaded = False
+    yield
+    sandbox_authz._authorization_config_loaded = False
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_storage_singleton():
     """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
     try:
