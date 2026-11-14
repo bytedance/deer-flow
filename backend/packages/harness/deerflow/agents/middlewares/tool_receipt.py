@@ -110,6 +110,7 @@ def make_tool_receipt(tool_call: dict, message: ToolMessage) -> dict:
     args = tool_call.get("args")
     args_bytes = json.dumps(args if isinstance(args, dict) else {}, sort_keys=True, default=str).encode("utf-8")
     content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
+    content_bytes = content.encode("utf-8")
     meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
     status = str(meta.get("status") or getattr(message, "status", "success") or "success")
     return {
@@ -117,8 +118,8 @@ def make_tool_receipt(tool_call: dict, message: ToolMessage) -> dict:
         "tool_name": str(tool_call.get("name") or ""),
         "status": status,
         "args_sha256": _short_hash(args_bytes),
-        "output_sha256": _short_hash(content.encode("utf-8")),
-        "output_bytes": len(content.encode("utf-8")),
+        "output_sha256": _short_hash(content_bytes),
+        "output_bytes": len(content_bytes),
         "created_at": datetime.now(UTC).isoformat(),
     }
 
