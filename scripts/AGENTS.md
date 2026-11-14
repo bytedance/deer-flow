@@ -65,6 +65,11 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
 
 ## Start, stop, clean
 
+- **Startup probes are opt-in and observational.** Keep doctor and bundle
+  diagnostics usable when services cannot start. Busy ports can belong to an
+  existing instance, and denied binds can be exclusive listeners. Reports omit
+  Docker endpoints, stderr, process arguments and environment values. Compute
+  startup triage status and active signals before rendering the summary.
 - **Validate before you stop anything.** `serve.sh` resolves the bind host and
   config first, so a bad value cannot tear down a running stack.
 - **`down` skips secret and permission checks.** Permission damage in the runtime
