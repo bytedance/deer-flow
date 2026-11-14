@@ -122,6 +122,17 @@ This section accumulates work toward the **2.3.0** milestone
   conversation, and opening it sent the thread id to an outside host.
   ([#8126])
 
+- **agents:** A custom agent name is a host directory component, so creation now
+  rejects Windows reserved device names (`NUL`, `CON`, `COM1` …) on every
+  platform. A device name creates no directory: `mkdir` appeared to succeed and
+  the first write inside it raised `FileNotFoundError`, which the create route
+  reported as a 500 instead of rejecting the name. The `/api/agents/check`
+  availability pre-check applies the same rule, so it cannot report an unusable
+  name as available. Reads, updates and deletes of
+  an existing name stay permissive so an agent created before this check remains
+  manageable. ([#7938])
+
+
 - **runtime:** In multi-worker mode (`run_ownership.heartbeat_enabled`), a
   worker that had lost its run to a peer could put the row back. Its assembly
   evidence write was an unconditional full-row upsert, so after a peer
@@ -16405,6 +16416,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#7831]: https://github.com/bytedance/deer-flow/pull/7831
 [#7892]: https://github.com/bytedance/deer-flow/pull/7892
 [#7907]: https://github.com/bytedance/deer-flow/pull/7907
+[#7938]: https://github.com/bytedance/deer-flow/issues/7938
 [#7941]: https://github.com/bytedance/deer-flow/pull/7941
 [#7945]: https://github.com/bytedance/deer-flow/issues/7945
 [#7953]: https://github.com/bytedance/deer-flow/issues/7953

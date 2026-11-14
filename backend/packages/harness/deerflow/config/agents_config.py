@@ -18,6 +18,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstr
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -161,14 +162,30 @@ class GitHubAgentConfig(BaseModel):
         return self
 
 
-def validate_agent_name(name: str | None) -> str | None:
-    """Validate a custom agent name before using it in filesystem paths."""
+def validate_agent_name(name: str | None, *, for_creation: bool = False) -> str | None:
+    """Validate a custom agent name before using it in filesystem paths.
+
+    An agent name is a directory component under ``users/{user_id}/agents/``,
+    so a name Windows reserves for a device (``NUL``, ``CON``, ``COM1`` …)
+    cannot be created there: ``mkdir`` appears to succeed and the first file
+    write inside it raises ``FileNotFoundError``. Reject such names on every
+    platform when a name is created, matching ``validate_thread_id`` and the
+    upload/skill/sandbox creation paths.
+
+    Reads, updates and deletes of an agent that already exists stay permissive:
+    an installation that created one of these names on Linux before this check
+    must still be able to list, export, rename away or delete it.
+    """
     if name is None:
         return None
     if not isinstance(name, str):
         raise ValueError("Invalid agent name. Expected a string or None.")
     if not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+    if for_creation:
+        reason = windows_incompatible_segment(name)
+        if reason is not None:
+            raise ValueError(f"Invalid agent name {name!r}: {reason}")
     return name
 
 

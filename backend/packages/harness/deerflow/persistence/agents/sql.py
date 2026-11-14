@@ -25,7 +25,7 @@ from sqlalchemy import Engine, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from deerflow.config.agents_config import AgentConfig
+from deerflow.config.agents_config import AgentConfig, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
@@ -143,6 +143,11 @@ class SqlAgentStore(AgentStore):
         return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
+        # The DB row has no directory of its own, but the name is still a host
+        # path component for the agent's memory scope and a portable agent
+        # package import target, so creation follows the same portability rule
+        # as the file store.
+        validate_agent_name(name, for_creation=True)
         effective_user = user_id or get_effective_user_id()
         now = datetime.now(UTC)
         row = AgentRow(
@@ -176,6 +181,7 @@ class SqlAgentStore(AgentStore):
             # the loser. Re-fetch the winner's row and apply the update to it
             # rather than letting a raw IntegrityError surface as a 500 — a true
             # upsert, symmetric with create()'s conflict handling.
+            validate_agent_name(name, for_creation=True)
             row = AgentRow(
                 id=uuid.uuid4().hex,
                 user_id=effective_user,
