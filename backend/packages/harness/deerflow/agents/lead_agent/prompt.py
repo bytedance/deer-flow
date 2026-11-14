@@ -23,7 +23,6 @@ from deerflow.config.subagents_config import (
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
-from deerflow.subagents import get_available_subagent_names
 from deerflow.tools.builtins.tool_search import get_deferred_tools_prompt_section
 
 if TYPE_CHECKING:
@@ -426,14 +425,15 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     }
 
     # Lazy import moved outside loop to avoid repeated import overhead
-    from deerflow.subagents.registry import get_subagent_config
+    from deerflow.subagents.registry import get_delegation_targets
 
+    targets = {target.name: target for target in get_delegation_targets(app_config=app_config)}
     lines = []
     for name in available_names:
         if name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
-            config = get_subagent_config(name, app_config=app_config)
+            config = targets.get(name)
             if config is not None:
                 # config.description is agent-editable (persisted by setup_agent /
                 # update_agent), so escape it before it renders into the
@@ -468,10 +468,9 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    if allowed_subagents is None:
-        available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
-    else:
-        available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    from deerflow.subagents.registry import get_delegation_targets
+
+    available_names = [target.name for target in get_delegation_targets(app_config=app_config, allowed_subagents=allowed_subagents)]
     if not available_names:
         return ""
     # A bash subagent inherits the lead's tool groups, so it has bash only when the lead does.

@@ -1,3 +1,4 @@
+import { matchesExecution } from "./identity";
 /**
  * Subtask step model shared by the live (SSE) and reload (fetched) paths.
  *
@@ -122,6 +123,7 @@ type RunEvent = {
 export function eventsToSteps(
   events: RunEvent[],
   taskId: string,
+  identity: { executionId?: string; dispatchId?: string } = {},
 ): SubtaskStep[] {
   const steps: SubtaskStep[] = [];
   for (const event of events) {
@@ -132,7 +134,11 @@ export function eventsToSteps(
       | (SubtaskStep & { task_id?: string })
       | undefined;
     const eventTaskId = content?.task_id ?? event.metadata?.task_id;
-    if (!content || eventTaskId !== taskId) {
+    if (
+      !content ||
+      eventTaskId !== taskId ||
+      !matchesExecution(identity, { ...event.metadata, ...content })
+    ) {
       continue;
     }
     steps.push({

@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 class SubagentRuntime:
-    """Share native-subagent capacity and optional durable batches across graphs.
+    """Share delegated-worker capacity and optional durable batches across graphs.
 
     Application entry points install equivalent process-global dependencies at
     startup. Direct graph factories instead receive this object explicitly, so
@@ -43,6 +43,8 @@ class SubagentRuntime:
         batch_repository: Any | None = None,
         batch_config: SubagentBatchesConfig | None = None,
         app_config: AppConfig | None = None,
+        extensions: Any | None = None,
+        workspace_resolver: Any | None = None,
     ) -> None:
         if not MIN_TOTAL_SUBAGENTS_PER_RUN <= max_total_per_run <= MAX_TOTAL_SUBAGENTS_PER_RUN:
             raise ValueError(f"max_total_per_run must be between {MIN_TOTAL_SUBAGENTS_PER_RUN} and {MAX_TOTAL_SUBAGENTS_PER_RUN}")
@@ -58,6 +60,10 @@ class SubagentRuntime:
         self.config = (config or SubagentRuntimeConfig()).model_copy(deep=True)
         self.max_total_per_run = max_total_per_run
         self.app_config = app_config
+        from deerflow.extensions.registry import EMPTY_EXTENSIONS
+
+        self.extensions = extensions if extensions is not None else EMPTY_EXTENSIONS
+        self.workspace_resolver = workspace_resolver
         self.execution_capacity = SubagentExecutionCapacity(self.config)
         self.batch_config = batch_config.model_copy(deep=True) if batch_config is not None else None
         self._external_batch_submitter = batch_submitter
@@ -82,6 +88,8 @@ class SubagentRuntime:
         app_config: AppConfig,
         *,
         batch_repository: Any | None = None,
+        extensions: Any | None = None,
+        workspace_resolver: Any | None = None,
     ) -> SubagentRuntime:
         """Build explicit SDK dependencies from a caller-owned config snapshot."""
 
@@ -107,6 +115,8 @@ class SubagentRuntime:
             batch_repository=batch_repository,
             batch_config=batch_config,
             app_config=app_config,
+            extensions=extensions,
+            workspace_resolver=workspace_resolver,
         )
 
     @property

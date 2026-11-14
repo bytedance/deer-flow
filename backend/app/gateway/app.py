@@ -756,6 +756,10 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # on it, a failure is logged by the task itself, and shutdown gives the
         # in-flight sweep a bounded graceful budget before cancelling it; any
         # already-started file worker drains before the runtime is torn down.
+        from deerflow.subagents.registry import validate_worker_catalog
+
+        await asyncio.to_thread(validate_worker_catalog, app_config=startup_config, extensions=getattr(app.state, "extensions", None))
+
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         # Best-effort per-document summary generation.

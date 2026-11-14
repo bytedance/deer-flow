@@ -1,4 +1,39 @@
 {
+  "deerflow-extension-acp-workers": {
+    "schema_version": 1,
+    "id": "catalog/acpWorkers",
+    "locales": {
+      "zh-CN": {
+        "title": "ACP 外部 Agent",
+        "description": "通过统一子任务入口委派 ACP Agent，共享容量、取消和超时管理。",
+        "usage": [
+          {
+            "title": "安装并配置 worker",
+            "description": "由部署方先安装并认证 ACP 程序，再按包内指南安装扩展，为已有 ACP Agent 配置 worker 别名并重启 Gateway。"
+          },
+          {
+            "title": "委派子任务",
+            "description": "启用父 Agent 的子任务能力并允许该别名。外部自报用量和未验证验收条件会保留来源。"
+          }
+        ]
+      },
+      "en-US": {
+        "title": "ACP external agents",
+        "description": "Delegate to ACP agents through unified tasks with shared capacity, cancellation and deadlines.",
+        "usage": [
+          {
+            "title": "Install and configure a worker",
+            "description": "Install and authenticate the ACP program separately. Follow the package guide to install the extension, assign a worker alias and restart Gateway."
+          },
+          {
+            "title": "Delegate a task",
+            "description": "Enable subagents for the parent and allow the alias. External usage remains self-reported and acceptance criteria remain unverified."
+          }
+        ]
+      }
+    },
+    "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-acp-workers#readme"
+  },
   "deerflow-extension-agent-teams": {
     "schema_version": 1,
     "id": "community.agent-teams",

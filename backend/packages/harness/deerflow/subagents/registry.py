@@ -5,12 +5,14 @@ import threading
 import time
 from collections.abc import Hashable
 from dataclasses import replace
+from types import MappingProxyType
 from typing import Any
 
 from deerflow.persistence.managed_subagents import ManagedSubagentDefinition, get_managed_subagent_store
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.worker_backends import WorkerPlan
 
 logger = logging.getLogger(__name__)
 _MANAGED_SIGNATURE_TTL_SECONDS = 1.0
@@ -257,3 +259,50 @@ def get_available_subagent_names(*, app_config: Any | None = None, allowed_subag
     if not host_bash_allowed:
         names = [name for name in names if name != "bash"]
     return names
+
+
+def worker_backend(name: str, extensions: Any):
+    for _, (backend_name, provider) in getattr(extensions, "worker_backends", ()):
+        if backend_name == name:
+            return provider
+    raise ValueError(f"Worker backend '{name}' is not installed")
+
+
+def validate_worker_catalog(*, app_config: Any, extensions: Any, include_managed: bool = True) -> None:
+    """Read-only preflight against this caller's explicit deployment snapshot."""
+    config = _resolve_subagents_app_config(app_config)
+    workers = getattr(config, "workers", {})
+    if not workers:
+        return
+    reserved = set(BUILTIN_SUBAGENTS) | set(config.custom_agents)
+    if include_managed:
+        reserved.update(definition.name for definition in _managed_definitions(app_config=app_config))
+    for name in workers:
+        if name in reserved:
+            raise ValueError(f"Worker alias conflicts with native subagent: {name}")
+        resolve_worker_plan(name, app_config=app_config, extensions=extensions)
+
+
+def resolve_worker_plan(name: str, *, app_config: Any, extensions: Any) -> WorkerPlan | None:
+    worker = getattr(_resolve_subagents_app_config(app_config), "workers", {}).get(name)
+    if worker is None:
+        return None
+    provider = worker_backend(worker.backend, extensions)
+    bound = provider.bind(name, worker.config, app_config)
+    timeout = worker.timeout_seconds or bound.get("timeout_seconds")
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 1:
+        raise ValueError(f"Worker '{name}' requires a positive timeout_seconds")
+    from deerflow.subagents.worker_backends import freeze_config
+
+    return WorkerPlan(name, worker.backend, worker.description, timeout, freeze_config(bound))
+
+
+def get_delegation_targets(*, app_config: Any | None = None, allowed_subagents: list[str] | None = None) -> list:
+    """One directory for prompts and dispatch; native callers keep their types."""
+    native = [get_subagent_config(name, app_config=app_config) for name in get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)]
+    workers = getattr(_resolve_subagents_app_config(app_config), "workers", {})
+    return [target for target in native if target is not None] + [
+        WorkerPlan(name, worker.backend, worker.description, worker.timeout_seconds or getattr(getattr(app_config, "acp_agents", {}).get(worker.config.get("agent")), "timeout_seconds", 0), MappingProxyType({}))
+        for name, worker in workers.items()
+        if allowed_subagents is None or name in allowed_subagents
+    ]

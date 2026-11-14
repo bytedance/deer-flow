@@ -19,6 +19,7 @@ import {
   useSubtaskContext,
   useUpdateSubtask,
 } from "@/core/tasks/context";
+import { subtaskKey } from "@/core/tasks/identity";
 import {
   collectRenderedSubtasks,
   findSubtaskResultMessage,
@@ -41,6 +42,7 @@ afterEach(() => {
 });
 
 function setup(history = false) {
+  const key = subtaskKey("task-1", "message-1");
   let completeArguments: () => void;
   let publish: ReturnType<typeof useUpdateSubtask>;
   let readTask: () => Subtask;
@@ -82,9 +84,9 @@ function setup(history = false) {
     }, [rendered, update]);
     useEffect(() => {
       publish = update;
-      readTask = () => tasksRef.current["task-1"]!;
+      readTask = () => tasksRef.current[key]!;
       completeArguments = () => {
-        update({ id: "task-1", modelName: "test-model" });
+        update({ id: key, modelName: "test-model" });
         setArgs({
           description: "Research the topic",
           prompt: "Find and compare reliable sources",
@@ -93,11 +95,11 @@ function setup(history = false) {
     });
     return (
       <SubtaskCard
-        taskId="task-1"
+        taskId={key}
         threadId={history ? "thread-1" : undefined}
         runId={history ? "run-1" : undefined}
         isLoading
-        fallbackTask={rendered.tasks.get("task-1")!}
+        fallbackTask={rendered.tasks.get(key)!}
       />
     );
   }
@@ -122,12 +124,51 @@ function setup(history = false) {
   return {
     ...view,
     complete: () => completeArguments!(),
-    publish: (task: Partial<Subtask> & { id: string }) => publish!(task),
+    publish: (task: Partial<Subtask> & { id: string }) =>
+      publish!({ ...task, id: key }),
     read: () => readTask!(),
   };
 }
 
 describe("SubtaskCard message synchronization", () => {
+  it("labels external worker limits and self-reported usage", async () => {
+    const view = setup();
+    await act(async () => {
+      view.publish({
+        id: "task-1",
+        status: "completed",
+        executor: "acp",
+        workerName: "external-coder",
+        externalUsage: { total_tokens: 42 },
+        stopReason: "backend_capped",
+        result: "Partial work",
+      });
+      view.complete();
+    });
+    expect(view.container.textContent).toContain("ACP · external-coder");
+    expect(view.container.textContent).toContain(enUS.subtasks.externalUsage);
+    expect(view.container.textContent).toContain(enUS.subtasks.externalLimit);
+    expect(view.container.textContent).toContain("42");
+  });
+
+  it("keeps missing external usage unavailable", async () => {
+    const view = setup();
+    await act(async () => {
+      view.publish({
+        id: "task-1",
+        status: "completed",
+        executor: "acp",
+        workerName: "external-coder",
+        result: "Done",
+      });
+      view.complete();
+    });
+    expect(view.container.textContent).toContain(
+      enUS.tokenUsage.unavailableShort,
+    );
+    expect(view.container.textContent).not.toContain("0 Tokens");
+  });
+
   it.each([false, true])(
     "renders forwarded evidence on completion/replay (replay=%s)",
     async (replay) => {

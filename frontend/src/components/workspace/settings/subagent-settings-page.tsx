@@ -93,12 +93,12 @@ function draftFrom(subagent: Subagent): Draft {
     displayName: subagent.display_name ?? "",
     description: subagent.description,
     systemPrompt: subagent.system_prompt ?? "",
-    model: subagent.model,
+    model: subagent.model ?? "inherit",
     toolsMode: tools.mode,
     tools: tools.text,
     skillsMode: skills.mode,
     skills: skills.text,
-    maxTurns: String(subagent.max_turns),
+    maxTurns: String(subagent.max_turns ?? 50),
     timeoutSeconds: String(subagent.timeout_seconds),
   };
 }
@@ -177,11 +177,13 @@ export function SubagentSettingsPage() {
                   <ItemTitle className="flex flex-wrap items-center gap-2">
                     <span>{subagent.display_name ?? subagent.name}</span>
                     <Badge variant="outline">
-                      {subagent.source === "builtin"
-                        ? t.settings.subagents.sourceBuiltin
-                        : subagent.source === "config"
-                          ? t.settings.subagents.sourceConfig
-                          : t.settings.subagents.sourceManaged}
+                      {subagent.backend && subagent.backend !== "native"
+                        ? subagent.backend.toUpperCase()
+                        : subagent.source === "builtin"
+                          ? t.settings.subagents.sourceBuiltin
+                          : subagent.source === "config"
+                            ? t.settings.subagents.sourceConfig
+                            : t.settings.subagents.sourceManaged}
                     </Badge>
                     {subagent.conflict && (
                       <Badge variant="destructive">

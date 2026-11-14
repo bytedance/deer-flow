@@ -98,6 +98,11 @@ def is_routine_tool(descriptor: dict, tool: Any) -> bool:
     """Only concrete host implementations qualify; remote read-only hints do not."""
     if descriptor["source"].get("mcp_server") or descriptor["source"].get("namespace"):
         return False
+    if getattr(tool, "name", None) == "task":
+        from deerflow.tools.builtins.task_tool import is_bound_task_tool
+
+        if is_bound_task_tool(tool):
+            return True
     implementation = descriptor["implementation"]
     trusted = {
         "deerflow.sandbox.tools:ls_tool",

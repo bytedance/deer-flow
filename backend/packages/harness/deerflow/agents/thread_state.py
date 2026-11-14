@@ -195,6 +195,13 @@ _DELEGATION_LEDGER_MAX_ENTRIES = 50
 
 
 class DelegationEntry(TypedDict):
+    execution_id: NotRequired[str]
+    executor: NotRequired[str]
+    worker_name: NotRequired[str]
+    error_code: NotRequired[str]
+    backend_stop_reason: NotRequired[str]
+    external_usage: NotRequired[dict]
+    workspace_ref: NotRequired[str]
     id: str
     run_id: NotRequired[str]
     description: str

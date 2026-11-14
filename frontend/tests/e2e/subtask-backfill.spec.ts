@@ -109,6 +109,17 @@ test("late subtask history preserves the full live step at the same index", asyn
   try {
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
     await expect.poll(stream.joined).toBe(true);
+    stream.send("custom", {
+      type: "task_started",
+      task_id: TASK_ID,
+      dispatch_id: "ai-backfill",
+      execution_id: "backfill-execution",
+      executor: "native",
+      model_name: "backfill-model",
+    });
+    await expect(
+      page.getByText("backfill-model", { exact: true }),
+    ).toBeVisible();
     await page.getByRole("button", { name: new RegExp(TASK_PROMPT) }).click();
     await expect.poll(() => historyRequest !== undefined).toBe(true);
     const query = new URL(historyRequest!.request().url()).searchParams;
@@ -118,6 +129,9 @@ test("late subtask history preserves the full live step at the same index", asyn
     stream.send("custom", {
       type: "task_running",
       task_id: TASK_ID,
+      dispatch_id: "ai-backfill",
+      execution_id: "backfill-execution",
+      executor: "native",
       message_index: 2,
       message: { type: "ai", id: "subtask-live", content: LIVE_TEXT },
     });
@@ -135,6 +149,8 @@ test("late subtask history preserves the full live step at the same index", asyn
         event_type: "subagent.step",
         content: {
           task_id: TASK_ID,
+          execution_id: "backfill-execution",
+          dispatch_id: "ai-backfill",
           message_index: seq,
           kind: "ai",
           text,

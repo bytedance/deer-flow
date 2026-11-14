@@ -6,6 +6,14 @@ import type { SubtaskStep } from "./steps";
 
 export interface Subtask {
   id: string;
+  providerCallId?: string;
+  dispatchId?: string;
+  executionId?: string;
+  executor?: string;
+  workerName?: string;
+  backendStopReason?: string;
+  errorCode?: string;
+  externalUsage?: Record<string, unknown>;
   status: "in_progress" | "completed" | "failed";
   subagent_type: string;
   description: string;

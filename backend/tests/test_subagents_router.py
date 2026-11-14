@@ -22,6 +22,26 @@ def _request(role: str):
     return SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role=role)))
 
 
+async def test_external_workers_are_read_only_and_reserve_managed_names():
+    from deerflow.config.acp_config import ACPAgentConfig
+
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            acp_agents={"coder": ACPAgentConfig(command="secret-launcher", env={"KEY": "secret"}, description="Coder", timeout_seconds=73)},
+            subagents=SubagentsAppConfig(workers={"external": {"backend": "acp", "description": "External worker", "config": {"agent": "coder"}}}),
+        )
+    )
+    catalog = await router.list_subagents(_request("user"))
+    worker = next(item for item in catalog.subagents if item.name == "external")
+    assert worker.backend == "acp" and worker.source == "config" and not worker.editable
+    assert worker.model is None and worker.max_turns is None and worker.timeout_seconds == 73
+    assert "secret" not in worker.model_dump_json()
+    with pytest.raises(HTTPException) as error:
+        await router.create_managed_subagent(_request("admin"), router.ManagedSubagentCreateRequest(name="external", description="Duplicate", system_prompt="Duplicate"))
+    assert error.value.status_code == 409
+
+
 @pytest.fixture(autouse=True)
 def _environment(tmp_path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))

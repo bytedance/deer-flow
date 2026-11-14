@@ -1,4 +1,4 @@
-"""Startup-only process capacity for native subagent execution."""
+"""Startup-only process capacity for delegated worker execution."""
 
 from typing import Literal
 
@@ -12,13 +12,13 @@ class SubagentRuntimeConfig(BaseModel):
         default=3,
         ge=1,
         le=64,
-        description="Maximum native subagents that may execute concurrently in one Gateway process.",
+        description="Maximum delegated workers that may execute concurrently in one Gateway process.",
     )
     max_queued: int = Field(
         default=64,
         ge=0,
         le=10_000,
-        description="Maximum native subagents waiting for a process execution slot.",
+        description="Maximum delegated workers waiting for a process execution slot.",
     )
     admission_policy: Literal["queue", "reject"] = Field(
         default="queue",
@@ -28,5 +28,5 @@ class SubagentRuntimeConfig(BaseModel):
         default=300,
         ge=1,
         le=86_400,
-        description="Maximum wait for a queued native subagent before it fails admission.",
+        description="Maximum wait for a queued delegated worker before it fails admission.",
     )

@@ -2,7 +2,7 @@
 
 import logging
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from deerflow.config._boolean_guards import reject_boolean
 from deerflow.config.prompt_overlay import PromptOverlay
@@ -179,6 +179,21 @@ class CustomSubagentConfig(BaseModel):
         return reject_boolean(value, info, kind="an integer")
 
 
+class WorkerConfig(BaseModel):
+    """Operator-owned external worker alias. Launch details belong to the backend."""
+
+    model_config = {"extra": "forbid"}
+    backend: str = Field(min_length=1, pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    description: str = Field(min_length=1)
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    config: dict = Field(default_factory=dict)
+
+    @field_validator("timeout_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_timeout(cls, value: object, info: ValidationInfo) -> object:
+        return reject_boolean(value, info, kind="an integer")
+
+
 class SubagentsAppConfig(BaseModel):
     """Configuration for the subagent system."""
 
@@ -216,6 +231,19 @@ class SubagentsAppConfig(BaseModel):
         default_factory=dict,
         description="User-defined subagent types keyed by agent name",
     )
+
+    workers: dict[str, WorkerConfig] = Field(default_factory=dict, description="External delegated workers keyed by alias")
+
+    @model_validator(mode="after")
+    def _validate_workers(self):
+        for name in self.workers:
+            if not name or len(name) > 64 or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in name):
+                raise ValueError(f"Invalid worker alias: {name!r}")
+            if name in self.custom_agents:
+                raise ValueError(f"Worker alias conflicts with native subagent: {name}")
+            if name in self.agents:
+                raise ValueError(f"Use subagents.workers.{name} for worker overrides; native overrides are unsupported")
+        return self
 
     # True when ``token_budget`` was NOT explicitly provided by the user, i.e.
     # the field fell back to its default_factory. ``get_token_budget_for`` uses

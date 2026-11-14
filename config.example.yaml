@@ -2036,6 +2036,16 @@ subagent_runtime:
   queue_timeout_seconds: 300
 
 # subagents:
+#   # External workers use the same task capacity/deadline/cancellation as native.
+#   # Install examples/deerflow-extension-acp-workers and enable its plugin first.
+#   workers:
+#     external-coder:
+#       backend: acp
+#       description: Delegate self-contained coding work to an external agent
+#       # timeout_seconds: 1800  # optional total budget, including queue/startup
+#       config:
+#         agent: codex          # references acp_agents.codex; no duplicate command
+#
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
 #   timeout_seconds: 1800

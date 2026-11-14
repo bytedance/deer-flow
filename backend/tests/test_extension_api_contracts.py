@@ -342,7 +342,7 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.2.11"
+    assert API_VERSION == "0.2.12"
     assert API_VERSION == version("deerflow-extension-api")
 
 
@@ -357,3 +357,10 @@ def test_extension_service_contract_is_public_and_defaults_to_noop():
     assert deps.run_evidence_reader is None
     assert asyncio.run(ExtensionService.start(_Bare(), deps)) is None
     assert asyncio.run(ExtensionService.stop(_Bare())) is None
+
+
+def test_unsupported_worker_backend_registration_returns_false():
+    class Bare:
+        pass
+
+    assert ExtensionRegistry.worker_backend(Bare(), "acp", object()) is False

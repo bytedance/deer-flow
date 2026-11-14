@@ -33,6 +33,7 @@ import {
 import type { Subtask } from "@/core/tasks";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
+import { formatExternalUsage } from "@/core/tasks/presentation";
 import {
   formatSubtaskTokenUsage,
   resolveSubtaskModelLabel,
@@ -70,10 +71,10 @@ export function SubtaskCard({
     () =>
       resultMessage?.type === "tool" &&
       resultMessage.name === "task" &&
-      resultMessage.tool_call_id === taskId
+      resultMessage.tool_call_id === (fallbackTask?.providerCallId ?? taskId)
         ? readKnowledgeSources([resultMessage])
         : [],
-    [resultMessage, taskId],
+    [resultMessage, taskId, fallbackTask?.providerCallId],
   );
   const reportComponents = useMemo(
     () => ({
@@ -85,13 +86,18 @@ export function SubtaskCard({
   const task = resolveRenderedSubtask(useSubtask(taskId), fallbackTask)!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
-  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
+  const external = !!task.executor && task.executor !== "native";
+  const modelLabel = external
+    ? `${task.executor?.toUpperCase()} · ${task.workerName ?? task.subagent_type}`
+    : resolveSubtaskModelLabel(task.modelName, models);
   const tokenLabel = tokenUsageEnabled
-    ? formatSubtaskTokenUsage(task.usage)
+    ? external
+      ? formatExternalUsage(task.externalUsage)
+      : formatSubtaskTokenUsage(task.usage)
     : undefined;
   const runtimeUsageLabel = tokenUsageEnabled
     ? tokenLabel
-      ? `${tokenLabel} ${t.tokenUsage.label}`
+      ? `${tokenLabel} ${external ? t.subtasks.externalUsage : t.tokenUsage.label}`
       : task.status === "in_progress"
         ? t.tokenUsage.collecting
         : t.tokenUsage.unavailableShort
@@ -106,6 +112,14 @@ export function SubtaskCard({
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
   const stepsCount = task.steps?.length ?? 0;
   const backfilledRef = useRef(false);
+  const backfillGenerationRef = useRef(0);
+  useEffect(() => {
+    backfilledRef.current = false;
+    const generation = ++backfillGenerationRef.current;
+    return () => {
+      backfillGenerationRef.current = generation + 1;
+    };
+  }, [taskId, task.executionId]);
   useEffect(() => {
     if (collapsed || backfilledRef.current || stepsCount > 0) {
       return;
@@ -114,17 +128,39 @@ export function SubtaskCard({
       return;
     }
     backfilledRef.current = true;
-    fetchSubtaskSteps(threadId, runId, taskId)
+    const generation = backfillGenerationRef.current;
+    const backfill = task.executionId
+      ? fetchSubtaskSteps(
+          threadId,
+          runId,
+          task.providerCallId ?? taskId,
+          undefined,
+          { executionId: task.executionId, dispatchId: task.dispatchId },
+        )
+      : fetchSubtaskSteps(threadId, runId, task.providerCallId ?? taskId);
+    backfill
       .then((steps) => {
+        if (generation !== backfillGenerationRef.current) return;
         if (steps.length > 0) {
           updateSubtask({ id: taskId, steps }, { stepSource: "history" });
         }
       })
       .catch(() => {
         // Allow a retry on the next expand if the fetch failed.
-        backfilledRef.current = false;
+        if (generation === backfillGenerationRef.current)
+          backfilledRef.current = false;
       });
-  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  }, [
+    collapsed,
+    stepsCount,
+    threadId,
+    runId,
+    taskId,
+    task.providerCallId,
+    task.executionId,
+    task.dispatchId,
+    updateSubtask,
+  ]);
   const icon = useMemo(() => {
     if (task.status === "completed") {
       return <CheckCircleIcon className="size-3" />;
@@ -193,6 +229,9 @@ export function SubtaskCard({
                       <span className="max-w-32 truncate" title={modelLabel}>
                         {modelLabel}
                       </span>
+                    )}
+                    {task.stopReason === "backend_capped" && (
+                      <span>{t.subtasks.externalLimit}</span>
                     )}
                     {runtimeUsageLabel && (
                       <span

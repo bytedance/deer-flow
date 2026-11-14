@@ -29,6 +29,13 @@ export function computeNextSubtask(
   { stepSource = "live" }: SubtaskUpdateOptions = {},
 ): { next: Subtask; becameTerminal: boolean; changed: boolean } {
   const previousStatus = previous?.status;
+  if (
+    previous?.executionId &&
+    task.executionId &&
+    previous.executionId !== task.executionId
+  ) {
+    return { next: previous, becameTerminal: false, changed: false };
+  }
 
   // MessageList writes the pending task tool-call state before parsing the
   // matching ToolMessage in the same render. Keep terminal results stable
@@ -80,6 +87,13 @@ function subtaskChanged(prev: Subtask | undefined, next: Subtask): boolean {
     return true;
   }
   return (
+    prev.executionId !== next.executionId ||
+    prev.dispatchId !== next.dispatchId ||
+    prev.executor !== next.executor ||
+    prev.workerName !== next.workerName ||
+    prev.backendStopReason !== next.backendStopReason ||
+    prev.errorCode !== next.errorCode ||
+    JSON.stringify(prev.externalUsage) !== JSON.stringify(next.externalUsage) ||
     prev.status !== next.status ||
     prev.modelName !== next.modelName ||
     prev.result !== next.result ||
@@ -131,7 +145,12 @@ export function subtaskNotification(
   }
   if (
     transition.changed &&
-    (task.latestMessage || task.steps || task.modelName || task.usage)
+    (task.latestMessage ||
+      task.steps ||
+      task.modelName ||
+      task.usage ||
+      task.executionId ||
+      task.externalUsage)
   ) {
     return "eager";
   }

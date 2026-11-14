@@ -17,6 +17,7 @@ _MOCKED_MODULE_NAMES = (
     "deerflow.agents",
     "deerflow.agents.thread_state",
     "deerflow.agents.middlewares",
+    "deerflow.agents.middlewares.audit_context",
     "deerflow.agents.middlewares.thread_data_middleware",
     "deerflow.sandbox",
     "deerflow.sandbox.middleware",

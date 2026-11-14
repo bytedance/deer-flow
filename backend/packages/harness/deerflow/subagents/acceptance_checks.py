@@ -2292,3 +2292,17 @@ def render_acceptance_segment(verdict: AcceptanceVerdict) -> str:
     if not parts:
         return ""
     return f"acceptance: {', '.join(parts)} — {_LIMITATION}"
+
+
+def unverified_external_criteria(acceptance_criteria: list[str] | None) -> AcceptanceVerdict | None:
+    """External self-reports never authorize reads of the parent's workspace."""
+    criteria = normalize_acceptance_criteria(acceptance_criteria)
+    if not criteria:
+        return None
+    return AcceptanceVerdict(
+        source=CHECK_SOURCE,
+        requirement=CHECK_REQUIREMENT,
+        leaves=[AcceptanceLeaf(criterion=criterion, family="other", checked=False, holds=False, detail="External worker evidence is not verified by the host.") for criterion in criteria],
+        unchecked=list(criteria),
+        all_hold=False,
+    )

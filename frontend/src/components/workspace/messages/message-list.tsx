@@ -99,6 +99,7 @@ import {
 } from "@/core/skills/usage";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { subtaskKey } from "@/core/tasks/identity";
 import {
   collectRenderedSubtasks,
   findSubtaskResultMessage,
@@ -1633,7 +1634,9 @@ export function MessageList({
                   }
                   for (const toolCall of message.tool_calls ?? []) {
                     const task = toolCall.id
-                      ? renderedSubtasks.tasks.get(toolCall.id)
+                      ? renderedSubtasks.tasks.get(
+                          subtaskKey(toolCall.id, message.id),
+                        )
                       : undefined;
                     if (toolCall.name === "task" && task) {
                       tasks.add(task);
@@ -1683,7 +1686,7 @@ export function MessageList({
                   }
                   const taskIds = message.tool_calls?.flatMap((toolCall) =>
                     toolCall.name === "task" && toolCall.id
-                      ? [toolCall.id]
+                      ? [subtaskKey(toolCall.id, message.id)]
                       : [],
                   );
                   for (const taskId of taskIds ?? []) {
@@ -1704,7 +1707,8 @@ export function MessageList({
                           fallbackTask={fallbackTask}
                           resultMessage={findSubtaskResultMessage(
                             group,
-                            taskId,
+                            fallbackTask.providerCallId ?? taskId,
+                            fallbackTask.dispatchId,
                           )}
                         />
                       </MessageArtifactPathsContext.Provider>,

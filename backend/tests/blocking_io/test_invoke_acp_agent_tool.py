@@ -81,3 +81,30 @@ async def test_invoke_acp_agent_setup_does_not_block_event_loop(monkeypatch, tmp
     assert captured["cwd"] == str(expected_cwd)
     assert captured["new_session"]["mcp_servers"] == [{"name": "test-server", "type": "http", "url": "https://example.test/mcp", "headers": []}]
     assert expected_cwd.is_dir()
+
+
+async def test_explicit_acp_transport_resolves_command_off_loop(monkeypatch, tmp_path):
+    from deerflow.acp.transport import invoke_acp
+
+    command = tmp_path / ("agent.cmd" if sys.platform == "win32" else "agent")
+    await asyncio.to_thread(command.write_text, "", encoding="utf-8")
+    if sys.platform != "win32":
+        await asyncio.to_thread(command.chmod, 0o755)
+
+    class Connection:
+        async def initialize(self, **kwargs):
+            pass
+
+        async def new_session(self, **kwargs):
+            return SimpleNamespace(session_id="session")
+
+        async def prompt(self, **kwargs):
+            return SimpleNamespace(stop_reason="end_turn", usage=None)
+
+    @contextlib.asynccontextmanager
+    async def spawn(client, cmd, *args, **kwargs):
+        yield Connection(), SimpleNamespace(stderr=None, wait=asyncio.Event().wait)
+
+    monkeypatch.setattr(acp, "spawn_agent_process", spawn)
+    outcome = await invoke_acp("test", ACPAgentConfig(command=str(command), description="Test"), "work", cwd=str(tmp_path), mcp_servers=[])
+    assert outcome.stop_reason == "end_turn" and outcome.error_code is None

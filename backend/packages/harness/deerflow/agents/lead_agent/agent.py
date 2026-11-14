@@ -147,18 +147,18 @@ def _subagent_release_policy(
     if not enabled:
         return policy
 
-    from deerflow.subagents import get_available_subagent_names, get_subagent_config
+    from deerflow.subagents.registry import get_delegation_targets
 
-    type_allowlist = sorted(set(get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)))
-    runtime_limits: dict[str, object] = {}
-    for name in type_allowlist:
-        subagent_config = get_subagent_config(name, app_config=app_config)
-        if subagent_config is None:
-            continue
-        runtime_limits[name] = {
-            "max_turns": subagent_config.max_turns,
-            "timeout_seconds": subagent_config.timeout_seconds,
-        }
+    targets = get_delegation_targets(app_config=app_config, allowed_subagents=allowed_subagents)
+    type_allowlist = sorted(target.name for target in targets)
+    runtime_limits = {}
+    for target in targets:
+        limits = {"timeout_seconds": target.timeout_seconds}
+        if hasattr(target, "max_turns"):
+            limits["max_turns"] = target.max_turns
+        else:
+            limits["backend"] = target.backend
+        runtime_limits[target.name] = limits
     policy["type_allowlist"] = type_allowlist
     policy["runtime_limits"] = runtime_limits
     return policy
@@ -1255,6 +1255,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_provider=_authz_provider,
         )
         _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=False, model_name=model_name)
+        from deerflow.extensions import get_agent_build_extensions
+        from deerflow.tools.builtins.task_tool import bind_graph_task_tools
+
+        final_tools = bind_graph_task_tools(final_tools, middlewares, app_config=resolved_app_config, extensions=get_agent_build_extensions())
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
             max_concurrent_subagents=max_concurrent_subagents,
@@ -1419,6 +1423,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_provider=_authz_provider,
     )
     _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
+    from deerflow.extensions import get_agent_build_extensions
+    from deerflow.tools.builtins.task_tool import bind_graph_task_tools
+
+    final_tools = bind_graph_task_tools(final_tools, middlewares, app_config=resolved_app_config, extensions=get_agent_build_extensions())
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,

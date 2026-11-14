@@ -31,8 +31,8 @@ def test_available_subagents_description_escapes_breakout(monkeypatch) -> None:
     # the registry module where the lookup resolves.
     monkeypatch.setattr(
         registry_module,
-        "get_subagent_config",
-        lambda name, app_config=None: SimpleNamespace(description=_BREAKOUT),
+        "get_delegation_targets",
+        lambda **kwargs: [SimpleNamespace(name="evil-agent", description=_BREAKOUT)],
     )
 
     result = prompt_module._build_available_subagents_description(["evil-agent"], bash_available=True)

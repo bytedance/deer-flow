@@ -98,6 +98,7 @@ export interface Translations {
       refreshHint: string;
     };
     catalog: Record<
+      | "acpWorkers"
       | "workflows"
       | "reportSections"
       | "agentTeams"
@@ -1680,6 +1681,8 @@ export interface Translations {
 
   // Subtasks
   subtasks: {
+    externalUsage: string;
+    externalLimit: string;
     subtask: string;
     executing: (count: number) => string;
     in_progress: string;

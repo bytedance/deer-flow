@@ -530,6 +530,9 @@ class DeerFlowClient:
             app_config=self._app_config,
             authorization_provider=_authz_provider,
         )
+        from deerflow.tools.builtins.task_tool import bind_graph_task_tools
+
+        final_tools = bind_graph_task_tools(final_tools, middlewares, app_config=self._app_config)
         bound_middlewares = normalize_middleware_state_schemas(
             middlewares,
             self._checkpoint_channel_mode,
@@ -628,6 +631,8 @@ class DeerFlowClient:
             "tool_call_id": msg.tool_call_id,
             "id": msg.id,
         }
+        if additional_kwargs := DeerFlowClient._serialize_additional_kwargs(msg):
+            data["additional_kwargs"] = additional_kwargs
         if (artifact := getattr(msg, "artifact", None)) is not None:
             data["artifact"] = artifact
         return StreamEvent(type="messages-tuple", data=data)

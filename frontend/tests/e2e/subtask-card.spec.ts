@@ -162,6 +162,9 @@ async function startRunningSubtaskStream() {
           data: {
             type: "task_running",
             task_id: "call-running-subtask",
+            dispatch_id: "msg-ai-running-subtask",
+            execution_id: "native-running-execution",
+            executor: "native",
             message: {
               type: "ai",
               id: "msg-ai-running-subtask-step",

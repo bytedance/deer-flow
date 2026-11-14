@@ -34,10 +34,11 @@ class SubagentResponse(BaseModel):
     tools: list[str] | None = None
     disallowed_tools: list[str] | None = None
     skills: list[str] | None = None
-    model: str = "inherit"
+    backend: str = "native"
+    model: str | None = "inherit"
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
-    max_turns: int = 50
+    max_turns: int | None = 50
     timeout_seconds: int = 900
     enabled: bool = True
     source: Literal["builtin", "config", "managed"]
@@ -112,7 +113,7 @@ def _explicit_overrides(name: str, app_config) -> dict[str, Any]:
 def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
     app_config = get_app_config()
     config_names = set(app_config.subagents.custom_agents)
-    reserved_names = set(BUILTIN_SUBAGENTS) | config_names
+    reserved_names = set(BUILTIN_SUBAGENTS) | config_names | set(app_config.subagents.workers)
     items: list[SubagentResponse] = []
 
     for name, definition in BUILTIN_SUBAGENTS.items():
@@ -154,6 +155,14 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
             )
         )
 
+    for name, worker in app_config.subagents.workers.items():
+        referenced = app_config.acp_agents.get(worker.config.get("agent")) if worker.backend == "acp" else None
+        items.append(
+            SubagentResponse(
+                name=name, description=worker.description, backend=worker.backend, source="config", editable=False, model=None, max_turns=None, timeout_seconds=worker.timeout_seconds or getattr(referenced, "timeout_seconds", 900)
+            )
+        )
+
     store = get_managed_subagent_store(app_config)
     for definition in store.list():
         items.append(
@@ -188,7 +197,7 @@ async def create_managed_subagent(request: Request, body: ManagedSubagentCreateR
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     app_config = await asyncio.to_thread(get_app_config)
     _validate_model(definition.model, app_config)
-    if definition.name in BUILTIN_SUBAGENTS or definition.name in app_config.subagents.custom_agents:
+    if definition.name in BUILTIN_SUBAGENTS or definition.name in app_config.subagents.custom_agents or definition.name in app_config.subagents.workers:
         raise HTTPException(status_code=409, detail=f"Subagent name '{definition.name}' is reserved by a built-in or config.yaml definition.")
     store = get_managed_subagent_store(app_config)
     try:

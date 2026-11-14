@@ -2,11 +2,23 @@ import type { Message } from "@langchain/langgraph-sdk";
 
 import { normalizeTokenUsage } from "../messages/usage";
 
+import { externalUsage, readTaskIdentity } from "./identity";
 import type { Subtask } from "./types";
 
 export type SubtaskStatus = Subtask["status"];
 
-export interface SubtaskResultUpdate {
+export interface SubtaskResultUpdate extends Partial<
+  Pick<
+    Subtask,
+    | "executionId"
+    | "dispatchId"
+    | "executor"
+    | "workerName"
+    | "backendStopReason"
+    | "errorCode"
+    | "externalUsage"
+  >
+> {
   status: SubtaskStatus;
   result?: string;
   error?: string;
@@ -55,6 +67,7 @@ const SUBAGENT_STOP_REASON_VALUES = [
   "turn_capped",
   "loop_capped",
   "model_length_capped",
+  "backend_capped",
 ] as const;
 const STRUCTURED_SUBAGENT_KEYS = [
   SUBAGENT_STATUS_KEY,
@@ -127,7 +140,14 @@ export function parseSubtaskResult(
     return { status: "in_progress" };
   }
 
-  const update: SubtaskResultUpdate = { status: structured.status };
+  const update: SubtaskResultUpdate = {
+    status: structured.status,
+    ...readTaskIdentity(additionalKwargs ?? {}, "subagent_"),
+  };
+  const reportedUsage = externalUsage(
+    additionalKwargs?.subagent_external_usage,
+  );
+  if (reportedUsage) update.externalUsage = reportedUsage;
   if (structured.error) {
     update.error = structured.error;
   }

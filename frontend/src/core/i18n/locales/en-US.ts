@@ -123,6 +123,7 @@ export const enUS: Translations = {
         "Refresh the page after your administrator updates an extension.",
     },
     catalog: {
+      acpWorkers: bundledCopy("deerflow-extension-acp-workers", "en-US"),
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
       context: bundledCopy("deerflow-extension-jev-context", "en-US"),
@@ -1980,6 +1981,8 @@ export const enUS: Translations = {
   },
 
   subtasks: {
+    externalUsage: "tokens (external self-report)",
+    externalLimit: "External agent limit",
     subtask: "Subtask",
     executing: (count: number) =>
       `Executing ${count === 1 ? "" : count + " "}subtask${count === 1 ? "" : "s in parallel"}`,

@@ -1,4 +1,4 @@
-"""Shared process-local admission control for native subagent execution."""
+"""Shared process-local admission control for delegated worker execution."""
 
 from __future__ import annotations
 

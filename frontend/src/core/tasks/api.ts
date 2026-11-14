@@ -27,6 +27,7 @@ export async function fetchSubtaskSteps(
   runId: string,
   taskId: string,
   pageSize: number = SUBTASK_STEPS_PAGE_SIZE,
+  identity: { executionId?: string; dispatchId?: string } = {},
 ): Promise<SubtaskStep[]> {
   const base = `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
     threadId,
@@ -75,5 +76,5 @@ export async function fetchSubtaskSteps(
     afterSeq = lastSeq;
   }
 
-  return eventsToSteps(events, taskId);
+  return eventsToSteps(events, taskId, identity);
 }

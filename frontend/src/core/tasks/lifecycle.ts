@@ -1,19 +1,7 @@
 import { normalizeTokenUsage } from "../messages/usage";
 
+import { externalUsage, readTaskIdentity, subtaskKey } from "./identity";
 import type { Subtask } from "./types";
-
-type TaskStartedEvent = {
-  type: "task_started";
-  task_id: string;
-  model_name?: unknown;
-};
-
-type TaskRunningEvent = {
-  type: "task_running";
-  task_id: string;
-  model_name?: unknown;
-  usage?: unknown;
-};
 
 /** Convert an additive task lifecycle event into a task-state update. */
 export function taskEventToSubtaskUpdate(
@@ -28,29 +16,43 @@ export function taskEventToSubtaskUpdate(
     return null;
   }
 
-  if (event.type === "task_started") {
-    const started = event as TaskStartedEvent;
-    const modelName =
-      typeof started.model_name === "string" && started.model_name.trim()
-        ? started.model_name.trim()
-        : undefined;
+  const identity = readTaskIdentity(event);
+  const base = {
+    id: subtaskKey(taskId, identity.dispatchId),
+    ...(identity.dispatchId || identity.executionId
+      ? { providerCallId: taskId }
+      : {}),
+    ...identity,
+  };
+  const modelName = normalizeModelName(event.model_name);
+  const usage = normalizeTokenUsage(event.usage);
+  const facts = {
+    ...base,
+    ...(modelName ? { modelName } : {}),
+    ...(usage ? { usage } : {}),
+    ...(externalUsage(event.external_usage)
+      ? { externalUsage: externalUsage(event.external_usage) }
+      : {}),
+    ...(typeof event.stop_reason === "string"
+      ? { stopReason: event.stop_reason }
+      : {}),
+  };
+  if (event.type === "task_started" || event.type === "task_running")
+    return facts;
+  if (
+    [
+      "task_completed",
+      "task_failed",
+      "task_cancelled",
+      "task_timed_out",
+    ].includes(String(event.type))
+  ) {
     return {
-      id: taskId,
-      ...(modelName ? { modelName } : {}),
+      ...facts,
+      status: event.type === "task_completed" ? "completed" : "failed",
+      ...(typeof event.result === "string" ? { result: event.result } : {}),
+      ...(typeof event.error === "string" ? { error: event.error } : {}),
     };
-  }
-
-  if (event.type === "task_running") {
-    const running = event as TaskRunningEvent;
-    const usage = normalizeTokenUsage(running.usage);
-    const modelName = normalizeModelName(running.model_name);
-    return usage || modelName
-      ? {
-          id: taskId,
-          ...(modelName ? { modelName } : {}),
-          ...(usage ? { usage } : {}),
-        }
-      : null;
   }
 
   return null;

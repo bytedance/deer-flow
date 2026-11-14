@@ -216,6 +216,9 @@ async def batch_task(
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
     available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
+    workers = getattr(getattr(app_config, "subagents", None), "workers", {})
+    if subagent_type in workers:
+        return _result(tool_call_id, content="External workers are not supported by batch_task; use task.", error=True)
     config = get_subagent_config(subagent_type, app_config=app_config)
     if config is None or subagent_type not in available:
         names = ", ".join(available) if available else "none"

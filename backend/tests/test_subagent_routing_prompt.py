@@ -1,13 +1,14 @@
 """Prompt-contract tests for benefit-based subagent routing."""
 
 from deerflow.agents.lead_agent import prompt as prompt_module
+from deerflow.subagents import registry as registry_module
 from deerflow.subagents.builtins.bash_agent import BASH_AGENT_CONFIG
 from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
 from deerflow.tools.builtins.task_tool import task_tool
 
 
 def _build_section(monkeypatch, names: list[str] | None = None, max_concurrent: int = 3) -> str:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: names or ["general-purpose"])
+    monkeypatch.setattr(registry_module, "get_available_subagent_names", lambda **kwargs: names or ["general-purpose"])
     return prompt_module._build_subagent_section(max_concurrent)
 
 
@@ -27,7 +28,7 @@ def test_routing_requires_clear_net_benefit(monkeypatch) -> None:
 
 
 def test_durable_batch_guidance_allows_only_explicit_prerequisites(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(registry_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
     section = prompt_module._build_subagent_section(3, batch_enabled=True)
     assert "depends_on" in section
     assert "must not depend on another item's output" not in section

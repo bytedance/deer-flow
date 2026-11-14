@@ -12,6 +12,8 @@ import pytest
 
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.agents.middlewares.tool_receipt import format_citation, receipt_id
+from deerflow.config.subagents_config import SubagentsAppConfig
+from deerflow.subagents import registry as registry_module
 from deerflow.subagents.report_contract import (
     MAX_ACCEPTANCE_CRITERIA,
     MAX_CRITERION_CHARS,
@@ -182,7 +184,7 @@ class TestTaskToolContract:
 
 class TestLeadDelegationWorkflow:
     def _build_section(self, monkeypatch: pytest.MonkeyPatch, max_concurrent: int) -> str:
-        monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+        monkeypatch.setattr(registry_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
         return prompt_module._build_subagent_section(max_concurrent)
 
     def test_single_subagent_workflow_verifies_citations_and_handles(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,8 +204,8 @@ class TestLeadDelegationWorkflow:
         assert "Resolve contradictions against primary evidence" in section
 
     def _build_section_receipts_disabled(self, monkeypatch: pytest.MonkeyPatch, max_concurrent: int) -> str:
-        monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
-        app_config = SimpleNamespace(verification=SimpleNamespace(receipts_enabled=False))
+        monkeypatch.setattr(registry_module, "get_available_subagent_names", lambda **kwargs: ["general-purpose"])
+        app_config = SimpleNamespace(subagents=SubagentsAppConfig(), verification=SimpleNamespace(receipts_enabled=False))
         return prompt_module._build_subagent_section(max_concurrent, app_config=app_config)
 
     def test_single_subagent_workflow_drops_citation_expectation_when_receipts_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:

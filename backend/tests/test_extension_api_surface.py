@@ -77,5 +77,6 @@ def test_registry_protocol_declares_every_registration_method():
         "service",
         "routers",
         "plugin",
+        "worker_backend",
     ):
         assert hasattr(ExtensionRegistry, method), f"ExtensionRegistry must declare {method}()"

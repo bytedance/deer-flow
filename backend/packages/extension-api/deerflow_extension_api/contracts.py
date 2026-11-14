@@ -200,6 +200,14 @@ class ExtensionRegistry(Protocol):
         """Return True when accepted; False means this host lacks plugin UI support."""
         return False
 
+    def worker_backend(self, name: str, provider: Any) -> bool:
+        """Register a delegated worker backend; False means unsupported by host.
+
+        The harness validates the provider contract. Public contracts stay
+        independent of the harness and its protocol dependencies.
+        """
+        return False
+
     def knowledge_provider(self, name: str, provider: Any) -> bool:
         """Register a read-only ``deerflow.knowledge.RetrievalProvider``.
 

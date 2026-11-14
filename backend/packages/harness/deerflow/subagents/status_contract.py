@@ -90,18 +90,20 @@ SUBAGENT_STATUS_VALUES: tuple[SubagentStatusValue, ...] = (
 
 #: Why a guardrail cap ended a run early. Carried on the additive
 #: ``subagent_stop_reason`` field, never as a status enum value.
-SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped", "model_length_capped"]
+SubagentStopReasonValue = Literal["token_capped", "turn_capped", "loop_capped", "model_length_capped", "backend_capped"]
 
 SUBAGENT_STOP_REASON_VALUES: tuple[SubagentStopReasonValue, ...] = (
     "token_capped",
     "turn_capped",
     "loop_capped",
     "model_length_capped",
+    "backend_capped",
 )
 
 #: Human-readable label folded into the model-visible result text when a cap
 #: fired, e.g. ``Task Succeeded (capped: token budget). Result: ...``.
 _STOP_REASON_LABELS: dict[SubagentStopReasonValue, str] = {
+    "backend_capped": "external agent limit",
     "token_capped": "token budget",
     "turn_capped": "turn budget",
     "loop_capped": "repeated tool-call loop",
@@ -137,6 +139,14 @@ class StructuredSubagentResult(TypedDict):
     tool_receipts: NotRequired[list[dict[str, Any]]]
     receipt_verdict: NotRequired[ReceiptVerdict]
     acceptance_verdict: NotRequired[AcceptanceVerdict]
+    execution_id: NotRequired[str]
+    dispatch_id: NotRequired[str]
+    executor: NotRequired[str]
+    worker_name: NotRequired[str]
+    error_code: NotRequired[str]
+    backend_stop_reason: NotRequired[str]
+    workspace_ref: NotRequired[str]
+    external_usage: NotRequired[dict[str, Any]]
 
 
 def _bound_metadata_text(text: str, cap: int = SUBAGENT_METADATA_TEXT_MAX_CHARS) -> str:
@@ -164,6 +174,14 @@ def make_subagent_additional_kwargs(
     tool_receipts: list[dict[str, Any]] | None = None,
     receipt_verdict: Mapping[str, object] | None = None,
     acceptance_verdict: Mapping[str, object] | None = None,
+    execution_id: str | None = None,
+    dispatch_id: str | None = None,
+    executor: str | None = None,
+    worker_name: str | None = None,
+    error_code: str | None = None,
+    backend_stop_reason: str | None = None,
+    workspace_ref: str | None = None,
+    external_usage: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
 
@@ -207,7 +225,36 @@ def make_subagent_additional_kwargs(
     validated_acceptance = validate_acceptance_verdict(acceptance_verdict)
     if validated_acceptance is not None:
         payload[SUBAGENT_ACCEPTANCE_VERDICT_KEY] = validated_acceptance
+    for key, value in {
+        "execution_id": execution_id,
+        "dispatch_id": dispatch_id,
+        "executor": executor,
+        "worker_name": worker_name,
+        "error_code": error_code,
+        "backend_stop_reason": backend_stop_reason,
+        "workspace_ref": workspace_ref,
+    }.items():
+        if isinstance(value, str) and value.strip():
+            payload["subagent_" + key] = value
+    normalized_external = normalize_external_usage(external_usage)
+    if normalized_external is not None:
+        payload["subagent_external_usage"] = normalized_external
     return payload
+
+
+def normalize_external_usage(value: Any) -> dict[str, Any] | None:
+    """Validate optional ACP self-reported usage without inventing native tokens."""
+    if not isinstance(value, Mapping) or not value:
+        return None
+    import json
+
+    try:
+        encoded = json.dumps(dict(value), allow_nan=False)
+        if len(encoded) > 8192:
+            return None
+        return json.loads(encoded)
+    except (TypeError, ValueError, RecursionError):
+        return None
 
 
 def normalize_token_usage(value: Any) -> dict[str, int] | None:
@@ -333,4 +380,11 @@ def read_subagent_result_metadata(
     validated_acceptance = validate_acceptance_verdict(additional_kwargs.get(SUBAGENT_ACCEPTANCE_VERDICT_KEY))
     if validated_acceptance is not None:
         payload["acceptance_verdict"] = validated_acceptance
+    for key in ("execution_id", "dispatch_id", "executor", "worker_name", "error_code", "backend_stop_reason", "workspace_ref"):
+        value = additional_kwargs.get("subagent_" + key)
+        if isinstance(value, str) and value.strip():
+            payload[key] = value
+    external = normalize_external_usage(additional_kwargs.get("subagent_external_usage"))
+    if external is not None:
+        payload["external_usage"] = external
     return payload

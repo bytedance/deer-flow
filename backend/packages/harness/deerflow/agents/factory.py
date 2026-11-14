@@ -186,6 +186,18 @@ def create_deerflow_agent(
         checkpoint_snapshot_frequency,
     )
 
+    if subagent_runtime is not None:
+        from deerflow.tools.builtins.task_tool import bind_graph_task_tools
+
+        effective_tools = bind_graph_task_tools(
+            effective_tools,
+            effective_middleware,
+            app_config=subagent_runtime.app_config,
+            execution_capacity=subagent_runtime.execution_capacity,
+            extensions=subagent_runtime.extensions,
+            workspace_resolver=subagent_runtime.workspace_resolver,
+        )
+
     return create_agent(
         model=model,
         tools=effective_tools or None,

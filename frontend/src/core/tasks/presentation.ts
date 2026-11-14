@@ -34,3 +34,13 @@ export function formatSubtaskTokenUsage(
 ): string | undefined {
   return usage ? formatTokenCount(usage.totalTokens) : undefined;
 }
+
+/** Preserve the external source label and absent-usage state. */
+export function formatExternalUsage(
+  usage: Record<string, unknown> | undefined,
+): string | undefined {
+  const tokens = usage?.total_tokens ?? usage?.totalTokens;
+  if (typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0)
+    return formatTokenCount(tokens);
+  return undefined;
+}

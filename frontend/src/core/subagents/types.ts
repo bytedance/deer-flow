@@ -8,10 +8,11 @@ export interface Subagent {
   tools: string[] | null;
   disallowed_tools: string[] | null;
   skills: string[] | null;
-  model: string;
+  backend?: string;
+  model: string | null;
   thinking_enabled?: boolean | null;
   reasoning_effort?: string | null;
-  max_turns: number;
+  max_turns: number | null;
   timeout_seconds: number;
   enabled: boolean;
   source: SubagentSource;

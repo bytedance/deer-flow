@@ -184,7 +184,7 @@ def test_bundled_documentation_snapshot_is_current():
     root = Path(__file__).resolve().parents[2]
     script = runpy.run_path(str(root / "scripts/sync_extension_documentation.py"))
     assert script["DESTINATION"].read_text(encoding="utf-8") == script["render"]()
-    assert len(json.loads(script["render"]())) == 15
+    assert len(json.loads(script["render"]())) == 16
 
 
 @pytest.mark.parametrize("collision", [False, True])

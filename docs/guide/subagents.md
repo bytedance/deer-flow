@@ -287,3 +287,68 @@ Discovery exemptions apply only to the actual framework-generated helper
 instances; an ordinary tool with the same name still follows the name policy.
 
 Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.
+
+
+## External ACP workers
+
+Install the [ACP worker extension](../../examples/deerflow-extension-acp-workers/README.md)
+with the extension manager, enable its entry under `plugins:`, and restart the
+Gateway. The deployment must separately install and authenticate the configured
+ACP program. Configure its launch command once under `acp_agents`, then add an
+alias under `subagents.workers`:
+
+```yaml
+subagents:
+  workers:
+    external-coder:
+      backend: acp
+      description: Self-contained external coding tasks
+      config:
+        agent: codex
+```
+
+The lead agent can call `task(subagent_type="external-coder", prompt="...")`
+alongside native workers. The caller's subagent allowlist applies to both.
+External workers appear read-only in Subagent settings. Worker aliases must not
+collide with built-in, YAML or managed native names. Native overrides under
+`subagents.agents`, model overrides and context snapshots are unsupported for
+ACP workers. `batch_task` remains native-only.
+
+The worker's default time budget comes from the referenced ACP agent;
+`subagents.workers.<alias>.timeout_seconds` can override it. The total deadline
+starts at dispatch and includes queueing, workspace preparation, process startup
+and protocol exchanges. Timeouts publish `timed_out` immediately, while the
+execution retains its slot until process and extension cleanup finish. Repeated
+cancel requests and late output cannot replace the first terminal result.
+Delivered steer cancels an ACP execution, including one still waiting for
+approval or execution binding. Continue does not resume that execution. Native
+pause and resume behavior is unchanged.
+
+Each execution uses its own directory below the thread's ACP workspace. Parent
+sandbox files and enabled MCP servers are not automatically forwarded. Give the
+worker a self-contained prompt. The external program runs as trusted operator
+code with the Gateway's OS permissions; the workspace is an output separation
+boundary, not an OS sandbox.
+
+Before dispatch, the graph's authorization, Guardrail and approval instances
+check the actual `invoke_acp_agent` operation and resolved agent/prompt.
+Allowing `task` alone does not authorize ACP. Approval can edit the prompt only;
+edited arguments are checked again. Approval binds the captured launch config.
+SDK graphs must supply every policy layer explicitly required by their config;
+otherwise ACP returns `delegation_policy_unavailable` without starting a process.
+No additional service or batch worker is needed for ordinary ACP tasks.
+
+ACP refusal is a failure. An external token/turn limit produces
+`backend_capped`: completed when usable text survives, failed otherwise. Normal
+empty output is completed with a neutral no-text notice. Text beginning with
+`Error:` remains text; protocol outcomes decide status. Optional usage is labeled
+as an external self-report and is kept separate from native model accounting;
+missing usage stays unavailable. ACP reports, receipt-like strings and claimed
+test results are not host evidence. Completed tasks with valid acceptance
+criteria return each criterion as UNVERIFIED without reading parent files.
+
+Execution and dispatch identities survive live events, final messages, SDK
+serialization and history reloads. The legacy `invoke_acp_agent` tool remains
+available with its original thread directory, MCP forwarding, protocol timeout
+and string return format; calling it inside a native task takes no second task
+slot.

@@ -23,6 +23,19 @@ class ChildInputGate:
         self.paused = threading.Event()
         self._lock = threading.Lock()
         self._instructions: list[str] = []
+        self.steered = threading.Event()
+        self.cancel_on_steer = False
+        self.cancel_callback = None
+
+    def mark_steered(self):
+        self.steered.set()
+        if self.cancel_on_steer and self.cancel_callback is not None:
+            self.cancel_callback()
+
+    def bind_external(self):
+        self.cancel_on_steer = True
+        if self.steered.is_set() and self.cancel_callback is not None:
+            self.cancel_callback()
 
     async def boundary(self):
         if not self.resume.is_set():
@@ -108,6 +121,11 @@ class RunInputControl:
     def bind_execution(self, call_id, execution_id):
         gate, _ = self.children[call_id]
         self.children[call_id] = (gate, execution_id)
+        from deerflow.subagents.execution import request_cancel_background_task
+
+        gate.cancel_callback = lambda: request_cancel_background_task(execution_id)
+        if gate.cancel_on_steer and gate.steered.is_set():
+            gate.cancel_callback()
 
     async def pending(self):
         state = await self.inputs.read()
@@ -126,6 +144,8 @@ class RunInputControl:
             self.abandoned = False
             self.steering_active = True
             self.interrupted_children = set(self.children)
+            for gate, _ in self.children.values():
+                gate.mark_steered()
         else:
             # A steer withdrawn before delivery starts no turn whose end would
             # resume the children that wait_tool paused for it. Only the
@@ -247,7 +267,7 @@ class RunInputControl:
         return accepted
 
     async def stop_children(self, *, all_children=False):
-        from deerflow.subagents.executor import get_background_task_result, request_cancel_background_task
+        from deerflow.subagents.execution import get_background_task_result, request_cancel_background_task
 
         results = []
         for call_id, (gate, execution_id) in list(self.children.items()):
@@ -289,7 +309,7 @@ class RunInputControl:
                     raise task.exception()
 
     async def close(self):
-        from deerflow.subagents.executor import request_cancel_background_task
+        from deerflow.subagents.execution import request_cancel_background_task
 
         for gate, execution_id in self.children.values():
             if execution_id:

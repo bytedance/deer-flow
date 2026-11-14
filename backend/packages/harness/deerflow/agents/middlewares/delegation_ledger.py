@@ -54,6 +54,8 @@ def _escape_context_text(value: object) -> str:
 
 
 def _status_guidance(status: str, stop_reason: str | None = None, acceptance_verdict: AcceptanceVerdict | None = None) -> str:
+    if stop_reason == "backend_capped":
+        return "external agent reached its own limit; retain useful partial output, verify load-bearing claims, and adjust the external agent configuration or task scope before retrying"
     if stop_reason:
         # A guardrail cap ended this run early (#3875 Phase 2): the status is
         # still completed/failed, and ``stop_reason`` carries *why* it stopped
@@ -129,6 +131,9 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         if structured is None:
             continue
         entry["status"] = structured["status"]
+        for field in ("execution_id", "executor", "worker_name", "error_code", "backend_stop_reason", "external_usage", "workspace_ref"):
+            if field in structured:
+                entry[field] = structured[field]
         stop_reason = structured.get("stop_reason")
         if stop_reason:
             entry["stop_reason"] = stop_reason

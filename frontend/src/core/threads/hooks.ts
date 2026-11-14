@@ -2522,7 +2522,8 @@ export function useThreadStream({
         // latestMessage for the collapsed-header tool-call hint, and append the
         // normalized step (assistant turn or tool output) to the timeline.
         updateSubtask({
-          id: e.task_id,
+          id: taskUpdate?.id ?? e.task_id,
+          executionId: taskUpdate?.executionId,
           latestMessage: e.message,
           steps: [messageToStep(e.message, e.message_index ?? 0)],
         });

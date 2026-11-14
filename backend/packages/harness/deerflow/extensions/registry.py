@@ -57,6 +57,7 @@ class LoadedExtensions:
     routers: tuple[tuple[str, Any], ...] = ()
     plugins: tuple[tuple[str, PluginContribution], ...] = ()
     knowledge_providers: tuple[tuple[str, tuple[str, Any]], ...] = ()
+    worker_backends: tuple[tuple[str, tuple[str, Any]], ...] = ()
     documentation: tuple[tuple[str, dict], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
@@ -87,6 +88,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         self._routers: list[_Entry] = []
         self._plugins: list[_Entry] = []
         self._knowledge_providers: list[_Entry] = []
+        self._worker_backends: list[_Entry] = []
         self._current_source: str | None = None
         self._model_access: ModelInvocationScope | None = None
 
@@ -152,6 +154,17 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
+    def worker_backend(self, name: str, provider: Any) -> bool:
+        from deerflow.subagents.worker_backends import validate_backend
+
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", name) or name == "native":
+            raise ValueError("Invalid or reserved worker backend name")
+        validate_backend(provider)
+        if any(existing == name for _, (existing, _) in self._worker_backends):
+            raise ValueError("Duplicate worker backend name")
+        self._worker_backends.append((self._source(), (name, provider)))
+        return True
+
     def knowledge_provider(self, name: str, provider: Any) -> bool:
         from deerflow.knowledge.providers import validate_provider
 
@@ -207,6 +220,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             self._routers,
             self._plugins,
             self._knowledge_providers,
+            self._worker_backends,
         ):
             bucket[:] = [entry for entry in bucket if entry[0] != source]
 
@@ -222,6 +236,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             len(self._routers),
             len(self._plugins),
             len(self._knowledge_providers),
+            len(self._worker_backends),
         )
 
     def rollback_to(self, mark: tuple[int, ...]) -> None:
@@ -242,6 +257,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
                 self._routers,
                 self._plugins,
                 self._knowledge_providers,
+                self._worker_backends,
             ),
             mark,
             strict=True,
@@ -260,6 +276,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
             routers=tuple(self._routers),
             plugins=tuple(self._plugins),
             knowledge_providers=tuple(self._knowledge_providers),
+            worker_backends=tuple(self._worker_backends),
             has_middleware_contributors=bool(self._middlewares),
             has_task_lifecycle=bool(self._task_lifecycle),
             has_system_model_observers=bool(self._system_model_observers),

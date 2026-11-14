@@ -6,6 +6,11 @@ import type { LoadedContribution } from "./registry";
 // Discovery metadata only: catalog entries never enter the runtime module loader.
 export const extensionCatalog = [
   {
+    key: "acpWorkers",
+    package: "deerflow-extension-acp-workers",
+    namespace: null,
+  },
+  {
     key: "agentTeams",
     icon: "users",
     package: "deerflow-extension-agent-teams",

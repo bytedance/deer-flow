@@ -46,6 +46,7 @@ from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddl
 from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
+from deerflow.subagents import execution as execution_module
 from deerflow.subagents.capacity import SubagentCapacityRejected
 from deerflow.trace_context import request_trace_context
 
@@ -3213,7 +3214,7 @@ class TestThreadSafety:
             completed.set()
 
         async def schedule_from_caller() -> None:
-            handles.append(executor_module.run_on_isolated_subagent_loop(deferred_work()))
+            handles.append(execution_module.run_on_isolated_subagent_loop(deferred_work()))
 
         # asyncio.run() creates the caller loop, runs the scheduling, then
         # closes the loop — cancelling anything still pending on it.
@@ -3266,40 +3267,40 @@ class TestThreadSafety:
         started = threading.Event()
         started.set()
 
-        executor_module._isolated_subagent_loop = loop
-        executor_module._isolated_subagent_loop_thread = thread
-        executor_module._isolated_subagent_loop_started = started
-        executor_module._isolated_subagent_loop_shutdown_pending = False
+        execution_module._isolated_subagent_loop = loop
+        execution_module._isolated_subagent_loop_thread = thread
+        execution_module._isolated_subagent_loop_started = started
+        execution_module._isolated_subagent_loop_shutdown_pending = False
 
-        executor_module._shutdown_isolated_subagent_loop()
+        execution_module._shutdown_isolated_subagent_loop()
 
-        assert executor_module._isolated_subagent_loop is loop
-        assert executor_module._isolated_subagent_loop_thread is thread
-        assert executor_module._isolated_subagent_loop_started is started
-        assert executor_module._isolated_subagent_loop_shutdown_pending is True
+        assert execution_module._isolated_subagent_loop is loop
+        assert execution_module._isolated_subagent_loop_thread is thread
+        assert execution_module._isolated_subagent_loop_started is started
+        assert execution_module._isolated_subagent_loop_shutdown_pending is True
         assert loop.closed is False
         assert thread.join_calls == 1
 
         with patch.object(executor_module.asyncio, "new_event_loop") as new_event_loop:
             with pytest.raises(RuntimeError, match="shutdown is still pending"):
-                executor_module._get_isolated_subagent_loop()
+                execution_module._get_isolated_subagent_loop()
             new_event_loop.assert_not_called()
 
         thread.alive = False
         loop.running = False
-        replacement = executor_module._get_isolated_subagent_loop()
+        replacement = execution_module._get_isolated_subagent_loop()
 
         assert loop.closed is True
         assert replacement is not loop
-        assert executor_module._isolated_subagent_loop is replacement
-        assert executor_module._isolated_subagent_loop_thread is not thread
-        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+        assert execution_module._isolated_subagent_loop is replacement
+        assert execution_module._isolated_subagent_loop_thread is not thread
+        assert execution_module._isolated_subagent_loop_shutdown_pending is False
 
-        executor_module._shutdown_isolated_subagent_loop()
-        assert executor_module._isolated_subagent_loop is None
-        assert executor_module._isolated_subagent_loop_thread is None
-        assert executor_module._isolated_subagent_loop_started is None
-        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+        execution_module._shutdown_isolated_subagent_loop()
+        assert execution_module._isolated_subagent_loop is None
+        assert execution_module._isolated_subagent_loop_thread is None
+        assert execution_module._isolated_subagent_loop_started is None
+        assert execution_module._isolated_subagent_loop_shutdown_pending is False
 
     def test_startup_timeout_retains_ownership_until_worker_exits(self, executor_module, caplog):
         """A startup timeout must retain the worker and allow later reaping."""
@@ -3350,23 +3351,23 @@ class TestThreadSafety:
         with (
             caplog.at_level("WARNING"),
             patch.object(executor_module.asyncio, "new_event_loop", return_value=retained),
-            patch.object(executor_module.threading, "Event", return_value=startup_event),
-            patch.object(executor_module.threading, "Thread", return_value=startup_thread),
+            patch.object(execution_module.threading, "Event", return_value=startup_event),
+            patch.object(execution_module.threading, "Thread", return_value=startup_thread),
         ):
             with pytest.raises(RuntimeError, match="Timed out starting isolated subagent event loop"):
-                executor_module._get_isolated_subagent_loop()
+                execution_module._get_isolated_subagent_loop()
 
-        assert executor_module._isolated_subagent_loop is retained
-        assert executor_module._isolated_subagent_loop_thread is startup_thread
-        assert executor_module._isolated_subagent_loop_started is startup_event
-        assert executor_module._isolated_subagent_loop_shutdown_pending is True
+        assert execution_module._isolated_subagent_loop is retained
+        assert execution_module._isolated_subagent_loop_thread is startup_thread
+        assert execution_module._isolated_subagent_loop_started is startup_event
+        assert execution_module._isolated_subagent_loop_shutdown_pending is True
         assert startup_thread.join_calls == 1
         assert retained.closed is False
         assert "Retaining isolated subagent loop ownership after startup timeout" in caplog.text
 
         with patch.object(executor_module.asyncio, "new_event_loop") as new_event_loop:
             with pytest.raises(RuntimeError, match="retained worker is still exiting"):
-                executor_module._get_isolated_subagent_loop()
+                execution_module._get_isolated_subagent_loop()
             new_event_loop.assert_not_called()
 
         # Dispatch-side recovery is only a liveness probe while ownership is
@@ -3375,15 +3376,15 @@ class TestThreadSafety:
 
         startup_thread.alive = False
         retained.running = False
-        replacement = executor_module._get_isolated_subagent_loop()
+        replacement = execution_module._get_isolated_subagent_loop()
 
         assert retained.closed is True
         assert replacement is not retained
-        assert executor_module._isolated_subagent_loop is replacement
-        assert executor_module._isolated_subagent_loop_thread is not startup_thread
-        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+        assert execution_module._isolated_subagent_loop is replacement
+        assert execution_module._isolated_subagent_loop_thread is not startup_thread
+        assert execution_module._isolated_subagent_loop_shutdown_pending is False
 
-        executor_module._shutdown_isolated_subagent_loop()
+        execution_module._shutdown_isolated_subagent_loop()
 
     def test_concurrent_pending_recovery_does_not_stop_replacement(self, executor_module, monkeypatch):
         """A stale recovery getter must not tear down a replacement loop."""
@@ -3461,23 +3462,23 @@ class TestThreadSafety:
         replacement = FakeLoop(running=True)
         started = threading.Event()
 
-        executor_module._isolated_subagent_loop = retained
-        executor_module._isolated_subagent_loop_thread = retained_thread
-        executor_module._isolated_subagent_loop_started = started
-        executor_module._isolated_subagent_loop_shutdown_pending = True
+        execution_module._isolated_subagent_loop = retained
+        execution_module._isolated_subagent_loop_thread = retained_thread
+        execution_module._isolated_subagent_loop_started = started
+        execution_module._isolated_subagent_loop_shutdown_pending = True
 
         gate = GateLock()
         real_thread = threading.Thread
-        monkeypatch.setattr(executor_module, "_isolated_subagent_loop_shutdown_lock", gate)
+        monkeypatch.setattr(execution_module, "_isolated_subagent_loop_shutdown_lock", gate)
         monkeypatch.setattr(executor_module.asyncio, "new_event_loop", MagicMock(return_value=replacement))
-        monkeypatch.setattr(executor_module.threading, "Thread", ReplacementThread)
+        monkeypatch.setattr(execution_module.threading, "Thread", ReplacementThread)
 
         results = []
         errors = []
 
         def recover():
             try:
-                results.append(executor_module._get_isolated_subagent_loop())
+                results.append(execution_module._get_isolated_subagent_loop())
             except BaseException as exc:
                 errors.append(exc)
 
@@ -3498,10 +3499,10 @@ class TestThreadSafety:
         assert retained.closed is True
         assert replacement.closed is False
         assert replacement.is_running()
-        assert executor_module._isolated_subagent_loop is replacement
-        assert executor_module._isolated_subagent_loop_shutdown_pending is False
+        assert execution_module._isolated_subagent_loop is replacement
+        assert execution_module._isolated_subagent_loop_shutdown_pending is False
 
-        executor_module._shutdown_isolated_subagent_loop()
+        execution_module._shutdown_isolated_subagent_loop()
         assert replacement.closed is True
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
@@ -3563,8 +3564,8 @@ class TestThreadSafety:
 
     def test_terminal_status_is_published_after_payload_fields(self, executor_module, monkeypatch):
         """Readers must not observe terminal status before terminal payload is complete."""
-        SubagentResult = executor_module.SubagentResult
-        SubagentStatus = executor_module.SubagentStatus
+        SubagentResult = execution_module.SubagentResult
+        SubagentStatus = execution_module.SubagentStatus
 
         now_entered = threading.Event()
         release_now = threading.Event()
@@ -3580,7 +3581,7 @@ class TestThreadSafety:
                 release_now.wait(timeout=5)
                 return completed_at
 
-        monkeypatch.setattr(executor_module, "datetime", BlockingDateTime)
+        monkeypatch.setattr(execution_module, "datetime", BlockingDateTime)
 
         result = SubagentResult(
             task_id="test-terminal-publication-order",
@@ -3667,11 +3668,11 @@ class TestCleanupBackgroundTask:
         def failing_submit(_context, _coro_factory):
             raise RuntimeError("isolated subagent event loop failed to start")
 
-        with patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=failing_submit):
+        with patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=failing_submit):
             with pytest.raises(RuntimeError, match="isolated subagent event loop"):
                 executor.execute_async("Task")
 
-        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
+        leftovers = [r for r in execution_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
         assert leftovers == []
 
     def test_execute_async_registers_nothing_when_context_copy_fails(self, executor_module, classes, base_config):
@@ -3697,11 +3698,11 @@ class TestCleanupBackgroundTask:
         def failing_context_copy():
             raise RuntimeError("callback manager copy failed")
 
-        with patch.object(executor_module, "_copy_isolated_subagent_context", side_effect=failing_context_copy):
+        with patch.object(execution_module, "_copy_isolated_subagent_context", side_effect=failing_context_copy):
             with pytest.raises(RuntimeError, match="callback manager copy"):
                 executor.execute_async("Task")
 
-        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "context-copy-failure-trace"]
+        leftovers = [r for r in execution_module.list_background_tasks() if r.trace_id == "context-copy-failure-trace"]
         assert leftovers == []
 
     def test_submit_helper_skips_coroutine_creation_when_loop_startup_fails(self, executor_module):
@@ -3727,9 +3728,9 @@ class TestCleanupBackgroundTask:
         def failing_loop():
             raise RuntimeError("Timed out starting isolated subagent event loop")
 
-        with patch.object(executor_module, "_get_isolated_subagent_loop", side_effect=failing_loop):
+        with patch.object(execution_module, "_get_isolated_subagent_loop", side_effect=failing_loop):
             with pytest.raises(RuntimeError, match="Timed out starting"):
-                executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+                execution_module._submit_to_isolated_loop_in_context(execution_module.copy_context(), coro_factory)
 
         assert factory_calls == []
 
@@ -3754,10 +3755,10 @@ class TestCleanupBackgroundTask:
             created.append(coroutine)
             return coroutine
 
-        with patch.object(executor_module, "_get_isolated_subagent_loop", return_value=object()):
+        with patch.object(execution_module, "_get_isolated_subagent_loop", return_value=object()):
             with patch.object(executor_module.asyncio, "run_coroutine_threadsafe", side_effect=RuntimeError("Event loop is closed")):
                 with pytest.raises(RuntimeError, match="Event loop is closed"):
-                    executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+                    execution_module._submit_to_isolated_loop_in_context(execution_module.copy_context(), coro_factory)
 
         assert len(created) == 1
         assert inspect.getcoroutinestate(created[0]) is inspect.CORO_CLOSED
@@ -3776,12 +3777,12 @@ class TestCleanupBackgroundTask:
             result="done",
             completed_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
         # Cleanup should remove it
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
     def test_cleanup_removes_terminal_failed_task(self, executor_module, classes):
         """Test that cleanup removes a FAILED task."""
@@ -3796,11 +3797,11 @@ class TestCleanupBackgroundTask:
             error="error",
             completed_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
     def test_cleanup_removes_terminal_timed_out_task(self, executor_module, classes):
         """Test that cleanup removes a TIMED_OUT task."""
@@ -3815,11 +3816,11 @@ class TestCleanupBackgroundTask:
             error="timeout",
             completed_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
     def test_cleanup_skips_running_task(self, executor_module, classes):
         """Test that cleanup does NOT remove a RUNNING task.
@@ -3837,12 +3838,12 @@ class TestCleanupBackgroundTask:
             status=SubagentStatus.RUNNING,
             started_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
         # Should still be present because it's RUNNING
-        assert task_id in executor_module._background_tasks
+        assert task_id in execution_module._background_tasks
 
     def test_cleanup_skips_pending_task(self, executor_module, classes):
         """Test that cleanup does NOT remove a PENDING task."""
@@ -3855,16 +3856,16 @@ class TestCleanupBackgroundTask:
             trace_id="test-trace",
             status=SubagentStatus.PENDING,
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
-        assert task_id in executor_module._background_tasks
+        assert task_id in execution_module._background_tasks
 
     def test_cleanup_handles_unknown_task_gracefully(self, executor_module):
         """Test that cleanup doesn't raise for unknown task IDs."""
         # Should not raise
-        executor_module.cleanup_background_task("nonexistent-task")
+        execution_module.cleanup_background_task("nonexistent-task")
 
     def test_cleanup_removes_task_with_completed_at_even_if_running(self, executor_module, classes):
         """Test that cleanup removes task if completed_at is set, even if status is RUNNING.
@@ -3882,12 +3883,12 @@ class TestCleanupBackgroundTask:
             status=SubagentStatus.RUNNING,  # Status not terminal
             completed_at=datetime.now(),  # But completed_at is set
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
         # Should be removed because completed_at is set
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
 
 # -----------------------------------------------------------------------------
@@ -4288,17 +4289,17 @@ class TestCooperativeCancellation:
             status=SubagentStatus.RUNNING,
             started_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
         assert not result.cancel_event.is_set()
 
-        executor_module.request_cancel_background_task(task_id)
+        execution_module.request_cancel_background_task(task_id)
 
         assert result.cancel_event.is_set()
 
     def test_request_cancel_nonexistent_task_is_noop(self, executor_module):
         """Test that requesting cancellation on a nonexistent task does not raise."""
-        executor_module.request_cancel_background_task("nonexistent-task")
+        execution_module.request_cancel_background_task("nonexistent-task")
 
     def test_cancel_before_the_coroutine_starts_leaves_no_pending_entry(self, executor_module, classes, base_config):
         """A cancel that wins the race against the loop must still terminalize.
@@ -4321,7 +4322,7 @@ class TestCooperativeCancellation:
         async def never_started() -> None:
             body_ran.set()
 
-        loop = executor_module._get_isolated_subagent_loop()
+        loop = execution_module._get_isolated_subagent_loop()
         hold = threading.Event()
 
         def hold_loop() -> None:
@@ -4332,11 +4333,11 @@ class TestCooperativeCancellation:
         loop.call_soon_threadsafe(hold_loop)
         try:
             execution_id = executor.execute_async("Task")
-            result = executor_module._background_tasks[execution_id]
+            result = execution_module._background_tasks[execution_id]
             assert result.status.value == "pending"
-            assert not executor_module._background_futures[execution_id].done()
+            assert not execution_module._background_futures[execution_id].done()
 
-            executor_module.request_cancel_background_task(execution_id)
+            execution_module.request_cancel_background_task(execution_id)
         finally:
             hold.set()
 
@@ -4354,11 +4355,11 @@ class TestCooperativeCancellation:
                 time.sleep(0.01)
             assert result.execution_done_event.is_set()
 
-            executor_module.cleanup_background_task(execution_id)
-            assert execution_id not in executor_module._background_tasks
+            execution_module.cleanup_background_task(execution_id)
+            assert execution_id not in execution_module._background_tasks
         finally:
-            executor_module._background_tasks.pop(execution_id, None)
-            executor_module._background_futures.pop(execution_id, None)
+            execution_module._background_tasks.pop(execution_id, None)
+            execution_module._background_futures.pop(execution_id, None)
 
     def test_cancel_before_the_submission_callback_never_fences_a_live_slot(
         self,
@@ -4397,7 +4398,7 @@ class TestCooperativeCancellation:
 
         admitted = threading.Event()
         admission_release = asyncio.Event()
-        loop = executor_module._get_isolated_subagent_loop()
+        loop = execution_module._get_isolated_subagent_loop()
 
         async def hold_admission(*_args, **_kwargs):
             admitted.set()
@@ -4418,13 +4419,13 @@ class TestCooperativeCancellation:
         execution_id = None
         try:
             execution_id = executor.execute_async("Task")
-            result = executor_module._background_tasks[execution_id]
+            result = execution_module._background_tasks[execution_id]
             # The loop is still inside ``hold_loop``, so the submission callback
             # that would create the asyncio task has not run yet.
             assert result.status.value == "pending"
-            assert executor_module._background_futures[execution_id].cancel()
+            assert execution_module._background_futures[execution_id].cancel()
 
-            executor_module.request_cancel_background_task(execution_id)
+            execution_module.request_cancel_background_task(execution_id)
         finally:
             release.set()
 
@@ -4451,13 +4452,13 @@ class TestCooperativeCancellation:
             # so nothing can acquire a slot after the fence opened.
             assert not admitted.is_set()
 
-            executor_module.cleanup_background_task(execution_id)
-            assert execution_id not in executor_module._background_tasks
+            execution_module.cleanup_background_task(execution_id)
+            assert execution_id not in execution_module._background_tasks
         finally:
             loop.call_soon_threadsafe(admission_release.set)
             if execution_id is not None:
-                executor_module._background_tasks.pop(execution_id, None)
-                executor_module._background_futures.pop(execution_id, None)
+                execution_module._background_tasks.pop(execution_id, None)
+                execution_module._background_futures.pop(execution_id, None)
 
     def test_cancel_after_the_task_exists_keeps_the_fence_closed_until_teardown(
         self,
@@ -4488,7 +4489,7 @@ class TestCooperativeCancellation:
         task_created = threading.Event()
         execution_ran = threading.Event()
         factory_release = threading.Event()
-        loop = executor_module._get_isolated_subagent_loop()
+        loop = execution_module._get_isolated_subagent_loop()
         previous_factory = loop.get_task_factory()
 
         async def slow_execution(_task, result_holder=None):
@@ -4515,8 +4516,8 @@ class TestCooperativeCancellation:
                 execution_id = executor.execute_async("Task")
                 assert task_created.wait(5)
 
-                result = executor_module._background_tasks[execution_id]
-                executor_module.request_cancel_background_task(execution_id)
+                result = execution_module._background_tasks[execution_id]
+                execution_module.request_cancel_background_task(execution_id)
 
                 # The loop is still holding the task, so nothing can have finished
                 # teardown: publishing here would hand the entry to cleanup while
@@ -4540,11 +4541,11 @@ class TestCooperativeCancellation:
             assert result.error in ("Cancelled before the execution started", "Cancelled by user")
             assert result.execution_done_event.is_set()
 
-            executor_module.cleanup_background_task(execution_id)
-            assert execution_id not in executor_module._background_tasks
+            execution_module.cleanup_background_task(execution_id)
+            assert execution_id not in execution_module._background_tasks
         finally:
-            executor_module._background_tasks.pop(execution_id, None)
-            executor_module._background_futures.pop(execution_id, None)
+            execution_module._background_tasks.pop(execution_id, None)
+            execution_module._background_futures.pop(execution_id, None)
 
     def test_cancel_of_a_running_body_keeps_its_own_terminal_write(
         self,
@@ -4570,9 +4571,9 @@ class TestCooperativeCancellation:
         with patch.object(executor, "_aexecute", new=slow_execution):
             execution_id = executor.execute_async("Task")
             assert execution_ran.wait(5)
-            result = executor_module._background_tasks[execution_id]
+            result = execution_module._background_tasks[execution_id]
 
-            executor_module.request_cancel_background_task(execution_id)
+            execution_module.request_cancel_background_task(execution_id)
 
         try:
             deadline = time.monotonic() + 10
@@ -4583,11 +4584,11 @@ class TestCooperativeCancellation:
             assert result.error == "Cancelled by user"
             assert result.execution_done_event.is_set()
 
-            executor_module.cleanup_background_task(execution_id)
-            assert execution_id not in executor_module._background_tasks
+            execution_module.cleanup_background_task(execution_id)
+            assert execution_id not in execution_module._background_tasks
         finally:
-            executor_module._background_tasks.pop(execution_id, None)
-            executor_module._background_futures.pop(execution_id, None)
+            execution_module._background_tasks.pop(execution_id, None)
+            execution_module._background_futures.pop(execution_id, None)
 
     def test_execute_async_runs_without_calling_execute(self, executor_module, classes, base_config):
         """Regression: execute_async should not route through execute()/asyncio.run()."""
@@ -4624,13 +4625,13 @@ class TestCooperativeCancellation:
         )
 
         with (
-            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
+            patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
             patch.object(executor, "_aexecute", side_effect=fake_aexecute),
             patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
         ):
             task_id = executor.execute_async("Task")
 
-        result = executor_module._background_tasks.get(task_id)
+        result = execution_module._background_tasks.get(task_id)
         assert result is not None
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done: Task"
@@ -4677,7 +4678,7 @@ class TestCooperativeCancellation:
         )
 
         with (
-            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
+            patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
             patch.object(executor_a, "_aexecute", side_effect=complete_a),
             patch.object(executor_b, "_aexecute", side_effect=complete_b),
         ):
@@ -4685,22 +4686,22 @@ class TestCooperativeCancellation:
             execution_b = executor_b.execute_async("Task B", task_id="same-provider-tool-call-id")
 
             assert execution_a != execution_b
-            assert executor_module._background_tasks[execution_a].trace_id == "trace-a"
-            assert executor_module._background_tasks[execution_b].trace_id == "trace-b"
+            assert execution_module._background_tasks[execution_a].trace_id == "trace-a"
+            assert execution_module._background_tasks[execution_b].trace_id == "trace-b"
 
-        assert executor_module._background_tasks[execution_a].result == "done-a"
-        assert executor_module._background_tasks[execution_b].result == "done-b"
+        assert execution_module._background_tasks[execution_a].result == "done-a"
+        assert execution_module._background_tasks[execution_b].result == "done-b"
 
-        result_a = executor_module._background_tasks[execution_a]
-        result_b = executor_module._background_tasks[execution_b]
-        executor_module.request_cancel_background_task(execution_a)
+        result_a = execution_module._background_tasks[execution_a]
+        result_b = execution_module._background_tasks[execution_b]
+        execution_module.request_cancel_background_task(execution_a)
         assert result_a.cancel_event.is_set()
         assert not result_b.cancel_event.is_set()
 
-        executor_module.cleanup_background_task(execution_a)
-        assert execution_a not in executor_module._background_tasks
-        assert executor_module._background_tasks[execution_b] is result_b
-        executor_module.cleanup_background_task(execution_b)
+        execution_module.cleanup_background_task(execution_a)
+        assert execution_a not in execution_module._background_tasks
+        assert execution_module._background_tasks[execution_b] is result_b
+        execution_module.cleanup_background_task(execution_b)
 
     def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
         """Regression: background subagent execution must keep request user context."""
@@ -4740,7 +4741,7 @@ class TestCooperativeCancellation:
         token = set_current_user(SimpleNamespace(id="alice"))
         try:
             with (
-                patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
+                patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
                 patch.object(executor, "_aexecute", side_effect=fake_aexecute),
                 patch.object(executor, "execute", side_effect=AssertionError("execute() should not be called by execute_async")),
             ):
@@ -4748,7 +4749,7 @@ class TestCooperativeCancellation:
         finally:
             reset_current_user(token)
 
-        result = executor_module._background_tasks.get(task_id)
+        result = execution_module._background_tasks.get(task_id)
         assert result is not None
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "alice"
@@ -4803,7 +4804,7 @@ class TestCooperativeCancellation:
         )
         try:
             with (
-                patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
+                patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
                 patch.object(executor, "_aexecute", side_effect=fake_aexecute),
             ):
                 executor.execute_async("Task")
@@ -4828,9 +4829,9 @@ class TestCooperativeCancellation:
             return get_authenticated_user_id()
 
         with bind_authenticated_user("alice"):
-            alice = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+            alice = execution_module._submit_to_isolated_loop_in_context(execution_module._copy_isolated_subagent_context(), read_identity)
         with bind_authenticated_user("bob"):
-            bob = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+            bob = execution_module._submit_to_isolated_loop_in_context(execution_module._copy_isolated_subagent_context(), read_identity)
         assert get_authenticated_user_id() is None
         ready.set()
         assert alice.result(timeout=10) == "alice"
@@ -4848,7 +4849,7 @@ class TestCooperativeCancellation:
         )
         token = var_child_runnable_config.set({"callbacks": manager})
         try:
-            context = executor_module._copy_isolated_subagent_context()
+            context = execution_module._copy_isolated_subagent_context()
         finally:
             var_child_runnable_config.reset(token)
 
@@ -4902,17 +4903,17 @@ class TestCooperativeCancellation:
 
             # Set CANCELLED on the result before the timeout handler runs.
             # The 50ms timeout will fire while execute() is blocked.
-            with executor_module._background_tasks_lock:
-                executor_module._background_tasks[task_id].status = SubagentStatus.CANCELLED
-                executor_module._background_tasks[task_id].error = "Cancelled by user"
-                executor_module._background_tasks[task_id].completed_at = datetime.now()
+            with execution_module._background_tasks_lock:
+                execution_module._background_tasks[task_id].status = SubagentStatus.CANCELLED
+                execution_module._background_tasks[task_id].error = "Cancelled by user"
+                execution_module._background_tasks[task_id].completed_at = datetime.now()
 
             deadline = time.monotonic() + 5
-            while task_id in executor_module._background_futures and time.monotonic() < deadline:
+            while task_id in execution_module._background_futures and time.monotonic() < deadline:
                 time.sleep(0.01)
-            assert task_id not in executor_module._background_futures, "background coroutine did not finish"
+            assert task_id not in execution_module._background_futures, "background coroutine did not finish"
 
-        result = executor_module._background_tasks.get(task_id)
+        result = execution_module._background_tasks.get(task_id)
         assert result is not None
         # The RUNNING guard in the FuturesTimeoutError handler must have
         # preserved CANCELLED instead of overwriting with TIMED_OUT.
@@ -4967,7 +4968,7 @@ class TestCooperativeCancellation:
             task_id = executor.execute_async("Task")
             assert first_chunk_seen.wait(timeout=3), "stream did not yield initial chunk"
 
-            result = executor_module._background_tasks[task_id]
+            result = execution_module._background_tasks[task_id]
             assert result.cancel_event.wait(timeout=3), "timeout handler did not request cancellation"
             assert result.status.value == SubagentStatus.TIMED_OUT.value
             timed_out_error = result.error
@@ -4976,7 +4977,7 @@ class TestCooperativeCancellation:
             finish_stream.set()
             assert execution_done.wait(timeout=3), "execution worker did not finish"
 
-        result = executor_module._background_tasks.get(task_id)
+        result = execution_module._background_tasks.get(task_id)
         assert result is not None
         assert result.status.value == SubagentStatus.TIMED_OUT.value
         assert result.result is None
@@ -4996,11 +4997,11 @@ class TestCooperativeCancellation:
             error="Cancelled by user",
             completed_at=datetime.now(),
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.cleanup_background_task(task_id)
+        execution_module.cleanup_background_task(task_id)
 
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
     def test_force_cleanup_removes_unreadable_running_task(self, executor_module, classes):
         """Force cleanup removes a RUNNING entry unconditionally.
@@ -5019,15 +5020,15 @@ class TestCooperativeCancellation:
             trace_id="test-trace",
             status=SubagentStatus.RUNNING,
         )
-        executor_module._background_tasks[task_id] = result
+        execution_module._background_tasks[task_id] = result
 
-        executor_module.force_cleanup_background_task(task_id)
+        execution_module.force_cleanup_background_task(task_id)
 
-        assert task_id not in executor_module._background_tasks
+        assert task_id not in execution_module._background_tasks
 
     def test_force_cleanup_handles_unknown_task_gracefully(self, executor_module):
         """Force cleanup doesn't raise for unknown task IDs."""
-        executor_module.force_cleanup_background_task("nonexistent-task")
+        execution_module.force_cleanup_background_task("nonexistent-task")
 
 
 # -----------------------------------------------------------------------------
@@ -5279,7 +5280,7 @@ class TestSubagentCheckpointLineage:
             try:
                 deadline = asyncio.get_running_loop().time() + 5
                 while True:
-                    result = executor_module.get_background_task_result(task_id)
+                    result = execution_module.get_background_task_result(task_id)
                     if result is not None and result.status.is_terminal:
                         break
                     if asyncio.get_running_loop().time() >= deadline:
@@ -5287,7 +5288,7 @@ class TestSubagentCheckpointLineage:
                     await asyncio.sleep(0.001)
                 assert result.status.value == "completed"
             finally:
-                executor_module.cleanup_background_task(task_id)
+                execution_module.cleanup_background_task(task_id)
             return {
                 "messages": [
                     AIMessage(
@@ -6061,12 +6062,12 @@ class TestInterruptedTokenUsage:
         execution_id = executor.execute_async("Echo ok")
         try:
             assert model_returned.wait(5), "second model response was not received"
-            result = executor_module.get_background_task_result(execution_id)
+            result = execution_module.get_background_task_result(execution_id)
             assert _summarize_usage(result.token_usage_records) == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
             journal = RunJournal(run_id="parent-run", thread_id="parent-thread", event_store=MagicMock())
             _report_usage_records(journal, result)
             if outcome == "cancelled":
-                executor_module.request_cancel_background_task(execution_id)
+                execution_module.request_cancel_background_task(execution_id)
             elif outcome == "completed":
                 gate["loop"].call_soon_threadsafe(gate["release"].set)
             assert terminal.wait(10), "subagent did not reach a terminal status"
@@ -6091,13 +6092,13 @@ class TestInterruptedTokenUsage:
         finally:
             if "release" in gate:
                 gate["loop"].call_soon_threadsafe(gate["release"].set)
-            executor_module.request_cancel_background_task(execution_id)
+            execution_module.request_cancel_background_task(execution_id)
             assert terminal.wait(5)
             # Drain the production loop before stopping it and restoring the
             # module fixture; no background task or admission slot may leak.
-            executor_module.run_on_isolated_subagent_loop(asyncio.sleep(0)).result(timeout=5)
-            executor_module.cleanup_background_task(execution_id)
-            executor_module._shutdown_isolated_subagent_loop()
+            execution_module.run_on_isolated_subagent_loop(asyncio.sleep(0)).result(timeout=5)
+            execution_module.cleanup_background_task(execution_id)
+            execution_module._shutdown_isolated_subagent_loop()
 
     @pytest.mark.anyio
     async def test_usage_snapshot_waits_for_stream_cleanup_despite_repeated_cancellation(self, classes, base_config, monkeypatch):
@@ -6131,7 +6132,7 @@ class TestInterruptedTokenUsage:
         monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
         monkeypatch.setattr(executor, "_create_agent", _async_create_agent_double(graph))
         holder = classes["SubagentResult"](task_id="cleanup-usage", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
-        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        running = asyncio.create_task(executor._aexecute("Task", holder))
         try:
             await asyncio.wait_for(waiting.wait(), timeout=5)
             running.cancel()
@@ -6161,7 +6162,7 @@ class TestInterruptedTokenUsage:
         executor = classes["SubagentExecutor"](config=base_config, tools=[])
         monkeypatch.setattr(executor, "_build_initial_state", build_state)
         holder = classes["SubagentResult"](task_id="setup-cancelled", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
-        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        running = asyncio.create_task(executor._aexecute("Task", holder))
         try:
             await asyncio.wait_for(building.wait(), timeout=5)
         finally:
@@ -6313,7 +6314,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Partial report [r24]"
@@ -6356,7 +6357,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.tool_receipts == harvested
@@ -6375,7 +6376,7 @@ class TestToolReceiptHarvest:
         holder.cancel_event.set()
         executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
         with patch.object(executor, "_create_agent", return_value=mock_agent):
-            result = await executor._aexecute_admitted("Do something", result_holder=holder)
+            result = await executor._aexecute("Do something", result_holder=holder)
 
         assert result.status == SubagentStatus.CANCELLED
         assert result.tool_receipts is None
@@ -6422,7 +6423,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something", result_holder=holder)
+            result = await executor._aexecute("Do something", result_holder=holder)
 
         assert result.status == SubagentStatus.CANCELLED
         assert result.tool_receipts == harvested
@@ -6459,7 +6460,7 @@ class TestToolReceiptHarvest:
         submitter = self._ThreadSubmitter()
         try:
             with (
-                patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submitter.submit),
+                patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=submitter.submit),
                 patch.object(executor_module, "build_tracing_callbacks", return_value=[]),
                 patch.object(executor_module, "inject_langfuse_metadata"),
                 patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
@@ -6467,14 +6468,14 @@ class TestToolReceiptHarvest:
             ):
                 task_id = executor.execute_async("Do something")
                 assert chunk_seen.wait(timeout=3)
-                executor_module.request_cancel_background_task(task_id)
+                execution_module.request_cancel_background_task(task_id)
                 deadline = time.monotonic() + 3
-                while not executor_module._background_tasks[task_id].status.is_terminal and time.monotonic() < deadline:
+                while not execution_module._background_tasks[task_id].status.is_terminal and time.monotonic() < deadline:
                     time.sleep(0.01)
         finally:
             submitter.close()
 
-        result = executor_module._background_tasks[task_id]
+        result = execution_module._background_tasks[task_id]
         assert result.status == SubagentStatus.CANCELLED
         assert result.tool_receipts == harvested
 
@@ -6515,7 +6516,7 @@ class TestToolReceiptHarvest:
         submitter = self._ThreadSubmitter()
         try:
             with (
-                patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=submitter.submit),
+                patch.object(execution_module, "_submit_to_isolated_loop_in_context", side_effect=submitter.submit),
                 patch.object(executor_module, "build_tracing_callbacks", return_value=[]),
                 patch.object(executor_module, "inject_langfuse_metadata"),
                 patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
@@ -6524,12 +6525,12 @@ class TestToolReceiptHarvest:
                 task_id = executor.execute_async("Do something")
                 assert chunk_seen.wait(timeout=3)
                 deadline = time.monotonic() + 3
-                while task_id in executor_module._background_futures and time.monotonic() < deadline:
+                while task_id in execution_module._background_futures and time.monotonic() < deadline:
                     time.sleep(0.01)
         finally:
             submitter.close()
 
-        result = executor_module._background_tasks[task_id]
+        result = execution_module._background_tasks[task_id]
         assert result.status == SubagentStatus.TIMED_OUT
         assert result.tool_receipts == harvested
 
@@ -6589,7 +6590,7 @@ class TestToolReceiptHarvest:
         try:
             with (
                 patch.object(
-                    executor_module,
+                    execution_module,
                     "_submit_to_isolated_loop_in_context",
                     side_effect=submitter.submit,
                 ),
@@ -6611,7 +6612,7 @@ class TestToolReceiptHarvest:
                 assert close_started.wait(timeout=3)
 
                 deadline = time.monotonic() + 1
-                result = executor_module._background_tasks[task_id]
+                result = execution_module._background_tasks[task_id]
                 while not result.status.is_terminal and time.monotonic() < deadline:
                     time.sleep(0.01)
 
@@ -6619,9 +6620,9 @@ class TestToolReceiptHarvest:
                 assert result.cancel_event.is_set()
                 assert not result.execution_done_event.is_set()
                 assert capacity.snapshot().running == 1
-                assert len(executor_module._background_execution_tasks) == 1
-                executor_module.cleanup_background_task(task_id)
-                assert executor_module.get_background_task_result(task_id) is result
+                assert len(execution_module._background_execution_tasks) == 1
+                execution_module.cleanup_background_task(task_id)
+                assert execution_module.get_background_task_result(task_id) is result
         finally:
             release_close.set()
             if result is not None:
@@ -6630,15 +6631,15 @@ class TestToolReceiptHarvest:
                     assert execution_done.wait(timeout=3)
                 elif task_id is not None:
                     deadline = time.monotonic() + 3
-                    while task_id in executor_module._background_futures and time.monotonic() < deadline:
+                    while task_id in execution_module._background_futures and time.monotonic() < deadline:
                         time.sleep(0.01)
             if task_id is not None:
-                executor_module.cleanup_background_task(task_id)
+                execution_module.cleanup_background_task(task_id)
             submitter.close()
 
         assert capacity.snapshot().running == 0
-        assert executor_module._background_execution_tasks == set()
-        assert executor_module.get_background_task_result(task_id) is None
+        assert execution_module._background_execution_tasks == set()
+        assert execution_module.get_background_task_result(task_id) is None
 
     @pytest.mark.anyio
     async def test_harvest_skipped_when_receipts_disabled(self, classes, base_config, mock_agent, msg, monkeypatch):
@@ -6674,7 +6675,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.tool_receipts is None
@@ -6702,7 +6703,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert executor.app_config is None
         assert executor._get_resolved_app_config() is resolved_config
@@ -6731,7 +6732,7 @@ class TestToolReceiptHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.tool_receipts is None
@@ -6948,7 +6949,7 @@ class TestBashExecutionHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is not None
@@ -7096,7 +7097,7 @@ class TestBashExecutionHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is not None
@@ -7124,7 +7125,7 @@ class TestBashExecutionHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions == []
@@ -7141,7 +7142,7 @@ class TestBashExecutionHarvest:
             patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
             patch.object(executor, "_create_agent", return_value=mock_agent),
         ):
-            result = await executor._aexecute_admitted("Do something")
+            result = await executor._aexecute("Do something")
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.bash_executions is None
@@ -7163,9 +7164,8 @@ def test_timestamp_writers_stamp_utc_aware_datetimes(classes):
 
 def test_utcnow_helper_returns_utc_aware_datetime(classes):
     """The shared timestamp writer must never depend on the host wall clock."""
-    executor_module = sys.modules["deerflow.subagents.executor"]
 
-    now = executor_module._utcnow()
+    now = execution_module._utcnow()
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
@@ -7215,7 +7215,6 @@ async def test_subagent_model_failure_drains_unclaimed_prewarm(classes, base_con
 async def test_execute_async_cancellation_unwind_child_failure_leaves_terminal_result(classes, base_config, monkeypatch, published_failure):
     from concurrent.futures import Future
 
-    executor_module = importlib.import_module("deerflow.subagents.executor")
     executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="thread-cancel-race")
     started = asyncio.Event()
     fail = asyncio.Event()
@@ -7236,7 +7235,7 @@ async def test_execute_async_cancellation_unwind_child_failure_leaves_terminal_r
         failed.set()
         raise RuntimeError("execution unwind failed")
 
-    monkeypatch.setattr(executor_module, "_submit_to_isolated_loop_in_context", submit)
+    monkeypatch.setattr(execution_module, "_submit_to_isolated_loop_in_context", submit)
     monkeypatch.setattr(executor, "_aexecute", execute)
     execution_id = executor.execute_async("work")
     wrapper = submitted[0]
@@ -7255,8 +7254,8 @@ async def test_execute_async_cancellation_unwind_child_failure_leaves_terminal_r
         if published_failure:
             assert result.error == "execution failed"
         future.set_result(result)
-        executor_module.cleanup_background_task(execution_id)
-        assert executor_module.get_background_task_result(execution_id) is None
+        execution_module.cleanup_background_task(execution_id)
+        assert execution_module.get_background_task_result(execution_id) is None
     finally:
         fail.set()
         if not wrapper.done():
@@ -7264,30 +7263,29 @@ async def test_execute_async_cancellation_unwind_child_failure_leaves_terminal_r
         await asyncio.gather(wrapper, return_exceptions=True)
         if not future.done():
             future.set_result(None)
-        executor_module.force_cleanup_background_task(execution_id)
+        execution_module.force_cleanup_background_task(execution_id)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pinned", [False, True])
 async def test_deferred_cleanup_expiry_registers_removal_after_fence_opens(classes, monkeypatch, pinned):
-    executor_module = importlib.import_module("deerflow.subagents.executor")
     tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
     execution_id = "execution-expired-cleanup"
     result = classes["SubagentResult"](task_id=execution_id, trace_id="trace", status=classes["SubagentStatus"].RUNNING)
     result.try_set_terminal(classes["SubagentStatus"].TIMED_OUT, error="timeout")
-    monkeypatch.setitem(executor_module._background_tasks, execution_id, result)
+    monkeypatch.setitem(execution_module._background_tasks, execution_id, result)
     monkeypatch.setattr(tool_module, "SubagentStatus", classes["SubagentStatus"])
-    monkeypatch.setattr(tool_module, "get_background_task_result", executor_module.get_background_task_result)
-    monkeypatch.setattr(tool_module, "cleanup_background_task", executor_module.cleanup_background_task)
+    monkeypatch.setattr(tool_module, "get_background_task_result", execution_module.get_background_task_result)
+    monkeypatch.setattr(tool_module, "cleanup_background_task", execution_module.cleanup_background_task)
     try:
         await tool_module._deferred_cleanup_subagent_task(None, execution_id, "trace", 0, terminal_result=result if pinned else None)
-        assert execution_id in executor_module._background_cleanup_requested
-        assert executor_module.get_background_task_result(execution_id) is result
+        assert execution_id in execution_module._background_cleanup_requested
+        assert execution_module.get_background_task_result(execution_id) is result
         assert not result.execution_done_event.is_set()
-        executor_module._mark_background_execution_done(execution_id, result)
-        assert executor_module.get_background_task_result(execution_id) is None
+        execution_module._mark_background_execution_done(execution_id, result)
+        assert execution_module.get_background_task_result(execution_id) is None
     finally:
-        executor_module.force_cleanup_background_task(execution_id)
+        execution_module.force_cleanup_background_task(execution_id)
 
 
 class TestSubagentFinalizationCancellation:
@@ -7515,7 +7513,7 @@ class TestSubagentCancellationLifecycle:
         executor = classes["SubagentExecutor"](config=replace(base_config, timeout_seconds=0.2), tools=[], run_id="run", extensions=lifecycle.extensions)
         holder = classes["SubagentResult"](task_id="sync-timeout", trace_id="trace", status=classes["SubagentStatus"].PENDING) if shared_holder else None
         original_execute = executor._aexecute
-        original_submit = module._submit_to_isolated_loop_in_context
+        original_submit = execution_module._submit_to_isolated_loop_in_context
 
         async def initial_state(task):
             if stage == "setup":
@@ -7552,7 +7550,7 @@ class TestSubagentCancellationLifecycle:
         monkeypatch.setattr(executor, "_build_initial_state", initial_state)
         monkeypatch.setattr(executor, "_create_agent", AsyncMock(return_value=SimpleNamespace(astream=stream)))
         monkeypatch.setattr(executor, "_aexecute", track_worker)
-        monkeypatch.setattr(module, "_submit_to_isolated_loop_in_context", submit)
+        monkeypatch.setattr(execution_module, "_submit_to_isolated_loop_in_context", submit)
         monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
         monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
         try:
@@ -7568,7 +7566,7 @@ class TestSubagentCancellationLifecycle:
             assert stage == "setup" or closed.is_set()
             assert result.execution_done_event.wait(timeout=5)
         finally:
-            module._shutdown_isolated_subagent_loop()
+            execution_module._shutdown_isolated_subagent_loop()
 
     @pytest.mark.parametrize("shared_holder", [False, True])
     def test_sync_timeout_returns_failure_before_stream_cleanup(self, classes, base_config, lifecycle, monkeypatch, shared_holder):
@@ -7617,7 +7615,7 @@ class TestSubagentCancellationLifecycle:
             assert lifecycle.stops == [(lifecycle.starts[0], TaskOutcome.FAILED)]
         finally:
             release_close.set()
-            module._shutdown_isolated_subagent_loop()
+            execution_module._shutdown_isolated_subagent_loop()
 
     @pytest.mark.parametrize("mode", ["setup_cancel", "stream_cancel", "cooperative", "success", "failure", "timeout"])
     def test_background_outcome_matches_terminal_status(self, classes, base_config, lifecycle, monkeypatch, mode):
@@ -7661,11 +7659,11 @@ class TestSubagentCancellationLifecycle:
         monkeypatch.setattr(module, "build_tracing_callbacks", lambda: [])
         monkeypatch.setattr(module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
         execution_id = executor.execute_async("synthetic lifecycle task")
-        result = module.get_background_task_result(execution_id)
+        result = execution_module.get_background_task_result(execution_id)
         try:
             assert entered.wait(timeout=5)
             if mode in {"setup_cancel", "stream_cancel"}:
-                module.request_cancel_background_task(execution_id)
+                execution_module.request_cancel_background_task(execution_id)
             elif mode == "cooperative":
                 result.cancel_event.set()
                 cooperative_cancel.set()
@@ -7685,10 +7683,10 @@ class TestSubagentCancellationLifecycle:
             assert lifecycle.stops == [(lifecycle.starts[0], expected_outcome)]
         finally:
             cooperative_cancel.set()
-            module.request_cancel_background_task(execution_id)
-            module._shutdown_isolated_subagent_loop()
-            module.cleanup_background_task(execution_id)
-        assert module.get_background_task_result(execution_id) is None
+            execution_module.request_cancel_background_task(execution_id)
+            execution_module._shutdown_isolated_subagent_loop()
+            execution_module.cleanup_background_task(execution_id)
+        assert execution_module.get_background_task_result(execution_id) is None
 
     @pytest.mark.anyio
     async def test_direct_cancellation_drains_stream_before_notification(self, classes, base_config, lifecycle, monkeypatch):
@@ -8076,15 +8074,15 @@ def task_result_delivery(classes, monkeypatch):
 
         def dispatch(prompt, task_id=None):
             probe.execution_id = execute_async(prompt, task_id=task_id)
-            probe.holder = executor_module.get_background_task_result(probe.execution_id)
-            probe.execution_future = executor_module._background_futures.get(probe.execution_id)
+            probe.holder = execution_module.get_background_task_result(probe.execution_id)
+            probe.execution_future = execution_module._background_futures.get(probe.execution_id)
             return probe.execution_id
 
         monkeypatch.setattr(executor, "execute_async", dispatch)
         return executor
 
     def read_result(execution_id):
-        holder = executor_module.get_background_task_result(execution_id)
+        holder = execution_module.get_background_task_result(execution_id)
         probe.first_read.set()
         return holder
 
@@ -8125,13 +8123,13 @@ def task_result_delivery(classes, monkeypatch):
                 release.set()
             if probe.holder is not None:
                 if not probe.holder.status.is_terminal:
-                    executor_module.request_cancel_background_task(probe.execution_id)
+                    execution_module.request_cancel_background_task(probe.execution_id)
                 assert probe.holder.execution_done_event.wait(5), "offline child teardown did not finish"
-                executor_module.cleanup_background_task(probe.execution_id)
+                execution_module.cleanup_background_task(probe.execution_id)
             for handle in set(tool_module._deferred_cleanup_tasks) - previous_cleanups:
                 handle.result(timeout=6)
         finally:
-            executor_module._shutdown_isolated_subagent_loop()
+            execution_module._shutdown_isolated_subagent_loop()
 
 
 @pytest.mark.asyncio
@@ -8223,8 +8221,8 @@ async def test_task_tool_retains_terminal_usage_tail_after_return(classes, task_
         assert journal.get_completion_data()["total_tokens"] == 10
         assert not probe.holder.execution_done_event.is_set(), "delivery must precede cleanup completion"
         assert probe.capacity.snapshot().running == 1
-        probe.executor_module.force_cleanup_background_task(probe.execution_id)
-        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+        execution_module.force_cleanup_background_task(probe.execution_id)
+        assert execution_module.get_background_task_result(probe.execution_id) is None
         assert probe.capacity.snapshot().running == 1
         release.set()
         assert await asyncio.to_thread(probe.holder.execution_done_event.wait, 5), "cleanup did not finish"
@@ -8233,7 +8231,7 @@ async def test_task_tool_retains_terminal_usage_tail_after_return(classes, task_
         for handle in set(probe.tool_module._deferred_cleanup_tasks) - previous_cleanups:
             await asyncio.wrap_future(handle)
         await asyncio.sleep(0)  # Drain the supervisor's parent-loop usage delivery.
-        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+        assert execution_module.get_background_task_result(probe.execution_id) is None
         assert probe.capacity.snapshot().running == 0
         assert journal.get_completion_data()["total_tokens"] == 35
         assert journal.get_completion_data()["subagent_tokens"] == 35
@@ -8279,7 +8277,7 @@ async def test_task_tool_cancellation_while_waiting_settles_child(classes, task_
             await parent
         assert probe.holder.status is classes["SubagentStatus"].CANCELLED
         assert probe.holder.execution_done_event.is_set()
-        assert probe.executor_module.get_background_task_result(probe.execution_id) is None
+        assert execution_module.get_background_task_result(probe.execution_id) is None
     finally:
         if not parent.done():
             parent.cancel()

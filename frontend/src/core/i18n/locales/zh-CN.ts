@@ -116,6 +116,7 @@ export const zhCN: Translations = {
       refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
     },
     catalog: {
+      acpWorkers: bundledCopy("deerflow-extension-acp-workers", "zh-CN"),
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
       context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
@@ -1869,6 +1870,8 @@ export const zhCN: Translations = {
   },
 
   subtasks: {
+    externalUsage: "tokens（外部自报）",
+    externalLimit: "外部 Agent 已达限制",
     subtask: "子任务",
     executing: (count: number) =>
       `${count > 1 ? "并行" : ""}执行 ${count} 个子任务`,

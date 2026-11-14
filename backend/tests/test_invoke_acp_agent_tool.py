@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from support.acp_process import ACP_AGENT_SCRIPT as _ACP_AGENT_SCRIPT
 
 from deerflow.config.acp_config import ACPAgentConfig
 from deerflow.config.app_config import AppConfig
@@ -859,44 +860,6 @@ def test_get_available_tools_uses_explicit_app_config_for_acp_agents(monkeypatch
 
 # A real ACP subprocess can stop responding at any protocol phase. Keep the
 # SDK's transport and cleanup intact so these tests detect leaked child processes.
-_ACP_AGENT_SCRIPT = """\
-import asyncio
-import sys
-from pathlib import Path
-
-import acp
-from acp.schema import InitializeResponse, NewSessionResponse, PromptResponse
-
-
-class _TestAgent:
-    def on_connect(self, conn):
-        self._conn = conn
-
-    async def _enter_phase(self, phase):
-        Path(sys.argv[3]).write_text(phase, encoding="utf-8")
-        if phase == "prompt":
-            await self._conn.session_update(session_id="test-session", update=acp.update_agent_thought_text(phase))
-        if phase == sys.argv[1]:
-            await asyncio.Event().wait()
-        delay = float(sys.argv[2])
-        if delay:
-            await asyncio.sleep(delay)
-
-    async def initialize(self, protocol_version, client_capabilities=None, client_info=None, **kwargs):
-        await self._enter_phase("initialize")
-        return InitializeResponse(protocol_version=protocol_version)
-
-    async def new_session(self, cwd, additional_directories=None, mcp_servers=None, **kwargs):
-        await self._enter_phase("new_session")
-        return NewSessionResponse(session_id="test-session")
-
-    async def prompt(self, session_id, prompt, **kwargs):
-        await self._enter_phase("prompt")
-        return PromptResponse(stop_reason="end_turn")
-
-
-asyncio.run(acp.run_agent(_TestAgent()))
-"""
 
 
 @pytest.fixture
@@ -1266,7 +1229,7 @@ def test_resolve_agent_command_leaves_relative_paths_to_the_spawn(monkeypatch, t
     """A relative configured path is left to the spawn, which runs in the ACP workspace."""
     resolved_dir = tmp_path / "resolved"
     monkeypatch.setattr(
-        "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
+        "deerflow.acp.transport.shutil.which",
         lambda command, path=None: str(resolved_dir / command),
     )
 
@@ -1283,7 +1246,7 @@ def test_resolve_agent_command_resolves_absolute_paths_through_the_lookup(monkey
         seen.append((command, path))
         return command + ".CMD"
 
-    monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which", _which)
+    monkeypatch.setattr("deerflow.acp.transport.shutil.which", _which)
 
     absolute = str(tmp_path / "npm" / "mcode")
     assert _resolve_agent_command(absolute, str(tmp_path / "agent-bin")) == absolute + ".CMD"
@@ -1299,7 +1262,7 @@ def test_resolve_agent_command_keeps_an_absolute_lookup_result_as_returned(monke
     """
     literal = str(tmp_path / "current" / ".." / "shared" / "agent")
     monkeypatch.setattr(
-        "deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which",
+        "deerflow.acp.transport.shutil.which",
         lambda command, path=None: command,
     )
 
@@ -1367,7 +1330,7 @@ def test_resolve_agent_command_hands_the_effective_path_to_the_lookup(monkeypatc
         seen.append(path)
         return str(tmp_path / (path or "gateway-bin") / command)
 
-    monkeypatch.setattr("deerflow.tools.builtins.invoke_acp_agent_tool.shutil.which", _which)
+    monkeypatch.setattr("deerflow.acp.transport.shutil.which", _which)
 
     assert _resolve_agent_command("npx", str(tmp_path / "agent-bin")) == str(tmp_path / "agent-bin" / "npx")
     assert _resolve_agent_command("npx") == str(tmp_path / "gateway-bin" / "npx")

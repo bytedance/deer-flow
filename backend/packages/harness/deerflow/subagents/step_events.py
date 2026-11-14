@@ -193,7 +193,7 @@ def build_subagent_step(
     return step
 
 
-def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
+def _subagent_run_event(chunk: Any) -> dict[str, Any] | None:
     """Map a ``task_*`` custom stream chunk to ``RunEventStore.put`` kwargs.
 
     Returns the ``event_type`` / ``category`` / ``content`` / ``metadata`` for a
@@ -267,3 +267,20 @@ def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
         }
 
     return None
+
+
+def subagent_run_event(chunk: Any) -> dict[str, Any] | None:
+    event = _subagent_run_event(chunk)
+    if event is None:
+        return None
+    for key in ("execution_id", "dispatch_id", "executor", "worker_name", "error_code", "backend_stop_reason", "stop_reason"):
+        value = chunk.get(key)
+        if isinstance(value, str) and value:
+            event["content"][key] = value
+            event["metadata"][key] = value
+    from deerflow.subagents.status_contract import normalize_external_usage
+
+    usage = normalize_external_usage(chunk.get("external_usage"))
+    if usage is not None:
+        event["content"]["external_usage"] = usage
+    return event
