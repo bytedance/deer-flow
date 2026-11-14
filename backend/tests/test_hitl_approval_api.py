@@ -6,6 +6,7 @@ import asyncio
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -101,6 +102,114 @@ def _fake_model(*args, **kwargs):
 
 def _fake_two_target_model(*args, **kwargs):
     return _StateAwareModel(responses=[], call_count=2)
+
+
+class _LegacyApprovalModel(_StateAwareModel):
+    legacy_ids: list[Any]
+
+    def _generate(self, messages: Any, stop: Any = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
+        if any(isinstance(message, AIMessage) and message.id for message in messages):
+            message = AIMessage(content="recovered without writing")
+        else:
+            message = AIMessage(
+                content="",
+                tool_calls=[{"name": "write_file", "args": {"path": f"/mnt/user-data/workspace/legacy-{index}.txt", "content": "must not write"}, "id": call_id} for index, call_id in enumerate(self.legacy_ids)],
+            )
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def _legacy_approval_pause(self, state, runtime):
+    """Seed a pre-#8070 checkpoint; only used while creating the old pause."""
+    from langgraph.types import interrupt
+
+    last = state["messages"][-1]
+    targets = [call for call in last.tool_calls if call["name"] in self.tool_names] if isinstance(last, AIMessage) else []
+    if not targets:
+        return None
+    actions = [{"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": call.get("args", {}), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"} for call in targets]
+    interrupt({"kind": "hitl_approval", "version": 1, "request_id": actions[0]["request_id"], "actions": actions, "allowed_decisions": ["approve", "reject"], "pending_tool_call_ids": [call["id"] for call in targets]})
+    raise AssertionError("legacy seeding hook must not handle recovery")
+
+
+@pytest.mark.parametrize("legacy_ids", [[None], ["duplicate", "duplicate"], [None, ""], ["", ""]], ids=["null", "duplicate", "null-empty", "duplicate-empty"])
+@pytest.mark.parametrize("recovery_mode", ["normal", "disabled", "checkpoint-only", "lowered-limit"])
+def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_deer_flow_home, legacy_ids, recovery_mode):  # noqa: F811
+    _enable_approval()
+
+    def legacy_model(*args, **kwargs):
+        return _LegacyApprovalModel(responses=[], legacy_ids=legacy_ids)
+
+    from langchain.agents.middleware import AgentMiddleware
+
+    class HitlApprovalMiddleware(AgentMiddleware):
+        """Reproduce the historical checkpoint independently of production recovery."""
+
+        def __init__(self):
+            self.tool_names = {"write_file"}
+
+        def after_model(self, state, runtime):
+            return _legacy_approval_pause(self, state, runtime)
+
+        async def aafter_model(self, state, runtime):
+            return self.after_model(state, runtime)
+
+    def seed_legacy_gate(middlewares, final_tools, app_config, **kwargs):
+        middlewares.append(HitlApprovalMiddleware())
+
+    with patch(_MODEL_PATCH, new=legacy_model), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        with patch("deerflow.agents.lead_agent.agent._insert_hitl_approval_middleware", new=seed_legacy_gate):
+            initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
+            assert initial.status_code == 200, initial.text
+            assert _wait_run_status(client, tid, initial.json()["run_id"], "waiting_for_input")["status"] == "waiting_for_input"
+            state = _wait_for_approval(client, tid)
+        payload = next(item for group in state["interrupts"].values() for item in group)["value"]
+        assert payload["pending_tool_call_ids"] == legacy_ids
+        blocked = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "must remain blocked"}]}))
+        assert blocked.status_code == 409, blocked.text
+        assert blocked.json()["detail"]["code"] == "approval_pending"
+        responses = [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "reject"} for action in payload["actions"]]
+        mixed = [dict(response) for response in responses]
+        mixed[0]["option_id"] = "approve"
+        refused = _run(client, csrf, tid, {"command": {"resume": {"responses": mixed}}})
+        assert refused.status_code == 422, refused.text
+        stale = [dict(response, request_id="earlier-pause") for response in responses]
+        refused = _run(client, csrf, tid, {"command": {"resume": {"responses": stale}}})
+        assert refused.status_code == 422, refused.text
+        assert {run["run_id"] for run in client.get(f"/api/threads/{tid}/runs").json()} == {initial.json()["run_id"]}
+        if recovery_mode == "disabled":
+            get_app_config().hitl_approval.enabled = False
+            get_app_config().hitl_approval.tools = []
+        elif recovery_mode == "lowered-limit":
+            get_app_config().hitl_approval.max_actions = 1
+        from app.gateway import hitl_approval as gateway_approval
+
+        original_mark = gateway_approval.mark_approval_answered
+
+        async def consume_then_lose_ack(*args, **kwargs):
+            # Model the crash window: durable answer committed, checkpoint
+            # interrupt not yet consumed. Recovery must recheck that pause.
+            assert await original_mark(*args, **kwargs) is not None
+            return None
+
+        recovery = patch.object(gateway_approval, "mark_approval_answered", new=consume_then_lose_ack) if recovery_mode == "checkpoint-only" else nullcontext()
+        with recovery:
+            rejected = _run(client, csrf, tid, {"command": {"resume": {"responses": responses}}})
+        assert rejected.status_code == 200, rejected.text
+        terminal = _wait_run_terminal(client, tid, rejected.json()["run_id"])
+        assert terminal["status"] == "success", terminal
+        state = client.get(f"/api/threads/{tid}").json()
+        assert state["status"] == "idle"
+        assert not state.get("interrupts")
+        messages = state["values"]["messages"]
+        assert not any(message.get("tool_calls") for message in messages)
+        assert not any(message.get("type") == "tool" and message.get("content") == "OK" for message in messages)
+        assert any("rejected" in str(message.get("content")) for message in messages)
+        assert not list(isolated_deer_flow_home.rglob("legacy-*.txt"))
+        followup = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "continue"}]}))
+        assert followup.status_code == 200, followup.text
+        assert _wait_run_terminal(client, tid, followup.json()["run_id"])["status"] == "success"
 
 
 def test_live_child_approval_endpoint_fences_owner_run_and_answer(isolated_app):
