@@ -109,3 +109,13 @@ def test_remote_capture_rejects_replacement_between_chunks(remote, tmp_path):
     remote.execute_command = command
     with pytest.raises(AgentRunError):
         read_snapshot(remote, "report.txt")
+
+
+def test_shared_outputs_keep_larger_bytes_and_nested_paths(remote):
+    from deerflow.sandbox.artifact_snapshot import publish_snapshot, read_snapshot
+
+    content = b"x" * (MAX_BYTES + 1)
+    publish_snapshot(remote, "charts/report.bin", content, area="outputs", max_bytes=3 * 1024 * 1024)
+    assert read_snapshot(remote, "charts/report.bin", max_bytes=3 * 1024 * 1024) == content
+    with pytest.raises(AgentRunError):
+        read_snapshot(remote, "charts/report.bin")

@@ -357,6 +357,24 @@ class TestCheckLLMApiKey:
         assert all(r.fix is not None for r in failed)
         assert any("OPENAI_API_KEY" in (r.fix or "") for r in failed)
 
+    @pytest.mark.parametrize(
+        "placeholder",
+        ["your-openai-api-key", "replace-with-your-totokens-api-key", "   "],
+    )
+    def test_placeholder_key_is_not_reported_as_ready(self, tmp_path, monkeypatch, placeholder):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  - name: relay\n    use: langchain_openai:ChatOpenAI\n    model: gpt-6-luna\n    api_key: $RELAY_API_KEY\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("RELAY_API_KEY", placeholder)
+
+        results = doctor.check_llm_api_key(cfg)
+
+        assert len(results) == 1
+        assert results[0].status == "fail"
+        assert "RELAY_API_KEY" in (results[0].fix or "")
+
     def test_missing_config_returns_empty(self, tmp_path):
         results = doctor.check_llm_api_key(tmp_path / "config.yaml")
         assert results == []
@@ -591,6 +609,88 @@ class TestCheckWebSearch:
         assert result.fix is not None
         assert "make setup" in result.fix
 
+    def test_infoquest_ignores_a_configured_api_key_like_its_client(self, tmp_path, monkeypatch):
+        """InfoQuest reads only INFOQUEST_API_KEY, so an api_key field must not make doctor report it configured."""
+        from deerflow.community.infoquest.infoquest_client import InfoQuestClient
+
+        monkeypatch.setenv("MY_INFOQUEST_KEY", "iq-real-key")
+        monkeypatch.setenv("INFOQUEST_API_KEY", "your-infoquest-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.infoquest.tools:web_search_tool\n    api_key: $MY_INFOQUEST_KEY\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "infoquest configured but INFOQUEST_API_KEY still holds the .env.example placeholder"
+        assert InfoQuestClient().api_key_set is False
+
+    @pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
+    def test_groundroute_key_is_checked(self, tmp_path, monkeypatch, tool_name):
+        """Every GroundRoute call needs a key; doctor used to report ok without one."""
+        monkeypatch.delenv("GROUNDROUTE_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: {tool_name}\n    use: deerflow.community.groundroute.tools:{tool_name}_tool\n")
+        check = doctor.check_web_search if tool_name == "web_search" else doctor.check_web_fetch
+
+        result = check(cfg)
+        assert result.status == "warn"
+        assert result.detail == "groundroute configured but GROUNDROUTE_API_KEY not set"
+
+        monkeypatch.setenv("GROUNDROUTE_API_KEY", "gr-real-key")
+        assert check(cfg).status == "ok"
+
+    def test_youcom_names_an_ignored_placeholder_in_config(self, tmp_path, monkeypatch):
+        """You.com drops it and uses the keyless endpoint, so the status stays ok but the field is named."""
+        from types import SimpleNamespace
+
+        from deerflow.community.youcom import tools as youcom
+
+        monkeypatch.delenv("YDC_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.youcom.tools:web_search_tool\n    api_key: your-tavily-api-key\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "ok"
+        assert result.detail.endswith("; api_key in config holds the .env.example placeholder and is ignored")
+        monkeypatch.setattr(youcom, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra={"api_key": "your-tavily-api-key"})))
+        assert youcom._resolve_tool_settings("web_search")[0] is None
+
+    def test_tavily_with_env_template_placeholder_warns(self, tmp_path, monkeypatch):
+        """The runtime drops an ``.env.example`` value, so doctor must not call it configured."""
+        monkeypatch.setenv("TAVILY_API_KEY", "your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n    api_key: $TAVILY_API_KEY\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "tavily configured but TAVILY_API_KEY still holds the .env.example placeholder"
+        assert "TAVILY_API_KEY" in (result.fix or "")
+
+    def test_literal_placeholder_in_config_falls_back_to_the_env_key(self, tmp_path, monkeypatch):
+        """``resolve_api_key`` drops the literal placeholder and the provider reads the environment instead."""
+        monkeypatch.setenv("SERPER_API_KEY", "real-serper-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serper.tools:web_search_tool\n    api_key: your-serper-api-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert result.detail == "serper (SERPER_API_KEY set)"
+
+    def test_literal_placeholder_in_config_is_named_when_no_env_key_backs_it(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n    api_key: your-tavily-api-key\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert result.detail == "tavily configured but api_key in config still holds the .env.example placeholder"
+
+    def test_key_that_only_mentions_your_is_configured(self, tmp_path, monkeypatch):
+        """Doctor and the runtime share one rule: ``sk-your-...`` is a key both of them use."""
+        monkeypatch.setenv("TAVILY_API_KEY", "sk-your-tavily-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tavily.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+
     def test_brave_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "bsa-test")
         cfg = tmp_path / "config.yaml"
@@ -768,6 +868,30 @@ class TestCheckWebFetch:
         result = doctor.check_web_fetch(cfg)
         assert result.status == "ok"
         assert "Jina AI" in result.detail
+
+    @pytest.mark.usefixtures("delegated_backend_dns")
+    def test_browserless_fetch_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch):
+        """``web_fetch`` builds the same client as ``web_capture``, so the configured token is authoritative there too."""
+        from deerflow.community.browserless.tools import _get_browserless_client
+
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-real-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.browserless.tools:web_fetch_tool\n    base_url: https://production-sfo.browserless.io\n    token: your-github-token\n")
+
+        result = doctor.check_web_fetch(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but token in config still holds the .env.example placeholder"
+        assert _get_browserless_client("web_fetch", cfg={"base_url": "https://production-sfo.browserless.io", "token": "your-github-token"}).token == ""
+
+    def test_jina_names_the_ignored_template_placeholder(self, tmp_path, monkeypatch):
+        """The runtime drops it and fetches anonymously; doctor says so instead of staying silent."""
+        monkeypatch.setenv("JINA_API_KEY", "your-jina-api-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_fetch\n    use: deerflow.community.jina_ai.tools:web_fetch_tool\n")
+        result = doctor.check_web_fetch(cfg)
+        assert result.status == "ok"
+        assert result.detail == "Jina AI Reader (no key needed); JINA_API_KEY holds the .env.example placeholder and is ignored"
 
     def test_firecrawl_without_key_warns(self, tmp_path, monkeypatch):
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
@@ -1014,6 +1138,64 @@ class TestCheckWebCapture:
 
         assert result.status == "warn"
         assert "BROWSERLESS_TOKEN" in (result.fix or "")
+
+    @pytest.mark.parametrize(
+        ("token", "detail"),
+        [
+            ("your-github-token", "browserless configured but token in config still holds the .env.example placeholder"),
+            ('""', "browserless configured but token in config is empty, and BROWSERLESS_TOKEN is read only when token is omitted"),
+        ],
+        ids=["placeholder", "blank"],
+    )
+    def test_browserless_explicit_token_wins_over_the_environment(self, tmp_path, monkeypatch, token, detail):
+        """Browserless reads BROWSERLESS_TOKEN only when ``token`` is omitted, so a valid variable cannot rescue the field."""
+        from deerflow.community.browserless.tools import _get_browserless_client
+
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "browserless-real-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(f"config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: {token}\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == detail
+        assert "remove token to use BROWSERLESS_TOKEN" in (result.fix or "")
+        runtime_token = _get_browserless_client("web_capture", cfg={"base_url": "https://production-sfo.browserless.io", "token": "" if token == '""' else token}).token
+        assert runtime_token == "", "doctor must warn exactly when the client sends no token"
+
+    def test_browserless_token_reference_to_an_unset_variable_names_it_once(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("BROWSERLESS_TOKEN", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but BROWSERLESS_TOKEN not set"
+
+    def test_browserless_self_hosted_still_warns_about_a_placeholder_token(self, tmp_path, monkeypatch):
+        """A self-hosted token is optional, but a placeholder shows the operator meant to set one."""
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "your-github-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: http://localhost:3032\n    network_isolation_confirmed: true\n    token: $BROWSERLESS_TOKEN\n"
+        )
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "warn"
+        assert result.detail == "browserless configured but BROWSERLESS_TOKEN still holds the .env.example placeholder"
+
+    def test_browserless_operator_chosen_token_is_a_token(self, tmp_path, monkeypatch):
+        """Only shipped template values are placeholders; ``your-review-team-token`` is a token someone chose."""
+        monkeypatch.setenv("BROWSERLESS_TOKEN", "your-review-team-token")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_capture\n    use: deerflow.community.browserless.tools:web_capture_tool\n    base_url: https://production-sfo.browserless.io\n    token: $BROWSERLESS_TOKEN\n")
+
+        result = doctor.check_web_capture(cfg)
+
+        assert result.status == "ok"
+        assert "BROWSERLESS_TOKEN set from config" in result.detail
 
 
 # ---------------------------------------------------------------------------

@@ -52,11 +52,14 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
 - **One dotenv selection per deployment.** `DEER_FLOW_COMPOSE_ENV_FILE` is
   resolved once, and Compose interpolation, service env files, secret probes and
   extras detection all use that path.
-- **Do not seed production `.env` from the examples.** `.env.example` holds
-  placeholder API keys that the production Gateway would receive. Both compose
-  files mark the env files optional so a fresh checkout still starts and stops.
+- **Do not seed production `.env` from the examples.** They hold development
+  defaults and sample keys, not values an operator chose for production. Both
+  compose files mark the env files optional so a fresh checkout still starts and
+  stops.
 - **Support bundles export no secrets** and show an external runtime home as
   `{DEER_FLOW_HOME}`.
+- **Doctor does not echo model credentials.** Obvious sample key values fail the
+  model readiness check even when the environment variable is nonempty.
 
 ## Start, stop, clean
 

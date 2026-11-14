@@ -76,6 +76,10 @@ make install
 make dev
 ```
 
+Run `make doctor` after setting model credentials. It reports obvious placeholder
+API keys as incomplete configuration; replace them with real keys before testing
+model calls.
+
 Open http://localhost:2026.
 
 - All configuration options, providers and manual setup: [Configuration](docs/guide/configuration.md)
@@ -105,7 +109,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Sandbox modes, file system, uploads and outputs | [Sandbox](docs/guide/sandbox.md) |
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
-| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md) |
+| Sub-agents and task delegation | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) · [Responses API compaction](backend/docs/summarization.md#responses-api-continuation) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |
@@ -113,6 +117,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Projects, instructions, document shelf | [Projects](docs/guide/projects.md) |
 | Scheduled tasks | [Scheduled Tasks](docs/guide/scheduled-tasks.md) |
 | Feishu, Slack, Telegram, Discord, DingTalk and other IM channels | [IM Channels](docs/guide/im-channels.md) |
+| File attachments, downloads and Office previews | [File Previews](docs/guide/file-previews.md) |
 | Token usage dashboard, workspace, chat archive | [Workspace UI](docs/guide/workspace.md) |
 | Terminal workbench | [Terminal Workbench (TUI)](docs/guide/tui.md) |
 | Personal access tokens, stream actions, embedded Python client | [API Access and Python Client](docs/guide/api-and-client.md) |
@@ -133,6 +138,7 @@ DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-
 - [Install.md](Install.md) - Setup instructions written for coding agents
 - [Configuration Reference](backend/docs/CONFIGURATION.md) - Every `config.yaml` option
 - [Backend Architecture](backend/README.md) - Backend architecture and API reference
+- [Conversation Sharing](docs/guide/sharing.md) - Expiring read-only snapshots, artifact previews and workspace copies
 - [Architecture Overview](docs/ARCHITECTURE.md) - How the services fit together
 - [Contributing Guide](CONTRIBUTING.md) - Development environment, workflow and tests
 - [Changelog](CHANGELOG.md) - Release notes

@@ -402,9 +402,15 @@ async def test_codex_factory_retry_policy_respects_admission(monkeypatch, regist
         event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "unexpected retry"}]}], "usage": {}}}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
 
-    client_class = httpx.Client
-    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    client_name = "AsyncClient" if mode == "async" else "Client"
+    client_class = getattr(httpx, client_name)
+    monkeypatch.setattr(provider.httpx, client_name, lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+
+    async def async_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", async_sleep)
 
     if enabled:
         with pytest.raises(httpx.HTTPStatusError) as caught:
@@ -484,8 +490,9 @@ async def test_codex_529_middleware_retry_reenters_admission(monkeypatch, regist
         sleep(delay)
         await real_async_sleep(0)
 
-    client_class = httpx.Client
-    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
+    client_name = "AsyncClient" if mode == "async" else "Client"
+    client_class = getattr(httpx, client_name)
+    monkeypatch.setattr(provider.httpx, client_name, lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs))
     monkeypatch.setattr(provider.time, "sleep", sleep)
     monkeypatch.setattr(asyncio, "sleep", async_sleep)
     agent = create_agent(model=model, tools=[], middleware=[errors.LLMErrorHandlingMiddleware(app_config=config)])
