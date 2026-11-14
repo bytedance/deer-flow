@@ -5,6 +5,29 @@ requests outside the Agent loop. `mcp_tasks.lease_seconds` (default 120) is a
 crash-recovery window; it does not impose that duration as a remote-call timeout.
 The server's existing `tool_call_timeout` still controls remote-call deadlines.
 
+## Submission ownership
+
+Durable submissions run on the task service's event loop, including submissions
+from isolated subagents. Each caller keeps its request context, while cancelling
+the caller leaves the remote submission and its database ownership check running.
+A bounded wait hands unfinished work to the service. Once a remote handle arrives,
+the unique durable create must settle before cancellation can act on that handle;
+a duplicate handle already tracked by another submission is left untouched.
+
+If cancellation wins before the result is delivered, a successful create is
+followed by a durable cancellation request matching that exact creation receipt.
+This internal cleanup still works after the original thread is deleted or
+recreated. Public cancellation keeps its current-thread authorization checks.
+Repeated requests preserve an active cancellation lease, and completed or missing
+rows are left alone. Remote cancellation uses the existing claimed control path;
+if shutdown has stopped the poller, the next worker resumes the stored request.
+
+Shutdown closes submission admission before draining. A final drain runs after
+Agent runs stop and before SQL dependencies close. Neither caller cancellation
+nor shutdown retries the remote submit. This ownership lasts only while the
+process and its event loop remain alive: process death, a remote call that never
+returns a handle, and ordinary database failures retain their existing limits.
+
 ## Why the full operation needs ownership
 
 Without renewal, a status/cancel request taking longer than the claim duration

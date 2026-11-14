@@ -520,6 +520,16 @@ async def _drain_inflight_runs(run_manager: RunManager) -> None:
         logger.exception("Failed to drain in-flight runs during shutdown")
 
 
+async def _drain_mcp_submissions(app: FastAPI) -> None:
+    """Resolve late submissions after run drain, before their SQL stack exits."""
+    service = getattr(app.state, "mcp_task_service", None)
+    if service is not None:
+        try:
+            await service.drain_submissions()
+        except Exception:
+            logger.exception("Failed to drain MCP submissions before SQL shutdown")
+
+
 async def _retry_recovered_run_stream_end(
     bridge: StreamBridge,
     run_id: str,
@@ -1091,6 +1101,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
         # Start the lease heartbeat if enabled (multi-worker deployments).
         await app.state.run_manager.start_heartbeat()
+        # Register last so this runs after the run-drain finally below and
+        # before extension services, checkpointer and SQL dependencies close.
+        stack.push_async_callback(_drain_mcp_submissions, app)
 
         try:
             yield
