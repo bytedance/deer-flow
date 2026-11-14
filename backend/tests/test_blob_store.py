@@ -69,7 +69,7 @@ def test_blob_ref_validates_digest_shape():
 
 
 def test_blob_ref_kind_is_path_safe():
-    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65):
+    for bad in ("../etc", "a/b", "Aupper", "", "-lead", "trailing-", "has space", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValidationError):
             BlobRef(sha256=hashlib.sha256(b"x").hexdigest(), size=1, kind=bad)
     for good in ("viewed-image", "tool-output", "a", "0", "a" * 64):
@@ -134,7 +134,7 @@ def test_kind_rejection_quotes_the_enforced_grammar():
     """One validator, one message: the pattern a producer is shown must be the
     pattern that is enforced (it was not, before this was centralised)."""
     assert validate_blob_kind("tool-output") == "tool-output"
-    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65):
+    for bad in ("trailing-", "a--", "-lead", "Aupper", "a/b", "", "x" * 65, "tool\n", "a" * 64 + "\n"):
         with pytest.raises(ValueError) as caught:
             validate_blob_kind(bad)
         message = str(caught.value)
