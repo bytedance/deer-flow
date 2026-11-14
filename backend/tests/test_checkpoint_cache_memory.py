@@ -25,7 +25,7 @@ def test_make_history_key_is_stable_and_scoped():
     assert k1 != make_history_key("ckpt-hist:v1:db0", "t1", "", "c2", "messages")
     assert k1 != make_history_key("ckpt-hist:v1:db0", "t1", "", "c1", "todos")
     assert k1 != make_history_key("ckpt-hist:v1:db9", "t1", "", "c1", "messages")
-    assert CACHE_FORMAT_VERSION == 1
+    assert CACHE_FORMAT_VERSION == 2
 
 
 def test_get_many_miss_then_hit():

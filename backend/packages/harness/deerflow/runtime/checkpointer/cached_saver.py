@@ -53,22 +53,26 @@ def _checkpoint_ref(tup: CheckpointTuple) -> tuple[str, str, str]:
 def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
     """Writes for one channel in the inner saver's canonical delta order.
 
-    The wrapper assumes the inner saver's ``get_delta_channel_history`` uses
-    ascending ``(task_id, idx)`` order per checkpoint; the base implementation
-    instead iterates ``pending_writes`` in storage order. For supported savers,
-    ``CheckpointTuple.pending_writes`` carries each task's writes in ``idx``
-    order, but across tasks it follows
-    *storage/completion* order, which the InMemorySaver backend leaves in task
-    arrival order rather than ``task_id`` order. Composing from that raw order
-    makes the cached history disagree with the inner saver on fan-out
-    supersteps (several parallel tasks writing one channel). A stable sort by
-    ``task_id`` restores the canonical ``(task_id, idx)`` order while preserving
-    each task's internal ``idx`` sequence; it is a no-op on backends that
-    already return writes ``ORDER BY task_id, idx`` (sqlite, postgres).
+    ``get_tuple`` returns ``pending_writes`` already in the canonical
+    ``writes_sort_key`` order — ``(task_path, task_id, idx)`` per checkpoint
+    (``InMemorySaver`` sorts its storage by that key; sqlite applies the same
+    key in Python inside ``load_pending_writes`` — its ``pending_writes_sql``
+    has no ``ORDER BY`` — and postgres does exactly the same in
+    ``_load_writes``, sorting in Python by that key after an unordered
+    ``array_agg(...)`` in ``SELECT_SQL``). The inner
+    ``get_delta_channel_history`` walks use the same order, so simply
+    filtering by channel keeps the cached composition in agreement with the
+    authoritative walk. Re-sorting by ``task_id`` was therefore not a no-op
+    on sqlite or postgres either: it broke them exactly the way it broke
+    ``InMemorySaver``.
+
+    Re-sorting by ``task_id`` alone would *break* that agreement on fan-out
+    supersteps (several parallel tasks writing one channel): tasks are
+    canonically ordered by ``task_path`` first, so a stable ``task_id`` sort
+    reorders writes whenever the two orders differ, and an order-sensitive
+    reducer rebuilds a different value from cache than from the inner saver.
     """
-    writes = [w for w in (tup.pending_writes or []) if w[1] == channel]
-    writes.sort(key=lambda w: w[0])
-    return writes
+    return [w for w in (tup.pending_writes or []) if w[1] == channel]
 
 
 class CachedHistorySaver(BaseCheckpointSaver):

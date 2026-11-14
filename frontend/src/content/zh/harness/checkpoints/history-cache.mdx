@@ -63,7 +63,7 @@ import { Callout } from "nextra/components";
 | `thread_id` 保持可读 | 运维不必重算摘要就能认出某个线程的键 |
 | 其余成分以 NUL 分隔后哈希 | 含 `:` 的命名空间不可能产生有歧义的键 |
 | 线程清理前缀 | `{key_prefix}:{thread_id}:`，按前缀匹配，绝不做逐键失效 |
-| 默认前缀 | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`，其中 `CACHE_FORMAT_VERSION = 1` |
+| 默认前缀 | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`，其中 `CACHE_FORMAT_VERSION = 2` |
 | `database.checkpoint_cache.key_prefix` | 整体替换派生前缀 |
 | 数据库身份 | 不含凭据：postgres 为 `host:port/database:schema`，sqlite 为文件路径，其余为 `memory`。轮换凭据不会改变命名空间，否则一次凭据轮换就会让缓存变冷、并让旧键一直孤儿到 TTL。两个部署共用同一个 redis 时，默认前缀不同。 |
 
