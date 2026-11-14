@@ -33,6 +33,11 @@
 
 ### 修复
 
+- **调度器：** 定时任务发往 IM 的通知不再把不带密钥词形态的凭证原样发出。URL 中的账号信息
+  （`postgres://admin:hunter2@host`）以及 `Authorization`、`Cookie` 请求头的值
+  （`Authorization: Bearer ...`）此前会完整进入消息；现在替换为 `[redacted]`，协议名和句子
+  其余部分保持可读，不含凭证的 URL 不受影响。([#8250])
+
 - **前端：** 任务表单的 Cron 预设现在要求分钟 0-59、小时 0-23、日期 1-31，
   超出范围的表达式（例如 `0 24 * * *`）会保持为自定义并保留原始文本。此前它会被识别为预设，
   在序列化以供提交时可能被限制到合法范围内的另一个时间。使用非法表达式创建或复制任务，
@@ -12918,3 +12923,4 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#8126]: https://github.com/bytedance/deer-flow/pull/8126
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8250]: https://github.com/bytedance/deer-flow/pull/8250

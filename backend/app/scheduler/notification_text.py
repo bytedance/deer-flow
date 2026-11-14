@@ -54,13 +54,33 @@ _EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
     re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
 )
+# The patterns above only reach a value that follows a secret-like key. Two
+# credential carriers have no such key: a URL's user info
+# (``postgres://user:pass@host``) and an ``Authorization``/``Cookie`` header
+# value (``Authorization: Bearer ...``). Both are common in agent replies about
+# deployments and API calls, and both would otherwise reach the IM platform
+# verbatim. Only the credential itself is replaced, so the scheme and the rest
+# of the line keep reading normally.
+_URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
+_AUTH_HEADER_RE = re.compile(r"(?i)(\b(?:authorization|cookie)\b\s*[:=]\s*)(?:(bearer|basic|token|digest)\s+)?[\"']?([^\s\"',;]+)")
+
+
+def _redact_url_userinfo(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_EGRESS_REDACTION}@"
+
+
+def _redact_auth_header(match: re.Match[str]) -> str:
+    scheme = match.group(2)
+    prefix = f"{match.group(1)}{scheme} " if scheme else match.group(1)
+    return f"{prefix}{_EGRESS_REDACTION}"
 
 
 def redact_egress_text(text: str) -> str:
     """Scrub likely secrets from text before it is pushed to external IM."""
     if not text:
         return text
-    redacted = text
+    redacted = _URL_USERINFO_RE.sub(_redact_url_userinfo, text)
+    redacted = _AUTH_HEADER_RE.sub(_redact_auth_header, redacted)
     for pattern in _EGRESS_SECRET_PATTERNS:
         if pattern.groups:
             redacted = pattern.sub(lambda match: f"{match.group(1)}={_EGRESS_REDACTION}", redacted)

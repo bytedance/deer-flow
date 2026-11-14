@@ -263,6 +263,41 @@ def test_secret_on_the_first_line_is_redacted():
     assert "Result: token=[redacted]" in text
 
 
+def test_redact_egress_text_scrubs_url_user_info():
+    redacted = redact_egress_text("deployed with postgres://admin:hunter2@db.internal:5432/deerflow")
+
+    assert "hunter2" not in redacted
+    assert redacted == "deployed with postgres://[redacted]@db.internal:5432/deerflow"
+
+
+def test_redact_egress_text_leaves_a_url_without_credentials_alone():
+    text = "opened http://127.0.0.1:2026/workspace?tab=runs and ssh://github.com/bytedance/deer-flow.git"
+
+    assert redact_egress_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("header", "secret"),
+    [
+        ("Authorization: Bearer 1234567890abcdef", "1234567890abcdef"),
+        ("authorization=Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+        ("Cookie: session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+    ],
+)
+def test_redact_egress_text_scrubs_header_credentials(header: str, secret: str):
+    redacted = redact_egress_text(f"sent the request with {header} to the service")
+
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_result_summary_never_forwards_url_credentials():
+    text = render_notification_text(notice("run_completed", run_status="success", result_summary="Connected to postgres://admin:hunter2@db.internal:5432/deerflow"))
+
+    assert "hunter2" not in text
+    assert "postgres://[redacted]@db.internal:5432/deerflow" in text
+
+
 def test_stop_condition_is_redacted_and_truncated():
     secret = "sk-" + ("S" * 40)
     condition = f"stop when {secret} rotates " + "z" * 400
