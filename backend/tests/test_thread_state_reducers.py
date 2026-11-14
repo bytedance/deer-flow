@@ -119,6 +119,18 @@ class TestMergeArtifacts:
     def test_none_existing_accepts_new(self):
         assert merge_artifacts(None, ["a"]) == ["a"]
 
+    def test_poisoned_existing_value_is_ignored(self):
+        """A non-list value persisted through the state route must not fail the
+        next artifact write with ``TypeError``."""
+        assert merge_artifacts("oops", ["a"]) == ["a"]
+
+    def test_non_list_new_value_is_ignored(self):
+        assert merge_artifacts(["a"], "oops") == ["a"]
+
+    def test_non_string_entries_are_dropped(self):
+        """Unhashable entries from a poisoned list must not break deduplication."""
+        assert merge_artifacts(["a", ["b"]], ["c", {"d": 1}]) == ["a", "c"]
+
 
 class TestMergeViewedImages:
     """Sanity check for the existing viewed_images reducer."""

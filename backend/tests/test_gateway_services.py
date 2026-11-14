@@ -861,6 +861,51 @@ def test_normalize_input_rejects_malformed_message_with_400():
     assert "input.messages[1]" in excinfo.value.detail
 
 
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+@pytest.mark.parametrize(
+    "value",
+    ["oops", [["nested"]], ["ok", 3], {"type": "__overwrite__", "value": ["ok"]}],
+    ids=["non-list", "unhashable-entry", "non-string-entry", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_artifact_state_with_400(channel, value):
+    """A value ``merge_artifacts`` cannot concatenate must be a 400 here.
+
+    The thread-state route persists reducer values with ``Overwrite``, so a
+    non-list shape would be stored before any reducer sees it and the next
+    artifact-producing run would fail on ``existing + new``.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({channel: value})
+
+    assert excinfo.value.status_code == 400
+    assert f"input.{channel}" in excinfo.value.detail
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_normalize_input_keeps_usable_artifact_lists(channel):
+    from app.gateway.services import normalize_input
+
+    assert normalize_input({channel: ["out/report.md", "out/data.csv"]})[channel] == ["out/report.md", "out/data.csv"]
+
+
+@pytest.mark.parametrize("channel", ["artifacts", "tool_artifact_processed"])
+def test_state_values_reject_unusable_artifact_state_with_400(channel):
+    """The thread-state update route shares the artifact-list boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({channel: "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert f"values.{channel}" in excinfo.value.detail
+
+
 @pytest.mark.parametrize(
     "tool_artifacts",
     [
