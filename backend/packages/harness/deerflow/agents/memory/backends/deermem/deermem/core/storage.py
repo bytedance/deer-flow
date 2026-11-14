@@ -437,6 +437,32 @@ def _parse_fact_markdown(path: Path) -> dict[str, Any]:
         raise MemoryStorageCorruption(f"Failed to parse canonical fact {path}: {exc}") from exc
 
 
+def _scan_rebuild_facts(root: Path) -> Iterator[Path]:
+    """Yield the full rebuild's glob matches without suppressing scan errors."""
+    pending = [(root, False, False)]
+    while pending:
+        directory, in_facts, followed_link = pending.pop()
+        try:
+            entries = os.scandir(directory)
+        except FileNotFoundError:
+            # The store may be new, or a directory may have vanished during the scan.
+            continue
+        with entries:
+            children = list(entries)
+        for entry in children:
+            name = os.path.normcase(entry.name)
+            path = Path(entry.path)
+            if in_facts and name.endswith(".md"):
+                yield path
+            is_facts = name == "facts"
+            if entry.is_dir(follow_symlinks=False):
+                pending.append((path, in_facts or is_facts, followed_link))
+            elif is_facts and not followed_link and entry.is_symlink() and entry.is_dir():
+                # The literal "facts" segment of the old glob follows a link.
+                # Its recursive segments do not follow directory links.
+                pending.append((path, True, True))
+
+
 def _parse_listed_fact(path: Path) -> dict[str, Any] | None:
     """Parse a fact found by a directory scan that ran without the scope locks.
 
@@ -2137,11 +2163,18 @@ class FileMemoryStorage(MemoryStorage):
         synced_signatures: dict[tuple[str | None, str | None], tuple[Any, ...]] = {}
         if scopes is None:
             root = Path(self._config.storage_path) if self._config.storage_path else memory_file_path(self._config).parent
-            candidates = root.glob("**/facts/**/*.md")
+            candidates = _scan_rebuild_facts(root)
             # One signature per manifest: every agent bucket of a user shares its
             # memory.json, and _scope_signature reads only that file.
             manifest_signatures: dict[Path, tuple[Any, ...]] = {}
-            for path in candidates:
+            while True:
+                try:
+                    path = next(candidates, None)
+                except OSError:
+                    logger.exception("Failed to scan canonical facts for retrieval index under %s", root)
+                    return {"supported": True, "indexed": 0, "failed": failed + 1, "fatal": True}
+                if path is None:
+                    break
                 try:
                     relative_parts = path.relative_to(root).parts
                     manifest_path: Path | None = None
@@ -2150,9 +2183,7 @@ class FileMemoryStorage(MemoryStorage):
                         manifest_path = root.joinpath(*relative_parts[:agents_index]) / self._config.manifest_filename
                         if manifest_path not in manifest_signatures:
                             manifest_signatures[manifest_path] = self._scope_signature(manifest_path, relative_parts[agents_index + 1])
-                    fact = _parse_listed_fact(path)
-                    if fact is None:
-                        continue
+                    fact = _parse_fact_markdown(path)
                     agents_index = relative_parts.index("agents")
                     expected_agent = relative_parts[agents_index + 1]
                     expected_user_bucket = relative_parts[1] if len(relative_parts) > 1 and relative_parts[0] == "users" else None
@@ -2167,9 +2198,17 @@ class FileMemoryStorage(MemoryStorage):
                     if manifest_path is not None:
                         synced_signatures.setdefault(self._cache_key(expected_agent, user_id=original_user), manifest_signatures[manifest_path])
                     records.append((fact, _scope_dict(original_user, expected_agent), str(path)))
-                except Exception:
+                except Exception as exc:
+                    read_error = exc.__cause__ if isinstance(exc, MemoryStorageCorruption) else exc
+                    if isinstance(read_error, FileNotFoundError) and not os.path.lexists(path):
+                        continue
                     logger.exception("Failed to rebuild retrieval index for %s", path)
                     failed += 1
+                    if isinstance(read_error, OSError) and not isinstance(read_error, FileNotFoundError):
+                        # An unreadable file is not evidence of malformed data.
+                        # Keep the previous index/signatures intact so a later
+                        # scoped search can retry instead of trusting partial rows.
+                        return {"supported": True, "indexed": 0, "failed": failed, "fatal": True}
         else:
             for scope in scopes:
                 kwargs = self._scope_kwargs(scope)
