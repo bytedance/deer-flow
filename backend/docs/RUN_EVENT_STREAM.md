@@ -214,18 +214,19 @@ Current middleware tags are `guardrail`, `loop_detection`,
 are additive. Because the full event type is limited to 32 characters and
 `middleware:` uses 11, a tag must contain 1-21 characters.
 
-`middleware:loop_detection` records transitions into the warned state (first
-per call hash or per tool-frequency burst) and each hard stop produced by
-`LoopDetectionMiddleware` in lead-agent and ordinary task-tool subagent runs.
+`middleware:loop_detection` records hash-based loop transitions into the
+warned state and each hard stop produced by `LoopDetectionMiddleware` in
+lead-agent and ordinary task-tool subagent runs. Tool-name frequency thresholds
+are observability metrics: they are emitted as INFO logs with
+`action=observe_only` and do not create middleware events or alter control flow.
 Task-tool subagents forward the append to the parent loop because `RunJournal`
 and its event store must not cross the isolated-loop boundary. Durable batch
 subagents have no parent run journal and do not emit these events. The event's
-`action` is `warn` or
-`hard_stop`. The `changes` object identifies the detection layer, affected tool
-names, observed count, effective threshold, whether the producer was a
-subagent, and its agent id when applicable. Tool arguments, prompts, message
-content, tool results, and argument-derived hashes are not persisted in this
-event.
+`action` is `warn` or `hard_stop`. The `changes` object identifies the detection
+layer, affected tool names, observed count, effective threshold, whether the
+producer was a subagent, and its agent id when applicable. Tool arguments,
+prompts, message content, tool results, and argument-derived hashes are not
+persisted in this event.
 
 `middleware:tool_progress` records effective result-quality state transitions
 from `ToolProgressMiddleware`: `warn` for ACTIVE → WARNED, `block` for a

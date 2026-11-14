@@ -29,9 +29,9 @@ import { Callout } from "nextra/components";
 
 ### 结果标记 `token_capped` 或 `loop_capped`
 
-**原因**：命中 token 预算或循环检测的硬停止（[#3931](https://github.com/bytedance/deer-flow/pull/3931)、[#3980](https://github.com/bytedance/deer-flow/pull/3980)）。
+**原因**：命中 token 预算，或相同工具调用在没有进展时触发了基于哈希的循环检测硬停止（[#3931](https://github.com/bytedance/deer-flow/pull/3931)、[#3980](https://github.com/bytedance/deer-flow/pull/3980)）。
 
-**处理**：先看步骤时间线里是不是同一个工具被反复调用。确实需要更多预算时调整 `subagents.token_budget.max_tokens` 或 `loop_detection.tool_freq_overrides`。注意 token 预算的默认值与 `summarization.enabled` 联动，显式设置的值不受影响。
+**处理**：先看步骤时间线里是不是同一个调用在没有进展时被重复执行。确实需要更多工作量时调整 `subagents.token_budget.max_tokens` 或其他明确的工作量预算。日志中的工具名称频次是观测指标，不会导致 `loop_capped`；`loop_detection.tool_freq_overrides` 只调整这些指标。注意 token 预算的默认值与 `summarization.enabled` 联动，显式设置的值不受影响。
 
 ### 结果标记 `model_length_capped`
 

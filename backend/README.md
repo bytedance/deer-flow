@@ -70,11 +70,13 @@ restore obsolete progress hints, including same-run goal continuations.
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
 
-When `loop_detection.enabled` is set, loop detection checks both repeated
-tool-call sets and per-tool frequency. Warnings do not skip the rest of a
-tool-call batch: any hard limit reached takes precedence and stops the entire
-batch before tool execution. Warning-only batches remain fully counted and
-receive a transient hint on the next model request.
+When `loop_detection.enabled` is set, loop detection checks repeated tool-call
+sets whose results show no progress. Warnings do not skip the rest of a
+tool-call batch: a hash-based hard limit stops the entire batch before tool
+execution. Tool-name frequency is retained as an INFO observability metric for
+workload and cost analysis; its thresholds never warn or stop a run. Warning-
+only batches remain fully counted and receive a transient hint on the next
+model request.
 
 ### Sandbox System
 
