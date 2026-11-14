@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -817,11 +818,14 @@ async def test_oidc_callback_falls_back_to_id_token_when_userinfo_body_is_malfor
 # tied to this login, so it is rejected like a mismatching one; otherwise its
 # email and email_verified replace the signed ID token's.
 
+# Each case carries the reason the Gateway logs, so an operator can tell an
+# absent ``sub`` from a malformed one.
 _NO_SUB_CASES = [
-    pytest.param({}, id="missing"),
-    pytest.param({"sub": ""}, id="empty"),
-    pytest.param({"sub": None}, id="null"),
-    pytest.param({"sub": ["s1"]}, id="non-string"),
+    pytest.param({}, "UserInfo response has no sub claim", id="missing"),
+    pytest.param({"sub": ""}, "UserInfo response has no sub claim", id="empty"),
+    pytest.param({"sub": None}, "UserInfo response has no sub claim", id="null"),
+    pytest.param({"sub": ["s1"]}, "UserInfo sub claim is not a string (list)", id="non-string"),
+    pytest.param({"sub": 1}, "UserInfo sub claim is not a string (int)", id="number"),
 ]
 
 
@@ -829,7 +833,7 @@ _NO_SUB_CASES = [
 @pytest.mark.parametrize(
     ("sub_field", "message"),
     [
-        *[pytest.param(case.values[0], "has no sub claim", id=case.id) for case in _NO_SUB_CASES],
+        *_NO_SUB_CASES,
         pytest.param({"sub": "s2"}, "does not match", id="other-subject"),
         pytest.param({"sub": "S1"}, "does not match", id="other-case"),
     ],
@@ -837,7 +841,7 @@ _NO_SUB_CASES = [
 async def test_oidc_fetch_userinfo_rejects_a_response_not_bound_to_the_id_token(sub_field, message):
     service = _service_answering({"/userinfo": {**sub_field, "email": "other@example.com", "email_verified": True}})
     try:
-        with pytest.raises(OIDCUserInfoMismatch, match=message):
+        with pytest.raises(OIDCUserInfoMismatch, match=re.escape(message)):
             await service.fetch_userinfo(OIDCMetadata(**_DISCOVERY), "access", expected_sub="s1")
     finally:
         await service.close()
@@ -854,8 +858,8 @@ async def test_oidc_fetch_userinfo_returns_a_response_for_the_same_subject():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sub_field", _NO_SUB_CASES)
-async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_sub(sub_field, caplog):
+@pytest.mark.parametrize(("sub_field", "reason"), _NO_SUB_CASES)
+async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_sub(sub_field, reason, caplog):
     id_token, jwks = _signed_provider(email="user@example.com", email_verified=False, name="ID Token User")
     userinfo = {**sub_field, "email": "admin@example.com", "email_verified": True, "name": "Someone Else"}
     service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
@@ -867,7 +871,7 @@ async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_sub(sub_
 
     assert (identity.subject, identity.email, identity.email_verified, identity.name) == ("s1", "user@example.com", False, "ID Token User")
     assert "admin@example.com" not in identity.claims.values()
-    assert "UserInfo response has no sub claim" in caplog.text
+    assert reason in caplog.text
 
 
 @pytest.mark.asyncio

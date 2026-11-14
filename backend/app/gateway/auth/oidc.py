@@ -410,8 +410,10 @@ class OIDCService:
         userinfo = _json_object(resp, "UserInfo response")
 
         sub = userinfo.get("sub")
-        if not isinstance(sub, str) or not sub:
+        if sub is None or sub == "":
             raise OIDCUserInfoMismatch("UserInfo response has no sub claim")
+        if not isinstance(sub, str):
+            raise OIDCUserInfoMismatch(f"UserInfo sub claim is not a string ({type(sub).__name__})")
         if sub != expected_sub:
             raise OIDCUserInfoMismatch("UserInfo sub does not match ID token sub")
 
