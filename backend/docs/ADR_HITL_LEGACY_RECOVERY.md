@@ -35,3 +35,26 @@ denial API. Use its single `_strip_calls` path for prevention, denial and legacy
 replay, extending cleanup to null-ID siblings, matching invalid calls and
 unidentifiable legacy function_call metadata. Keep legacy identity admission
 exact and require integer version 1 excluding booleans.
+
+## Approval v2 compatibility (2026-11-14)
+
+Main at 4f3a8b7 replaces the version-1 after-model gate with the version-2
+operation approval middleware. Do not restore version-1 approval generation or
+change version-2 Ask/Auto/Full decisions to resolve this integration conflict.
+
+For a validated, reject-only unaddressable version-1 pause, retain the original
+`HitlApprovalMiddleware.after_model` graph node name through a small recovery-only
+compatibility middleware. Assemble it only from worker-recovered durable actions,
+never from caller context. It performs one rejection cleanup, consumes no new
+authorization, creates no new interrupt, and becomes inert after that replay.
+The normal version-2 middleware retains ownership of subsequent operations.
+
+Only one original legacy interrupt can enter digest-bound recovery. Multiple
+parallel version-2 interrupts continue through their existing interrupt-ID resume
+map; mixed legacy/parallel batches fail closed. Keep the durable answer/restore
+identity, single-winner CAS, and exact grouped-response matching.
+
+Verification must seed a version-1 checkpoint with its original node name, then
+restore production assembly before recovery. Exercise the real Gateway with
+full/delta checkpoints, configuration changes and checkpoint-only retry. Keep
+version-2 call-ID, parallel approval and edited-argument tests in the selection.
