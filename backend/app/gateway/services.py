@@ -55,7 +55,7 @@ from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECE
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.agents_config import load_agent_config
-from deerflow.config.app_config import get_app_config
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
 from deerflow.mcp_scope import (
@@ -1403,10 +1403,11 @@ _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
 
 
-def _resolve_gateway_recursion_limits() -> tuple[int, int]:
+def _resolve_gateway_recursion_limits(app_config: AppConfig | None = None) -> tuple[int, int]:
     """Resolve the run default and ceiling from one hot-reloaded snapshot."""
     try:
-        app_config = get_app_config()
+        if app_config is None:
+            app_config = get_app_config()
         raw = app_config.recursion_limit
         max_limit = app_config.max_recursion_limit
         if raw > max_limit:
@@ -1517,6 +1518,7 @@ def build_run_config(
     metadata: dict[str, Any] | None,
     *,
     assistant_id: str | None = None,
+    app_config: AppConfig | None = None,
 ) -> dict[str, Any]:
     """Build a RunnableConfig dict for the agent.
 
@@ -1534,13 +1536,16 @@ def build_run_config(
     This mirrors the channel manager's ``_resolve_run_params`` logic. IM
     channel runs send no ``recursion_limit`` unless their session config or
     channel policy sets one, so they get the same configured default here.
+
+    *app_config* is the snapshot the recursion limits come from; without it
+    they are read through ``get_app_config()``, which does file IO.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
     # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
-    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits(app_config)
     config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         caller_configurable = request_config.get("configurable")
@@ -2383,7 +2388,11 @@ async def start_run(
     stream_modes = normalize_stream_modes(body.stream_mode)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    run_ctx = get_run_context(request)
+    # Building the context loads the live AppConfig, which stats and hashes
+    # config.yaml and reparses it after an edit, so it runs in a worker. The
+    # rest of the run start reuses that snapshot.
+    run_ctx = await asyncio.to_thread(get_run_context, request)
+    app_config = run_ctx.app_config
     admission_run_id: str | None = None
     producer_lease_started = False
     producer_lease_handed_off = False
@@ -2399,7 +2408,6 @@ async def start_run(
 
     # Validate model against the allowlist when a model_name is provided.
     if model_name:
-        app_config = get_app_config()
         resolved = app_config.get_model_config(model_name)
         if resolved is None:
             raise HTTPException(
@@ -2488,7 +2496,7 @@ async def start_run(
                     thread_id=thread_id,
                     accessor=accessor,
                     read_config=read_config,
-                    enabled=get_app_config().hitl_approval.enabled,
+                    enabled=app_config.hitl_approval.enabled,
                     body=body,
                 )
                 resume_map = getattr(validated_approval_request_ids, "resume_map", None)
@@ -2526,7 +2534,7 @@ async def start_run(
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         try:
-            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+            config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id, app_config=app_config)
         except ValueError as exc:
             # Raised only for the caller's own config sections or assistant_id.
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -2545,7 +2553,7 @@ async def start_run(
         from deerflow.approvals.policy import resolve_mode
 
         try:
-            resolve_mode(get_app_config().hitl_approval, config.get("context") or {})
+            resolve_mode(app_config.hitl_approval, config.get("context") or {})
         except (ValueError, TypeError) as exc:
             raise HTTPException(422, detail={"code": "invalid_approval_mode", "message": "The selected tool approval mode is not allowed"}) from exc
         if not is_internal_caller:
@@ -2653,7 +2661,7 @@ async def start_run(
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
                 run_context=run_ctx,
                 run_manager=run_mgr,
-                app_config=get_app_config(),
+                app_config=app_config,
             )
             reader, source_ids = prepared
             run_ctx = replace(run_ctx, conversation_reader=reader)
@@ -3146,7 +3154,7 @@ async def launch_scheduled_thread_run(
         input=graph_input,
         command=None,
         metadata=metadata or {},
-        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
+        config={"recursion_limit": await asyncio.to_thread(_resolve_scheduler_recursion_limit)},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;

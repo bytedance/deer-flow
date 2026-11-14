@@ -260,7 +260,7 @@ def test_run_routes_reject_invalid_goal_before_admission(monkeypatch, path, inva
     app.include_router(thread_runs.router)
     app.state.stream_bridge = SimpleNamespace()
     app.state.run_manager = SimpleNamespace(create_or_reject=AsyncMock())
-    monkeypatch.setattr(services, "get_run_context", lambda _request: SimpleNamespace(thread_store=app.state.thread_store))
+    monkeypatch.setattr(services, "get_run_context", lambda _request: SimpleNamespace(thread_store=app.state.thread_store, app_config=None))
     factory = Mock(side_effect=AssertionError("invalid goal reached graph assembly"))
     monkeypatch.setattr(services, "resolve_agent_factory", factory)
     worker = AsyncMock()
