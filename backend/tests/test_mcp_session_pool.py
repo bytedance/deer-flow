@@ -8,14 +8,22 @@ import sys
 import threading
 import weakref
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
 import pytest
-from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, current_session_pool, get_session_pool, reset_session_pool
+from deerflow.mcp.session_pool import (
+    MCPError,
+    McpError,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    current_session_pool,
+    get_session_pool,
+    reset_session_pool,
+)
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     mcp_scope_belongs_to_thread,
@@ -776,7 +784,7 @@ mcp.run(transport="stdio")
 
     with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
         wrapped = _make_session_pool_tool(original_tool, "crash", connection)
-        with pytest.raises(McpError, match="Connection closed") as exc_info:
+        with pytest.raises(MCPError, match="Connection closed") as exc_info:
             await wrapped.coroutine(deerflow_runtime=runtime)
 
         assert exc_info.value.error.code == CONNECTION_CLOSED
@@ -3193,3 +3201,110 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+def test_is_mcp_transport_disconnect_v1_and_v2_compat():
+    """Verify _is_mcp_transport_disconnect recognizes both MCP 1.x and 2.x exception structures."""
+    from deerflow.mcp.session_pool import MCPError, McpError, _is_mcp_transport_disconnect
+
+    # 1. Closed stream errors (anyio)
+    assert _is_mcp_transport_disconnect(anyio.ClosedResourceError()) is True
+    assert _is_mcp_transport_disconnect(anyio.BrokenResourceError()) is True
+    assert _is_mcp_transport_disconnect(anyio.EndOfStream()) is True
+
+    # 2. Standard McpError (1.x pattern)
+    closed_err = McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+    assert _is_mcp_transport_disconnect(closed_err) is True
+
+    # 3. Non-disconnect McpError
+    other_err = McpError(ErrorData(code=408, message="request timed out"))
+    assert _is_mcp_transport_disconnect(other_err) is False
+
+    wrong_msg_err = McpError(ErrorData(code=CONNECTION_CLOSED, message="other failure"))
+    assert _is_mcp_transport_disconnect(wrong_msg_err) is False
+
+    # 4a. Simulated MCP 2.x MCPError (inheriting from Exception, code & message attributes)
+    class FakeMCP2ErrorWithErrorData(Exception):
+        def __init__(self, code: int, message: str):
+            super().__init__(code, message)
+            self.error = ErrorData(code=code, message=message)
+            self.code = code
+            self.message = message
+
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeMCP2ErrorWithErrorData,)):
+        fake_closed = FakeMCP2ErrorWithErrorData(code=CONNECTION_CLOSED, message="Connection closed")
+        assert _is_mcp_transport_disconnect(fake_closed) is True
+
+        fake_timeout = FakeMCP2ErrorWithErrorData(code=408, message="timeout")
+        assert _is_mcp_transport_disconnect(fake_timeout) is False
+
+    # 4b. Simulated error with direct code/message and NO .error attribute (exercises fallback path)
+    class FakeDirectCodeMessageError(Exception):
+        def __init__(self, code: int, message: str):
+            super().__init__(code, message)
+            self.code = code
+            self.message = message
+
+    with patch("deerflow.mcp.session_pool._MCP_ERROR_TYPES", (FakeDirectCodeMessageError,)):
+        direct_closed = FakeDirectCodeMessageError(code=CONNECTION_CLOSED, message="Connection closed")
+        assert _is_mcp_transport_disconnect(direct_closed) is True
+
+        direct_timeout = FakeDirectCodeMessageError(code=408, message="timeout")
+        assert _is_mcp_transport_disconnect(direct_timeout) is False
+
+    # 5. Ensure McpError and MCPError are exported / available
+    assert issubclass(McpError, Exception)
+    assert issubclass(MCPError, Exception)
+
+
+def test_mcp_v2_compatibility_wrapper_construction_and_import(monkeypatch):
+    """Verify the production McpError compatibility wrapper for MCP 2.x accepts ErrorData and keyword args."""
+    import importlib
+    import sys
+    import types
+
+    # Simulate MCP 2.x SDK base class
+    class MockSdkMCPError(Exception):
+        def __init__(self, code: int, message: str, data: Any = None):
+            super().__init__(code, message, data)
+            self.error = ErrorData(code=code, message=message, data=data)
+            self.code = code
+            self.message = message
+            self.data = data
+
+    fake_module = types.ModuleType("mcp.shared.exceptions")
+    fake_module.MCPError = MockSdkMCPError
+
+    monkeypatch.setitem(sys.modules, "mcp.shared.exceptions", fake_module)
+
+    import deerflow.mcp.session_pool as session_pool_mod
+
+    try:
+        importlib.reload(session_pool_mod)
+        CompatMcpError = session_pool_mod.McpError
+        assert issubclass(CompatMcpError, MockSdkMCPError)
+
+        # 1. 1.x signature: McpError(ErrorData(...))
+        err1 = CompatMcpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        assert err1.code == CONNECTION_CLOSED
+        assert err1.message == "Connection closed"
+        assert err1.error.code == CONNECTION_CLOSED
+        assert err1.error.message == "Connection closed"
+
+        # 2. 2.x signature: MCPError(code, message)
+        err2 = CompatMcpError(CONNECTION_CLOSED, "Connection closed")
+        assert err2.code == CONNECTION_CLOSED
+        assert err2.message == "Connection closed"
+
+        # 3. 2.x signature with kwargs: MCPError(code=..., message=...)
+        err3 = CompatMcpError(code=408, message="request timed out")
+        assert err3.code == 408
+        assert err3.message == "request timed out"
+
+        # 4. _is_mcp_transport_disconnect works on the wrapper
+        assert session_pool_mod._is_mcp_transport_disconnect(err1) is True
+        assert session_pool_mod._is_mcp_transport_disconnect(err2) is True
+        assert session_pool_mod._is_mcp_transport_disconnect(err3) is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(session_pool_mod)

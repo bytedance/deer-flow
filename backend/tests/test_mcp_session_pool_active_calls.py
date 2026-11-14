@@ -4,10 +4,9 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
-from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool
+from deerflow.mcp.session_pool import McpError, MCPSessionPool, call_pooled_session_tool
 
 
 class ControlledSession:
