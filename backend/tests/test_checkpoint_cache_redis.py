@@ -6,6 +6,7 @@ import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deerflow.config.app_config import AppConfig
+from deerflow.runtime.checkpoint_cache.base import CACHE_FORMAT_VERSION
 from deerflow.runtime.checkpoint_cache.provider import (
     checkpoint_cache_db_hash,
     checkpoint_cache_key_prefix,
@@ -217,7 +218,7 @@ async def test_zero_ttl_disables_expiry_explicitly(monkeypatch: pytest.MonkeyPat
 async def test_adelete_thread_purges_matching_keys_only(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeRedis()
     cache = _make_cache(monkeypatch, fake)
-    prefix = "ckpt-hist:v1:db0"
+    prefix = "ckpt-hist:v2:db0"
     await cache.aset_many(
         {
             f"{prefix}:t1:aaa": _entry(1),
@@ -296,4 +297,4 @@ def test_key_prefix_override_wins():
     app_config = _app_config({"backend": "sqlite", "checkpoint_cache": {"key_prefix": "custom:"}})
     assert checkpoint_cache_key_prefix(app_config) == "custom:"
     default = checkpoint_cache_key_prefix(_app_config({"backend": "sqlite"}))
-    assert default.startswith("ckpt-hist:v1:")
+    assert default.startswith(f"ckpt-hist:v{CACHE_FORMAT_VERSION}:")
