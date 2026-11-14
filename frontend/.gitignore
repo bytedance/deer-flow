@@ -15,6 +15,7 @@ db.sqlite
 
 # next.js
 /.next/
+/.next-static/
 /out/
 next-env.d.ts
 
