@@ -54,14 +54,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function hasAnyMemorySummary(memory: UserMemory): boolean {
-  return Boolean(
-    memory.user.workContext.summary ||
-    memory.user.personalContext.summary ||
-    memory.user.topOfMind.summary ||
-    memory.history.recentMonths.summary ||
-    memory.history.earlierContext.summary ||
+  return [
+    memory.user.workContext.summary,
+    memory.user.personalContext.summary,
+    memory.user.topOfMind.summary,
+    memory.history.recentMonths.summary,
+    memory.history.earlierContext.summary,
     memory.history.longTermBackground.summary,
-  );
+  ].some((summary) => summary.trim() !== "");
 }
 
 function isMemorySection(value: unknown): value is {
@@ -227,14 +227,31 @@ export function MemorySettingsPage() {
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
 
+  const summariesText = memory
+    ? [
+        memory.user.workContext.summary,
+        memory.user.personalContext.summary,
+        memory.user.topOfMind.summary,
+        memory.history.recentMonths.summary,
+        memory.history.earlierContext.summary,
+        memory.history.longTermBackground.summary,
+      ]
+        .join("\n")
+        .toLowerCase()
+    : "";
+
+  const summaryMatchesQuery = Boolean(
+    normalizedQuery && summariesText.includes(normalizedQuery),
+  );
+
   const filteredFacts = memory
-    ? memory.facts.filter((fact) =>
-        normalizedQuery
-          ? `${fact.content} ${fact.category}`
-              .toLowerCase()
-              .includes(normalizedQuery)
-          : true,
-      )
+    ? memory.facts.filter((fact) => {
+        if (!normalizedQuery) return true;
+        if (summaryMatchesQuery) return true;
+        return `${fact.content} ${fact.category}`
+          .toLowerCase()
+          .includes(normalizedQuery);
+      })
     : [];
 
   async function handleExportMemory() {

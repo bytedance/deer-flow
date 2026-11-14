@@ -262,15 +262,17 @@ export default function NewScheduledTaskPage() {
             onChange={(event) => setPrompt(event.target.value)}
             placeholder={st.create.prompt}
           />
-          <ScheduledTaskScheduleInput
-            key={
-              sourceTaskId
-                ? `${sourceTaskId}:${createSchedule.schedule_type}:${JSON.stringify(createSchedule.schedule_spec)}`
-                : "new"
-            }
-            initial={createSchedule}
-            onChange={setCreateSchedule}
-          />
+          {sourceStatus === "loading" ? (
+            <div className="text-muted-foreground text-sm">
+              {t.common.loading}
+            </div>
+          ) : (
+            <ScheduledTaskScheduleInput
+              key={sourceTaskId ?? "new"}
+              initial={createSchedule}
+              onChange={setCreateSchedule}
+            />
+          )}
           {createSchedule.schedule_type === "once" &&
             !createSchedule.schedule_spec.run_at && (
               <div className="text-muted-foreground text-sm">
