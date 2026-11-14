@@ -109,6 +109,20 @@ async def test_missing_key_never_makes_request(webz):
 
 
 @pytest.mark.asyncio
+async def test_env_template_placeholder_is_not_sent_as_a_key(webz, monkeypatch):
+    """An ``.env`` made from the old template still holds ``WEBZ_API_KEY=your-webz-api-key``."""
+    module, options, requests, _, _ = webz
+    options.update(api_key="your-webz-api-key")
+    monkeypatch.setenv("WEBZ_API_KEY", "your-webz-api-key")
+    assert "WEBZ_API_KEY" in json.loads(await module.web_search_tool.ainvoke({"query": "news"}))["error"]
+    assert not requests
+
+    monkeypatch.setenv("WEBZ_API_KEY", "env-key")
+    await module.web_search_tool.ainvoke({"query": "news"})
+    assert requests[0].headers["authorization"] == "Bearer env-key"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("arguments", [{"query": " "}, {"query": "x" * 751}, {"query": "word " * 101}, {"query": "news", "published_from": "yesterday"}, {"query": "news", "published_from": "2026-09-20", "published_to": "2026-09-01"}])
 async def test_invalid_input_never_makes_request(webz, arguments):
     module, _, requests, _, _ = webz

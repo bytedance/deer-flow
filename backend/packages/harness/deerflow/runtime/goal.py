@@ -64,6 +64,10 @@ CONTINUABLE_GOAL_BLOCKERS: set[GoalBlocker] = {"goal_not_met_yet"}
 
 GOAL_CLEAR_ALIASES = frozenset({"clear", "reset", "off"})
 
+# The explicit subcommand that asks `/goal` to synthesize an objective from the
+# recent conversation instead of treating the text as a literal objective.
+GOAL_FROM_CHAT_TOKEN = "from-chat"
+
 GOAL_OUTCOME_CHANNEL = "goal_outcome"
 
 _extract_response_text = llm_text.extract_response_text
@@ -89,23 +93,30 @@ def goal_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]:
 class GoalCommand(NamedTuple):
     """Parsed intent of a ``/goal`` slash command argument string."""
 
-    kind: Literal["status", "clear", "set"]
+    kind: Literal["status", "clear", "set", "from_chat"]
     objective: str = ""
 
 
 def parse_goal_command(args: str) -> GoalCommand:
     """Parse the argument string of a ``/goal`` command into an intent.
 
-    Shared by the TUI and IM-channel surfaces so the three-way semantics stay in
+    Shared by the TUI and IM-channel surfaces so the command semantics stay in
     one place: empty shows the active goal, ``clear``/``reset``/``off`` clears it,
-    and anything else sets the goal to that (trimmed) objective. The frontend
-    keeps a parallel TypeScript copy in ``input-box-helpers.ts``.
+    ``from-chat [guidance]`` asks the server to synthesize an objective from the
+    recent conversation (``objective`` then carries the optional guidance), and
+    anything else sets the goal to that (trimmed) objective. The frontend keeps a
+    parallel TypeScript copy in ``input-box-helpers.ts`` — as of the from-chat
+    slice that copy still parses ``from-chat ...`` as a literal objective; the
+    web-side alignment is a documented follow-up, not a regression.
     """
     stripped = args.strip()
     if not stripped:
         return GoalCommand("status")
     if stripped.lower() in GOAL_CLEAR_ALIASES:
         return GoalCommand("clear")
+    parts = stripped.split(None, 1)
+    if parts[0].lower() == GOAL_FROM_CHAT_TOKEN:
+        return GoalCommand("from_chat", parts[1].strip() if len(parts) > 1 else "")
     return GoalCommand("set", stripped)
 
 

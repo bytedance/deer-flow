@@ -30,6 +30,7 @@ type HappyDOMWindow = Window & {
 };
 
 const THREAD_ID = "83d5133d-f8aa-4095-9bba-2aca03f8f61c";
+const SHARE_TOKEN = "s".repeat(43);
 const writeText = rs.mocked(writeTextToClipboard);
 const initialURL = window.location.href;
 
@@ -65,10 +66,34 @@ function renderItem(metadata: Record<string, unknown> = {}) {
 
 /** Opens the row's "more" menu and selects Share. Radix opens on pointerdown. */
 async function share(): Promise<string> {
+  rs.spyOn(globalThis, "fetch").mockImplementation(
+    async (_url, init) =>
+      new Response(
+        JSON.stringify(
+          init?.method === "POST"
+            ? {
+                share_id: "one",
+                checkpoint_id: "cp",
+                seq: 1,
+                token: SHARE_TOKEN,
+                created_at: new Date().toISOString(),
+                expires_at: new Date(Date.now() + 86400000).toISOString(),
+                revoked_at: null,
+              }
+            : [],
+        ),
+      ),
+  );
   const trigger = await screen.findByRole("button", { name: /more/i });
   fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
   fireEvent.click(trigger);
   fireEvent.click(await screen.findByText("Share"));
+  const create = await screen.findByRole("button", {
+    name: "Create snapshot link",
+  });
+  await waitFor(() => expect(create.getAttribute("disabled")).toBeNull());
+  fireEvent.click(create);
+  fireEvent.click(await screen.findByRole("button", { name: "Copy link" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
   return writeText.mock.calls[0]![0];
 }
@@ -76,6 +101,7 @@ async function share(): Promise<string> {
 afterEach(() => {
   cleanup();
   writeText.mockReset();
+  rs.restoreAllMocks();
   (window as unknown as HappyDOMWindow).happyDOM.setURL(initialURL);
 });
 
@@ -97,18 +123,16 @@ describe("ThreadSidebarItem Share", () => {
       );
       writeText.mockResolvedValue(true);
       renderItem();
-      expect(await share()).toBe(`${origin}/workspace/chats/${THREAD_ID}`);
+      expect(await share()).toBe(`${origin}/share/${SHARE_TOKEN}`);
     });
   }
 
-  it("copies the custom agent route on the current origin", async () => {
+  it("creates the same public snapshot route for a custom agent conversation", async () => {
     (window as unknown as HappyDOMWindow).happyDOM.setURL(
       "http://localhost:2026/workspace",
     );
     writeText.mockResolvedValue(true);
     renderItem({ agent_name: "research bot" });
-    expect(await share()).toBe(
-      `http://localhost:2026/workspace/agents/research%20bot/chats/${THREAD_ID}`,
-    );
+    expect(await share()).toBe(`http://localhost:2026/share/${SHARE_TOKEN}`);
   });
 });

@@ -86,6 +86,8 @@ hook directory, so they never run a developer's or CI's Git hooks.
   look identical.
 - **Shutdown stops accepting detached observations before the memory flush**, so an
   accepted observation is never registered after shutdown began.
+- **Search indexes are rebuildable.** The Gateway rechecks each indexed hit
+  against the current owner-visible message before returning text.
 
 ## Full-stack plugins and host access
 

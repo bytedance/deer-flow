@@ -24,7 +24,7 @@ from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import HTTPException
-from langgraph_sdk.errors import ConflictError
+from langgraph_sdk.errors import APIStatusError, ConflictError
 
 from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
@@ -142,7 +142,7 @@ _LIVE_RUN_STATUSES = frozenset({"pending", "running"})
 
 @dataclass
 class _RunAdmission:
-    """How far one inbound message's run request got, for dedupe release.
+    """How far one inbound message's run request got, for dedupe and goal replies.
 
     ``requested`` flips right before the run request leaves the manager;
     ``confirmed`` once the Gateway proved it admitted the run (a run id, a
@@ -151,6 +151,7 @@ class _RunAdmission:
 
     requested: bool = False
     confirmed: bool = False
+    error: BaseException | None = None
 
 
 _RUN_ADMISSION: ContextVar[_RunAdmission | None] = ContextVar("deerflow_channel_run_admission", default=None)
@@ -161,9 +162,20 @@ _RUN_ADMISSION: ContextVar[_RunAdmission | None] = ContextVar("deerflow_channel_
 # status errors mean the Gateway never admitted it.
 _RUN_REQUEST_REACHED_GATEWAY_ERRORS = (httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError)
 
+# ``/goal from-chat`` makes the Gateway run a synthesis LLM call before it
+# answers, which routinely exceeds the 10s budget the other ``/goal`` calls
+# need for a checkpoint read/write — the live Feishu run timed out client-side
+# while the Gateway went on to save the goal. Keep connect/write/pool short so
+# a dead Gateway still fails fast, and extend only the read for the synthesis.
+_GOAL_FROM_CHAT_TIMEOUT = httpx.Timeout(10.0, read=120.0)
+
 
 class _RunFailedFrame(RuntimeError):
     """The stream's ``error`` frame: the run ended, so a retry is not a duplicate."""
+
+
+class _ConversationSwitched(RuntimeError):
+    """The chat no longer points at the thread whose goal was saved."""
 
 
 @contextmanager
@@ -194,6 +206,11 @@ def _note_run_confirmed() -> None:
     if (admission := _RUN_ADMISSION.get()) is not None:
         admission.requested = True
         admission.confirmed = True
+
+
+def _note_run_error(error: BaseException) -> None:
+    if (admission := _RUN_ADMISSION.get()) is not None:
+        admission.error = error
 
 
 # Recovery replies must say the turn was dropped: the run was rejected before
@@ -2156,14 +2173,21 @@ class ChannelManager:
 
         self._maybe_spawn_followup_watcher(thread_id, result, carrier_msg)
 
-    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str) -> None:
+    async def _publish_progress_update(self, msg: InboundMessage, thread_id: str, text: str, *, is_final: bool = False) -> None:
+        """Publish a turn update; progress by default, final for standalone replies.
+
+        A non-final outbound joins the run's stream: streaming channels update
+        the same message with later chunks (and the final answer), while QQ and
+        DingTalk card mode drop it before a stream exists. Callers that must
+        stay visible on every channel publish ``is_final=True``.
+        """
         await self.bus.publish_outbound(
             OutboundMessage(
                 channel_name=msg.channel_name,
                 chat_id=msg.chat_id,
                 thread_id=thread_id,
                 text=text,
-                is_final=False,
+                is_final=is_final,
                 thread_ts=msg.thread_ts,
                 connection_id=msg.connection_id,
                 owner_user_id=msg.owner_user_id,
@@ -3285,6 +3309,7 @@ class ChannelManager:
         extra_context: dict[str, Any] | None = None,
         *,
         bound_identity_checked: bool = False,
+        expected_thread_id: str | None = None,
     ) -> None:
         # Normal entry paths already run the bound-identity check in
         # _handle_message() or _handle_command(). Keep this default False so
@@ -3301,7 +3326,10 @@ class ChannelManager:
         # first message for the chat. topic_id may be None (e.g. Telegram
         # private chats) — the store handles this by using the "channel:chat_id"
         # key without a topic suffix.
-        thread_id, created = await self._get_or_create_thread(client, msg)
+        if expected_thread_id is None:
+            thread_id, created = await self._get_or_create_thread(client, msg)
+        else:
+            thread_id, created = expected_thread_id, False
         if not created:
             logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
             await self._update_thread_channel_metadata(client, msg, thread_id)
@@ -3341,6 +3369,7 @@ class ChannelManager:
                 thread_id,
                 extra_context=extra_context,
                 storage_user_id=storage_user_id,
+                check_thread_binding=expected_thread_id is not None,
             )
         finally:
             self._finish_serialized_thread_run(
@@ -3358,6 +3387,7 @@ class ChannelManager:
         *,
         extra_context: dict[str, Any] | None = None,
         storage_user_id: str | None = None,
+        check_thread_binding: bool = False,
     ) -> None:
         if storage_user_id is None:
             storage_user_id = _channel_storage_user_id(msg)
@@ -3396,6 +3426,11 @@ class ChannelManager:
         original_text = msg.text
         uploaded = await _ingest_inbound_files(thread_id, msg, user_id=storage_user_id)
         human_message = _human_input_message_with_channel_response(msg.text, metadata=msg.metadata, original_content=original_text, files=uploaded or None, message_id=human_message_id)
+
+        # Metadata loading, queueing and file preparation may have awaited a
+        # /new. Keep the saved thread pinned and check its binding at handoff.
+        if check_thread_binding and await self._lookup_thread_id(msg) != thread_id:
+            raise _ConversationSwitched
 
         if self._channel_supports_streaming(msg.channel_name):
             await self._handle_streaming_chat(
@@ -3447,6 +3482,7 @@ class ChannelManager:
                 # behaviorally identical to the previous bare ``await``.
                 result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
             except Exception as exc:
+                _note_run_error(exc)
                 if _is_admitted_run_conflict(exc):
                     # An earlier delivery's run; it posts its own outcome.
                     _note_run_confirmed()
@@ -3487,6 +3523,7 @@ class ChannelManager:
                 **run_kwargs,
             )
         except Exception as exc:
+            _note_run_error(exc)
             if _is_admitted_run_conflict(exc):
                 _note_run_confirmed()
                 logger.info("[Manager] run already admitted for this message: thread_id=%s (%s)", thread_id, exc)
@@ -3500,6 +3537,7 @@ class ChannelManager:
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             if step_limit_text := _step_limit_text(exc):
+                _note_run_confirmed()
                 logger.warning("[Manager] run stopped at its step limit: thread_id=%s", thread_id)
                 await self._send_error(msg, step_limit_text)
                 # The run ended, as after a terminal error frame: release the key
@@ -3700,6 +3738,8 @@ class ChannelManager:
                 pin_recovery = await self._stale_pin_recovery(msg, exc, expected_pin=expected_pin, thread_id=thread_id)
                 pin_recovery_text = pin_recovery.text if pin_recovery else None
         finally:
+            if stream_error is not None:
+                _note_run_error(stream_error)
             if replay_gap and last_values is None and not latest_text and stream_error is None:
                 last_values = await self._admitted_turn(client, msg, thread_id)
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
@@ -3842,7 +3882,7 @@ class ChannelManager:
             reply = (
                 "Available commands:\n"
                 "/bootstrap — Start a bootstrap session (enables agent setup)\n"
-                "/goal [condition|clear] — Set, show, or clear an active goal\n"
+                "/goal [condition|clear|from-chat [hint]] — Set, show, clear, or compose the goal from the conversation\n"
                 "/new — Start a new conversation\n"
                 "/status — Show current thread info\n"
                 "/models — List available models\n"
@@ -4088,8 +4128,12 @@ class ChannelManager:
         """Recognize only the Gateway's known goal-write conflict, not arbitrary 409s."""
         if not isinstance(error, httpx.HTTPStatusError) or error.response.status_code != 409:
             return False
+        # POST (from-chat synthesis) saves the goal like PUT, so it carries the
+        # same "Set the goal ..." detail; recognizing it lets the IM reply reuse
+        # the busy wording for both the pre-check and the save-time race.
         detail = {
             "PUT": "Thread has a run in flight. Set the goal after the run finishes.",
+            "POST": "Thread has a run in flight. Set the goal after the run finishes.",
             "DELETE": "Thread has a run in flight. Clear the goal after the run finishes.",
         }.get(error.request.method)
         if detail is None:
@@ -4107,13 +4151,15 @@ class ChannelManager:
         *,
         headers: dict[str, str],
         json: dict[str, Any] | None = None,
+        suffix: str = "",
+        timeout: float | httpx.Timeout = 10,
     ) -> dict[str, Any]:
         async with _make_gateway_client(self._gateway_url) as http:
             request = getattr(http, method.lower())
-            kwargs: dict[str, Any] = {"timeout": 10, "headers": {**headers, **self._csrf_headers()}}
+            kwargs: dict[str, Any] = {"timeout": timeout, "headers": {**headers, **self._csrf_headers()}}
             if json is not None:
                 kwargs["json"] = json
-            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal", **kwargs)
+            response = await request(f"{self._gateway_url}/api/threads/{quote(thread_id, safe='')}/goal{suffix}", **kwargs)
             response.raise_for_status()
             return response.json() or {}
 
@@ -4180,6 +4226,9 @@ class ChannelManager:
                 return await self._goal_reply(msg, "clear_failed")
             return await self._goal_reply(msg, "cleared")
 
+        if command.kind == "from_chat":
+            return await self._handle_goal_from_chat(msg, thread_id, guidance=command.objective, headers=headers)
+
         if not thread_id:
             thread_id, _ = await self._create_first_thread(self._get_client(), msg)
 
@@ -4196,6 +4245,108 @@ class ChannelManager:
         chat_msg = _dc_replace(msg, text=command.objective, msg_type=InboundMessageType.CHAT)
         await self._handle_chat(chat_msg, bound_identity_checked=True)
         return None
+
+    async def _handle_goal_from_chat(self, msg: InboundMessage, thread_id: str | None, *, guidance: str, headers: dict[str, str]) -> str | None:
+        """``/goal from-chat``: synthesize an objective from the conversation, then start one run.
+
+        Unlike the literal ``set`` branch — which starts the run silently because
+        the user typed the objective — the objective here is model-synthesized,
+        so the user is shown what was saved before the run streams its output.
+        Saving and the busy/409 guard stay on the Gateway route; this only
+        reports the outcome and hands the saved objective to ``_handle_chat``.
+        Run handoff keeps this thread pinned and re-checks the binding after
+        confirmation delivery and preparation. Admission evidence distinguishes
+        rejected starts from requests whose response was lost.
+        """
+        if not thread_id:
+            return await self._goal_reply(msg, "from_chat_no_thread")
+
+        try:
+            result = await self._goal_request("post", thread_id, headers=headers, json={"guidance": guidance or None}, suffix="/from-chat", timeout=_GOAL_FROM_CHAT_TIMEOUT)
+        except Exception as exc:
+            return await self._goal_from_chat_error_reply(msg, exc)
+
+        goal = result.get("goal") if isinstance(result, Mapping) else None
+        objective = goal.get("objective") if isinstance(goal, Mapping) else None
+        if not isinstance(objective, str) or not objective.strip():
+            logger.warning("Goal from-chat returned no usable objective")
+            return await self._goal_reply(msg, "from_chat_failed")
+
+        from dataclasses import replace as _dc_replace
+
+        chat_msg = _dc_replace(msg, text=objective, msg_type=InboundMessageType.CHAT)
+        reply = None
+        may_be_running = False
+        with _run_admission_scope() as admission:
+            try:
+                if await self._lookup_thread_id(msg) != thread_id:
+                    raise _ConversationSwitched
+                locale = await self._reply_locale.locale_for(_effective_owner_user_id(msg))
+                try:
+                    # A separate final outbound keeps the saved objective visible
+                    # alongside the run's stream on every IM provider.
+                    await self._publish_progress_update(msg, thread_id, goal_reply_text("from_chat_saved", locale).format(objective=objective), is_final=True)
+                except Exception:
+                    logger.warning("Goal from-chat saved but the confirmation card failed", exc_info=True)
+                await self._handle_chat(chat_msg, bound_identity_checked=True, expected_thread_id=thread_id)
+            except _ConversationSwitched:
+                reply = (await self._goal_reply(msg, "from_chat_conversation_switched")).format(objective=objective)
+            except Exception as exc:
+                _note_run_error(exc)
+                logger.warning("Goal from-chat run handoff failed", exc_info=True)
+
+            if reply is None and admission.error is not None and not admission.confirmed:
+                error = admission.error
+                rejected = isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+                if isinstance(error, (httpx.HTTPStatusError, APIStatusError)):
+                    rejected = 400 <= error.response.status_code < 500
+                may_be_running = admission.requested and not rejected
+                reply = await self._goal_reply(msg, "from_chat_run_status_unknown" if may_be_running else "from_chat_saved_but_not_started")
+            if reply is not None:
+                # Use the saved thread even when its conversation binding cannot
+                # be read. Deliver the recovery advice before releasing dedupe.
+                await self._publish_progress_update(msg, thread_id, reply, is_final=True)
+                if admission.error is not None and not may_be_running:
+                    await self._release_inbound_dedupe_key(msg)
+        return None
+
+    async def _goal_from_chat_error_reply(self, msg: InboundMessage, exc: Exception) -> str:
+        """Map a from-chat Gateway error to the owner-language reply.
+
+        Only the known in-flight conflict, a client-side timeout, and the
+        structured synthesis outcomes (``unclear``, ``no_context``,
+        ``pending_clarification``, ``goal_changed``) get their own wording;
+        anything else degrades to the generic retry reply. The model's ``reason``
+        is never read here, and the Gateway does not log it verbatim either.
+        """
+        if self._is_goal_in_flight_error(exc):
+            return await self._goal_reply(msg, "busy")
+        if isinstance(exc, httpx.TimeoutException):
+            # The Gateway may finish synthesizing and save the goal after this
+            # client stops waiting, so the reply must not claim it failed.
+            logger.warning("Goal from-chat request timed out; the goal may still be saved", exc_info=True)
+            return await self._goal_reply(msg, "from_chat_timeout")
+        code = None
+        if isinstance(exc, httpx.HTTPStatusError):
+            try:
+                body = exc.response.json()
+            except ValueError:
+                body = None
+            detail = body.get("detail") if isinstance(body, Mapping) else None
+            if isinstance(detail, Mapping):
+                code = detail.get("code")
+        if code == "unclear":
+            return await self._goal_reply(msg, "from_chat_unclear")
+        if code == "no_context":
+            return await self._goal_reply(msg, "from_chat_no_context")
+        if code == "pending_clarification":
+            return await self._goal_reply(msg, "from_chat_pending_clarification")
+        if code == "goal_changed":
+            # The save's compare-and-swap found a newer checkpoint: another
+            # goal (or write) landed during synthesis, so nothing was saved.
+            return await self._goal_reply(msg, "from_chat_changed")
+        logger.warning("Goal from-chat failed through gateway", exc_info=True)
+        return await self._goal_reply(msg, "from_chat_failed")
 
     async def _fetch_gateway_json(self, path: str, *, msg: InboundMessage | None = None) -> dict[str, Any]:
         """GET a Gateway API path and return the parsed JSON body.

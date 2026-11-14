@@ -9,6 +9,8 @@ import pytest
 
 from deerflow.knowledge import KnowledgeRequestContext, format_result, sources_from_messages
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def graph(monkeypatch):

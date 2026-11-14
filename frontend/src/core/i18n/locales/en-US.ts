@@ -14,6 +14,53 @@ import { bundledCopy } from "@/core/extensions/documentation";
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  sharing: {
+    title: "Share conversation",
+    description:
+      "Anyone with the link can view this snapshot without signing in.",
+    scope:
+      "Includes visible conversation steps and presented output files. Later changes stay private. Revoke a link to stop future access; copies already downloaded or forked remain with their recipients.",
+    expiry: "Link expires after",
+    hour: "1 hour",
+    day: "1 day",
+    week: "7 days",
+    month: "30 days",
+    create: "Create snapshot link",
+    working: "Working…",
+    link: "Share link",
+    copy: "Copy link",
+    copied: "Copied",
+    links: "Created links",
+    noLinks: "No share links yet.",
+    revoke: "Revoke",
+    revoked: "Revoked",
+    expired: "Expired",
+    expires: "Expires",
+    loading: "Loading…",
+    failed: "Unable to complete this request. Try again.",
+    unavailable: "Sharing is unavailable on this server.",
+    conflict:
+      "Finish the current turn before sharing. If it is already finished, refresh or revoke an older link and try again.",
+    tooLarge:
+      "This conversation or its artifacts exceed the sharing size limit.",
+    readOnly: "Read-only snapshot",
+    fork: "Continue in my workspace",
+    forking: "Copying…",
+    missing: "This share link has expired, was revoked, or is unavailable.",
+    retry: "Retry",
+    artifacts: "Artifacts",
+    download: "Download",
+    preview: "Preview",
+    close: "Close preview",
+    you: "User",
+    assistant: "Assistant",
+    tool: "Tool result",
+    noPreview: "Download this file to open it.",
+    previewNote:
+      "Static preview. Interactive content may require downloading the file.",
+    previewLimited:
+      "Preview shows the first 512 KiB. Download for the complete file.",
+  },
   usage: {
     title: "Token usage",
     description: "View input, output and cache-hit token usage.",
@@ -124,6 +171,11 @@ export const enUS: Translations = {
     },
     catalog: {
       officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
+      workspaceSearch: {
+        title: "Conversation search",
+        description:
+          "Search historical message text and jump to the matching conversation turn.",
+      },
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
       context: bundledCopy("deerflow-extension-jev-context", "en-US"),
@@ -267,6 +319,7 @@ export const enUS: Translations = {
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    scrollToBottom: "Scroll to bottom",
     showingOf: (loaded, total) => `Showing ${loaded} of ${total}`,
     download: "Download",
     thinking: "Thinking",
@@ -2054,6 +2107,39 @@ export const enUS: Translations = {
   },
 
   // Shortcuts
+  workspaceSearch: {
+    title: "Search conversations",
+    description: "Find conversations and messages, or run a command.",
+    placeholder: "Search titles and messages…",
+    open: "Search",
+    all: "All",
+    threads: "Conversations",
+    messages: "Messages",
+    includeArchived: "Include archived",
+    archived: "Archived",
+    recent: "Recent conversations",
+    searching: "Searching…",
+    indexing: "Preparing message search… Results will appear here shortly.",
+    unavailable:
+      "Message search is unavailable on this installation. You can search conversation titles.",
+    unsupported: "Search is unavailable in this view.",
+    error: "Search could not finish. Try again.",
+    empty: "No matches. Try another keyword or include archived conversations.",
+    more: "Show more results",
+    retry: "Try again",
+    hint: "↑ ↓ to navigate · Enter to open · > for commands",
+    user: "You",
+    assistant: "Assistant",
+    context: "Message context",
+    returnToLatest: "Return to latest messages",
+    loadingContext: "Loading message context…",
+    messageUnavailable:
+      "This message is no longer available. Return to the conversation to view its current history.",
+    matchedMessage: "Located message",
+    earlier: "Earlier messages",
+    later: "Later messages",
+    untitled: "Untitled conversation",
+  },
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",

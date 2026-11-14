@@ -2563,6 +2563,8 @@ memory:
     eviction_access_half_life_days: 30
     eviction_correction_reserved_fraction: 0.10
     eviction_correction_reserved_max: 10
+    eviction_reserved_categories: [correction] # hybrid-v1 only: categories eligible for the reserved slots above (default: ["correction"])
+    eviction_decay_exempt_categories: [] # hybrid-v1 only: categories exempt from confirmation freshness time-decay (default: [])
     eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
@@ -3722,6 +3724,15 @@ authorization:
 # See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
+#   - name: workspace-search
+#     package: deerflow-extension-workspace-search
+#     use: deerflow_workspace_search:install
+#     table_prefix: extension_workspace_search_
+#     enabled: true
+#     # Install examples/deerflow-extension-workspace-search first; restart Gateway.
+#     # SQLite/Postgres reuse the application database. Memory deployments use:
+#     config:
+#       path: .deer-flow/workspace-search.db
 #   - name: example                       # PEP 621 entry-point name
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
