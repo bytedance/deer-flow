@@ -55,6 +55,8 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from deerflow.agents.middlewares.response_chain import without_response_chain_id
+
 #: Replacement args keyed by tool-call id.
 ArgsReplacements = Mapping[str, dict[str, Any]]
 #: ``(message, tool_call) -> new_args`` or ``None`` to leave the call alone.
@@ -99,7 +101,7 @@ def rewrite_messages_tool_call_args(messages: list[Any], replacement_for: Replac
         updated.append(patched)
     if not changed:
         return None
-    return [_without_response_chain_id(message) for message in updated]
+    return [without_response_chain_id(message) for message in updated]
 
 
 def _duplicated_call_ids(tool_calls: Sequence[Any]) -> set[str]:
@@ -172,17 +174,6 @@ def pair_tool_call_results(messages: Sequence[Any]) -> list[ToolCallOccurrence]:
                 position = queue.popleft()
                 occurrences[position] = replace(occurrences[position], result=message)
     return occurrences
-
-
-def _without_response_chain_id(message: Any) -> Any:
-    """Drop an OpenAI ``resp_`` response id so the adapter replays history instead of chaining to it."""
-    if not isinstance(message, AIMessage):
-        return message
-    response_metadata = message.response_metadata or {}
-    response_id = response_metadata.get("id")
-    if not (isinstance(response_id, str) and response_id.startswith("resp_")):
-        return message
-    return message.model_copy(update={"response_metadata": {key: value for key, value in response_metadata.items() if key != "id"}})
 
 
 def rewrite_tool_call_args(message: AIMessage, replacements: ArgsReplacements) -> AIMessage:

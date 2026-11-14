@@ -77,6 +77,11 @@ This section accumulates work toward the **2.3.0** milestone
   invalid, returns the Gateway's `422`; edits to other fields do not revalidate
   an unchanged schedule. ([#8020])
 
+- **summarization:** With `use_previous_response_id`, successful context
+  compaction now starts a fresh Responses API history so the next request
+  includes the new summary and retained messages. Skipped or failed compaction
+  preserves the existing continuation chain.
+
 - **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
   `parents` or `counters_since_delta_snapshot` in its metadata no longer
   leaves the thread broken. Those keys used to land on the thread's first
