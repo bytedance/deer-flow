@@ -558,6 +558,12 @@ server always require an agent grant; there is no passthrough to discovery
 credentials. Default Lead, bootstrap runs and owners without a matching grant
 cannot call its tools. Personal MCP connections cannot enable this feature.
 
+Enabling protection also denies calls through tools issued before the change;
+start a new run to discover tools with the current authentication chain. Editing
+a server preserves `agent_auth` when the field is omitted, including on the
+single-server replacement endpoint. Disabling protection requires explicit
+`agent_auth: false`.
+
 Keep the grants in operator-owned `config.yaml`, separately from the
 API-writable server configuration:
 
@@ -620,6 +626,11 @@ own name or binding. Durable subagent batches and ordinary MCP background
 tasks store only nonsecret binding/definition references, then restore that
 identity after worker recovery. A new definition rollout does not switch an
 existing task's service account or break its status/cancel calls.
+
+References also bind the MCP transport and exact URL. Changing that destination
+invalidates existing references, including after a Gateway restart; old tasks
+cannot send their account's credential to the replacement endpoint. References
+without a destination fingerprint are refused rather than upgraded implicitly.
 
 Each call checks the current operator grant, including when the access token
 is cached. Disable/delete the binding or remove an owner to deny subsequent

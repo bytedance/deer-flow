@@ -52,3 +52,32 @@ async def test_cold_admission_and_live_policy_reload(agent_auth_env, agent_mcp_t
     finally:
         reset_extensions_config()
         reset_app_config()
+
+
+@pytest.mark.asyncio
+async def test_existing_standalone_tool_observes_enabled_protection_off_loop(agent_auth_env, tmp_path, monkeypatch):
+    config = agent_auth_env.config.extensions.model_copy(deep=True)
+    config.mcp_servers["tickets"].agent_auth = False
+    path = tmp_path / "extensions.json"
+    await asyncio.to_thread(path.write_text, config.model_dump_json(by_alias=True), encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(path))
+    reset_app_config()  # MCP-only embeddings need no config.yaml.
+    reset_extensions_config()
+    interceptor = build_agent_auth_interceptor(config)
+    request = MCPToolCallRequest(name="search", args={}, server_name="tickets")
+    calls = []
+
+    async def handler(request):
+        calls.append(request)
+
+    try:
+        await interceptor(request, handler)
+        updated = config.model_copy(deep=True)
+        updated.mcp_servers["tickets"].agent_auth = True
+        await asyncio.to_thread(path.write_text, updated.model_dump_json(by_alias=True), encoding="utf-8")
+        with pytest.raises(ToolException):
+            await interceptor(request, handler)
+        assert len(calls) == 1
+    finally:
+        reset_extensions_config()
+        reset_app_config()

@@ -1107,7 +1107,8 @@ def _merge_preserving_secrets(
     }
     if preserve_omitted_fields and "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
-    if preserve_omitted_fields and "agent_auth" not in incoming.model_fields_set:
+    # Changing an ordinary field must not silently remove credential enforcement.
+    if "agent_auth" not in incoming.model_fields_set:
         update["agent_auth"] = existing.agent_auth
     if preserve_omitted_fields and "headers_from_context" not in incoming.model_fields_set:
         update["headers_from_context"] = existing.headers_from_context

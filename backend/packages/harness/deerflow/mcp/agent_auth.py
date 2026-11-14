@@ -17,7 +17,7 @@ from langchain_core.tools import ToolException
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from deerflow.config.agents_config import AgentConfig, load_agent_soul
-from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, get_extensions_config
 from deerflow.config.mcp_agent_auth_config import BindingId, DefinitionDigest, McpAgentCredentialBinding
 from deerflow.mcp.headers import apply_header_overrides, header_spellings
 from deerflow.mcp.oauth import OAuthTokenManager
@@ -41,6 +41,7 @@ class AgentCredentialReference(BaseModel):
     agent: str
     definition_digest: DefinitionDigest
     credential_digest: DefinitionDigest
+    destination_digest: DefinitionDigest
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,22 @@ def _credential_digest(binding: McpAgentCredentialBinding) -> str:
     return canonical_hash(binding.oauth.model_dump(mode="json", exclude={"client_secret", "refresh_token", "refresh_skew_seconds"}))
 
 
+def _destination_digest(server: McpServerConfig) -> str:
+    return canonical_hash({"transport": server.type, "url": server.url})
+
+
+def _current_server(server_name: str) -> McpServerConfig | None:
+    from deerflow.config.app_config import get_app_config, peek_loaded_app_config
+
+    try:
+        # Standalone MCP clients need only extensions_config.json. A Gateway
+        # also applies its operator-owned YAML overrides, never a run snapshot.
+        config = get_app_config(use_runtime_override=False).extensions if peek_loaded_app_config(use_runtime_override=False) is not None else get_extensions_config()
+        return config.mcp_servers.get(server_name)
+    except Exception:
+        raise ToolException("MCP agent credential policy is unavailable") from None
+
+
 def capture_agent_authority(app_config: Any, *, user_id: str, agent_config: AgentConfig | None) -> AgentMcpAuthority | None:
     """Admit a host-loaded definition once, before an agent run is assembled."""
     if agent_config is None:
@@ -88,7 +105,16 @@ def capture_agent_authority(app_config: Any, *, user_id: str, agent_config: Agen
     for binding_id, binding in matches:
         if digest not in binding.definition_digests:
             raise McpAgentAuthorizationError(f"Agent definition is not approved for MCP binding '{binding_id}'")
-        references.append(AgentCredentialReference(server=binding.server, binding=binding_id, agent=binding.agent, definition_digest=digest, credential_digest=_credential_digest(binding)))
+        references.append(
+            AgentCredentialReference(
+                server=binding.server,
+                binding=binding_id,
+                agent=binding.agent,
+                definition_digest=digest,
+                credential_digest=_credential_digest(binding),
+                destination_digest=_destination_digest(app_config.extensions.mcp_servers[binding.server]),
+            )
+        )
     return AgentMcpAuthority(user_id, tuple(references), canonical_json(agent_config.model_dump(mode="json")), soul)
 
 
@@ -149,6 +175,7 @@ def _current_binding(reference: AgentCredentialReference, user_id: str) -> McpAg
         or server is None
         or not server.enabled
         or not server.agent_auth
+        or _destination_digest(server) != reference.destination_digest
         or _credential_digest(binding) != reference.credential_digest
     ):
         raise McpAgentAuthorizationError(f"MCP agent credential binding '{reference.binding}' is unavailable or revoked")
@@ -190,7 +217,7 @@ async def validate_task_agent_reference(user_id: str, server_name: str, referenc
 
 
 def build_agent_auth_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
-    servers = {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.agent_auth}
+    servers = {name: server for name, server in extensions_config.get_enabled_mcp_servers().items() if server.type in ("http", "sse")}
     if not servers:
         return None
 
@@ -198,11 +225,20 @@ def build_agent_auth_interceptor(extensions_config: ExtensionsConfig) -> Any | N
         server = servers.get(request.server_name)
         if server is None:
             return await handler(request)
+        if not server.agent_auth:
+            current = await asyncio.to_thread(_current_server, request.server_name)
+            if current is not None and current.agent_auth:
+                # The old chain may still contain user/context auth writers.
+                # Require rediscovery instead of injecting into that chain.
+                raise McpAgentAuthorizationError(f"MCP server '{request.server_name}' now requires agent credentials; start a new run to reload its tools")
+            return await handler(request)
         runtime = getattr(request, "runtime", None)
         authority = runtime_agent_authority(runtime) if runtime is not None else _task_authority.get()
         reference = next((ref for ref in authority.references if ref.server == request.server_name), None) if authority is not None else None
         if reference is None:
             raise McpAgentAuthorizationError(f"No admitted agent credential for MCP server '{request.server_name}'")
+        if _destination_digest(server) != reference.destination_digest:
+            raise McpAgentAuthorizationError(f"MCP destination no longer matches binding '{reference.binding}'")
         binding = await asyncio.to_thread(_current_binding, reference, authority.user_id)
         manager = _token_manager(reference, binding)
         try:

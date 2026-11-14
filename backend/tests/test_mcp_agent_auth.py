@@ -170,6 +170,76 @@ def test_personal_file_cannot_claim_deployment_credentials(agent_auth_env):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("admitted", [False, True])
+async def test_existing_tool_rejects_newly_enabled_protection(agent_auth_env, agent_mcp_transport, admitted):
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.config.extensions_config import McpUserScopedAuthConfig
+    from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, capture_agent_authority
+    from deerflow.mcp.tools import get_mcp_tools
+
+    old = agent_auth_env.config.model_copy(deep=True)
+    old.extensions.mcp_servers["tickets"].agent_auth = False
+    old.extensions.mcp_servers["tickets"].user_auth = McpUserScopedAuthConfig(users={"alice": "Bearer research-client-old-user"})
+    set_app_config(old)
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("tools", ToolNode(await get_mcp_tools(old.extensions), handle_tool_errors=False))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    compiled = graph.compile()
+    value = {"messages": [AIMessage(content="", tool_calls=[{"name": "tickets_search", "args": {}, "id": "search-1", "type": "tool_call"}])]}
+    context = {"user_id": "alice"}
+    await compiled.ainvoke(value, context=context)
+    assert agent_mcp_transport.calls == [("search", "Bearer research-client-old-user")]
+    set_app_config(agent_auth_env.config)
+    if admitted:
+        context[AGENT_AUTH_CONTEXT_KEY] = capture_agent_authority(agent_auth_env.config, user_id="alice", agent_config=agent_auth_env.agent)
+    push_current_app_config(old)
+    try:
+        with pytest.raises(ToolException):
+            await compiled.ainvoke(value, context=context)
+    finally:
+        pop_current_app_config()
+    assert len(agent_mcp_transport.calls) == 1
+    assert agent_mcp_transport.token_clients == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_destination_changed", [False, True])
+async def test_task_reference_rejects_changed_live_or_captured_destination(agent_auth_env, agent_mcp_transport, live_destination_changed):
+    from deerflow.mcp.agent_auth import capture_agent_authority
+    from deerflow.mcp.task_tool_caller import McpTaskConnectionUnavailableError, McpTaskToolCaller
+
+    env = agent_auth_env
+    reference = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent).references[0].model_dump(mode="json")
+    replacement = env.config.model_copy(deep=True)
+    replacement.extensions.mcp_servers["tickets"].url = "https://replacement.example/mcp"
+    if live_destination_changed:
+        set_app_config(replacement)
+    caller = McpTaskToolCaller(replacement.extensions)
+    with pytest.raises(McpTaskConnectionUnavailableError):
+        await caller.call_tool(server_name="tickets", tool_name="poll_job", arguments={}, user_id="alice", thread_id="thread-1", agent_auth=reference)
+    assert agent_mcp_transport.calls == []
+    assert agent_mcp_transport.token_clients == []
+
+
+@pytest.mark.asyncio
+async def test_task_reference_without_destination_fails_closed(agent_auth_env, agent_mcp_transport):
+    from deerflow.mcp.agent_auth import capture_agent_authority
+    from deerflow.mcp.task_tool_caller import McpTaskConnectionUnavailableError, McpTaskToolCaller
+
+    env = agent_auth_env
+    reference = capture_agent_authority(env.config, user_id="alice", agent_config=env.agent).references[0].model_dump(mode="json")
+    del reference["destination_digest"]
+    with pytest.raises(McpTaskConnectionUnavailableError):
+        await McpTaskToolCaller(env.config.extensions).call_tool(server_name="tickets", tool_name="poll_job", arguments={}, user_id="alice", thread_id="thread-1", agent_auth=reference)
+    assert agent_mcp_transport.calls == []
+    assert agent_mcp_transport.token_clients == []
+
+
+@pytest.mark.asyncio
 async def test_concurrent_owners_never_share_tokens_and_secret_rotation_keeps_identity(agent_auth_env, agent_mcp_transport, caplog):
     from deerflow.mcp.agent_auth import capture_agent_authority
     from deerflow.mcp.task_tool_caller import McpTaskConnectionUnavailableError, McpTaskToolCaller

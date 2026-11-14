@@ -154,8 +154,10 @@ def _write_config(path, data):
 
 
 @pytest.mark.parametrize("operation", ["poll", "cancel"])
-@pytest.mark.parametrize("revoked", [False, True])
-def test_gateway_process_restart_keeps_task_identity_and_enforces_revocation(agent_auth_env, tmp_path, operation, revoked):
+@pytest.mark.parametrize("policy_change", ["definition", "revocation", "destination"])
+def test_gateway_process_restart_keeps_task_identity_and_enforces_revocation(agent_auth_env, tmp_path, operation, policy_change):
+    revoked = policy_change == "revocation"
+    denied = policy_change != "definition"
     env = agent_auth_env
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -221,23 +223,26 @@ def test_gateway_process_restart_keeps_task_identity_and_enforces_revocation(age
         binding["definition_digests"] = [agent_definition_digest(agent, new_soul)]
         binding["enabled"] = not revoked
         _write_config(config_path, data)
+        if policy_change == "destination":
+            server["url"] = remote_url + "/replacement-mcp"
+            _write_config(tmp_path / "extensions.json", {"mcpServers": {"tickets": server}})
         remote.generation = 2
         remote.release.set()
         with _gateway(tmp_path, client, port, 2) as second:
             assert second.pid != first.pid
-            target_status = "failed" if revoked else "cancelled" if operation == "cancel" else "working"
+            target_status = "failed" if denied else "cancelled" if operation == "cancel" else "working"
 
             def recovered():
                 record = request("GET", task_url)
                 sent = [call for call in remote.calls if call["generation"] == 2 and call["tool"] == operation + "_job"]
-                return record if record["status"] == target_status and (revoked or sent) else None
+                return record if record["status"] == target_status and (denied or sent) else None
 
             result = _until(recovered)
             if operation == "cancel":
                 assert result["cancel_attempt_count"] >= 2, result
             later_calls = [call for call in remote.calls if call["generation"] == 2]
-            if revoked:
-                assert "revoked" in result["error"], result
+            if denied:
+                assert result["error"], result
                 assert later_calls == []
                 assert remote.tokens == ["research-client-1"]
             else:
@@ -246,7 +251,16 @@ def test_gateway_process_restart_keeps_task_identity_and_enforces_revocation(age
                 assert remote.tokens == ["research-client-1", "research-client-2"]
             (tmp_path / "evidence.json").write_text(
                 json.dumps(
-                    {"operation": operation, "revoked": revoked, "old_pid": first.pid, "new_pid": second.pid, "old_exit": first.returncode, "task_status": result["status"], "token_acquisitions": len(remote.tokens), "calls": remote.calls},
+                    {
+                        "operation": operation,
+                        "policy_change": policy_change,
+                        "old_pid": first.pid,
+                        "new_pid": second.pid,
+                        "old_exit": first.returncode,
+                        "task_status": result["status"],
+                        "token_acquisitions": len(remote.tokens),
+                        "calls": remote.calls,
+                    },
                     indent=2,
                 ),
                 encoding="utf-8",

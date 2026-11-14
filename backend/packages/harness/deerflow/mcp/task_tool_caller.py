@@ -77,6 +77,7 @@ class McpTaskToolCaller:
         extensions_config: ExtensionsConfig,
         *,
         oauth_token_manager: OAuthTokenManager | None = None,
+        connection_scope: Literal["deployment", "personal"] = "deployment",
     ) -> None:
         self._extensions_config = extensions_config
         self._personal_callers: OrderedDict[str, tuple[PersonalMcpConfigSnapshot, McpTaskToolCaller | None]] = OrderedDict()
@@ -87,6 +88,7 @@ class McpTaskToolCaller:
         # custom ``mcpInterceptors`` builder is invoked exactly once.
         self._submit_interceptors = build_mcp_tool_interceptors(
             extensions_config,
+            connection_scope=connection_scope,
             oauth_builder=lambda config: build_oauth_tool_interceptor(
                 config,
                 token_manager=self._oauth_token_manager,
@@ -167,7 +169,7 @@ class McpTaskToolCaller:
             if caller is None:
                 # A personal name can equal a deployment name. Never consult
                 # the deployment OAuth state or startup snapshot for this path.
-                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config, owner_user_id=user_id))
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config, owner_user_id=user_id), connection_scope="personal")
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 

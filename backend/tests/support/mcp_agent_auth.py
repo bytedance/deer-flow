@@ -107,7 +107,7 @@ def agent_mcp_transport(monkeypatch):
             assert len(request.headers.get_list("authorization")) == 1
             name, authorization = message["params"]["name"], request.headers["authorization"]
             calls.append((name, authorization))
-            assert authorization.startswith("Bearer research-client")
+            assert authorization.startswith("Bearer research-client") or authorization == "Bearer discovery-secret"
             result = {"isError": False, "content": [{"type": "text", "text": "ok"}], "structuredContent": {"task_id": "remote-1", "status": "cancelled" if name == "cancel_job" else "running"}}
         else:
             raise AssertionError(method)

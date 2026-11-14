@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.agent_auth import build_agent_auth_interceptor
@@ -22,6 +22,7 @@ def build_mcp_tool_interceptors(
     oauth_builder: Any = build_oauth_tool_interceptor,
     user_auth_builder: Any = build_user_scoped_auth_interceptor,
     context_headers_builder: Any = build_context_headers_interceptor,
+    connection_scope: Literal["deployment", "personal"] = "deployment",
     resolver: Any = resolve_variable,
     target_logger: logging.Logger = logger,
 ) -> list[Any]:
@@ -31,7 +32,7 @@ def build_mcp_tool_interceptors(
     if oauth_interceptor is not None:
         interceptors.append(oauth_interceptor)
 
-    agent_auth_interceptor = build_agent_auth_interceptor(extensions_config)
+    agent_auth_interceptor = None if connection_scope == "personal" else build_agent_auth_interceptor(extensions_config)
     if agent_auth_interceptor is not None:
         interceptors.append(agent_auth_interceptor)
 

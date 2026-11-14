@@ -947,10 +947,11 @@ def peek_current_app_config() -> AppConfig | None:
     return _current_app_config.get()
 
 
-def peek_loaded_app_config() -> AppConfig | None:
+def peek_loaded_app_config(*, use_runtime_override: bool = True) -> AppConfig | None:
     """Return the configuration this process has loaded, without touching the filesystem.
 
-    The runtime-scoped override wins when one is active; otherwise this is the
+    The runtime-scoped override wins when one is active unless
+    ``use_runtime_override=False``; otherwise this is the
     cached singleton ``get_app_config()`` last loaded (or ``set_app_config()``
     installed). ``None`` means no configuration has ever been loaded in this
     process, which is what a host without a ``config.yaml`` looks like — as
@@ -958,7 +959,7 @@ def peek_loaded_app_config() -> AppConfig | None:
     file, where callers need the loaded value to tell "unavailable" from
     "never configured".
     """
-    override = _current_app_config.get()
+    override = _current_app_config.get() if use_runtime_override else None
     if override is not None:
         return override
     return _app_config

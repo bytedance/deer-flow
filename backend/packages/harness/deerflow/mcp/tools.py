@@ -1103,7 +1103,7 @@ class _PreparedServerDiscovery:
     pool: MCPSessionPool
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
-    connection_scope: str
+    connection_scope: MCPPoolDomain
     personal_user_id: str | None = None
 
 
@@ -1115,6 +1115,7 @@ def _prepare_server_client(
     client_cls: Any,
     initial_oauth_header: str | None,
     oauth_token_manager: OAuthTokenManager,
+    connection_scope: MCPPoolDomain = "deployment",
 ) -> _PreparedServerClient:
     """Build the client/interceptors for one selected server."""
     server_cfg = extensions_config.mcp_servers.get(server_name)
@@ -1126,6 +1127,7 @@ def _prepare_server_client(
     )
     tool_interceptors = build_mcp_tool_interceptors(
         server_view,
+        connection_scope=connection_scope,
         oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
         resolver=resolve_variable,
         target_logger=logger,
@@ -1421,6 +1423,7 @@ async def _discover_and_wrap_prepared(
             client_cls=client_cls,
             initial_oauth_header=initial_oauth_headers.get(server_name),
             oauth_token_manager=oauth_token_manager,
+            connection_scope=prepared.connection_scope,
         )
         for server_name in prepared.server_names
     ]
