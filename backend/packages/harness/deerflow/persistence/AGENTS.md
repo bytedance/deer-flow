@@ -103,3 +103,7 @@ with best-effort cleanup, preserving the original publication outcome.
   submits. The remote handle and the polling stay out of the agent loop.
 - **A paused batch is reconciled but not advanced.** Lease recovery includes a
   paused parent with expired items, and skips promotion and claiming.
+- **Retry admission matches the observed failed attempt in one conditional
+  update.** Check its status, completion time and update time together, so a
+  delayed request preserves a newer attempt and its result. Keep the
+  parent-before-item lock order.

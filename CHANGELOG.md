@@ -100,6 +100,10 @@ This section accumulates work toward the **2.3.0** milestone
   Windows extended-length namespace before removal.
   ([#8144](https://github.com/bytedance/deer-flow/pull/8144))
 
+- **subagents:** Concurrent explicit retries preserve the latest batch-item
+  attempt and result. Stale retries return HTTP 409, while fresh requests can
+  retry a subsequent failure. ([#7957](https://github.com/bytedance/deer-flow/pull/7957))
+
 - **channels:** A WeCom group command that follows the bot mention now runs as a
   command. WeCom keeps the mention inside the message text (`@RobotA /new`), and
   the classifier required a bare leading `/`, so `/new` and `/status` sent in a
