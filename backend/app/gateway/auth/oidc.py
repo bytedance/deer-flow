@@ -63,7 +63,7 @@ class OIDCValidationError(OIDCError):
 
 
 class OIDCUserInfoMismatch(OIDCError):
-    """UserInfo sub does not match ID token sub."""
+    """UserInfo sub is missing or does not match ID token sub."""
 
 
 def _json_object(resp: httpx.Response, what: str) -> dict[str, Any]:
@@ -391,8 +391,10 @@ class OIDCService:
     async def fetch_userinfo(self, metadata: OIDCMetadata, access_token: str, expected_sub: str) -> dict[str, Any]:
         """Fetch userinfo from the UserInfo endpoint.
 
-        Validates that the ``sub`` claim matches ``expected_sub``
-        (from the ID token) to prevent userinfo injection.
+        The response is returned only when its ``sub`` equals ``expected_sub``
+        (from the ID token). OIDC Core 5.3.2 requires that check, and a
+        response without a ``sub`` cannot be tied to this login, so it raises
+        ``OIDCUserInfoMismatch`` too instead of overriding the ID token claims.
         """
         if not metadata.userinfo_endpoint:
             return {}
@@ -407,7 +409,10 @@ class OIDCService:
             raise OIDCError(f"UserInfo fetch failed: {exc}") from exc
         userinfo = _json_object(resp, "UserInfo response")
 
-        if userinfo.get("sub") and userinfo["sub"] != expected_sub:
+        sub = userinfo.get("sub")
+        if not isinstance(sub, str) or not sub:
+            raise OIDCUserInfoMismatch("UserInfo response has no sub claim")
+        if sub != expected_sub:
             raise OIDCUserInfoMismatch("UserInfo sub does not match ID token sub")
 
         return userinfo
