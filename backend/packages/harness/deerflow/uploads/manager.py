@@ -119,6 +119,12 @@ def normalize_filename(filename: str) -> str:
     # but they indicate a Windows-style path that should be stripped or rejected.
     if "\\" in safe:
         raise ValueError(f"Filename contains backslash: {filename!r}")
+    # Reject colons — beyond drive letters (already stripped by Path.name),
+    # a colon in a basename addresses an NTFS Alternate Data Stream on
+    # Windows ("notes.txt:hidden" writes an invisible stream on notes.txt
+    # instead of a new file), matching skills.installer.is_unsafe_zip_member.
+    if ":" in safe:
+        raise ValueError(f"Filename contains colon: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
     if is_reserved_upload_filename(safe):
