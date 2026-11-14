@@ -187,7 +187,7 @@ This approach significantly improves generation quality by providing the model w
 This skill auto-selects the provider by environment variables (no CLI change):
 
 - `GEMINI_API_KEY` set → use Gemini (default, unchanged).
-- Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/image_generation`, model `image-01`).
+- Otherwise, `MINIMAX_API_KEY` set → use MiniMax (`/v1/images/generations`, model `MiniMax-H3-Image`).
 - Otherwise, `IMAGE_GENERATION_API_KEY` set → use an OpenAI-compatible Images API.
 - Force one explicitly with `IMAGE_GENERATION_PROVIDER=gemini|minimax|openai`.
   `openai-compatible` is also accepted as an alias for `openai`.
@@ -211,17 +211,17 @@ supported dimensions and `response_format=b64_json`; DALL-E output files must us
 skill; use the default GPT Image model for edits.
 
 MiniMax optional overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
-`MINIMAX_IMAGE_MODEL` (default `image-01`). Reference images are sent as the MiniMax
-`subject_reference` character image. The CLI and `--prompt-file` / `--reference-images`
-/ `--output-file` / `--aspect-ratio` arguments are identical for both providers.
+`MINIMAX_IMAGE_MODEL` (default `MiniMax-H3-Image`). Text-to-image uses
+`POST /v1/images/generations`. Reference-image calls use JSON
+`POST /v1/images/edits` with `images[].image_url` data URLs. The CLI and
+`--prompt-file` / `--reference-images` / `--output-file` / `--aspect-ratio`
+arguments are identical for all providers.
 
 **MiniMax prompt handling (provider-internal).** Authoring is provider-agnostic — write
-the same structured JSON regardless of which provider is active. MiniMax `image-01`
-consumes a single text string, so the MiniMax path itself sends only the JSON `prompt`
-field (the other fields such as `style` / `composition` / `negative_prompt` apply to the
-Gemini path) and enables `prompt_optimizer` so MiniMax expands it server-side. MiniMax
-caps that prompt at 1500 characters; if the `prompt` field is longer, the script returns
-an error instead of calling the API. The Gemini path receives the full structured JSON.
+the same structured JSON regardless of which provider is active. MiniMax consumes a
+single text string, so the MiniMax path itself sends only the JSON `prompt` field
+(the other fields such as `style` / `composition` / `negative_prompt` apply to the
+Gemini path). The Gemini path receives the full structured JSON.
 
 ## Notes
 

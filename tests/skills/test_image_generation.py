@@ -81,7 +81,7 @@ def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
         captured["json"] = json
         return FakeResp(
             {
-                "data": {"image_base64": [base64.b64encode(raw).decode()]},
+                "data": [{"b64_json": base64.b64encode(raw).decode()}],
                 "base_resp": {"status_code": 0, "status_msg": "success"},
             }
         )
@@ -93,13 +93,12 @@ def test_minimax_builds_payload_and_writes(monkeypatch, tmp_path):
     msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
 
     assert out.read_bytes() == raw
-    assert captured["url"].endswith("/v1/image_generation")
+    assert captured["url"].endswith("/v1/images/generations")
     assert captured["headers"]["Authorization"] == "Bearer m"
-    assert captured["json"]["model"] == "image-01"
-    assert captured["json"]["response_format"] == "base64"
+    assert captured["json"]["model"] == "MiniMax-H3-Image"
+    assert captured["json"]["response_format"] == "b64_json"
     assert captured["json"]["aspect_ratio"] == "16:9"
     assert captured["json"]["n"] == 1
-    assert captured["json"]["prompt_optimizer"] is True
     assert "Successfully generated image" in msg
 
 
@@ -108,10 +107,11 @@ def test_minimax_reference_image_as_data_url(monkeypatch, tmp_path):
     captured = {}
 
     def fake_post(url, headers=None, json=None, **kw):
+        captured["url"] = url
         captured["json"] = json
         return FakeResp(
             {
-                "data": {"image_base64": [base64.b64encode(b"x").decode()]},
+                "data": [{"b64_json": base64.b64encode(b"x").decode()}],
                 "base_resp": {"status_code": 0},
             }
         )
@@ -123,12 +123,12 @@ def test_minimax_reference_image_as_data_url(monkeypatch, tmp_path):
     prompt_file.write_text("scene", encoding="utf-8")
     img.generate_image(str(prompt_file), [str(ref)], str(tmp_path / "o.jpg"), "1:1")
 
-    subj = captured["json"]["subject_reference"]
-    assert subj[0]["type"] == "character"
-    assert subj[0]["image_file"].startswith("data:image/jpeg;base64,")
+    assert captured["url"].endswith("/v1/images/edits")
+    images = captured["json"]["images"]
+    assert images[0]["image_url"].startswith("data:image/jpeg;base64,")
     import base64 as _b64
 
-    encoded = subj[0]["image_file"].split(",", 1)[1]
+    encoded = images[0]["image_url"].split(",", 1)[1]
     assert _b64.b64decode(encoded) == b"\xff\xd8refbytes"
 
 
@@ -156,7 +156,7 @@ def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
         captured["json"] = json
         return FakeResp(
             {
-                "data": {"image_base64": [base64.b64encode(b"x").decode()]},
+                "data": [{"b64_json": base64.b64encode(b"x").decode()}],
                 "base_resp": {"status_code": 0},
             }
         )
@@ -172,7 +172,6 @@ def test_minimax_extracts_json_prompt_field(monkeypatch, tmp_path):
 
     # Only the JSON `prompt` field reaches MiniMax — no other fields, no JSON syntax.
     assert captured["json"]["prompt"] == "a red barn at dawn"
-    assert captured["json"]["prompt_optimizer"] is True
 
 
 def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
@@ -183,7 +182,7 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
         captured["json"] = json
         return FakeResp(
             {
-                "data": {"image_base64": [base64.b64encode(b"x").decode()]},
+                "data": [{"b64_json": base64.b64encode(b"x").decode()}],
                 "base_resp": {"status_code": 0},
             }
         )
@@ -196,30 +195,13 @@ def test_minimax_plaintext_prompt_passes_through(monkeypatch, tmp_path):
     assert captured["json"]["prompt"] == "a red apple on a table"
 
 
-def test_minimax_rejects_overlong_prompt_without_calling_api(monkeypatch, tmp_path):
-    monkeypatch.setenv("MINIMAX_API_KEY", "m")
-
-    def fake_post(url, headers=None, json=None, **kw):  # pragma: no cover
-        raise AssertionError("must not call the API when the prompt is over the limit")
-
-    monkeypatch.setattr(img.requests, "post", fake_post)
-    prompt_file = tmp_path / "p.json"
-    prompt_file.write_text('{"prompt": "' + "x" * 1600 + '"}', encoding="utf-8")
-    out = tmp_path / "o.jpg"
-    msg = img.generate_image(str(prompt_file), [], str(out), "16:9")
-
-    assert "1500" in msg
-    assert "character" in msg.lower()
-    assert not out.exists()
-
-
 def test_minimax_creates_nested_output_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
 
     def fake_post(url, headers=None, json=None, **kw):
         return FakeResp(
             {
-                "data": {"image_base64": [base64.b64encode(b"img").decode()]},
+                "data": [{"b64_json": base64.b64encode(b"img").decode()}],
                 "base_resp": {"status_code": 0},
             }
         )
