@@ -1057,14 +1057,15 @@ def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, va
     user_home.mkdir()
     monkeypatch.setenv("HOME", str(user_home))
     if os.name == "nt":
-        # Git Bash expands "~" from HOME, but Python's expanduser() reads USERPROFILE
-        # on Windows; pin both so the two resolution paths stay comparable.
-        monkeypatch.setenv("USERPROFILE", str(user_home))
-    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
-    if variable == "DEER_FLOW_HOME":
-        home = _local_launcher_home(project)
+        # The inherited POSIX HOME must not override Windows' native profile.
+        platform_home = tmp_path / "windows-profile"
+        platform_home.mkdir()
+        monkeypatch.setenv("USERPROFILE", str(platform_home))
     else:
-        home = (project / "~/runtime-data" if value.startswith(("'", '"')) else user_home / "runtime-data") / ".deer-flow"
+        platform_home = user_home
+    (project / ".env").write_text(f"{variable}={value}\n", encoding="utf-8")
+    expanded = project / "~/runtime-data" if value.startswith(("'", '"')) else platform_home / "runtime-data"
+    home = expanded if variable == "DEER_FLOW_HOME" else expanded / ".deer-flow"
     (home / "threads" / "tilde" / "user-data").mkdir(parents=True)
     original = dict(os.environ)
 
@@ -1073,6 +1074,23 @@ def test_dotenv_tilde_matches_launcher_quote_semantics(tmp_path, monkeypatch, va
     assert summary["found"] is True
     assert dict(os.environ) == original
     assert str(user_home) not in json.dumps(summary)
+
+
+def test_dotenv_tilde_uses_home_declared_earlier(tmp_path, monkeypatch):
+    project = tmp_path / "checkout"
+    project.mkdir()
+    dotenv_home = tmp_path / "dotenv-home"
+    (project / ".env").write_text(
+        f"HOME={dotenv_home}\nDEER_FLOW_HOME=~/runtime-data\n",
+        encoding="utf-8",
+    )
+    home = dotenv_home / "runtime-data"
+    (home / "threads" / "tilde-home" / "user-data").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home"))
+
+    summary = support_bundle.collect_thread_summary(project, "tilde-home")
+
+    assert summary["found"] is True
 
 
 @pytest.mark.parametrize("dotenv_home", ["", "stale-data"])
