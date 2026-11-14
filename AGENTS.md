@@ -87,6 +87,8 @@ make check-agent-guidance                          # size budget of these guides
   from trusted sources only, and restart the Gateway after every extension
   change.
 - **Ship tests with every feature and bug fix.**
+- **Image-generation CLI failures exit non-zero**, with diagnostics on stderr
+  and success on stdout.
 - **Document behavior next to its topic, in the same change**: user-facing
   behavior in `docs/guide/` or `backend/docs/`. `README.md` is an index; change
   it only to add or re-point a link.
