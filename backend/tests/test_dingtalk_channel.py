@@ -1265,6 +1265,15 @@ class TestAdaptMarkdownForDingtalk:
 
 
 class TestConvertMarkdownTable:
+    def test_tab_padded_delimiter_cells(self):
+        text = "| Key | Value |\n|\t---\t|\t:---:\t|\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == "> **Key**: a\n> **Value**: b\n"
+
+    @pytest.mark.parametrize("separator", ["| : | : |", "| --- | |", "| -- -- | --- |"], ids=["missing-hyphens", "empty-cell", "internal-space"])
+    def test_invalid_delimiter_cells_preserve_text(self, separator):
+        text = f"| Key | Value |\n{separator}\n| a | b |"
+        assert _adapt_markdown_for_dingtalk(text) == text
+
     @pytest.mark.parametrize(
         ("header", "row", "expected"),
         [
