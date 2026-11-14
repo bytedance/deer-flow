@@ -96,7 +96,7 @@ def resolve_end_at(value: datetime | str | None, timezone: str) -> datetime | No
     try:
         return _resolve_local_datetime(value, timezone)
     except OverflowError as exc:
-        raise scheduler_error(422, "invalid_request", "end_at: date-time is outside the supported UTC range") from exc
+        raise scheduler_error(422, "invalid_request", f"end_at: {value.isoformat()} cannot be represented in UTC (task timezone: {timezone}); choose a date within the supported range") from exc
     except ValueError as exc:
         raise scheduler_error(422, "invalid_request", f"end_at: {exc}") from exc
 

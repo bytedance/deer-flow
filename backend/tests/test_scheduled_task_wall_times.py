@@ -113,9 +113,12 @@ def test_end_at_preserves_an_aware_second_fold():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["create", "update", "resume"])
-async def test_end_at_outside_utc_datetime_range_returns_validation_error(operation):
+@pytest.mark.parametrize(
+    "end_at",
+    ["9999-12-31T23:59:00", "9999-12-31T23:59:00-05:00", "0001-01-01T00:00:00+05:00"],
+)
+async def test_end_at_outside_utc_datetime_range_returns_validation_error(operation, end_at):
     timezone = "America/New_York"
-    end_at = "9999-12-31T23:59:00"
     with pytest.raises(HTTPException) as caught:
         if operation == "create":
             body = ScheduledTaskCreateRequest(
@@ -134,7 +137,8 @@ async def test_end_at_outside_utc_datetime_range_returns_validation_error(operat
             prepare_resume_updates(_existing(timezone, status="paused"), {"end_at": end_at}, used=0, now=NOW)
     assert caught.value.status_code == 422
     assert caught.value.detail["code"] == "invalid_request"
-    assert caught.value.detail["message"].startswith("end_at: ")
+    assert f"end_at: {end_at} cannot be represented in UTC" in caught.value.detail["message"]
+    assert timezone in caught.value.detail["message"]
 
 
 @pytest.mark.asyncio
