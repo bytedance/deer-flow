@@ -415,7 +415,19 @@ class TestBuildTodoActions:
 
 @pytest.mark.parametrize(
     "status, expected_status",
-    [("pending", "pending"), ("in_progress", "in_progress"), ("completed", "completed"), ("unknown", None), (None, None), (True, None), (1, None), ([], None), ({}, None)],
+    [
+        ("pending", "pending"),
+        ("in_progress", "in_progress"),
+        ("completed", "completed"),
+        ("blocked", "blocked"),
+        ("waiting", "waiting"),
+        ("unknown", None),
+        (None, None),
+        (True, None),
+        (1, None),
+        ([], None),
+        ({}, None),
+    ],
 )
 def test_normalize_todos_only_keeps_valid_string_statuses(status, expected_status):
     todo = {"content": "Example task", "status": status}
@@ -433,7 +445,7 @@ class _ToolCallingModel(FakeMessagesListChatModel):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("status", [[], {}, "unknown", "completed"], ids=["list", "dict", "unknown-string", "valid"])
+@pytest.mark.parametrize("status", [[], {}, "unknown", "completed", "blocked", "waiting"], ids=["list", "dict", "unknown-string", "completed", "blocked", "waiting"])
 async def test_todo_validation_remains_recoverable_with_token_attribution(status, use_async):
     """Attribution runs before ToolNode validates model-generated TODO arguments."""
     todo = {"content": "Example task", "status": status}
@@ -452,7 +464,7 @@ async def test_todo_validation_remains_recoverable_with_token_attribution(status
     tool_messages = [message for message in result["messages"] if isinstance(message, ToolMessage)]
     assert len(tool_messages) == 1
     assert tool_messages[0].tool_call_id == "todo-call"
-    if status == "completed":
+    if isinstance(status, str) and status in {"completed", "blocked", "waiting"}:
         assert tool_messages[0].status == "success"
         assert result["todos"] == [todo]
     else:

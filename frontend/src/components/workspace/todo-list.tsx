@@ -72,26 +72,37 @@ export function TodoList({
         )}
       >
         <QueueList className="bg-background mt-0 w-full rounded-t-xl">
-          {todos.map((todo, i) => (
-            <QueueItem key={i + (todo.content ?? "")}>
-              <div className="flex items-center gap-2">
-                <QueueItemIndicator
-                  className={
-                    todo.status === "in_progress" ? "bg-primary/70" : ""
-                  }
-                  completed={todo.status === "completed"}
-                />
-                <QueueItemContent
-                  className={
-                    todo.status === "in_progress" ? "text-primary/70" : ""
-                  }
-                  completed={todo.status === "completed"}
-                >
-                  {todo.content}
-                </QueueItemContent>
-              </div>
-            </QueueItem>
-          ))}
+          {todos.map((todo, i) => {
+            const status = todo.status ?? "pending";
+            return (
+              <QueueItem key={i + (todo.content ?? "")}>
+                <div className="flex items-center gap-2">
+                  <QueueItemIndicator
+                    aria-label={`Todo status: ${status}`}
+                    className={cn(
+                      status === "in_progress" && "bg-primary/70",
+                      status === "blocked" &&
+                        "border-destructive/70 bg-destructive/15",
+                      status === "waiting" &&
+                        "border-muted-foreground/70 bg-muted",
+                    )}
+                    completed={status === "completed"}
+                    title={`Todo status: ${status}`}
+                  />
+                  <QueueItemContent
+                    className={cn(
+                      status === "in_progress" && "text-primary/70",
+                      status === "blocked" && "text-destructive",
+                      status === "waiting" && "text-muted-foreground italic",
+                    )}
+                    completed={status === "completed"}
+                  >
+                    {todo.content}
+                  </QueueItemContent>
+                </div>
+              </QueueItem>
+            );
+          })}
         </QueueList>
       </main>
     </div>

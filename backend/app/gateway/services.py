@@ -646,7 +646,7 @@ def _normalize_input_messages(
 SERVER_OWNED_STATE_CHANNELS = frozenset({"sandbox", "thread_data", "viewed_images", "goal_outcome", "applied_run_inputs"})
 
 #: The ``write_todos`` status contract the todo middleware renders.
-_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+_TODO_STATUSES = frozenset({"pending", "in_progress", "completed", "blocked", "waiting"})
 
 
 def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, Any]] | None:
@@ -671,7 +671,7 @@ def _normalize_external_todos(value: Any, *, location: str) -> list[dict[str, An
             raise HTTPException(status_code=400, detail=f"{location}[{index}].content must be a string")
         status = entry.get("status", "pending")
         if not isinstance(status, str) or status not in _TODO_STATUSES:
-            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, or completed")
+            raise HTTPException(status_code=400, detail=f"{location}[{index}].status must be pending, in_progress, completed, blocked, or waiting")
         normalized.append({**entry, "content": content, "status": status})
     return normalized
 

@@ -6,8 +6,8 @@ and audit contract are documented in the
 
 ## Run-scoped state
 
-Hash histories, frequency windows/counters, and warning-suppression sets
-share a `(thread_id, run_id)` key. This gives a fresh budget to each user
+Hash histories, frequency windows/counters, and frequency-metric reporting
+sets share a `(thread_id, run_id)` key. This gives a fresh budget to each user
 run when a compiled graph is cached and reused, while keeping one budget
 across repeated graph entries belonging to the same Gateway run (including
 hidden goal continuations). `after_agent` clears only transient pending
@@ -24,15 +24,9 @@ every retained run scope for that thread.
 
 ## Decision ordering
 
-Loop decisions are severity-first across both detection layers: a warning
-candidate never short-circuits frequency accounting for the remaining calls
-in an admitted batch. A hard limit can stop scanning immediately because it
-rejects the entire batch. Only the selected warning is marked and logged;
-hash warnings still precede frequency warnings when neither layer stops the
-run. Among simultaneous frequency-warning candidates, the first crossing in
-model tool-call order remains selected for compatibility; later calls are
-still counted and can warn in a later batch. A frequency warning whose burst
-decays within the batch must not leave a stale suppression mark.
-
-`backend/tests/test_loop_detection_middleware.py` covers mixed-tool batches,
-window decay, overrides, and sync/async compiled-graph execution.
+Hash-based loop decisions are evaluated before the frequency metric is updated.
+A hash warning does not prevent the remaining tool names in the same response
+from being counted. Frequency thresholds only emit INFO metrics with
+`action="observe_only"`; they never enqueue a model warning, strip tool calls,
+or set a stop reason. The hash warning and hard-stop behavior remains scoped to
+identical calls whose results show no progress.

@@ -124,7 +124,7 @@ models:
 
 ## Plan mode
 
-When `is_plan_mode` is set to `true` in the request configuration, the `TodoMiddleware` is activated. The agent then maintains a structured task list, marking items as `in_progress`, `completed`, or `pending` as it works through a complex task. This provides visibility into the agent's progress for the user.
+When `is_plan_mode` is set to `true` in the request configuration, the `TodoMiddleware` is activated. The agent maintains a structured task list and updates it at meaningful milestones. Items can be `pending`, `in_progress`, `completed`, `blocked`, or `waiting`; `completed` means the work is fully finished and verified, while `blocked` and `waiting` explain why the current run cannot continue.
 
 Plan mode is appropriate for complex, multi-step tasks where showing incremental progress is valuable. For simple requests, it is better left disabled to avoid unnecessary overhead.
 

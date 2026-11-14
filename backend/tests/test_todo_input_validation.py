@@ -35,7 +35,12 @@ def test_external_todos_must_be_renderable(boundary, todos):
 
 @pytest.mark.parametrize("boundary", BOUNDARIES)
 def test_external_todos_accept_the_write_todos_shape(boundary):
-    todos = [{"content": "Ship it", "status": "in_progress"}, {"content": "", "status": "pending"}]
+    todos = [
+        {"content": "Ship it", "status": "in_progress"},
+        {"content": "Unblock dependency", "status": "blocked"},
+        {"content": "Wait for approval", "status": "waiting"},
+        {"content": "", "status": "pending"},
+    ]
     assert boundary({"todos": todos})["todos"] == todos
 
 

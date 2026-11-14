@@ -1519,7 +1519,9 @@ input_polish:
 # Loop Detection Configuration
 # ============================================================================
 # Detect and interrupt repeated identical tool-call loops.
-# Frequency thresholds are safety limits for repeated use of the same tool type.
+# Frequency thresholds are windowed observability metrics for repeated use of a
+# tool type. They log burst counts and never stop a run; use token, time, call,
+# or cost budgets when work needs a hard ceiling.
 
 loop_detection:
   enabled: true
@@ -1530,10 +1532,8 @@ loop_detection:
   max_tracked_threads: 100
   tool_freq_warn: 30
   tool_freq_hard_limit: 50
-  # Per-tool overrides for tool_freq_warn / tool_freq_hard_limit. Values can be
-  # higher or lower than the global defaults. Commonly used to raise thresholds
-  # for high-frequency tools like bash in batch workflows (e.g. RNA-seq pipelines)
-  # without weakening protection on every other tool.
+  # Per-tool overrides for the two frequency metrics. Values can be higher or
+  # lower than the global thresholds for tools with different normal workloads.
   # tool_freq_overrides:
   #   bash:
   #     warn: 150
