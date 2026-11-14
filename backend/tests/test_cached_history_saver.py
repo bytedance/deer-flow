@@ -478,3 +478,69 @@ def test_sync_fanout_compose_matches_inner_canonical_order():
 
     assert _write_task_ids(composed) == _write_task_ids(expected)
     assert composed[_FANOUT_CHANNEL]["writes"] == expected[_FANOUT_CHANNEL]["writes"]
+
+
+# ----------------------------------------------------------------------
+# Fan-out with distinct task_paths: canonical order is
+# ``writes_sort_key`` = (task_path, task_id, idx), NOT task_id alone.
+#
+# ``InMemorySaver.get_tuple`` / its native delta walk both return a
+# checkpoint's ``pending_writes`` via ``_ordered_writes``, which sorts by
+# ``writes_sort_key`` (task_path first). Composing from ``get_tuple``'s
+# order therefore already matches the authoritative walk; re-sorting by
+# ``task_id`` alone reorders writes whenever the two orders differ.
+# ----------------------------------------------------------------------
+
+
+def _seed_fanout_distinct_task_paths(saver: InMemorySaver) -> dict:
+    """Same chain as _seed_fanout_thread, but the two fan-out writes have
+    distinct task_paths whose order is the REVERSE of their task_id order."""
+    thread_id = f"fanout-tp-{uuid4().hex}"
+    base = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    cfg0 = saver.put(base, empty_checkpoint(), {}, {})
+
+    c1 = empty_checkpoint()
+    c1["channel_values"] = {_FANOUT_CHANNEL: ["seed"]}
+    c1["channel_versions"] = {_FANOUT_CHANNEL: "1"}
+    cfg1 = saver.put(cfg0, c1, {}, {_FANOUT_CHANNEL: "1"})
+    # task_id order: task-a < task-z; task_path order: "1|aaa" < "1|zzz".
+    # Canonical (task_path, task_id, idx) replays task-z FIRST.
+    saver.put_writes(cfg1, [(_FANOUT_CHANNEL, ["fan-z"])], "task-z", "1|aaa")
+    saver.put_writes(cfg1, [(_FANOUT_CHANNEL, ["fan-a"])], "task-a", "1|zzz")
+
+    return saver.put(cfg1, empty_checkpoint(), {}, {})
+
+
+@pytest.mark.anyio
+async def test_fanout_distinct_task_paths_compose_matches_inner_order():
+    """A task_id-only sort would replay task-a before task-z; the inner
+    saver's canonical task_path order replays task-z first."""
+    oracle = InMemorySaver()
+    oracle_cfg = _seed_fanout_distinct_task_paths(oracle)
+    expected = await oracle.aget_delta_channel_history(config=oracle_cfg, channels=[_FANOUT_CHANNEL])
+    assert _write_task_ids(expected) == ["task-z", "task-a"]  # canonical order
+
+    inner = InMemorySaver()
+    cfg = _seed_fanout_distinct_task_paths(inner)
+    saver = _wrap(inner, MemoryCheckpointHistoryCache(max_entries=16))
+    composed = await saver.aget_delta_channel_history(config=cfg, channels=[_FANOUT_CHANNEL])
+
+    assert _write_task_ids(composed) == _write_task_ids(expected)
+    assert composed[_FANOUT_CHANNEL]["writes"] == expected[_FANOUT_CHANNEL]["writes"]
+
+
+def test_sync_fanout_distinct_task_paths_compose_matches_inner_order():
+    """Sync twin: the sync compose path preserves the same canonical order."""
+    oracle = InMemorySaver()
+    oracle_cfg = _seed_fanout_distinct_task_paths(oracle)
+    expected = oracle.get_delta_channel_history(config=oracle_cfg, channels=[_FANOUT_CHANNEL])
+    assert _write_task_ids(expected) == ["task-z", "task-a"]
+
+    inner = InMemorySaver()
+    cfg = _seed_fanout_distinct_task_paths(inner)
+    saver = _wrap(inner, MemoryCheckpointHistoryCache(max_entries=16))
+    composed = saver.get_delta_channel_history(config=cfg, channels=[_FANOUT_CHANNEL])
+
+    assert _write_task_ids(composed) == _write_task_ids(expected)
+    assert composed[_FANOUT_CHANNEL]["writes"] == expected[_FANOUT_CHANNEL]["writes"]
