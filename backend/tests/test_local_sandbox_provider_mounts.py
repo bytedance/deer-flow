@@ -1,4 +1,5 @@
 import errno
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -569,6 +570,7 @@ class TestMultipleMounts:
         sandbox.write_file("/mnt/repo/writable/file.txt", "content")
         assert (rw_dir / "file.txt").read_text() == "content"
 
+    @pytest.mark.skipif(os.name == "nt", reason="spawns a real POSIX /bin/sh and cat; no faithful Windows equivalent")
     def test_execute_command_path_replacement(self, tmp_path, monkeypatch):
         data_dir = tmp_path / "data"
         data_dir.mkdir()
