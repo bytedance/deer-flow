@@ -1021,18 +1021,23 @@ async def run_agent(
     """Execute an agent in the background, publishing events to *bridge*."""
 
     # Unpack infrastructure dependencies from RunContext.
-    checkpointer = ctx.checkpointer
+    base_checkpointer = ctx.checkpointer
+    checkpointer = base_checkpointer
     store = ctx.store
     event_store = ctx.event_store
     run_events_config = ctx.run_events_config
     thread_store = ctx.thread_store
-    terminal_status_kwargs = {"persist": False} if event_store is not None else {}
-    # Staged terminal statuses commit only after receipt and duration writes;
-    # keep the still-active durable row's lease renewed until then.
-    record.terminal_commit_pending = event_store is not None
+    stage_terminal = event_store is not None or (checkpointer is not None and run_manager.heartbeat_enabled)
+    terminal_status_kwargs = {"persist": False} if stage_terminal else {}
+    # The active run row must cover the last run-owned checkpoint write.
+    record.terminal_commit_pending = stage_terminal
 
     run_id = record.run_id
     thread_id = record.thread_id
+    if checkpointer is not None and run_manager.heartbeat_enabled:
+        from deerflow.runtime.checkpointer.run_owned_saver import RunOwnedSaver
+
+        checkpointer = RunOwnedSaver(checkpointer, run_manager, record)
 
     from deerflow_extension_api import ExtensionData, TaskInfo
 
@@ -2149,7 +2154,7 @@ async def run_agent(
                         logger.warning("Could not remove scheduled goal for run %s", run_id, exc_info=True)
                         await run_manager.set_status(run_id, RunStatus.error, error="Scheduled goal cleanup failed", persist=False)
 
-                if not record.ownership_lost and (event_store is not None or scheduled_goal is not None or record.rollback_finalization_pending):
+                if not record.ownership_lost and (stage_terminal or scheduled_goal is not None or record.rollback_finalization_pending):
                     try:
                         # Even after bounded receipt retries are exhausted, persist the
                         # real worker outcome. Leaving a successful row inflight would
@@ -2212,7 +2217,7 @@ async def run_agent(
                                 run_manager=run_manager,
                                 bridge=bridge,
                                 accessor=accessor,
-                                checkpointer=checkpointer,
+                                checkpointer=base_checkpointer,
                             )
                     except Exception:
                         logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
@@ -2221,9 +2226,17 @@ async def run_agent(
                     try:
                         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
                         if not await run_manager.has_later_started_run(thread_id, run_id):
-                            await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            if run_manager.heartbeat_enabled:
+                                async with (
+                                    _checkpoint_thread_lock(thread_id),
+                                    run_manager.reserve_thread_operation(thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id) as title_operation,
+                                ):
+                                    title_saver = RunOwnedSaver(base_checkpointer, run_manager, title_operation)
+                                    await _ensure_interrupted_title(checkpointer=title_saver, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                            else:
+                                await _ensure_interrupted_title(checkpointer=base_checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
                     except Exception:
-                        logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+                        logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id, exc_info=True)
 
                 # Sync title from checkpoint to threads_meta.display_name
                 if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
@@ -2617,8 +2630,12 @@ async def _clear_completed_goal(
         # admitted a new run wins, even before it has written any checkpoint.
         async with (
             goal_thread_lock(record.thread_id),
-            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id),
+            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id) as goal_operation,
         ):
+            if run_manager.heartbeat_enabled:
+                from deerflow.runtime.checkpointer.run_owned_saver import RunOwnedSaver
+
+                checkpointer = RunOwnedSaver(checkpointer, run_manager, goal_operation)
             checkpoint_tuple = await _call_checkpointer_method(
                 checkpointer,
                 "aget_tuple",

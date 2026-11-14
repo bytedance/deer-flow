@@ -2513,7 +2513,13 @@ class RunManager:
 
                 # 1) Local inflight check (same-worker guard; cross-worker is the
                 #    store's partial unique index below).
-                local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing or r.scheduled_goal_cleanup_pending]
+                local_inflight = [
+                    r
+                    for r in self._thread_records_locked(thread_id)
+                    if r.status in (RunStatus.pending, RunStatus.running)
+                    or r.scheduled_goal_cleanup_pending
+                    or (r.finalizing and not (operation_kind == ThreadOperationKind.checkpoint_write and r.terminal_status_persisted and not self._awaits_terminal_commit(r)))
+                ]
 
                 if any(r.scheduled_goal_cleanup_pending for r in local_inflight):
                     raise ConflictError(f"Thread {thread_id} has a scheduled goal awaiting finalization")
@@ -3047,7 +3053,7 @@ class RunManager:
         """The existing store, only when it supports atomic Run inputs."""
         return self._store if getattr(self._store, "supports_run_inputs", False) is True else None
 
-    async def owns_active_admission(self, record: RunRecord) -> bool:
+    async def owns_active_admission(self, record: RunRecord, *, reason: str = "Scheduled goal cleanup lost its active run lease.") -> bool:
         """Confirm the existing run slot without holding a SQL writer transaction."""
         async with self._run_registry_lock(record.run_id):
             if self._runs.get(record.run_id) is not record or record.ownership_lost:
@@ -3055,12 +3061,21 @@ class RunManager:
         if self._store is None:
             return True
         row = await self._store.get(record.run_id, user_id=record.user_id)
-        if row is None or row.get("thread_id") != record.thread_id or row.get("user_id") != record.user_id or row.get("status") not in ("pending", "running") or row.get("owner_worker_id") != record.owner_worker_id:
+        rollback_owned = (
+            record.rollback_finalization_pending
+            and record.operation_kind == ThreadOperationKind.run
+            and row is not None
+            and row.get("status") == "interrupted"
+            and row.get("cancel_action") == "rollback"
+            and row.get("run_incarnation") == record.run_incarnation
+            and row.get("producer_epoch") == record.producer_epoch
+        )
+        if row is None or row.get("thread_id") != record.thread_id or row.get("user_id") != record.user_id or (row.get("status") not in ("pending", "running") and not rollback_owned) or row.get("owner_worker_id") != record.owner_worker_id:
             return False
         if self.heartbeat_enabled:
             deadline = self._parse_lease_deadline(row.get("lease_expires_at"))
             if deadline is None or deadline <= datetime.now(UTC):
-                await self._mark_ownership_lost(record, reason="Scheduled goal cleanup lost its active run lease.", require_active=False)
+                await self._mark_ownership_lost(record, reason=reason, require_active=False)
                 return False
         return not record.ownership_lost
 
