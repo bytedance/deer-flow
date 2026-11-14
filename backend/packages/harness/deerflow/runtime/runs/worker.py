@@ -627,6 +627,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             "__run_input_control",
             "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
+            "_hitl_resume_tool_names",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -1359,6 +1360,7 @@ async def run_agent(
         hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
         hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
         hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
+        legacy_resume_tools = _legacy_recovery_tool_names(hitl_resume_actions, graph_input)
         if journal is not None and hitl_resume_calls:
             journal.adopt_resumed_tool_calls(hitl_resume_calls)
         agent_app_config = ctx.app_config
@@ -1381,6 +1383,9 @@ async def run_agent(
         # pending interrupt. The assembly marker makes that hook deny rather
         # than pause again; all other runs cannot inject this internal mode.
         runtime_ctx.pop("_hitl_disabled_resume_escape", None)
+        runtime_ctx.pop("_hitl_resume_tool_names", None)
+        if legacy_resume_tools:
+            runtime_ctx["_hitl_resume_tool_names"] = frozenset(legacy_resume_tools)
         if hitl_resume_escape:
             runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
@@ -3248,6 +3253,7 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
         interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
         if not interrupt_writes:
             continue
+        approval_count = sum(1 for write in interrupt_writes for item in (write[2] if isinstance(write[2], (list, tuple)) else (write[2],)) if isinstance(getattr(item, "value", None), Mapping) and item.value.get("kind") == "hitl_approval")
         matched: list[Mapping[str, Any]] = []
         for write in interrupt_writes:
             interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
@@ -3266,19 +3272,29 @@ async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dic
                 pending_ids = payload.get("pending_tool_call_ids")
                 actions = payload.get("actions")
                 if invalid_approval_identity(payload) is not None:
-                    if not _is_all_reject_hitl_resume(graph_input) or len(grouped_responses) != len(actions):
+                    if approval_count != 1 or not _is_all_reject_hitl_resume(graph_input) or len(grouped_responses) != len(actions):
                         continue
                     if any(response.get("tool_call_id") != action["tool_call_id"] or response.get("request_id") != action["request_id"] for response, action in zip(grouped_responses, actions)):
                         continue
                     matched.extend(actions)
                     continue
-                if not isinstance(pending_ids, list) or any(not isinstance(call_id, str) for call_id in pending_ids):
+                if not isinstance(pending_ids, list) or any(not isinstance(call_id, str) for call_id in pending_ids) or len(set(pending_ids)) != len(pending_ids):
                     continue
                 if set(pending_ids) != group_ids or not isinstance(actions, list):
                     continue
                 matched.extend(action for action in actions if isinstance(action, Mapping))
         return matched
     return []
+
+
+def _legacy_recovery_tool_names(actions: list[Mapping[str, Any]], graph_input: Any) -> set[str]:
+    """Recover names only after the action lookup matched an invalid legacy pause."""
+    if not actions or not _is_all_reject_hitl_resume(graph_input):
+        return set()
+    ids = [action.get("tool_call_id") for action in actions]
+    if all(isinstance(call_id, str) for call_id in ids) and len(set(ids)) == len(ids):
+        return set()
+    return {action["tool_name"] for action in actions if isinstance(action.get("tool_name"), str) and action["tool_name"]}
 
 
 def _is_all_reject_hitl_resume(graph_input: Any) -> bool:

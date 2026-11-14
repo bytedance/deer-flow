@@ -122,13 +122,11 @@ def _legacy_approval_pause(self, state, runtime):
     """Seed a pre-#8070 checkpoint; only used while creating the old pause."""
     from langgraph.types import interrupt
 
-    from deerflow.agents.middlewares.hitl_approval_middleware import summarize_args
-
     last = state["messages"][-1]
-    targets = self._target_calls(last) if isinstance(last, AIMessage) else []
+    targets = [call for call in last.tool_calls if call["name"] in self.tool_names] if isinstance(last, AIMessage) else []
     if not targets:
         return None
-    actions = [{"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": summarize_args(call.get("args", {}), pii_config=self.pii_config), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"} for call in targets]
+    actions = [{"tool_call_id": call["id"], "tool_name": call["name"], "args_summary": call.get("args", {}), "request_id": f"hitl_approval:{last.id or ''}:{call['id']}"} for call in targets]
     interrupt({"kind": "hitl_approval", "version": 1, "request_id": actions[0]["request_id"], "actions": actions, "allowed_decisions": ["approve", "reject"], "pending_tool_call_ids": [call["id"] for call in targets]})
     raise AssertionError("legacy seeding hook must not handle recovery")
 
@@ -141,12 +139,27 @@ def test_legacy_unaddressable_pause_all_reject_recovers(isolated_app, isolated_d
     def legacy_model(*args, **kwargs):
         return _LegacyApprovalModel(responses=[], legacy_ids=legacy_ids)
 
-    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+    from langchain.agents.middleware import AgentMiddleware
+
+    class HitlApprovalMiddleware(AgentMiddleware):
+        """Reproduce the historical checkpoint independently of production recovery."""
+
+        def __init__(self):
+            self.tool_names = {"write_file"}
+
+        def after_model(self, state, runtime):
+            return _legacy_approval_pause(self, state, runtime)
+
+        async def aafter_model(self, state, runtime):
+            return self.after_model(state, runtime)
+
+    def seed_legacy_gate(middlewares, final_tools, app_config, **kwargs):
+        middlewares.append(HitlApprovalMiddleware())
 
     with patch(_MODEL_PATCH, new=legacy_model), TestClient(isolated_app) as client:
         csrf = _register_user(client)
         tid = _create_thread(client, csrf)
-        with patch.object(HitlApprovalMiddleware, "after_model", new=_legacy_approval_pause):
+        with patch("deerflow.agents.lead_agent.agent._insert_hitl_approval_middleware", new=seed_legacy_gate):
             initial = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
             assert initial.status_code == 200, initial.text
             assert _wait_run_status(client, tid, initial.json()["run_id"], "waiting_for_input")["status"] == "waiting_for_input"

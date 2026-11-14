@@ -49,6 +49,11 @@ never from caller context. It performs one rejection cleanup, consumes no new
 authorization, creates no new interrupt, and becomes inert after that replay.
 The normal version-2 middleware retains ownership of subsequent operations.
 
+Both guards use one rejection cleanup. Version-2 prevention must also remove
+invalid calls sharing a rejected ID before provider serialization. Four native
+message cases reproduce surviving null/duplicate/empty-ID invalid calls on the
+unmodified 4f3a8b7 guard; unrelated invalid calls keep their existing owner.
+
 Only one original legacy interrupt can enter digest-bound recovery. Multiple
 parallel version-2 interrupts continue through their existing interrupt-ID resume
 map; mixed legacy/parallel batches fail closed. Keep the durable answer/restore

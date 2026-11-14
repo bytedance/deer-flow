@@ -92,6 +92,10 @@ make test-blocking-io
 
 ## Concurrency
 
+Version-1 recovery keeps only its historical graph node through
+`approvals.legacy`; worker-bound rejection runs once, then version-2 approvals
+own subsequent operations. Never restore version-1 pause generation.
+
 Middlewares run on the event loop that serves the run. File and network I/O goes
 off the loop, and a started operation is drained even after cancellation. Waiters
 that cross loops own separate futures; notify them outside the state lock.

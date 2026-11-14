@@ -133,6 +133,35 @@ async def run_store(request, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_gateway_recovery_requires_one_original_legacy_interrupt(monkeypatch):
+    from app.gateway import hitl_approval as gateway
+
+    legacy = _payload()
+    current = _payload(["healthy"], request_id="current")
+    current["version"] = 2
+    grouped = {"legacy": [Interrupt(value=legacy, id="legacy")], "current": [Interrupt(value=current, id="current")]}
+    monkeypatch.setattr(gateway, "find_pending_interrupts", AsyncMock(return_value=grouped))
+    monkeypatch.setattr(gateway, "has_waiting_for_input_run", AsyncMock(return_value=True))
+    monkeypatch.setattr(gateway, "has_any_pending_interrupt", AsyncMock(return_value=True))
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=SimpleNamespace(config={}, next=())))
+    with pytest.raises(HTTPException) as error:
+        await gateway.validate_resume_request(request=None, thread_id="thread", accessor=accessor, read_config={}, enabled=False, body=SimpleNamespace(command={"resume": {"responses": _responses(legacy) + _responses(current)}}))
+    assert error.value.status_code == 422
+    with pytest.raises(HTTPException):
+        await gateway.current_approval_request_ids(None, "thread", accessor=accessor, read_config={})
+
+
+def test_addressable_actions_never_enable_the_legacy_gate():
+    from langgraph.types import Command
+
+    from deerflow.runtime.runs.worker import _build_runtime_context, _legacy_recovery_tool_names
+
+    payload = _payload(["healthy"])
+    assert _legacy_recovery_tool_names(payload["actions"], Command(resume={"responses": _responses(payload)})) == set()
+    assert "_hitl_resume_tool_names" not in _build_runtime_context("thread", "run", {"_hitl_resume_tool_names": {"write_file"}})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ids", [[None], ["same", "same"]])
 async def test_recovery_has_one_winner_and_restores_exact_pause(run_store, ids):
     payload = _payload(ids)
@@ -176,9 +205,8 @@ async def test_old_recovery_identity_cannot_answer_a_new_pause(run_store, next_i
 
 
 @pytest.mark.parametrize("ids", [[None], ["same", "same"]])
-@pytest.mark.parametrize("entry", ["replay", "fresh", "denial"])
-def test_rejection_removes_colliding_provider_surfaces(ids, entry, monkeypatch):
-    from deerflow.agents.middlewares.hitl_approval_middleware import HitlApprovalMiddleware
+def test_rejection_removes_colliding_provider_surfaces(ids):
+    from deerflow.approvals.legacy import HitlApprovalMiddleware
 
     calls = [{"name": "write_file", "args": {}, "id": call_id} for call_id in ids]
     calls.append({"name": "echo", "args": {}, "id": ids[0]})
@@ -191,13 +219,7 @@ def test_rejection_removes_colliding_provider_surfaces(ids, entry, monkeypatch):
         invalid_tool_calls=[{"name": "write_file", "args": "{", "id": ids[0], "error": "invalid arguments"}],
     )
     middleware = HitlApprovalMiddleware(tool_names={"write_file"})
-    if entry == "fresh":
-        monkeypatch.setattr(middleware, "_can_resume", lambda runtime: True)
-        update = middleware.after_model({"messages": [message]}, SimpleNamespace(context={}))
-    elif entry == "denial":
-        update = middleware._deny_all(message, calls[:-2], "The calls were rejected and not executed.")
-    else:
-        update = middleware._process_responses(message, calls[:-2], {"responses": []})
+    update = middleware.after_model({"messages": [message]}, SimpleNamespace(context={}))
     result = update["messages"][0]
     assert result.id == message.id
     assert not result.invalid_tool_calls
@@ -208,6 +230,7 @@ def test_rejection_removes_colliding_provider_surfaces(ids, entry, monkeypatch):
     assert any(block.get("type") == "text" and "not executed" in block["text"] for block in result.content)
     assert message.invalid_tool_calls
     assert "function_call" in message.additional_kwargs
+    assert middleware.after_model({"messages": [message]}, SimpleNamespace(context={})) is None
 
 
 @pytest.mark.asyncio
@@ -217,7 +240,7 @@ async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
     from langgraph.graph import MessagesState, StateGraph
     from langgraph.types import Command, interrupt
 
-    from deerflow.runtime.runs.worker import _is_all_reject_hitl_resume, _pending_hitl_resume_actions, _pending_hitl_resume_tool_names
+    from deerflow.runtime.runs.worker import _is_all_reject_hitl_resume, _legacy_recovery_tool_names, _pending_hitl_resume_actions
 
     payload = _payload(ids)
 
@@ -237,11 +260,11 @@ async def test_worker_recovers_legacy_names_only_for_bound_rejections(ids):
     command = Command(resume={"responses": responses})
     assert _is_all_reject_hitl_resume(command)
     assert await _pending_hitl_resume_actions(saver, config, command) == payload["actions"]
-    assert await _pending_hitl_resume_tool_names(saver, config, command) == {"write_file"}
+    assert _legacy_recovery_tool_names(await _pending_hitl_resume_actions(saver, config, command), command) == {"write_file"}
     responses[0]["request_id"] = "stale"
     assert await _pending_hitl_resume_actions(saver, config, command) == []
-    assert await _pending_hitl_resume_tool_names(saver, config, command) == set()
+    assert _legacy_recovery_tool_names(await _pending_hitl_resume_actions(saver, config, command), command) == set()
     responses[0]["request_id"] = payload["actions"][0]["request_id"]
     responses[0]["option_id"] = "approve"
     assert await _pending_hitl_resume_actions(saver, config, command) == []
-    assert await _pending_hitl_resume_tool_names(saver, config, command) == set()
+    assert _legacy_recovery_tool_names(await _pending_hitl_resume_actions(saver, config, command), command) == set()

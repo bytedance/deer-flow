@@ -22,6 +22,10 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Trust boundary
 
+Legacy reject-only recovery binds one original version-1 interrupt by digest.
+Parallel version-2 decisions retain their interrupt-ID resume map; never combine
+them into a legacy recovery identity.
+
 - **Share tokens read only frozen snapshots.** See [sharing](../../../docs/guide/sharing.md).
 - **Server-owned run context.** A client can send run context in `body.context`
   and in `body.config`. Admit server-owned keys only from internally authenticated

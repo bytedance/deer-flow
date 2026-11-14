@@ -828,7 +828,12 @@ def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
     return None
 
 
-def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None) -> None:
+def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_config: AppConfig, *, supports_resume: bool, model_name: str | None = None, legacy_recovery_tools: Any = None) -> None:
+    if isinstance(legacy_recovery_tools, (set, frozenset)) and legacy_recovery_tools and all(isinstance(name, str) and name for name in legacy_recovery_tools):
+        from deerflow.approvals.legacy import HitlApprovalMiddleware
+
+        # Preserve only the old checkpoint node, never the old approval policy.
+        middlewares.append(HitlApprovalMiddleware(tool_names=set(legacy_recovery_tools)))
     hitl_config = getattr(app_config, "hitl_approval", None)
     if hitl_config is None or hitl_config.enabled is not True:
         return
@@ -1418,7 +1423,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         authorization_provider=_authz_provider,
     )
-    _insert_hitl_approval_middleware(middlewares, final_tools, resolved_app_config, supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False), model_name=model_name)
+    _insert_hitl_approval_middleware(
+        middlewares,
+        final_tools,
+        resolved_app_config,
+        supports_resume=not (config.get("context") or {}).get("_hitl_disabled_resume_escape", False),
+        model_name=model_name,
+        legacy_recovery_tools=(config.get("context") or {}).get("_hitl_resume_tool_names"),
+    )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,

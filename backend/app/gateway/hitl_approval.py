@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from app.gateway.checkpoint_lineage import hitl_approval_payloads
-from deerflow.runtime.approval_identity import ApprovalIdentity, invalid_approval_identity
 from deerflow.approvals.protocol import combine_approval_payloads
+from deerflow.runtime.approval_identity import ApprovalIdentity, invalid_approval_identity
 from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 
 logger = logging.getLogger(__name__)
