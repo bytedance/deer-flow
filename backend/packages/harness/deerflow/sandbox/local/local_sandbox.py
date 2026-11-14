@@ -524,7 +524,7 @@ class LocalSandbox(Sandbox):
         # substitution resumes after a match, so a tail that ran through a
         # ":"-joined list ($PATH, $PYTHONPATH) swallowed every later entry and
         # left those container paths unresolved.
-        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[\s\"';&|<>()])(?:/[^\s\"';&|<>():,]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
@@ -537,7 +537,7 @@ class LocalSandbox(Sandbox):
         # write_file content regularly stores PATH-style exports, and a tail
         # that ran through the ":" left the later list entries virtual in the
         # host file (read_file masked them back, so the corruption was hidden).
-        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():]*)?" for m in mappings]
+        patterns = [PATH_START_BOUNDARY + re.escape(m.container_path) + r"(?=/|$|[^\w./-])(?:/[^\s\"';&|<>():,]*)?" for m in mappings]
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property

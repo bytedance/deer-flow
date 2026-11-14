@@ -70,10 +70,10 @@ PATH_START_BOUNDARY = rf"(?<!{_PATH_START_BLOCKERS.pattern})"
 # entry under the same base to the model unmasked. ``;``, the Windows list
 # separator, already ended it. A ``:`` inside one path (``grep -n`` output,
 # a file name) only shortens the match; the rest is copied through verbatim.
-_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>():]*)?"
+_PATH_TAIL = r"(?:[/\\][^\s\"';&|<>():,]*)?"
 
 _SEGMENT_BOUNDARY_CHAR = re.compile(r"[^\w./-]")
-_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>():")
+_PATH_TAIL_TERMINATORS = frozenset("\"';&|<>():,")
 
 
 def normalize_mask_tail(tail: str) -> str:

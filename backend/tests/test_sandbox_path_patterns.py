@@ -46,7 +46,7 @@ def _legacy_local_pattern(base: str) -> re.Pattern[str]:
 # tail also stops at ``:``, so a ``:``-joined path list ($PATH, $PYTHONPATH)
 # cannot swallow a second host path into the first match's tail.
 _LEGACY_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
-_CURRENT_TAIL = r"(?:[/\\][^\s\"';&|<>():]*)?"
+_CURRENT_TAIL = r"(?:[/\\][^\s\"';&|<>():,]*)?"
 
 
 def _with_current_tail(legacy: str) -> str:
@@ -208,6 +208,40 @@ def test_tail_stops_at_colon_so_a_path_list_masks_every_entry(mask, output: str,
 def test_colon_inside_a_single_path_leaves_the_rendered_output_unchanged(mask, tail: str) -> None:
     """``grep -n`` lines and ``:`` in file names only shorten the match: the rest
     of the text is copied through verbatim right after the virtual prefix."""
+    assert mask(f"/host/ws{tail}", "/host/ws", "/mnt/ws") == f"/mnt/ws{tail}"
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("files=/host/ws/a.py,/host/ws/b.py", "files=/mnt/ws/a.py,/mnt/ws/b.py"),
+        ("copy /host/ws/src,/host/ws/tests /dst", "copy /mnt/ws/src,/mnt/ws/tests /dst"),
+        (
+            "extra=/host/ws/x,other=/host/ws/y",
+            "extra=/mnt/ws/x,other=/mnt/ws/y",
+        ),
+    ],
+)
+def test_tail_stops_at_comma_so_a_list_masks_every_entry(mask, output: str, expected: str) -> None:
+    """A ``,``-joined list must not hide a second host path inside the first tail.
+
+    The same failure mode the ``:`` fix covered for PATH-style lists: once a
+    match consumes the rest of the list, scanning resumes after it, so every
+    later entry under the same base reaches the model as a raw host path.
+    """
+    assert mask(output, "/host/ws", "/mnt/ws") == expected
+
+
+@pytest.mark.parametrize("mask", _MASKERS)
+@pytest.mark.parametrize(
+    "tail",
+    ["/report,final.py", "/notes,a.txt:2024.csv"],
+)
+def test_comma_inside_a_single_path_leaves_the_rendered_output_unchanged(mask, tail: str) -> None:
+    """A ``,`` in a real file name only shortens the match: the rest of the text
+    is copied through verbatim right after the virtual prefix, so the whole
+    path still reads back as the same virtual file."""
     assert mask(f"/host/ws{tail}", "/host/ws", "/mnt/ws") == f"/mnt/ws{tail}"
 
 
