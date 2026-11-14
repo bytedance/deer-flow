@@ -75,6 +75,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.scheduler.runtime import SCHEDULER_CAPABILITY_CONTEXT_KEY, is_scheduler_capability
+from deerflow.skills.storage.skill_storage import SkillStorage
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
@@ -492,6 +493,7 @@ def build_middlewares(
     memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
@@ -518,6 +520,9 @@ def build_middlewares(
             thread's physical skill projection. Prompt-only bootstrap agents do
             not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
+        skill_storage: Optional storage instance for slash-skill activation.
+            Embedding hosts that manage request-scoped skill storage can pass it
+            here instead of relying on the user-scoped default.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
         mcp_routing_middleware: Compatibility middleware for advisory MCP
@@ -591,6 +596,7 @@ def build_middlewares(
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
             skill_authorization=skill_authorization,
+            skill_storage=skill_storage,
         )
     )
 
@@ -874,6 +880,7 @@ def assemble_lead_agent(
     config: RunnableConfig,
     *,
     app_config: AppConfig | None = None,
+    skill_storage: SkillStorage | None = None,
 ) -> LeadAgentAssembly:
     """Return the compiled lead graph together with its assembly descriptor.
 
@@ -881,6 +888,9 @@ def assemble_lead_agent(
     built from does not have to be recovered from LangGraph private runtime
     keys or mutable graph attributes. ``make_lead_agent`` remains the
     graph-only LangGraph Server ABI declared in ``langgraph.json``.
+
+    ``skill_storage`` lets an embedding host supply request-scoped skill
+    storage for slash activation; omitting it keeps the user-scoped default.
     """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = app_config or runtime_config.get("app_config")
@@ -908,7 +918,9 @@ def assemble_lead_agent(
     # configurable key must not recompile the channel table either).
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
-    return _assemble_lead_agent(config, app_config=runtime_app_config)
+    if skill_storage is None:
+        return _assemble_lead_agent(config, app_config=runtime_app_config)
+    return _assemble_lead_agent(config, app_config=runtime_app_config, skill_storage=skill_storage)
 
 
 def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
@@ -987,7 +999,12 @@ def _complete_assembly(
     return LeadAgentAssembly(graph=graph, descriptor=descriptor, effective_model=effective_model)
 
 
-def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
+def _assemble_lead_agent(
+    config: RunnableConfig,
+    *,
+    app_config: AppConfig,
+    skill_storage: SkillStorage | None = None,
+) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -1404,6 +1421,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         available_skills=available_skills,
         memory_enabled=memory_enabled,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
