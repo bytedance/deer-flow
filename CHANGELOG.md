@@ -70,9 +70,12 @@ This section accumulates work toward the **2.3.0** milestone
 
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
-  `0 24 * * *` stays a custom schedule. It used to be shown as the nearest
-  preset and saved back as that rewritten time; it now keeps the typed text and
-  saving it surfaces the Gateway's `422`. ([#8020])
+  `0 24 * * *` stays a custom schedule and keeps its original text. Previously,
+  it was parsed as a preset and could be clamped to a different time when
+  serialized for submission. Creating or duplicating a task with an invalid
+  expression, or updating its schedule configuration while the expression is
+  invalid, returns the Gateway's `422`; edits to other fields do not revalidate
+  an unchanged schedule. ([#8020])
 
 - **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
   `parents` or `counters_since_delta_snapshot` in its metadata no longer

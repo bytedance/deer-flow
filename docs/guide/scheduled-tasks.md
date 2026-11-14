@@ -46,7 +46,9 @@ Current MVP limits:
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
-In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression. Presets cover minute 0-59, hour 0-23 and day of month 1-31; an expression outside those ranges stays Custom, and saving it returns `422` until it is corrected.
+In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
+
+Presets cover minute 0-59, hour 0-23 and day of month 1-31. An expression outside those ranges stays Custom and keeps its original text. Creating or duplicating a task with an invalid expression, or updating its schedule configuration while the expression is invalid, returns `422` from the Gateway. Editing only other fields, such as the title, leaves the schedule configuration out of the update request and does not revalidate the unchanged expression.
 
 ## Control proactive IM notifications
 
