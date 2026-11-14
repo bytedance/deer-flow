@@ -29,6 +29,7 @@ Read the guide for an area before you change it.
 ```bash
 make test               # offline suite in parallel shards
 make test-blocking-io   # strict blocking-I/O suite
+make test-bundled-extensions  # behavior suites of bundled examples (not in make test)
 make lint
 make format
 make test-live          # calls real APIs; needs DEER_FLOW_RUN_LIVE_TESTS=1

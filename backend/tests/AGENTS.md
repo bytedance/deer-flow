@@ -62,6 +62,18 @@ with a reason when the binary is missing.
 - **Circular imports are solved in `conftest.py`** with a `sys.modules` stub; see
   the existing entry for `deerflow.subagents.executor`.
 
+## Bundled extension behavior
+
+A module that validates a bundled example's own behavior carries
+`pytest.mark.bundled_extension` at module level, so the core shards skip it and
+the bundled extension CI runs it. Host mechanisms stay in the core shards even
+when an example package is the payload: loading and registration, the public
+extension API, authorization, routing and runtime. Host/extension compatibility
+checks live in `test_extension_host_contracts.py`, so a broken compatibility
+guarantee still fails core CI, and `test_bundled_extension_ci.py` keeps the
+workflow's test-file list in step with the marker. Run the bundled suites with
+`make test-bundled-extensions`.
+
 ## Blocking-I/O tests
 
 Every test under `blocking_io/` runs with a detector that fails on a blocking
