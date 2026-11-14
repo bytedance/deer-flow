@@ -24,3 +24,10 @@ row 1001 (the 1002nd data row), which contains the string `text`. That text lies
 outside DuckDB's default dataframe sampling positions and exposes incomplete
 mixed-column inference. Tests decompress it before calling the production loader.
 The same generator produces this fixture with deterministic gzip metadata.
+
+`mixed-types.xls` contains a `MixedTypes` sheet with boolean/integer,
+date/integer and boolean/decimal columns alongside a compatible numeric
+`amount` column. The third row has only an amount so the other cells are null.
+A separate `Control` sheet previously masked the missing mixed sheet by loading
+successfully. The regression queries the mixed rows in both the first load and
+a cache hit from a fresh process.

@@ -52,3 +52,24 @@ workbook.save(buffer)
 Path(__file__).with_name("sparse-mixed.xls.gz").write_bytes(
     gzip.compress(buffer.getvalue(), mtime=0)
 )
+
+
+workbook = xlwt.Workbook()
+sheet = workbook.add_sheet("MixedTypes")
+for column, heading in enumerate(
+    ("bool_number", "date_number", "bool_decimal", "amount")
+):
+    sheet.write(0, column, heading)
+sheet.write(1, 0, True)
+sheet.write(1, 1, datetime(2026, 1, 2), date_style)
+sheet.write(1, 2, False)
+sheet.write(1, 3, 1)
+sheet.write(2, 0, 42)
+sheet.write(2, 1, 7)
+sheet.write(2, 2, 1.25)
+sheet.write(2, 3, 2.5)
+sheet.write(3, 3, 3)
+sheet = workbook.add_sheet("Control")
+sheet.write(0, 0, "value")
+sheet.write(1, 0, 10)
+workbook.save(str(Path(__file__).with_name("mixed-types.xls")))

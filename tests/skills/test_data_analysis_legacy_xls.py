@@ -3,6 +3,7 @@
 import builtins
 import datetime
 import gzip
+import json
 import runpy
 import shutil
 import subprocess
@@ -195,28 +196,12 @@ def test_legacy_xls_restores_sampling_when_table_creation_fails(
         ).fetchone() == (17,)
 
 
-@pytest.mark.parametrize("unreadable_kind", [None, "corrupt", "renamed-xlsx"])
-def test_legacy_xls_cli_runs_offline_with_empty_extension_directory(
-    tmp_path, unreadable_kind
-):
-    """An XLS-only cold import must not install DuckDB's XLSX reader."""
+def _offline_xls_command(tmp_path, files):
     extension_dir = tmp_path / "extensions"
     extension_dir.mkdir()
     repository = tmp_path / "empty-extension-repository"
     repository.mkdir()
     cache = tmp_path / "cache"
-    files = [str(FIXTURE)]
-    if unreadable_kind:
-        unreadable = tmp_path / "unreadable.xls"
-        if unreadable_kind == "corrupt":
-            unreadable.write_bytes(b"not an Excel workbook")
-        else:
-            workbook = openpyxl.Workbook()
-            workbook.active.append(["value"])
-            workbook.active.append([99])
-            workbook.save(unreadable)
-            workbook.close()
-        files.insert(0, str(unreadable))
     # Configure a real connection in a fresh interpreter. An empty local
     # repository makes extension installation fail without any network request;
     # all CLI parsing, XLS reads, SQL and cache publication remain production code.
@@ -241,7 +226,7 @@ module["main"].__globals__["CACHE_DIR"] = cache
 sys.argv = [script, *arguments]
 module["main"]()
 """
-    command = [
+    return [
         sys.executable,
         "-c",
         bootstrap,
@@ -252,6 +237,26 @@ module["main"]()
         "--files",
         *files,
     ]
+
+
+@pytest.mark.parametrize("unreadable_kind", [None, "corrupt", "renamed-xlsx"])
+def test_legacy_xls_cli_runs_offline_with_empty_extension_directory(
+    tmp_path, unreadable_kind
+):
+    """An XLS-only cold import must not install DuckDB's XLSX reader."""
+    files = [str(FIXTURE)]
+    if unreadable_kind:
+        unreadable = tmp_path / "unreadable.xls"
+        if unreadable_kind == "corrupt":
+            unreadable.write_bytes(b"not an Excel workbook")
+        else:
+            workbook = openpyxl.Workbook()
+            workbook.active.append(["value"])
+            workbook.active.append([99])
+            workbook.save(unreadable)
+            workbook.close()
+        files.insert(0, str(unreadable))
+    command = _offline_xls_command(tmp_path, files)
     inspected = subprocess.run(
         [*command, "--action", "inspect"],
         cwd=tmp_path,
@@ -285,4 +290,55 @@ module["main"]()
     )
     assert queried.returncode == 0, queried.stderr
     assert queried.stdout.splitlines()[2].strip() == "10"
-    assert not list(extension_dir.rglob("*"))
+    assert not list((tmp_path / "extensions").rglob("*"))
+
+
+def test_legacy_xls_mixed_cell_types_survive_cli_cache(tmp_path):
+    command = _offline_xls_command(
+        tmp_path, [str(FIXTURE.with_name("mixed-types.xls"))]
+    )
+    output = tmp_path / "result.json"
+    for cached in (False, True):
+        result = subprocess.run(
+            [
+                *command,
+                "--action",
+                "query",
+                "--sql",
+                'SELECT *, typeof(amount) AS amount_type FROM "MixedTypes" ORDER BY amount',
+                "--output-file",
+                str(output),
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Failed to load sheet" not in result.stderr
+        assert ("Cache hit!" in result.stderr) is cached
+        assert json.loads(output.read_text(encoding="utf-8")) == [
+            {
+                "bool_number": "True",
+                "date_number": "2026-01-02 00:00:00",
+                "bool_decimal": "False",
+                "amount": 1.0,
+                "amount_type": "DOUBLE",
+            },
+            {
+                "bool_number": "42",
+                "date_number": "7",
+                "bool_decimal": "1.25",
+                "amount": 2.5,
+                "amount_type": "DOUBLE",
+            },
+            {
+                "bool_number": None,
+                "date_number": None,
+                "bool_decimal": None,
+                "amount": 3.0,
+                "amount_type": "DOUBLE",
+            },
+        ]
+    assert not list((tmp_path / "extensions").rglob("*"))

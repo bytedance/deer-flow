@@ -28,10 +28,10 @@ python -m pip install pandas xlrd
 These optional packages are loaded only for `.xls` input. A missing package produces
 an explicit setup instruction. Legacy workbooks are read sheet by sheet with pandas'
 xlrd engine, preserving cell values (including literal `NA` strings and leading
-zeros in text identifiers) and treating empty cells as nulls. DuckDB infers table
-types from all rows in the sheet, restoring the connection's original dataframe
-sampling setting after materialization, including on failure. Completely empty
-sheets are skipped. The `.xlsx` reader
+zeros in text identifiers) and treating empty cells as nulls. Columns with
+incompatible cell types, such as a date and a number, are stored as text with
+nulls preserved. Compatible numeric types still produce numeric columns.
+Completely empty sheets are skipped. The `.xlsx` reader
 continues to use openpyxl and DuckDB's spatial extension. A legacy workbook that
 cannot be opened is reported and skipped so remaining inputs can still be
 analyzed. The command fails if no input produces a table.

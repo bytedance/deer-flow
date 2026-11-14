@@ -49,6 +49,9 @@ def compute_files_hash(files: list[str]) -> str:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
         hasher.update(name)
+        if os.path.splitext(file_path)[1].lower() == ".xls":
+            # Rebuild legacy caches that might have dropped a mixed-type sheet.
+            hasher.update(b"legacy-xls-v2\0")
         file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
@@ -330,12 +333,17 @@ def _load_legacy_excel(
                 if frame.columns.empty:
                     logger.warning(f"  Skipping empty sheet '{sheet_name}'")
                     continue
+                for column_name, column in frame.items():
+                    # Excel permits unrelated cell types in the same column.
+                    # Normalize those columns before DuckDB chooses a SQL type.
+                    kind = pandas.api.types.infer_dtype(column, skipna=True)
+                    if kind in ("mixed", "mixed-integer"):
+                        frame[column_name] = column.map(str, na_action="ignore")
                 original_sample = con.execute(
                     "SELECT current_setting('pandas_analyze_sample')"
                 ).fetchone()[0]
                 try:
-                    # A rare text cell can fall outside DuckDB's default sample.
-                    # Analyze the entire sheet before materializing object columns.
+                    # Infer compatible types from all rows, including rare values.
                     con.execute(
                         "SET pandas_analyze_sample = ?",
                         [max(original_sample, len(frame))],
