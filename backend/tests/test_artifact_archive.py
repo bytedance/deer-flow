@@ -407,6 +407,74 @@ def test_archive_rejects_casefolded_entry_collisions(tmp_path, monkeypatch) -> N
     assert response.status_code == 409
 
 
+@pytest.mark.parametrize(
+    "order",
+    [
+        ["/mnt/user-data/outputs/Report", "/mnt/user-data/outputs/report/slides/lesson.pptx"],
+        ["/mnt/user-data/outputs/report/slides/lesson.pptx", "/mnt/user-data/outputs/Report"],
+    ],
+)
+def test_archive_rejects_file_colliding_with_implicit_directory(tmp_path, monkeypatch, order) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    file_entry = outputs / "Report"
+    file_entry.write_text("file content", encoding="utf-8")
+    lower_report = outputs / "report"
+    if lower_report.exists() and file_entry.samefile(lower_report):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
+    nested_dir = outputs / "report" / "slides"
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
+    nested_entry = nested_dir / "lesson.pptx"
+    nested_entry.write_text("slides content", encoding="utf-8")
+
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=order,
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 409
+
+
+def test_archive_rejects_unicode_nfc_nfd_implicit_directory_collision(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    nfc_name = "Caf\u00e9"
+    nfd_dir = "Cafe\u0301"
+    file_entry = outputs / nfc_name
+    file_entry.write_text("cafe content", encoding="utf-8")
+    nfd_path = outputs / nfd_dir
+    if nfd_path.exists() and file_entry.samefile(nfd_path):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
+    nested_dir = outputs / nfd_dir
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
+    nested_entry = nested_dir / "menu.txt"
+    nested_entry.write_text("menu content", encoding="utf-8")
+
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=[
+            f"/mnt/user-data/outputs/{nfc_name}",
+            f"/mnt/user-data/outputs/{nfd_dir}/menu.txt",
+        ],
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 409
+
+
 def test_archive_rechecks_size_after_open(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
