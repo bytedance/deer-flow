@@ -3,6 +3,7 @@ import gc
 import logging
 import weakref
 from datetime import UTC, datetime, timedelta
+from threading import Timer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -3554,30 +3555,97 @@ async def test_outer_cancel_returns_before_suppressing_child_and_releases_all_on
             max_concurrent_polls=3,
         )
 
-    caller = asyncio.create_task(_run_batch_probe(service, phase))
-    await driver.started.wait()
-    caller.cancel("first cancellation")
-    timed_out = False
-    try:
-        with pytest.raises(asyncio.CancelledError) as caught:
-            await asyncio.wait_for(caller, timeout=0.2)
-        assert caught.value.args == ("first cancellation",)
-    except TimeoutError:
-        timed_out = True
-
-    assert timed_out is False
-    assert driver.swallowed.is_set()
     if phase == "poll":
-        released = repo.released
+        released, release_methods = repo.released, ["release_poll_claim_after_cancellation"]
     elif phase == "cancel":
-        released = repo.cancel_releases
+        released, release_methods = repo.cancel_releases, ["release_cancel_claim"]
     else:
-        released = repo.notification_releases
-    assert sorted(task_id for task_id, _kwargs in released) == ["task-1", "task-2"]
-    assert len(service._compensation_tasks) == 1
+        released, release_methods = repo.notification_releases, ["release_notification_claim", "release_notification_lease"]
+    releases_finished = asyncio.Event()
+    for release_method in release_methods:
+        real_release = getattr(repo, release_method)
 
-    release_gate.set()
-    await _wait_for_compensation_tasks_to_clear(service)
+        async def observe_release(*args, _release=real_release, **kwargs):
+            result = await _release(*args, **kwargs)
+            if len(released) == 2:
+                releases_finished.set()
+            return result
+
+        monkeypatch.setattr(repo, release_method, observe_release)
+    loop = asyncio.get_running_loop()
+    real_time, real_wait = loop.time, asyncio.wait
+    clock = real_time()
+    drain_started = asyncio.Event()
+    drain_timeouts = []
+
+    async def observe_wait(tasks, **kwargs):
+        if any(getattr(task, "get_name", lambda: "")().endswith("-cancellation-handoff") for task in tasks):
+            drain_timeouts.append(kwargs["timeout"])
+            drain_started.set()
+        return await real_wait(tasks, **kwargs)
+
+    caller = None
+    try:
+        # Freeze only the clock: the real batch, deadline waiter and asyncio
+        # timers still run. Runner stalls cannot consume the cancellation budget
+        # before the child and lease-release barriers have been reached.
+        with monkeypatch.context() as timing:
+            timing.setattr(loop, "time", lambda: clock)
+            timing.setattr(asyncio, "wait", observe_wait)
+            test_task = asyncio.current_task()
+            barriers_pending = True
+            watchdog_expired = False
+
+            def expire_barriers():
+                nonlocal watchdog_expired
+                if barriers_pending:
+                    watchdog_expired = True
+                    test_task.cancel("MCP cancellation barriers did not settle")
+
+            # A real-time guard must work even when the event-loop clock is
+            # frozen, so a broken release path fails rather than hanging CI.
+            watchdog = Timer(5, loop.call_soon_threadsafe, args=(expire_barriers,))
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                caller = asyncio.create_task(_run_batch_probe(service, phase))
+                await driver.started.wait()
+                caller.cancel("first cancellation")
+                await drain_started.wait()
+                await driver.swallowed.wait()
+                await releases_finished.wait()
+            except asyncio.CancelledError:
+                if watchdog_expired:
+                    raise TimeoutError("MCP cancellation barriers did not settle within 5s") from None
+                raise
+            finally:
+                barriers_pending = False
+                watchdog.cancel()
+                watchdog.join()
+
+            assert drain_timeouts == pytest.approx([0.05])
+            assert not caller.done()
+            assert not service._compensation_tasks
+            # Expire the 50ms budget, then let time run again. The outer timeout
+            # is a deadlock guard, not a second competing latency assertion.
+            offset = clock + 0.051 - real_time()
+            timing.setattr(loop, "time", lambda: real_time() + offset)
+            done, _ = await asyncio.wait({caller}, timeout=5)
+            assert done == {caller}
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await caller
+            assert caught.value.args == ("first cancellation",)
+            assert not release_gate.is_set()
+            assert sorted(task_id for task_id, _kwargs in released) == ["task-1", "task-2"]
+            assert len(service._compensation_tasks) == 1
+    finally:
+        # Restore the clock before draining, including when an assertion fails.
+        release_gate.set()
+        if caller is not None:
+            if not caller.done():
+                caller.cancel()
+            await asyncio.gather(caller, return_exceptions=True)
+        await _wait_for_compensation_tasks_to_clear(service)
     assert len(released) == 2
 
 
