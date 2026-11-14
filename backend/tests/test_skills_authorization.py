@@ -2582,6 +2582,25 @@ def test_lead_chain_wires_durable_render_filter():
     assert middlewares.index(activations[0]) < middlewares.index(durables[0]), "activation must wrap outside durable so the per-step decisions are published before the renderer reads them"
 
 
+def test_lead_chain_prefers_injected_skill_storage_over_user_scoped_storage():
+    """Embedding hosts can supply request-scoped storage; it must win over the
+    user-scoped default even when a user_id is present."""
+    from deerflow.agents.lead_agent.agent import build_middlewares
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+
+    injected = object()
+    middlewares = build_middlewares(
+        {"configurable": {}},
+        app_config=_make_app_config(),
+        model_name="gpt-4",
+        user_id="user-123",
+        skill_storage=injected,
+    )
+
+    activation = next(m for m in middlewares if isinstance(m, SkillActivationMiddleware))
+    assert activation._storage() is injected
+
+
 def test_subagent_chain_wires_durable_render_filter():
     """Same wiring contract for the subagent builder's DurableContextMiddleware."""
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
