@@ -96,3 +96,7 @@ make test-blocking-io
 - **Retry the goal evaluator only for a malformed verdict** from a normal model
   completion. Other failures are final.
 - **A truncated workspace snapshot cannot prove that a file is absent.**
+
+Direct store calls to `list_messages` and `list_messages_by_run` return no records for
+`limit=0` across memory, JSONL and SQL; Gateway endpoints still require a positive
+limit. Parity coverage: `tests/test_run_event_store.py::TestZeroMessageLimit`.
