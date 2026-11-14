@@ -85,15 +85,31 @@ class FailingCreateRepository(FakeRepository):
         raise RuntimeError("database unavailable")
 
 
-class BlockingCreateRepository(FakeRepository):
+class BlockingCreateRepository(FailingCreateRepository):
     def __init__(self):
         super().__init__()
         self.create_started = asyncio.Event()
+        self.finish_create = asyncio.Event()
+        self.create_interrupted = False
 
     async def create(self, **kwargs):
-        self.created.append(kwargs)
         self.create_started.set()
-        await asyncio.Event().wait()
+        try:
+            await self.finish_create.wait()
+        except asyncio.CancelledError:
+            self.create_interrupted = True
+            raise
+        return await super().create(**kwargs)
+
+
+async def _finish_blocked_submission(service, submit_task, repo, driver):
+    repo.finish_create.set()
+    if hasattr(driver, "finish_cancel"):
+        driver.finish_cancel.set()
+    if not submit_task.done():
+        submit_task.cancel()
+    await asyncio.gather(submit_task, return_exceptions=True)
+    await service._drain_compensation_tasks(deadline=asyncio.get_running_loop().time() + 5)
 
 
 class DuplicateCreateRepository(FakeRepository):
@@ -332,7 +348,7 @@ async def test_submit_compensates_remote_task_when_thread_incarnation_drifted():
 
 
 @pytest.mark.asyncio
-async def test_submit_cancellation_during_persistence_cancels_remote_task():
+async def test_submit_cancellation_waits_for_persistence_failure_before_compensating():
     repo = BlockingCreateRepository()
     driver = FakeDriver(
         submission=TaskSubmission(
@@ -363,20 +379,28 @@ async def test_submit_cancellation_during_persistence_cancels_remote_task():
     )
 
     submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
-    await repo.create_started.wait()
-    submit_task.cancel()
+    try:
+        await repo.create_started.wait()
+        submit_task.cancel()
+        await asyncio.sleep(0)
+        assert driver.cancel_calls == []
+        assert not repo.create_interrupted
+        repo.finish_create.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await submit_task
+        with pytest.raises(asyncio.CancelledError):
+            await submit_task
 
-    assert len(driver.cancel_calls) == 1
-    cancelled = driver.cancel_calls[0]
-    assert cancelled.local_task_id == "task-1"
-    assert cancelled.remote_task_id == "remote-1"
+        assert len(repo.created) == 1
+        assert len(driver.cancel_calls) == 1
+        cancelled = driver.cancel_calls[0]
+        assert cancelled.local_task_id == "task-1"
+        assert cancelled.remote_task_id == "remote-1"
+    finally:
+        await _finish_blocked_submission(service, submit_task, repo, driver)
 
 
 @pytest.mark.asyncio
-async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
+async def test_submit_repeated_cancellation_preserves_compensation_after_persistence_failure():
     repo = BlockingCreateRepository()
     driver = BlockingCancelDriver(
         submission=TaskSubmission(
@@ -407,23 +431,30 @@ async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
     )
 
     submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
-    await repo.create_started.wait()
-    submit_task.cancel()
-    await driver.cancel_started.wait()
+    try:
+        await repo.create_started.wait()
+        submit_task.cancel()
+        await asyncio.sleep(0)
+        assert driver.cancel_calls == []
+        assert not repo.create_interrupted
+        repo.finish_create.set()
+        await driver.cancel_started.wait()
 
-    submit_task.cancel()
-    driver.finish_cancel.set()
+        submit_task.cancel()
+        driver.finish_cancel.set()
 
-    with pytest.raises(asyncio.CancelledError):
-        await submit_task
+        with pytest.raises(asyncio.CancelledError):
+            await submit_task
 
-    assert len(driver.cancel_calls) == 1
-    assert driver.cancel_completed
-    assert not driver.cancel_interrupted
+        assert len(driver.cancel_calls) == 1
+        assert driver.cancel_completed
+        assert not driver.cancel_interrupted
+    finally:
+        await _finish_blocked_submission(service, submit_task, repo, driver)
 
 
 @pytest.mark.asyncio
-async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(monkeypatch, caplog):
+async def test_submit_retains_hung_compensation_after_late_persistence_failure(monkeypatch, caplog):
     monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0)
     repo = BlockingCreateRepository()
     driver = BlockingCancelDriver(
@@ -455,27 +486,34 @@ async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(
     )
 
     submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
-    await repo.create_started.wait()
-    submit_task.cancel()
+    try:
+        await repo.create_started.wait()
+        submit_task.cancel()
 
-    with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
-        await submit_task
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(asyncio.CancelledError):
+                await submit_task
+            assert driver.cancel_calls == []
+            assert not repo.create_interrupted
+            repo.finish_create.set()
+            await driver.cancel_started.wait()
 
-    assert "cancellation continues in the background" in caplog.text
-    await driver.cancel_started.wait()
-    assert not driver.cancel_interrupted
-    assert not driver.cancel_completed
+        assert "cancellation continues in the background" in caplog.text
+        assert not driver.cancel_interrupted
+        assert not driver.cancel_completed
 
-    driver.finish_cancel.set()
-    await driver.cancel_finished.wait()
+        driver.finish_cancel.set()
+        await driver.cancel_finished.wait()
 
-    assert len(driver.cancel_calls) == 1
-    assert driver.cancel_completed
-    assert not driver.cancel_interrupted
+        assert len(driver.cancel_calls) == 1
+        assert driver.cancel_completed
+        assert not driver.cancel_interrupted
+    finally:
+        await _finish_blocked_submission(service, submit_task, repo, driver)
 
 
 @pytest.mark.asyncio
-async def test_submit_cancellation_preserves_cancelled_error_when_compensation_fails(caplog):
+async def test_submit_cancellation_preserved_when_persistence_then_compensation_fail(caplog):
     repo = BlockingCreateRepository()
     driver = FakeDriver(
         submission=TaskSubmission(
@@ -506,15 +544,22 @@ async def test_submit_cancellation_preserves_cancelled_error_when_compensation_f
     )
 
     submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
-    await repo.create_started.wait()
-    submit_task.cancel()
+    try:
+        await repo.create_started.wait()
+        submit_task.cancel()
+        await asyncio.sleep(0)
+        assert driver.cancel_calls == []
+        assert not repo.create_interrupted
+        repo.finish_create.set()
 
-    with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError):
-        await submit_task
+        with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError):
+            await submit_task
 
-    assert len(driver.cancel_calls) == 1
-    assert "Failed to cancel untracked MCP task" in caplog.text
-    assert "cancel unavailable" in caplog.text
+        assert len(driver.cancel_calls) == 1
+        assert "Failed to cancel untracked MCP task" in caplog.text
+        assert "cancel unavailable" in caplog.text
+    finally:
+        await _finish_blocked_submission(service, submit_task, repo, driver)
 
 
 @pytest.mark.asyncio
@@ -1909,11 +1954,12 @@ async def test_stop_callers_share_deadline_and_log_one_timeout(monkeypatch, capl
         await release_wait.wait()
         return set(), set()
 
+    clock_loop = SimpleNamespace(time=lambda: clock[0])
     monkeypatch.setattr(service_module.asyncio, "wait", fake_wait)
     monkeypatch.setattr(
         service_module.asyncio,
         "get_running_loop",
-        lambda: SimpleNamespace(time=lambda: clock[0]),
+        lambda: clock_loop,
     )
 
     poller_started = asyncio.Event()
@@ -1986,11 +2032,12 @@ async def test_poller_done_clears_stop_state_and_ignores_stale_callback(monkeypa
         await release_wait[index].wait()
         return set(), set()
 
+    clock_loop = SimpleNamespace(time=lambda: clock[0])
     monkeypatch.setattr(service_module.asyncio, "wait", fake_wait)
     monkeypatch.setattr(
         service_module.asyncio,
         "get_running_loop",
-        lambda: SimpleNamespace(time=lambda: clock[0]),
+        lambda: clock_loop,
     )
 
     first_started = asyncio.Event()
@@ -4864,11 +4911,10 @@ async def test_stop_drains_service_owned_compensation_tasks(monkeypatch):
         release_started.set()
         await release_gate.wait()
 
+    await service.start()
     compensation = asyncio.create_task(release_claim(), name="test-mcp-compensation")
     service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
     await release_started.wait()
-    await service.start()
-
     original_drain = service._drain_compensation_tasks
     drain_started = asyncio.Event()
 
@@ -4906,10 +4952,10 @@ async def test_stop_bounds_drain_of_service_owned_compensation_tasks(monkeypatch
         release_started.set()
         await release_gate.wait()
 
+    await service.start()
     compensation = asyncio.create_task(release_claim(), name="test-mcp-stuck-compensation")
     service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
     await release_started.wait()
-    await service.start()
     try:
         with caplog.at_level(logging.WARNING):
             await asyncio.wait_for(service.stop(), timeout=0.5)
@@ -4948,10 +4994,10 @@ async def test_stop_logs_pending_compensation_on_poller_timeout(monkeypatch, cap
         await compensation_release.wait()
 
     monkeypatch.setattr(service, "run_once", blocked_run_once)
+    await service.start()
     compensation = asyncio.create_task(release_claim(), name="test-mcp-timeout-compensation")
     service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
     await compensation_started.wait()
-    await service.start()
     await poller_started.wait()
 
     try:
@@ -4985,11 +5031,10 @@ async def test_stop_preserves_cancellation_while_draining_compensation_tasks(mon
         release_started.set()
         await release_gate.wait()
 
+    await service.start()
     compensation = asyncio.create_task(release_claim(), name="test-mcp-cancelled-drain")
     service._track_compensation_task(compensation, action="release poll claim", task_id="task-1")
     await release_started.wait()
-    await service.start()
-
     original_drain = service._drain_compensation_tasks
     drain_started = asyncio.Event()
 

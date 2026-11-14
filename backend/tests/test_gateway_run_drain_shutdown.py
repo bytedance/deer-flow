@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from types import SimpleNamespace
 from typing import Annotated, TypedDict
 from unittest.mock import AsyncMock
@@ -150,7 +150,8 @@ async def test_shutdown_is_noop_without_inflight_runs():
 
 
 @pytest.mark.asyncio
-async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch):
+@pytest.mark.parametrize("shutdown_failure", [None, "run_cancel", "mcp_error", "mcp_cancel"])
+async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch, shutdown_failure):
     """Drain runs before services, then close runtime resources in stack order.
 
     Patches every ``langgraph_runtime`` collaborator down to trivial stand-ins so
@@ -198,6 +199,8 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
 
     async def spy_shutdown(self, *, timeout):  # noqa: ANN001
         events.append("runs_drained")
+        if shutdown_failure == "run_cancel":
+            raise asyncio.CancelledError
 
     def spy_set_extension_notify_loop(loop):  # noqa: ANN001
         assert loop is asyncio.get_running_loop()
@@ -221,6 +224,14 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     app = FastAPI()
     registry = ExtensionRegistry()
 
+    class _McpService:
+        async def drain_submissions(self):
+            events.append("submissions_drained")
+            if shutdown_failure == "mcp_error":
+                raise RuntimeError("submission drain failed")
+            if shutdown_failure == "mcp_cancel":
+                raise asyncio.CancelledError
+
     class _Service:
         async def start(self, _deps):
             events.append("service_started")
@@ -233,8 +244,10 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     app.state.extensions = registry.build()
     startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
 
-    async with langgraph_runtime(app, startup_config):
-        pass
+    expected = pytest.raises(asyncio.CancelledError) if shutdown_failure in ("run_cancel", "mcp_cancel") else nullcontext()
+    with expected:
+        async with langgraph_runtime(app, startup_config):
+            app.state.mcp_task_service = _McpService()
 
     assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
     assert "service_started" in events
@@ -243,6 +256,8 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     assert events.index("engine_initialized") < events.index("session_factory_resolved")
     assert events.index("session_factory_resolved") < events.index("service_started")
     assert events.index("runs_drained") < events.index("service_stopped")
+    assert events.index("runs_drained") < events.index("submissions_drained")
+    assert events.index("submissions_drained") < events.index("service_stopped")
     assert events.index("service_stopped") < events.index("store_closed")
     assert events.index("store_closed") < events.index("checkpointer_closed")
     assert events.index("checkpointer_closed") < events.index("engine_closed")
