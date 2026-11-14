@@ -2051,6 +2051,35 @@ export const enUS: Translations = {
     title: "Context window",
     badgeAriaLabel: (percentage: string) =>
       `Context window ${percentage}% full`,
+    breakdownTitle: "Context composition",
+    ringAriaLabel: (percentage: string) =>
+      `Context composition, ${percentage}% of the window used`,
+    ringAriaLabelNoWindow: (tokens: string) =>
+      `Context composition, ${tokens} ${tokens === "1" ? "token" : "tokens"} used`,
+    ringAriaLabelEmpty: "Context composition, no data yet",
+    usedOfWindow: (used: string, total: string) => `${used} of ${total} used`,
+    usedOnly: (used: string) =>
+      `${used} ${used === "1" ? "token" : "tokens"} used`,
+    remaining: (remaining: string) => `${remaining} remaining`,
+    shareOfWindow: "Share of the context window",
+    shareOfUsed: "Share of the tokens used",
+    empty: "No composition data yet. Send a message and it will be captured.",
+    categories: {
+      systemPrompt: "System prompt",
+      tools: "Tools",
+      skills: "Skills",
+      memoryContext: "Memory & context",
+      conversation: "Conversation",
+    },
+    subcategories: {
+      builtinTools: "Built-in",
+      mcpTools: "MCP",
+      memory: "Memory",
+      taskState: "Task state",
+      otherInjection: "System extras",
+      conversationMessages: "Messages",
+      toolResults: "Tool results",
+    },
   },
 
   // Shortcuts

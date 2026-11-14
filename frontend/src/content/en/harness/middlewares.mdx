@@ -40,16 +40,17 @@ The middleware chain is built once per agent invocation, based on the current co
 9. `MemoryMiddleware` — cross-session memory injection and queuing
 10. `ViewImageMiddleware` — image details injection (if model supports vision)
 11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
-16. Custom middlewares (if any)
-17. Configured extension middlewares (if any)
-18. `TerminalResponseMiddleware` — retries an empty final response once
-19. `ModelLengthFinishReasonMiddleware` — records a length-capped completion
-20. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
-21. `ClarificationMiddleware` — intercepts clarification requests (always last)
+12. `ContextUsageMiddleware` — snapshots the model request's token composition (if token usage is enabled)
+13. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
+14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+15. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+16. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+17. Custom middlewares (if any)
+18. Configured extension middlewares (if any)
+19. `TerminalResponseMiddleware` — retries an empty final response once
+20. `ModelLengthFinishReasonMiddleware` — records a length-capped completion
+21. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+22. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
 The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
@@ -133,6 +134,16 @@ Tracks LLM token consumption per model call and logs it at the `info` level. Use
 token_usage:
   enabled: true
 ```
+
+---
+
+### ContextUsageMiddleware
+
+Captures the token composition of each model request: system prompt, built-in and MCP tool schemas, loaded skill bodies, memory, task state, other injected context, conversation messages, and tool results. It is read-only and never changes the request.
+
+The snapshot is taken immediately before `SystemMessageCoalescingMiddleware`, so injected system messages keep their provenance instead of being folded into the system prompt. Later request sanitizers and run-input admission can still shrink what the provider receives, so the counts describe the request at that boundary rather than the exact provider payload. Counts are approximate, are stored on the run's final `AIMessage`, and are exposed through the thread token-usage API as `context_usage.breakdown`, which the composer's context ring renders. A manual context compaction clears the retained snapshot, because it counted messages that were just removed; the ring returns to the placeholder until the next model call records a new one. Percentages use the model's declared `context_window` when one is configured and the request's own total otherwise.
+
+**Configuration**: follows `token_usage.enabled` in `config.yaml`; the ring is hidden when token tracking is off.
 
 ---
 

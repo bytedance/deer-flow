@@ -1936,6 +1936,34 @@ export const zhCN: Translations = {
     label: "上下文",
     title: "上下文窗口",
     badgeAriaLabel: (percentage: string) => `上下文窗口已使用 ${percentage}%`,
+    breakdownTitle: "上下文构成",
+    ringAriaLabel: (percentage: string) =>
+      `上下文构成，已占用窗口 ${percentage}%`,
+    ringAriaLabelNoWindow: (tokens: string) =>
+      `上下文构成，已使用 ${tokens} tokens`,
+    ringAriaLabelEmpty: "上下文构成，暂无数据",
+    usedOfWindow: (used: string, total: string) => `已使用 ${used} / ${total}`,
+    usedOnly: (used: string) => `已使用 ${used} tokens`,
+    remaining: (remaining: string) => `剩余 ${remaining}`,
+    shareOfWindow: "占上下文窗口",
+    shareOfUsed: "占已使用",
+    empty: "暂无统计数据；发送一条消息后生成。",
+    categories: {
+      systemPrompt: "系统提示词",
+      tools: "工具",
+      skills: "技能",
+      memoryContext: "记忆与上下文",
+      conversation: "会话内容",
+    },
+    subcategories: {
+      builtinTools: "内置",
+      mcpTools: "MCP",
+      memory: "记忆",
+      taskState: "任务状态",
+      otherInjection: "系统附加信息",
+      conversationMessages: "对话消息",
+      toolResults: "工具结果",
+    },
   },
 
   // Shortcuts

@@ -1745,6 +1745,32 @@ export interface Translations {
     label: string;
     title: string;
     badgeAriaLabel: (percentage: string) => string;
+    breakdownTitle: string;
+    ringAriaLabel: (percentage: string) => string;
+    ringAriaLabelNoWindow: (tokens: string) => string;
+    ringAriaLabelEmpty: string;
+    usedOfWindow: (used: string, total: string) => string;
+    usedOnly: (used: string) => string;
+    remaining: (remaining: string) => string;
+    shareOfWindow: string;
+    shareOfUsed: string;
+    empty: string;
+    categories: {
+      systemPrompt: string;
+      tools: string;
+      skills: string;
+      memoryContext: string;
+      conversation: string;
+    };
+    subcategories: {
+      builtinTools: string;
+      mcpTools: string;
+      memory: string;
+      taskState: string;
+      otherInjection: string;
+      conversationMessages: string;
+      toolResults: string;
+    };
   };
 
   // Shortcuts

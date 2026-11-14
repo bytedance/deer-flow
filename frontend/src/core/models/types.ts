@@ -28,6 +28,8 @@ export interface Model {
   model: string;
   display_name: string;
   description?: string | null;
+  /** Configured context capacity; optional so an older Gateway still loads. */
+  context_window?: number | null;
   /** @deprecated derived from `reasoning`; kept for older Gateways. */
   supports_thinking?: boolean;
   /** @deprecated derived from `reasoning`; kept for older Gateways. */

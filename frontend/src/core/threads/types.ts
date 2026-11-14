@@ -118,10 +118,29 @@ export interface RunMessage {
   created_at: string;
 }
 
+export interface ThreadContextUsageBreakdown {
+  total_tokens: number;
+  percentage: number | null;
+  remaining_tokens: number | null;
+  system_prompt_tokens: number;
+  builtin_tools_tokens: number;
+  mcp_tools_tokens: number;
+  skill_body_tokens: number;
+  memory_tokens: number;
+  task_state_tokens: number;
+  other_injection_tokens: number;
+  conversation_tokens: number;
+  tool_result_tokens: number;
+  model_name: string | null;
+  context_window: number | null;
+  captured_at: string | null;
+}
+
 export interface ThreadContextUsage {
   token_count: number;
   max_context_tokens: number | null;
   percentage: number | null;
+  breakdown?: ThreadContextUsageBreakdown | null;
 }
 
 export interface ThreadTokenUsageResponse {

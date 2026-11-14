@@ -81,6 +81,7 @@ import {
 } from "@/core/threads/hooks";
 import {
   selectContextUsage,
+  selectContextUsageBreakdown,
   threadTokenUsageToTokenUsage,
 } from "@/core/threads/token-usage";
 import { projectIdOfThread, textOfMessage } from "@/core/threads/utils";
@@ -137,6 +138,9 @@ export default function AgentChatPage() {
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const contextUsage = selectContextUsage(threadTokenUsage.data);
+  const contextUsageBreakdown = selectContextUsageBreakdown(
+    threadTokenUsage.data,
+  );
 
   const { showNotification } = useNotification();
   const selectorVisible =
@@ -760,6 +764,11 @@ export default function AgentChatPage() {
                       hasPendingApproval
                     }
                     inputLocked={hasPendingApproval}
+                    contextUsageBreakdown={contextUsageBreakdown}
+                    contextUsageEnabled={tokenUsageEnabled}
+                    onContextUsageOpen={() => {
+                      void threadTokenUsage.refetch();
+                    }}
                     onContextChange={(context, options) => {
                       if (options?.automatic)
                         resolveThreadContext(threadId, context);

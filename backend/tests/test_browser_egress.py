@@ -305,7 +305,7 @@ def test_timed_out_egress_resolution_does_not_starve_browser_request_guard(monke
             assert await asyncio.wait_for(
                 context_usage.build_context_usage(request=SimpleNamespace(app=SimpleNamespace()), thread_id="thread-1", run_store=RunStore()),
                 timeout=2,
-            ) == {"token_count": 250, "max_context_tokens": 1000, "percentage": 25.0}
+            ) == {"token_count": 250, "max_context_tokens": 1000, "percentage": 25.0, "breakdown": None}
 
             # The actual contention is on the browser loop: its installed route
             # callback must still run the synchronous request guard.

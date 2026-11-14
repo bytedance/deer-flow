@@ -34,6 +34,7 @@ def _contract_model() -> ModelConfig:
         name="glm-5.3-flash",
         model="glm-5.3-flash",
         use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        context_window=200_000,
         reasoning={
             "thinking": "required",
             "dialect": "openai_extra_body",
@@ -63,6 +64,7 @@ def test_list_models_projects_reasoning_for_every_model(client):
     by_name = {m["name"]: m for m in response.json()["models"]}
 
     legacy = by_name["legacy"]
+    assert legacy["context_window"] is None
     assert legacy["supports_thinking"] is True
     assert legacy["supports_reasoning_effort"] is True
     assert legacy["reasoning"] == {
@@ -73,6 +75,8 @@ def test_list_models_projects_reasoning_for_every_model(client):
     }
 
     contract = by_name["glm-5.3-flash"]
+    # The composer reads this to keep its context ring in sync across models.
+    assert contract["context_window"] == 200_000
     # Deprecation-window projection: the booleans are derived from the contract.
     assert contract["supports_thinking"] is True
     assert contract["supports_reasoning_effort"] is True
@@ -89,6 +93,7 @@ def test_get_model_projects_reasoning(client):
 
     assert response.status_code == 200
     body = response.json()
+    assert body["context_window"] == 200_000
     assert body["reasoning"]["thinking"] == "required"
     assert body["reasoning"]["effort"]["values"] == ["low", "high", "max"]
 

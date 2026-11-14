@@ -210,6 +210,12 @@ def _make_system_message_coalescing_middleware():
     return SystemMessageCoalescingMiddleware()
 
 
+def _make_context_usage_middleware():
+    from deerflow.agents.middlewares.context_usage_middleware import ContextUsageMiddleware
+
+    return ContextUsageMiddleware(model_name="test-model", context_window=1000)
+
+
 def _make_dynamic_context_middleware():
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
@@ -250,6 +256,7 @@ _MIDDLEWARE_DECLARATIONS = [
     ("deerflow.agents.middlewares.tool_output_budget_middleware", "ToolOutputBudgetMiddleware", _make_tool_output_budget_middleware),
     ("deerflow.agents.middlewares.skill_activation_middleware", "SkillActivationMiddleware", _make_skill_activation_middleware),
     ("deerflow.agents.middlewares.system_message_coalescing_middleware", "SystemMessageCoalescingMiddleware", _make_system_message_coalescing_middleware),
+    ("deerflow.agents.middlewares.context_usage_middleware", "ContextUsageMiddleware", _make_context_usage_middleware),
     # The date middlewares declare the effective timezone the injected
     # <current_date> follows, so differently-anchored deployments fingerprint
     # differently.
@@ -314,6 +321,14 @@ def test_todo_hard_stop_policy_changes_assembly_identity(monkeypatch):
     assert previous_params.pop("skip_completion_reminder_on_safety_cap") is True
     monkeypatch.setattr(previous, "release_policy_parameters", lambda: previous_params)
     assert _middleware_fingerprint(current) != _middleware_fingerprint(previous)
+
+
+def test_context_usage_policy_covers_the_persisted_snapshot_identity():
+    params = _make_context_usage_middleware().release_policy_parameters()
+
+    assert params["model_name"] == "test-model"
+    assert params["context_window"] == 1000
+    assert str(params["token_counter"]).endswith("count_tokens_approximately")
 
 
 def test_safety_text_only_stop_policy_changes_assembly_identity(monkeypatch):
