@@ -83,7 +83,7 @@ class TestReadMarkStamping:
         mark = result.additional_kwargs["deerflow_read_mark"]
         assert mark == {"path": "/mnt/user-data/outputs/report.md", "hash": _sha("v1")}
 
-    def test_ranged_read_stamps_full_file_hash(self):
+    def test_custom_ranged_read_without_source_snapshot_does_not_stamp_full_hash(self):
         mw = _middleware({"/mnt/user-data/outputs/report.md": "line1\nline2\nline3"})
         request = _make_request(
             "read_file",
@@ -91,7 +91,7 @@ class TestReadMarkStamping:
         )
         handler = MagicMock(return_value=ToolMessage(content="line3", tool_call_id="call-1", name="read_file"))
         result = mw.wrap_tool_call(request, handler)
-        assert result.additional_kwargs["deerflow_read_mark"]["hash"] == _sha("line1\nline2\nline3")
+        assert "deerflow_read_mark" not in result.additional_kwargs
 
     def test_error_tool_message_gets_no_mark(self):
         mw = _middleware({"/mnt/user-data/outputs/report.md": "v1"})

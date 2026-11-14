@@ -58,7 +58,9 @@ from deerflow.sandbox.read_file_contract import (
     READ_FILE_NUMBERED_MAX_LINES,
     READ_FILE_START_LINE_EXCEEDS,
     READ_FILE_TRUNCATION_PREFIX,
+    split_file_lines,
 )
+from deerflow.sandbox.read_snapshot import read_snapshot_requested, record_read_snapshot
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -3329,9 +3331,11 @@ def _read_file_from_sandbox(
     *,
     start_line: int | None = None,
     end_line: int | None = None,
+    sandbox: Sandbox | None = None,
 ) -> str:
     """Read through the sandbox while preserving provider-owned mount paths."""
-    sandbox = ensure_sandbox_initialized(runtime)
+    if sandbox is None:
+        sandbox = ensure_sandbox_initialized(runtime)
     ensure_thread_directories_exist(runtime)
     if is_local_sandbox(runtime):
         path = _resolve_local_read_path(path, get_thread_data(runtime))
@@ -3358,6 +3362,63 @@ def _ranged_read_hits_a_line(runtime: Runtime | None, path: str, line: int) -> b
     together with this one yields a newline only if this line exists.
     """
     return "\n" in _read_file_from_sandbox(runtime, path, start_line=line - 1, end_line=line)
+
+
+def _format_read_file_snapshot(content: str, *, start_line: int | None = None, end_line: int | None = None) -> tuple[str, str]:
+    """Derive a normal read_file view from one complete source snapshot."""
+    effective_start = start_line or 1
+    use_line_range = start_line is not None or end_line is not None
+    if use_line_range:
+        lines = split_file_lines(content)
+        content = "\n".join(lines[effective_start - 1 : end_line])
+        if not content and effective_start > 1 and effective_start > len(lines):
+            return READ_FILE_START_LINE_EXCEEDS, "error"
+    if not content:
+        return READ_FILE_EMPTY, "success"
+    max_chars = _read_file_output_max_chars()
+    displayed = _truncate_read_file_output(
+        content,
+        max_chars,
+        line_offset=effective_start - 1,
+        joined_lines=use_line_range,
+        ends_at_eof=end_line is None,
+    )
+    return displayed, "partial_success" if max_chars != 0 and len(content) > max_chars else "success"
+
+
+def _read_file_output_max_chars() -> int:
+    try:
+        sandbox_cfg = get_app_config().sandbox
+        return sandbox_cfg.read_file_output_max_chars if sandbox_cfg else 50000
+    except Exception:
+        return 50000
+
+
+def _label_read_file_range(runtime: Runtime, requested_path: str, content: str, output: str, *, start_line: int | None, end_line: int | None, max_chars: int) -> str:
+    """Label only a complete displayed range, without changing source evidence."""
+    use_line_range = start_line is not None or end_line is not None
+    effective_start = start_line or 1
+    call_id = getattr(runtime, "tool_call_id", None)
+    # Leave in-band provider failures and range markers recognizable to consumers.
+    if (
+        use_line_range
+        and isinstance(call_id, str)
+        and call_id
+        and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
+        and output == content
+        and not content.startswith("Error:")
+        and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
+    ):
+        # A provider's ranged result joins source lines, including a trailing empty line.
+        lines = content.split("\n")
+        if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
+            rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
+            # Write tools accept literal 'N | ' text. A verbatim write-back of
+            # this display can therefore persist the labels as file content.
+            numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
+            if max_chars == 0 or len(numbered) <= max_chars:
+                output = numbered
+    return output
 
 
 def _read_file_result(runtime: Runtime, content: str, *, status: str = "success", error_type: str | None = None) -> str | ToolMessage:
@@ -3428,6 +3489,23 @@ def read_file_tool(
             return _read_file_failure(runtime, READ_FILE_INVALID_RANGE)
 
         requested_path = path
+        if read_snapshot_requested(path):
+            # The gate already needs a complete version hash. Read once and
+            # derive both that evidence and the ranged/truncated view from it.
+            sandbox = ensure_sandbox_initialized(runtime)
+            source = _read_file_from_sandbox(runtime, path, sandbox=sandbox)
+            if not isinstance(sandbox, LocalSandbox) and source.startswith("Error:"):
+                # Some remote providers report read failures as text. Never
+                # turn that failure into a range view or version evidence.
+                # LocalSandbox raises failures; its Error: lines are file data.
+                return _read_file_failure(runtime, _truncate_read_file_output(source, _read_file_output_max_chars()))
+            displayed, status = _format_read_file_snapshot(source, start_line=start_line, end_line=end_line)
+            if status == "error":
+                return _read_file_failure(runtime, displayed)
+            if status == "success":
+                displayed = _label_read_file_range(runtime, requested_path, displayed, displayed, start_line=start_line, end_line=end_line, max_chars=_read_file_output_max_chars())
+            record_read_snapshot(path, source, displayed)
+            return _read_file_result(runtime, displayed, status=status)
         use_line_range = start_line is not None or end_line is not None
         if use_line_range:
             content = _read_file_from_sandbox(runtime, path, start_line=start_line, end_line=end_line)
@@ -3451,26 +3529,7 @@ def read_file_tool(
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
         output = _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
-        call_id = getattr(runtime, "tool_call_id", None)
-        # Leave in-band provider failures and range markers recognizable to consumers.
-        if (
-            use_line_range
-            and isinstance(call_id, str)
-            and call_id
-            and requested_path.startswith((f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/workspace/"))
-            and output == content
-            and not content.startswith("Error:")
-            and content.strip() not in READ_FILE_NO_CONTENT_RESULTS
-        ):
-            # A provider's ranged result joins source lines, including a trailing empty line.
-            lines = content.split("\n")
-            if 1 <= len(lines) <= READ_FILE_NUMBERED_MAX_LINES and (end_line is None or len(lines) <= end_line - effective_start + 1):
-                rows = "\n".join(f"{number} | {line}" for number, line in enumerate(lines, start=effective_start))
-                # Write tools accept literal 'N | ' text. A verbatim write-back of
-                # this display can therefore persist the labels as file content.
-                numbered = "Source lines (for exact edits, copy the text after the first ' | '):\n" + rows
-                if max_chars == 0 or len(numbered) <= max_chars:
-                    output = numbered
+        output = _label_read_file_range(runtime, requested_path, content, output, start_line=start_line, end_line=end_line, max_chars=max_chars)
         return _read_file_result(runtime, output, status="partial_success" if max_chars != 0 and len(content) > max_chars else "success")
     except SandboxError as e:
         return _read_file_failure(runtime, f"Error: {e}", e)

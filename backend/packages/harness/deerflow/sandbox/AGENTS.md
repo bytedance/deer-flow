@@ -87,3 +87,11 @@ Reuse the shared pieces: `derive_sandbox_scope_token`, `AcquireSerializer`,
 `WarmPoolLifecycleMixin` and the ownership store in
 [aio_sandbox](../community/aio_sandbox/AGENTS.md). Scoped command hooks default to
 pass-through, so a provider without server-side sessions needs no change.
+
+## Read snapshots
+
+When the read-before-write gate requests a snapshot, derive the displayed range
+and version hash from one complete provider read. Add source line labels only to
+the view, never to the hashed source. Record the final displayed content with
+`record_read_snapshot`; preserve producer status and the no-ID string API.
+Tests: `test_read_snapshot_capture.py`, `test_read_mark_snapshot.py`.

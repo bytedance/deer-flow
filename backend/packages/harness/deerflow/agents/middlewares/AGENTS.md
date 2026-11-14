@@ -95,3 +95,10 @@ make test-blocking-io
 Middlewares run on the event loop that serves the run. File and network I/O goes
 off the loop, and a started operation is drained even after cancellation. Waiters
 that cross loops own separate futures; notify them outside the state lock.
+
+## Read-before-write evidence
+
+Bind each mark to the invocation-local `read_snapshot` returned by the read,
+including ranged or truncated views. Never re-read a newer version to mark an
+older result. Without captured evidence, custom reads must match the complete
+current file exactly; partial or transformed custom results do not grant marks.

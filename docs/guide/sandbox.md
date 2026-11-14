@@ -287,6 +287,8 @@ Each task gets its own execution environment with a full filesystem view — ski
 
 The read-before-write gate ties each read mark to that `read_file` call's result, including custom tools returning multi-message `Command` updates. An unrelated result cannot authorize a write after a failed read or hide a successful read.
 
+Read marks identify the source version returned by `read_file`, including ranged and truncated views. An external change requires a new read before writing. Custom tools without snapshot evidence must return the exact complete file to authorize writes. Source line labels affect only the displayed view, never the original-source hash.
+
 Deeply nested JSON returned by tools, including `read_file`, keeps its original content when result analysis reaches the JSON parser's depth limit. Explicit tool failures remain errors with an unknown category when depth prevents analysis.
 Tool-call arguments and clarification options nested past the JSON parser's recursion limit are treated as unusable opaque values instead of aborting the run.
 
