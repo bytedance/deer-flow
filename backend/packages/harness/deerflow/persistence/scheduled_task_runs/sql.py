@@ -480,10 +480,10 @@ class ScheduledTaskRunRepository:
     ):
         """SELECT for the next bounded drain batch, fair to task owners.
 
-        Only same-thread FIFO heads are eligible (an older active row on the
-        same thread hides every newer one). Rows at or before ``created_after``
-        are already due for timeout and are removed before FIFO checks, owner
-        ranking, and the batch limit; they must not occupy another row's slot.
+        Only same-thread FIFO heads are eligible. Older running or launching
+        rows on the same thread block newer rows regardless of age. Queued rows
+        at or before ``created_after`` are due for timeout and are excluded before
+        FIFO checks, owner ranking, and the batch limit.
         Eligible rows are ranked within their owner by
         ``attempt_count, created_at, id`` and the batch is ordered by that rank
         first, so every owner's head comes before any owner's second row: one

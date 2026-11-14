@@ -1366,15 +1366,16 @@ async def test_fair_batch_keeps_same_thread_fifo(sqlite_repos, cap):
     assert batch == ["a-older"]
 
 
-async def test_queue_age_cutoff_keeps_running_same_thread_fifo_blocker(sqlite_repos):
+@pytest.mark.parametrize("status", ["running", "launching"])
+async def test_queue_age_cutoff_keeps_active_same_thread_fifo_blocker(sqlite_repos, status):
     sf, task_repo, run_repo = sqlite_repos
     now = datetime.now(UTC)
     await _owned_occurrence(
         task_repo,
         run_repo,
-        "a-long-running",
+        "a-old-active",
         user_id=OWNER_A,
-        status="running",
+        status=status,
         thread_id="reuse-thread",
     )
     await _owned_occurrence(
@@ -1394,9 +1395,9 @@ async def test_queue_age_cutoff_keeps_running_same_thread_fifo_blocker(sqlite_re
 
     # The timeout applies to waiting rows, not to an older active execution.
     async with sf() as session:
-        running = await session.get(ScheduledTaskRunRow, "a-long-running")
-        assert running is not None
-        running.created_at = now - timedelta(hours=1)
+        blocker = await session.get(ScheduledTaskRunRow, "a-old-active")
+        assert blocker is not None
+        blocker.created_at = now - timedelta(hours=1)
         await session.commit()
 
     cutoff = now - timedelta(minutes=5)
