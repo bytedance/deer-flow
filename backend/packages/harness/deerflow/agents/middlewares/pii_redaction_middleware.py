@@ -260,6 +260,13 @@ def redact_text(text: str | None, config: PiiRedactionConfig | None) -> str | No
     return _make_redactor(config).redact(text)
 
 
+def redact_content(content: object, config: PiiRedactionConfig | None) -> object:
+    """Project persisted content under the current policy without changing state."""
+    if config is None or not config.enabled:
+        return content
+    return _redact_content(content, _make_redactor(config))[0]
+
+
 def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> list[str]:
     """Redact related text fields, before truncation."""
     redactor = _make_redactor(config)

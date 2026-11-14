@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+from langchain.agents.middleware.types import ExtendedModelResponse
 from langchain_core.messages import AIMessage
 
 
 def last_ai_message(response: Any) -> AIMessage | None:
     """Return the last assistant message from a middleware model result."""
+    if isinstance(response, ExtendedModelResponse):
+        response = response.model_response
     if isinstance(response, AIMessage):
         return response
     result = getattr(response, "result", None)
