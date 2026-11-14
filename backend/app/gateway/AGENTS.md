@@ -22,6 +22,7 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
 
 ## Trust boundary
 
+- **Share tokens read only frozen snapshots.** See [sharing](../../../docs/guide/sharing.md).
 - **Server-owned run context.** A client can send run context in `body.context`
   and in `body.config`. Admit server-owned keys only from internally authenticated
   callers and strip them from both places for everyone else. When you add a

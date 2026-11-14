@@ -1,6 +1,47 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  sharing: {
+    title: string;
+    description: string;
+    scope: string;
+    expiry: string;
+    hour: string;
+    day: string;
+    week: string;
+    month: string;
+    create: string;
+    working: string;
+    link: string;
+    copy: string;
+    copied: string;
+    links: string;
+    noLinks: string;
+    revoke: string;
+    revoked: string;
+    expired: string;
+    expires: string;
+    loading: string;
+    failed: string;
+    unavailable: string;
+    conflict: string;
+    tooLarge: string;
+    readOnly: string;
+    fork: string;
+    forking: string;
+    missing: string;
+    retry: string;
+    artifacts: string;
+    download: string;
+    preview: string;
+    close: string;
+    you: string;
+    assistant: string;
+    tool: string;
+    noPreview: string;
+    previewNote: string;
+    previewLimited: string;
+  };
   usage: {
     title: string;
     description: string;

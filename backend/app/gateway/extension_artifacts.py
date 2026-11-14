@@ -178,7 +178,7 @@ async def import_snapshot(request: Request, user_id: str, thread_id: str, namesp
         return result
 
 
-async def read_snapshot(request: Request, user_id: str, thread_id: str, path: str) -> bytes:
+async def read_snapshot(request: Request, user_id: str, thread_id: str, path: str, *, max_bytes: int = MAX_BYTES) -> bytes:
     """Capture bounded output bytes through host storage or an authorized lease.
 
     Non-output paths raise HTTP 400; unsafe files raise 422 and host mutation
@@ -191,8 +191,8 @@ async def read_snapshot(request: Request, user_id: str, thread_id: str, path: st
     path = normalize_outputs_virtual_path(path)
     async with snapshot_sandbox(request, user_id, thread_id) as sandbox:
         if sandbox is not None:
-            return await run_file_io(read_remote, sandbox, path.removeprefix("/mnt/user-data/outputs/"))
-        return await run_file_io(read_output_snapshot, user_id, thread_id, path)
+            return await run_file_io(read_remote, sandbox, path.removeprefix("/mnt/user-data/outputs/"), max_bytes=max_bytes)
+        return await run_file_io(read_output_snapshot, user_id, thread_id, path, max_bytes=max_bytes)
 
 
 async def verify_imports(request: Request, user_id: str, thread_id: str, receipts: list[dict[str, Any]], *, lifetime: AsyncExitStack | None = None) -> None:
@@ -220,7 +220,7 @@ async def verify_imports(request: Request, user_id: str, thread_id: str, receipt
         raise AgentRunError(422, "Attached artifact copy is unavailable or changed; inspect the team artifacts and send a new request") from exc
 
 
-def read_output_snapshot(user_id: str, thread_id: str, path: str) -> bytes:
+def read_output_snapshot(user_id: str, thread_id: str, path: str, *, max_bytes: int = MAX_BYTES) -> bytes:
     """Read bounded host output bytes without following links.
 
     Non-output paths raise HTTP 400; unsafe files raise 422 and mutation during
@@ -229,10 +229,10 @@ def read_output_snapshot(user_id: str, thread_id: str, path: str) -> bytes:
     if os.name != "posix" or not isinstance(path, str):
         raise AgentRunError(422, "Output capture requires POSIX and an output path")
     path = normalize_outputs_virtual_path(path)
-    return _read_host_snapshot(user_id, thread_id, path.removeprefix("/mnt/user-data/outputs/"), "outputs")
+    return _read_host_snapshot(user_id, thread_id, path.removeprefix("/mnt/user-data/outputs/"), "outputs", max_bytes=max_bytes)
 
 
-def _read_host_snapshot(user_id: str, thread_id: str, path: str, area: str) -> bytes:
+def _read_host_snapshot(user_id: str, thread_id: str, path: str, area: str, *, max_bytes: int = MAX_BYTES) -> bytes:
     paths = get_paths()
     root = paths.base_dir.resolve()
     base = paths.sandbox_outputs_dir(thread_id, user_id=user_id) if area == "outputs" else paths.sandbox_uploads_dir(thread_id, user_id=user_id)
@@ -247,11 +247,11 @@ def _read_host_snapshot(user_id: str, thread_id: str, path: str, area: str) -> b
         fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         with os.fdopen(fd, "rb") as source:
             before = os.fstat(source.fileno())
-            if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_BYTES or (area == "uploads" and before.st_nlink != 1):
-                raise AgentRunError(422, "Artifact must be a regular file of at most 2 MiB")
-            content = source.read(MAX_BYTES + 1)
+            if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes or before.st_nlink != 1:
+                raise AgentRunError(422, "Artifact must be a regular, unlinked file within the capture limit")
+            content = source.read(max_bytes + 1)
             after = os.fstat(source.fileno())
-            if len(content) > MAX_BYTES or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            if len(content) > max_bytes or (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_size, after.st_mtime_ns, after.st_ctime_ns):
                 raise AgentRunError(409, "Artifact changed during capture")
             return content
     except OSError as exc:
