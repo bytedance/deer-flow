@@ -1243,13 +1243,18 @@ def _extract_artifacts(result: dict | list, *, thread_id: str | None = None) -> 
             break
         # Look for AI messages with present_files tool calls
         if msg.get("type") == "ai":
+            message_paths: list[str] = []
             for tc in msg.get("tool_calls", []):
                 if isinstance(tc, dict) and tc.get("name") == "present_files":
                     args = tc.get("args", {})
                     paths = args.get("filepaths", [])
                     if isinstance(paths, list):
-                        artifacts.extend(p for p in paths if isinstance(p, str))
-    return artifacts
+                        message_paths.extend(p for p in paths if isinstance(p, str))
+            # The scan runs newest-first; prepend so earlier calls stay first.
+            artifacts[:0] = message_paths
+    # Match the ``merge_artifacts`` reducer: first-presented order, no repeats,
+    # so a file presented twice in one turn is uploaded once.
+    return list(dict.fromkeys(artifacts))
 
 
 def _is_hidden_human_control_message(msg: Mapping[str, Any], *, thread_id: str | None = None) -> bool:
