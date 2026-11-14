@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlsplit
@@ -11,7 +12,7 @@ from fastapi import HTTPException
 from jwt.algorithms import RSAAlgorithm
 
 from app.gateway.auth.models import User
-from app.gateway.auth.oidc import OIDCError, OIDCIdentity, OIDCMetadata, OIDCService, OIDCValidationError
+from app.gateway.auth.oidc import OIDCError, OIDCIdentity, OIDCMetadata, OIDCService, OIDCUserInfoMismatch, OIDCValidationError
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from deerflow.config.auth_config import OIDCProviderConfig
 
@@ -672,12 +673,15 @@ def _service_answering(responses: dict[str, object]) -> OIDCService:
     return service
 
 
-def _signed_provider() -> tuple[str, dict]:
-    """Return an ID token for ``_ISSUER`` and the JWKS that verifies it."""
+def _signed_provider(**claims) -> tuple[str, dict]:
+    """Return an ID token for ``_ISSUER`` and the JWKS that verifies it.
+
+    ``claims`` override the default ID token claims.
+    """
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = int(time.time())
     id_token = jwt.encode(
-        {"iss": _ISSUER, "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "email": "user@example.com", "email_verified": True},
+        {"iss": _ISSUER, "aud": "deer-flow", "sub": "s1", "exp": now + 300, "iat": now, "email": "user@example.com", "email_verified": True, **claims},
         private_key,
         algorithm="RS256",
         headers={"kid": "k1"},
@@ -805,6 +809,105 @@ async def test_oidc_callback_falls_back_to_id_token_when_userinfo_body_is_malfor
 
     assert identity.subject == "s1"
     assert identity.email == "user@example.com"
+
+
+# ── UserInfo subject check ────────────────────────────────────────────────
+#
+# OIDC Core 5.3.2: the UserInfo ``sub`` must exactly match the ID token's
+# before any UserInfo claim is used. A response without a ``sub`` cannot be
+# tied to this login, so it is rejected like a mismatching one; otherwise its
+# email and email_verified replace the signed ID token's.
+
+# Each case carries the reason the Gateway logs, so an operator can tell an
+# absent ``sub`` from a malformed one.
+_NO_SUB_CASES = [
+    pytest.param({}, "UserInfo response has no sub claim", id="missing"),
+    pytest.param({"sub": ""}, "UserInfo response has no sub claim", id="empty"),
+    pytest.param({"sub": None}, "UserInfo response has no sub claim", id="null"),
+    pytest.param({"sub": ["s1"]}, "UserInfo sub claim is not a string (list)", id="non-string"),
+    pytest.param({"sub": 1}, "UserInfo sub claim is not a string (int)", id="number"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sub_field", "message"),
+    [
+        *_NO_SUB_CASES,
+        pytest.param({"sub": "s2"}, "does not match", id="other-subject"),
+        pytest.param({"sub": "S1"}, "does not match", id="other-case"),
+    ],
+)
+async def test_oidc_fetch_userinfo_rejects_a_response_not_bound_to_the_id_token(sub_field, message):
+    service = _service_answering({"/userinfo": {**sub_field, "email": "other@example.com", "email_verified": True}})
+    try:
+        with pytest.raises(OIDCUserInfoMismatch, match=re.escape(message)):
+            await service.fetch_userinfo(OIDCMetadata(**_DISCOVERY), "access", expected_sub="s1")
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+async def test_oidc_fetch_userinfo_returns_a_response_for_the_same_subject():
+    body = {"sub": "s1", "email": "user@example.com", "name": "User"}
+    service = _service_answering({"/userinfo": body})
+    try:
+        assert await service.fetch_userinfo(OIDCMetadata(**_DISCOVERY), "access", expected_sub="s1") == body
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("sub_field", "reason"), _NO_SUB_CASES)
+async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_sub(sub_field, reason, caplog):
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=False, name="ID Token User")
+    userinfo = {**sub_field, "email": "admin@example.com", "email_verified": True, "name": "Someone Else"}
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
+    try:
+        with caplog.at_level("WARNING", logger="app.gateway.auth.oidc"):
+            identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    assert (identity.subject, identity.email, identity.email_verified, identity.name) == ("s1", "user@example.com", False, "ID Token User")
+    assert "admin@example.com" not in identity.claims.values()
+    assert reason in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_oidc_callback_uses_userinfo_claims_for_the_same_subject():
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=False)
+    userinfo = {"sub": "s1", "email": "user@corp.example", "email_verified": True, "name": "UserInfo User"}
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
+    try:
+        identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    assert (identity.subject, identity.email, identity.email_verified, identity.name) == ("s1", "user@corp.example", True, "UserInfo User")
+
+
+@pytest.mark.asyncio
+async def test_oidc_userinfo_without_sub_cannot_make_a_first_login_an_admin():
+    """End to end: a sub-less UserInfo email must not reach admin_emails."""
+    id_token, jwks = _signed_provider(email="user@example.com", email_verified=True)
+    service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": {"email": "admin@example.com", "email_verified": True}})
+    try:
+        identity = await service.authenticate_callback("keycloak", OIDCMetadata(**_DISCOVERY), "deer-flow", "secret", "code", "https://app.example.com/callback")
+    finally:
+        await service.close()
+
+    local_provider = AsyncMock()
+    local_provider.get_user_by_oauth.return_value = None
+    local_provider.get_user_by_email.return_value = None
+    await get_or_provision_oidc_user(
+        provider_id="keycloak",
+        provider_config=_provider_config(admin_emails=["admin@example.com"]),
+        identity=identity,
+        local_provider=local_provider,
+    )
+
+    local_provider.create_oauth_user.assert_awaited_once_with(email="user@example.com", oauth_provider="keycloak", oauth_id="s1", system_role="user")
 
 
 def _oidc_router_client(monkeypatch, service: OIDCService):
