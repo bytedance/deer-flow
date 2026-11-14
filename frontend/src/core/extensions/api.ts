@@ -3,12 +3,17 @@ import { z } from "zod";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
+import { documentationSchema } from "./documentation";
+
 const contributions = z.array(
   z.object({
     namespace: z.string(),
     viewer_id: z.string().nullable().optional(),
     module: z.string().nullable(),
     backend_actions: z.array(z.string()).optional(),
+    model_tools: z.array(z.string()).optional(),
+    documentation: documentationSchema.optional().catch(undefined),
+    runtime_only: z.boolean().optional(),
     entry: z.string().nullable(),
     // Keep unknown transports so the loader can reject only that contribution.
     transport: z.string().nullable().optional(),

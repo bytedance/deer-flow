@@ -73,3 +73,17 @@ def test_merge_promoted_recovers_from_malformed_existing_names():
     result = merge_promoted(existing, {"catalog_hash": "abc", "names": ["search"]})
 
     assert result == {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+
+def test_merge_promoted_replaces_non_object_existing():
+    # A checkpoint poisoned before the gateway validated this channel stores a
+    # raw Overwrite value; genuine promotion writes must not keep failing on it.
+    result = merge_promoted("oops", {"catalog_hash": "abc", "names": ["search"]})
+
+    assert result == {"catalog_hash": "abc", "names": ["search"]}
+
+
+def test_merge_promoted_ignores_non_object_update():
+    existing = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    assert merge_promoted(existing, "oops") is existing

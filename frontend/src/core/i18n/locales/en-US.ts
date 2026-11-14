@@ -9,9 +9,112 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const enUS: Translations = {
+  sharing: {
+    title: "Share conversation",
+    description:
+      "Anyone with the link can view this snapshot without signing in.",
+    scope:
+      "Includes visible conversation steps and presented output files. Later changes stay private. Revoke a link to stop future access; copies already downloaded or forked remain with their recipients.",
+    expiry: "Link expires after",
+    hour: "1 hour",
+    day: "1 day",
+    week: "7 days",
+    month: "30 days",
+    create: "Create snapshot link",
+    working: "Working…",
+    link: "Share link",
+    copy: "Copy link",
+    copied: "Copied",
+    links: "Created links",
+    noLinks: "No share links yet.",
+    revoke: "Revoke",
+    revoked: "Revoked",
+    expired: "Expired",
+    expires: "Expires",
+    loading: "Loading…",
+    failed: "Unable to complete this request. Try again.",
+    unavailable: "Sharing is unavailable on this server.",
+    conflict:
+      "Finish the current turn before sharing. If it is already finished, refresh or revoke an older link and try again.",
+    tooLarge:
+      "This conversation or its artifacts exceed the sharing size limit.",
+    readOnly: "Read-only snapshot",
+    fork: "Continue in my workspace",
+    forking: "Copying…",
+    missing: "This share link has expired, was revoked, or is unavailable.",
+    retry: "Retry",
+    artifacts: "Artifacts",
+    download: "Download",
+    preview: "Preview",
+    close: "Close preview",
+    you: "User",
+    assistant: "Assistant",
+    tool: "Tool result",
+    noPreview: "Download this file to open it.",
+    previewNote:
+      "Static preview. Interactive content may require downloading the file.",
+    previewLimited:
+      "Preview shows the first 512 KiB. Download for the complete file.",
+  },
+  usage: {
+    title: "Token usage",
+    description: "View input, output and cache-hit token usage.",
+    reportingNote:
+      "Recorded provider usage; active runs and missing provider reports may be incomplete. Cache hits are included in input tokens.",
+    period: "Usage period",
+    last7Days: "Last 7 days",
+    last30Days: "Last 30 days",
+    refresh: "Refresh",
+    tokens: "Total tokens",
+    runs: "Runs",
+    inputTokens: "Input tokens",
+    outputTokens: "Output tokens",
+    cachedTokens: "Cache-hit input tokens",
+    daily: "Daily token usage",
+    dailyDetails: "View daily details",
+    models: "Usage by model",
+    noUsage: "No usage recorded in this period.",
+    unknown: "Unknown",
+    timezoneNote: "Daily buckets use your browser's current UTC offset.",
+    date: "Date",
+    model: "Model",
+    noModels: "No model usage recorded in this period.",
+    noRuns: "No runs match this filter.",
+    recentRuns: "Recent runs",
+    recentRunsHint:
+      "All dates, newest first. Independent of the usage period above.",
+    status: "Run status",
+    allStatuses: "All statuses",
+    pending: "Queued",
+    running: "Running",
+    success: "Completed",
+    error: "Failed",
+    timeout: "Timed out",
+    interrupted: "Interrupted",
+    cancelled: "Cancelled",
+    unknownStatus: "Other status",
+    previous: "Previous page",
+    next: "Next page",
+    page: (page) => `Page ${page}`,
+    started: "Started",
+    duration: "Duration",
+    conversation: "Conversation",
+    untitled: "Untitled conversation",
+    details: "Error details",
+    loadFailed: "Usage data could not be loaded. Try again.",
+    retry: "Retry",
+    forbidden: "You do not have permission to view usage and runs.",
+    unavailable: "Usage reporting is unavailable on this server.",
+    databaseRequired:
+      "Usage reporting is unavailable. It requires a SQLite or PostgreSQL database. Contact your administrator if the problem persists.",
+    staticUnavailable: "Usage reporting is not available in the static demo.",
+    loading: "Loading usage…",
+  },
   // Locale meta
   locale: {
     localName: "English",
@@ -39,77 +142,67 @@ export const enUS: Translations = {
     catalogHint:
       "This entry comes from the repository extension catalog. Ask your deployment administrator to confirm its installation and activation status.",
     installationGuide: "Installation guide",
+    detail: {
+      guide: "Read the guide",
+      gettingStarted: "Get started",
+      requirements: "Before you start",
+      loaded: "Loaded",
+      loadedHint:
+        "This extension is loaded. Follow the usage instructions to get started.",
+      tools: "Registered tools",
+      pages: "Workspace pages",
+      management: "Usage & management",
+      readyHint:
+        "Your administrator has enabled this extension. It is ready to use.",
+      disabledHint:
+        "This extension is disabled. Ask your administrator to enable it.",
+      failedHint:
+        "The extension page could not load. Refresh extensions to try again.",
+      noPageHint:
+        "This extension has no standalone page. Check the guide for how to use it in conversations or tasks.",
+      guideHint:
+        "Read the guide to explore what this extension adds to DeerFlow and how to use it.",
+      technicalDetails: "Technical details",
+      package: "Package",
+      namespace: "Extension ID",
+      refresh: "Refresh extensions",
+      refreshHint:
+        "Refresh the page after your administrator updates an extension.",
+    },
     catalog: {
-      workflows: {
-        title: "Script workflows",
+      officePreview: bundledCopy("deerflow-extension-office-preview", "en-US"),
+      workspaceSearch: {
+        title: "Conversation search",
         description:
-          "Save versioned Agent workflows, resume within the same Gateway process and review exact retained output versions. No restart replay or hard monetary budget.",
+          "Search historical message text and jump to the matching conversation turn.",
       },
-      reportSections: {
-        title: "Sectioned long-form writing",
-        description:
-          "Write long reports section by section and assemble them into a downloadable Markdown document.",
-      },
-      agentTeams: {
-        title: "Agent teams",
-        description:
-          "Let full Custom Agents collaborate through @mentions, shared records and task handoffs.",
-      },
-      bookmarks: {
-        title: "Bookmarks",
-        description:
-          "Save useful answers and find and organize your own bookmarks on a dedicated page.",
-      },
-      context: {
-        title: "Context pruning",
-        description:
-          "Shorten older read-only tool results while preserving recent messages and native summaries.",
-      },
-      classify: {
-        title: "Text classification",
-        description:
-          "Label a list of texts with supplied categories using the deployment-configured classification service.",
-      },
-      screening: {
-        title: "Content risk warnings",
-        description:
-          "Screen fetched content and add advisory warnings to suspicious tool results without blocking tools.",
-      },
-      example: {
-        title: "Extension development example",
-        description:
-          "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
-      },
-      retrieval: {
-        title: "Local retrieval example",
-        description:
-          "Demonstrate read-only retrieval and structured tool results using fixed sample documents, without an external knowledge service.",
-      },
-      lightrag: {
-        title: "LightRAG",
-        description:
-          "Retrieve documents and entity relations from LightRAG with shared source citations.",
-      },
-      knowledgePlatform: {
-        title: "Knowledge spaces and connections",
-        description:
-          "Manage hierarchical spaces, resource sharing and inherited policies with explicit administrator grants. Requires installation and configuration; no management page or global retrieval ACL is included.",
-      },
-      knowledgeManagement: {
-        title: "Knowledge ingestion and processing",
-        description:
-          "Ingest files, URLs and text through WeKnora and manage processing with explicit administrator grants. Requires installation and configuration; no management page is included.",
-      },
-      weknora: {
-        title: "WeKnora knowledge retrieval",
-        description:
-          "Search WeKnora knowledge bases and selected documents with source citations. Requires administrator installation and access configuration.",
-      },
-      knowledge: {
-        title: "Knowledge scope example",
-        description:
-          "Search sample documents within selected knowledge bases or files and inspect source citations.",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "en-US"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "en-US"),
+      context: bundledCopy("deerflow-extension-jev-context", "en-US"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "en-US"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "en-US"),
+      workflows: bundledCopy("deerflow-extension-workflows", "en-US"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "en-US",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "en-US"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "en-US"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "en-US",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "en-US",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "en-US",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
+      weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
+      example: bundledCopy("deerflow-extension-example", "en-US"),
     },
     pageUnavailable: "Extension page unavailable",
     pageUnavailableHint:
@@ -226,6 +319,7 @@ export const enUS: Translations = {
     more: "More",
     search: "Search",
     loadMore: "Load more",
+    scrollToBottom: "Scroll to bottom",
     showingOf: (loaded, total) => `Showing ${loaded} of ${total}`,
     download: "Download",
     thinking: "Thinking",
@@ -341,6 +435,13 @@ export const enUS: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "Preparing download…",
+    retryDownload: "Retry download",
+    downloadFailed: "Download failed. Try again.",
+    downloadRequested: "Sent to browser downloads",
+    retry: "Retry preview",
+    unavailable:
+      "Preview is unavailable for this format. Download the original file to view it.",
     loadingPreview: "Preparing preview...",
     resourcesUnavailable:
       "Some preview resources could not be loaded. View the source or download the files for the complete content.",
@@ -391,6 +492,12 @@ export const enUS: Translations = {
   },
 
   modelPicker: {
+    search: "Search models…",
+    provider: "Provider",
+    allProviders: "All providers",
+    noResults: "No matching models",
+    recent: "Recently used",
+
     title: "Choose a model",
     favorites: "Favorites",
     otherModels: "Other models",
@@ -558,6 +665,7 @@ export const enUS: Translations = {
       waitingForYou: "Waiting for you",
       waiting: "Waiting",
       paused: "Paused",
+      waitingApproval: "Waiting for approval",
       autoContinuedOnce: "Auto-continued once",
       autoContinuedMany: "Auto-continued {count} times",
       details: "Details",
@@ -589,6 +697,9 @@ export const enUS: Translations = {
           "Goal check: the run did not finish the work. Check the reply for errors, then send a message to retry.",
         needsInputCard: "Answer the question above to continue.",
         needsInputReply: "Reply with the missing details to continue.",
+        needsApproval: "Review the tool approval above to continue.",
+        needsApprovalReload:
+          "Approval details failed to load. Use the reload-error panel above to try again.",
         external:
           "Goal check: waiting on something external. Send a message when it's ready.",
         unchecked: "{reason}. It's checked again after your next message.",
@@ -656,6 +767,25 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    runInputMode: "Send while working",
+    queueMode: "Queue",
+    steerMode: "Steer",
+    queueModeHelp: "Run after the current task finishes",
+    steerModeHelp: "Adjust the current task at the next available point",
+    runInputSend: "Send update",
+    runInputTextOnly:
+      "Send plain text while a task is running. Attachments and slash commands can be sent when it finishes.",
+    runInputUnavailable:
+      "The message was not confirmed. Check the task status and try again; your draft is kept.",
+    stopRun: "Stop current task",
+    runInputQueued: "Queued",
+    runInputSteering: "Waiting to apply",
+    runInputUnapplied: "Not applied in this run",
+    runInputRetry: "Send again",
+    runInputCancel: "Remove this message",
+    runInputDispatching: "Pending confirmation",
+    runInputReplayUnavailable:
+      "This run was adjusted while working. Send a new message to continue instead of replaying only part of it.",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",
@@ -790,8 +920,18 @@ export const enUS: Translations = {
     viewTrash: "Trash",
     documentsLoadFailed: "Couldn't load project documents",
     threadFilesLoadFailed: "Couldn't load conversation files",
-    interimMemoryNotice:
-      "Memory stays global for now: anything discussed in a project may enter your global memory until per-project memory arrives in Phase 3.",
+    memoryTitle: "Project memory",
+    memoryAutoExtract: "Automatic extraction",
+    memoryDescription:
+      "Durable facts learned from this project’s conversations, used only in this project. Turning extraction off keeps existing memories; delete any fact you no longer want used. Automatic extraction requires global memory to be enabled.",
+    memoryEmpty:
+      "No project memories yet. Conventions and lessons from future project chats will appear here.",
+    memoryPromote: "Move to instructions",
+    memoryPromoted: "Moved to project instructions",
+    memorySaveFirst: "Save your instruction edits before moving a memory.",
+    memoryLoadFailed: "Couldn’t load project memory.",
+    memoryActionFailed:
+      "Couldn’t update project memory. Refresh and try again.",
   },
 
   trash: {
@@ -875,7 +1015,9 @@ export const enUS: Translations = {
   subagentBatches: {
     label: "Batches",
     title: "Subagent batches",
-    description: "Durable, restart-safe work for many independent items.",
+    description: "Background batch work with saved progress.",
+    followUpPending: "The requested follow-up will continue after this batch.",
+    followUpStopped: "Automatic follow-up has stopped.",
     workerUnavailable:
       "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
@@ -1547,6 +1689,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    streamServerError: (status) =>
+      `The service is temporarily unavailable (HTTP ${status}). Please try again.`,
     outlineLabel: "Conversation outline",
     outlineAttachmentFallback: "Image or file message",
   },
@@ -1836,10 +1980,68 @@ export const enUS: Translations = {
     requiredA11yLabel: "required",
     selectPlaceholder: "Select...",
     answeredValue: (value: string) => `Answered: ${value}`,
+    approval: {
+      modeLabel: "Tool permissions",
+      modeAsk: "Ask",
+      modeAuto: "Auto",
+      modeFull: "Full access",
+      askDescription: "Ask before operations that require approval.",
+      autoDescription:
+        "Review each operation automatically; ask when risk or authorization needs your decision.",
+      fullDescription:
+        "Skip operation approvals. Deployment restrictions and account permissions still apply.",
+      approveThread: "Allow for this chat",
+      grantScope:
+        "Applies only to this tool with these exact arguments. Revoke from Tool permissions.",
+      editArguments: "Edit arguments",
+      fullArguments: "Complete arguments",
+      invalidArguments:
+        "Enter a valid JSON object. The server also validates the tool schema.",
+      revokeGrants: "Revoke chat approvals",
+      grantsRevoked: "Chat approvals revoked",
+      childApproval: "A subagent is waiting for your approval.",
+      title: "Tool approval required",
+      description:
+        "Review every action before continuing. Long values may be truncated for display, but omitted content still executes in full. Approving will attempt to execute the tool; other execution checks still apply.",
+      waiting: "Waiting for approval",
+      loading: "Loading approval details...",
+      loadFailed:
+        "Approval details could not be loaded. This conversation is still waiting for approval; reload the details before continuing.",
+      reload: "Reload approval details",
+      approve: "Approve",
+      reject: "Reject",
+      approveAll: "Approve all",
+      rejectAll: "Reject all and finish",
+      submitDecisions: "Submit decisions",
+      reasonLabel: "Rejection reason (optional)",
+      reasonPlaceholder: "Tell the agent why it should not run these tools...",
+      submitFailed:
+        "The approval could not be submitted. Review your decisions and try again.",
+      submitTimeout:
+        "The approval submission timed out and was stopped. Review your decisions and try again.",
+      featureDisabled:
+        "Tool approval is now disabled. You can still reject all and finish safely.",
+      noPending:
+        "This approval is no longer pending. Reload the conversation before retrying.",
+    },
   },
 
   // Subtasks
   uploads: {
+    status: {
+      pending: "Ready to send",
+      uploading: "Uploading…",
+      uploaded: "Uploaded",
+      failed: "Upload failed",
+      cancelled: "Cancelled",
+    },
+    cancelUpload: "Cancel upload",
+    retryUpload: "Retry upload",
+    notReady:
+      "Attachments are not ready. Retry failed files or remove them, then send again.",
+    attachment: "Attachment",
+    image: "Image",
+    removeAttachment: (filename) => `Remove attachment: ${filename}`,
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
@@ -1905,6 +2107,39 @@ export const enUS: Translations = {
   },
 
   // Shortcuts
+  workspaceSearch: {
+    title: "Search conversations",
+    description: "Find conversations and messages, or run a command.",
+    placeholder: "Search titles and messages…",
+    open: "Search",
+    all: "All",
+    threads: "Conversations",
+    messages: "Messages",
+    includeArchived: "Include archived",
+    archived: "Archived",
+    recent: "Recent conversations",
+    searching: "Searching…",
+    indexing: "Preparing message search… Results will appear here shortly.",
+    unavailable:
+      "Message search is unavailable on this installation. You can search conversation titles.",
+    unsupported: "Search is unavailable in this view.",
+    error: "Search could not finish. Try again.",
+    empty: "No matches. Try another keyword or include archived conversations.",
+    more: "Show more results",
+    retry: "Try again",
+    hint: "↑ ↓ to navigate · Enter to open · > for commands",
+    user: "You",
+    assistant: "Assistant",
+    context: "Message context",
+    returnToLatest: "Return to latest messages",
+    loadingContext: "Loading message context…",
+    messageUnavailable:
+      "This message is no longer available. Return to the conversation to view its current history.",
+    matchedMessage: "Located message",
+    earlier: "Earlier messages",
+    later: "Later messages",
+    untitled: "Untitled conversation",
+  },
   shortcuts: {
     searchActions: "Search actions...",
     noResults: "No results found.",
@@ -1921,6 +2156,34 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     models: {
+      connectionSettings: "Connection settings",
+      importTitle: "Fetch and add models",
+      importDescription:
+        "Fetch a provider catalog, select models, then test and add them. Each test may incur provider charges. Only models that pass the streaming tool-call test are enabled.",
+      savedConnection: "Use a saved connection",
+      newConnection: "New connection",
+      fetchModels: "Fetch models",
+      searchModels: "Search models…",
+      selectVisible: "Select visible",
+      clearSelection: "Clear selection",
+      alreadyConfigured: "Already configured",
+      noCatalogResults:
+        "No matching models. Try another search or add a model manually.",
+      catalogTruncated:
+        "This catalog was limited to 2,000 models or 20 pages. You can still add other model IDs manually.",
+      discovery_unsupported:
+        "This endpoint does not offer model discovery. Add a model ID manually.",
+      discovery_failed:
+        "Could not fetch the catalog. Check the connection and try again.",
+      importUncertain:
+        "Result not confirmed. Retry to check whether this model was saved.",
+      importStopped:
+        "Stopped. Completed models are saved; retry to reconcile the last request.",
+      stopImport: "Stop",
+      closeCatalog: "Done",
+      catalogCount: (visible, total, selected) =>
+        `${visible} / ${total} models · ${selected} selected`,
+      testAndAdd: (count) => `Test and add (${count})`,
       title: "Models",
       description:
         "Manage shared models available to users. Models from the server configuration are read-only.",

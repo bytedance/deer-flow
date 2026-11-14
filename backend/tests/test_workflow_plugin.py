@@ -16,7 +16,10 @@ from test_extension_agent_runs import runtime as _runtime_fixture
 
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="Workflow worker execution requires POSIX")
+pytestmark = [
+    pytest.mark.bundled_extension,
+    pytest.mark.skipif(os.name != "posix", reason="Workflow worker execution requires POSIX"),
+]
 
 ROOT = Path(__file__).resolve().parents[2]
 

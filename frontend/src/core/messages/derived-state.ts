@@ -9,13 +9,6 @@ import {
 } from "./utils";
 
 function messageStableKey(message: Message) {
-  if (
-    message.type === "tool" &&
-    typeof message.tool_call_id === "string" &&
-    message.tool_call_id.length > 0
-  ) {
-    return `tool:${message.tool_call_id}`;
-  }
   if (typeof message.id === "string" && message.id.length > 0) {
     return `message:${message.id}`;
   }

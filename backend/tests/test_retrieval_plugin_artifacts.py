@@ -18,6 +18,8 @@ from deerflow.runtime.checkpoint_mode import inject_checkpoint_mode
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.serialization import serialize_channel_values_for_api
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def retrieval_plugin(monkeypatch):

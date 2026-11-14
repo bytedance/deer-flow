@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "knowledge-center",
+  "locales": {
+    "zh-CN": {
+      "title": "知识中心",
+      "description": "在独立页面浏览知识空间、导入资料，并查看文档处理状态。",
+      "usage": [
+        {
+          "title": "选择空间与知识库",
+          "description": "打开知识中心，选择你有权限访问的空间及其中的知识库。"
+        },
+        {
+          "title": "导入资料",
+          "description": "按页面提供的操作导入文件、网址或文本。可用按钮取决于你的权限和服务支持。"
+        },
+        {
+          "title": "查看处理状态",
+          "description": "检查返回的文档记录或按文档标识查询状态，必要时手动刷新。"
+        }
+      ],
+      "requirements": [
+        "已安装并启用知识空间与连接、知识入库与处理扩展，并为你分配可访问的空间和资源。"
+      ]
+    },
+    "en-US": {
+      "title": "Knowledge center",
+      "description": "Browse knowledge spaces, import content and inspect document processing on a dedicated page.",
+      "usage": [
+        {
+          "title": "Choose a space and knowledge base",
+          "description": "Open Knowledge center and select an accessible space and mapped knowledge base."
+        },
+        {
+          "title": "Import content",
+          "description": "Use the available controls to import a file, URL or text. Controls depend on your permissions and provider support."
+        },
+        {
+          "title": "Inspect processing",
+          "description": "Inspect the returned document record or look up a document by ID, refreshing its status when needed."
+        }
+      ],
+      "requirements": [
+        "Enable the knowledge platform and management extensions and grant you access to spaces and resources."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-knowledge-center#readme"
+}

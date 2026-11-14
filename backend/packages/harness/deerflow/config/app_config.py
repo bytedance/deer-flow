@@ -27,9 +27,12 @@ from deerflow.config.file_signature import ConfigSignature as _ConfigSignature
 from deerflow.config.file_signature import get_config_signature as _get_config_signature
 from deerflow.config.file_signature import read_config_with_signature as _read_config_with_signature
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
+from deerflow.config.harness_guard_config import HarnessGuardConfig
+from deerflow.config.hitl_approval_config import HitlApprovalConfig
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
+from deerflow.config.mcp_agent_auth_config import BindingId, McpAgentCredentialBinding
 from deerflow.config.mcp_tasks_config import McpTasksConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
@@ -284,6 +287,22 @@ class AppConfig(BaseModel):
     skill_scan: SkillScanConfig = Field(default_factory=SkillScanConfig, description="Native deterministic skill safety scanning configuration")
     skill_evolution: SkillEvolutionConfig = Field(default_factory=SkillEvolutionConfig, description="Agent-managed skill evolution configuration")
     extensions: ExtensionsConfig = Field(default_factory=ExtensionsConfig, description="Extensions configuration (MCP servers and skills state)")
+    mcp_agent_auth: dict[BindingId, McpAgentCredentialBinding] = Field(default_factory=dict, description="Administrator-granted MCP agent credentials, checked on each call")
+
+    @field_validator("mcp_agent_auth")
+    @classmethod
+    def _unique_mcp_agent_grants(cls, bindings: dict[str, McpAgentCredentialBinding]) -> dict[str, McpAgentCredentialBinding]:
+        subjects: set[tuple[str, str, str]] = set()
+        for binding in bindings.values():
+            if not binding.enabled:
+                continue
+            for owner in binding.owners:
+                subject = (binding.server, binding.agent, owner)
+                if subject in subjects:
+                    raise ValueError("MCP agent bindings overlap for the same server, agent and owner")
+                subjects.add(subject)
+        return bindings
+
     tool_output: ToolOutputConfig = Field(default_factory=ToolOutputConfig, description="Tool output budget protection configuration")
     tool_artifacts: ToolArtifactConfig = Field(default_factory=ToolArtifactConfig, description="Tool-artifact handle registry configuration (issue #4676)")
     tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig, description="Tool search / deferred loading configuration")
@@ -319,7 +338,9 @@ class AppConfig(BaseModel):
     loop_detection: LoopDetectionConfig = Field(default_factory=LoopDetectionConfig, description="Loop detection middleware configuration")
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
+    hitl_approval: HitlApprovalConfig = Field(default_factory=HitlApprovalConfig, description="Human-in-the-loop approval for high-risk tool calls")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
+    harness_guard: HarnessGuardConfig = Field(default_factory=HarnessGuardConfig, description="HarnessGuard tool-loop interceptor middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
@@ -795,7 +816,7 @@ def _load_and_cache_app_config(config_path: str | None = None, *, extensions_sou
     return _app_config
 
 
-def get_app_config() -> AppConfig:
+def get_app_config(*, use_runtime_override: bool = True) -> AppConfig:
     """Get the DeerFlow config instance.
 
     Returns a cached singleton instance and automatically reloads it when the
@@ -806,10 +827,13 @@ def get_app_config() -> AppConfig:
     ``reload_app_config(config_path)``, that path is preferred over ambient
     resolution. Use `reload_app_config()` to force a reload, or
     `reset_app_config()` to clear the cache.
+
+    Credential grant checks set `use_runtime_override=False` so revocation is
+    read from the operator configuration even while a run keeps its snapshot.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature
 
-    runtime_override = _current_app_config.get()
+    runtime_override = _current_app_config.get() if use_runtime_override else None
     if runtime_override is not None:
         return runtime_override
 
@@ -923,10 +947,11 @@ def peek_current_app_config() -> AppConfig | None:
     return _current_app_config.get()
 
 
-def peek_loaded_app_config() -> AppConfig | None:
+def peek_loaded_app_config(*, use_runtime_override: bool = True) -> AppConfig | None:
     """Return the configuration this process has loaded, without touching the filesystem.
 
-    The runtime-scoped override wins when one is active; otherwise this is the
+    The runtime-scoped override wins when one is active unless
+    ``use_runtime_override=False``; otherwise this is the
     cached singleton ``get_app_config()`` last loaded (or ``set_app_config()``
     installed). ``None`` means no configuration has ever been loaded in this
     process, which is what a host without a ``config.yaml`` looks like — as
@@ -934,7 +959,7 @@ def peek_loaded_app_config() -> AppConfig | None:
     file, where callers need the loaded value to tell "unavailable" from
     "never configured".
     """
-    override = _current_app_config.get()
+    override = _current_app_config.get() if use_runtime_override else None
     if override is not None:
         return override
     return _app_config

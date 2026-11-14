@@ -5,6 +5,8 @@ async function captureThreadStreamOptions(assistantId?: string) {
 
   rs.resetModules();
   rs.doMock("react", () => ({
+    createContext: () => ({}),
+    useContext: () => undefined,
     useCallback: <T extends (...args: never[]) => unknown>(callback: T) =>
       callback,
     useEffect: () => undefined,
@@ -56,6 +58,7 @@ async function captureThreadStreamOptions(assistantId?: string) {
       t: {
         pages: { newChat: "New chat" },
         uploads: { uploadingFiles: "Uploading files" },
+        inputBox: { runInputUnavailable: "The current Run is unavailable" },
       },
     }),
   }));

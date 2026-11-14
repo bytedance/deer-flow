@@ -137,6 +137,13 @@ Build from `src/components/ui/` (shadcn on Radix) before writing new primitives:
 
 ## Known exceptions
 
+File-format identity tiles in `workspace/file-type-icon.tsx` use four paired
+light/dark tints in `styles/globals.css`: green for spreadsheets, blue for Word,
+orange for slides, and purple for JSON. Icons and type captions also identify the
+format, so color is supplementary. These tints apply only to file identity tiles;
+surrounding controls use semantic tokens. Rendered document colors belong to the
+file content and preserve the author's styling.
+
 Landing-only decoration that does not follow the rules above. Don't copy these
 into app or docs UI:
 
