@@ -43,14 +43,18 @@ make test-blocking-io
 - **Read the run context from `request.runtime`** in an interceptor. Context
   variables are not reliable there, because the adapter may call from another
   task.
-- **Three credential sources** exist for HTTP and SSE servers: deployment OAuth,
-  per-user `user_auth`, and per-request `headers_from_context`. A missing
+- **Credential sources** include deployment OAuth, agent grants, per-user
+  `user_auth`, and per-request `headers_from_context`. A missing
   credential fails the call. It never falls back to another user's or to the
   deployment credential.
 - **The OAuth store keeps refresh tokens only**, encrypted and keyed by scope,
   owner and server. Personal managers pass `owner_user_id`.
 - **Background task calls have no request.** `McpTaskToolCaller` binds the task
   owner's identity for the call and restores the previous value afterwards.
+- **Agent grants are live policy, not run snapshots.** Every protected call
+  rechecks the operator binding even with a cached token. Durable references
+  retain the admitted definition revision; definition rollouts preserve them,
+  while grant revocation denies them. See the per-agent section in the MCP guide.
 
 ## Results
 

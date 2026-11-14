@@ -49,6 +49,9 @@ def compute_files_hash(files: list[str]) -> str:
         name = os.fsencode(os.path.basename(file_path))
         hasher.update(len(name).to_bytes(8, "big"))
         hasher.update(name)
+        if os.path.splitext(file_path)[1].lower() == ".xls":
+            # Rebuild legacy caches that might have dropped a mixed-type sheet.
+            hasher.update(b"legacy-xls-v2\0")
         file_hasher = hashlib.sha256()
         try:
             with open(file_path, "rb") as f:
@@ -239,7 +242,6 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
     Returns unique lookup aliases mapped to their canonical SQL table names.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
@@ -263,6 +265,11 @@ def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
     """Load all sheets from an Excel file into DuckDB tables."""
+    if os.path.splitext(file_path)[1].lower() == ".xls":
+        _load_legacy_excel(con, file_path, table_map)
+        return
+
+    con.execute("INSTALL spatial; LOAD spatial;")
     import openpyxl
 
     wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
@@ -293,6 +300,63 @@ def _load_excel(
             )
         except Exception as e:
             logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
+
+
+def _load_legacy_excel(
+    con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
+) -> None:
+    """Read BIFF workbooks with xlrd through pandas, preserving inferred types."""
+    try:
+        import pandas
+        import xlrd  # noqa: F401 -- check the optional engine before opening a file
+    except ImportError:
+        raise SystemExit(
+            "Legacy .xls analysis requires pandas and xlrd. Prepare this Python "
+            "environment with: python -m pip install pandas xlrd"
+        ) from None
+
+    try:
+        workbook = pandas.ExcelFile(file_path, engine="xlrd")
+    except Exception as exc:
+        logger.warning(f"  Failed to load workbook '{file_path}': {exc}")
+        return
+
+    with workbook:
+        for sheet_name in workbook.sheet_names:
+            alias, table_name = _allocate_table_names(sheet_name, table_map)
+            try:
+                # Preserve literal strings such as "NA" and "00123"; only
+                # empty cells become nulls before DuckDB infers column types.
+                frame = workbook.parse(
+                    sheet_name, dtype=object, keep_default_na=False, na_values=[""]
+                )
+                if frame.columns.empty:
+                    logger.warning(f"  Skipping empty sheet '{sheet_name}'")
+                    continue
+                for column_name, column in frame.items():
+                    # Excel permits unrelated cell types in the same column.
+                    # Normalize those columns before DuckDB chooses a SQL type.
+                    kind = pandas.api.types.infer_dtype(column, skipna=True)
+                    if kind in ("mixed", "mixed-integer"):
+                        frame[column_name] = column.map(str, na_action="ignore")
+                original_sample = con.execute(
+                    "SELECT current_setting('pandas_analyze_sample')"
+                ).fetchone()[0]
+                try:
+                    # Infer compatible types from all rows, including rare values.
+                    con.execute(
+                        "SET pandas_analyze_sample = ?",
+                        [max(original_sample, len(frame))],
+                    )
+                    con.from_df(frame).create(table_name)
+                finally:
+                    con.execute("SET pandas_analyze_sample = ?", [original_sample])
+                table_map[alias] = table_name
+                logger.info(
+                    f"  Loaded sheet '{sheet_name}' -> table '{table_name}' ({len(frame)} rows)"
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to load sheet '{sheet_name}': {e}")
 
 
 def _load_csv(

@@ -1110,6 +1110,8 @@ async def task_tool(
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
+    from deerflow.mcp.agent_auth import runtime_agent_authority
+
     executor_kwargs = {
         "config": config,
         "tools": tools,
@@ -1129,6 +1131,7 @@ async def task_tool(
         "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
         "knowledge_scope": knowledge_scope,
+        "agent_mcp_authority": runtime_agent_authority(runtime),
         # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
         # executor, which appends them to the subagent's task HumanMessage as
         # untrusted data (sanitized and boundary-framed by

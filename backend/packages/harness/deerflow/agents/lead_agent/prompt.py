@@ -1002,7 +1002,10 @@ def get_skills_prompt_section(
 
 def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name, user_id=user_id)
+    return _format_agent_soul(load_agent_soul(agent_name, user_id=user_id))
+
+
+def _format_agent_soul(soul: str | None) -> str:
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1132,6 +1135,7 @@ def apply_prompt_template(
     max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
+    agent_soul: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
@@ -1243,7 +1247,7 @@ def apply_prompt_template(
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name, user_id=user_id),
+        soul=get_agent_soul(agent_name, user_id=user_id) if agent_soul is None else _format_agent_soul(agent_soul),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
