@@ -206,6 +206,11 @@ models:
 - A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` handoff is drained on first use and the token is kept for the life of the process, so every `ClaudeChatModel` instance reuses it
 - On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
 
+Completed Codex refusal explanations are returned as assistant text and retained
+in `additional_kwargs.refusal`. A nonblank refusal completes the turn instead
+of triggering empty-response retries. Mixed text/refusal parts keep their
+original order; blank or malformed parts do not gain fabricated explanations.
+
 To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
 
 ```yaml
