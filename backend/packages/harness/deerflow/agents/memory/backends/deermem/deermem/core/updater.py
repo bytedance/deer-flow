@@ -16,6 +16,11 @@ from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from deerflow.agents.middlewares.model_length_termination_detectors import (
+    ModelLengthTermination,
+    default_detectors,
+)
+
 from ..config import DeerMemConfig
 from .eviction import (
     EVICTION_POLICY_CONFIDENCE,
@@ -120,6 +125,36 @@ def _extract_text(content: Any) -> str:
         flush_pending_str_parts()
         return "\n".join(pieces)
     return str(content)
+
+
+# Provider spellings of "stopped at the output cap" live in the middleware
+# detectors; reuse them so the extractor recognises the same signals there.
+_LENGTH_TERMINATION_DETECTORS = tuple(default_detectors())
+
+
+def _length_termination(response: Any) -> ModelLengthTermination | None:
+    """Return the provider's output-cap signal for *response*, if any.
+
+    Providers report the cap through different fields and values
+    (``finish_reason``, ``stop_reason``, Responses-API ``incomplete``); when a
+    hit is returned, any JSON in the content is necessarily incomplete.
+    """
+    if response is None:
+        return None
+    for detector in _LENGTH_TERMINATION_DETECTORS:
+        hit = detector.detect(response)
+        if hit is not None:
+            return hit
+    return None
+
+
+class _MemoryUpdateParseError(json.JSONDecodeError):
+    """The extractor response could not be parsed into a memory update.
+
+    Raised only for parse-stage failures, so the caller can tell them apart
+    from the apply-gate ``JSONDecodeError`` that means the payload parsed but
+    was rejected as an unsafe partial update.
+    """
 
 
 _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
@@ -463,7 +498,7 @@ def _parse_memory_update_response(response_content: Any) -> dict[str, Any]:
         if isinstance(parsed, dict) and _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS.issubset(parsed):
             return _normalize_memory_update_data(parsed)
 
-    raise json.JSONDecodeError("No valid memory update JSON object found", response_text, 0)
+    raise _MemoryUpdateParseError("No valid memory update JSON object found", response_text, 0)
 
 
 def _strip_upload_mentions_from_memory(memory_data: dict[str, Any]) -> dict[str, Any]:
@@ -2018,7 +2053,19 @@ class MemoryUpdater:
                 self._watermark_set(watermark_key, _message_identity(messages[-1]))
             return success
         except json.JSONDecodeError as e:
-            logger.warning("Failed to parse LLM response for memory update: %s", e)
+            termination = _length_termination(response) if isinstance(e, _MemoryUpdateParseError) else None
+            if termination is not None:
+                # The output cap was hit, so the JSON is truncated rather than
+                # malformed. Say so: the generic parse message sends operators
+                # hunting for a bad prompt when the fix is a larger max_tokens.
+                logger.warning(
+                    "Memory update LLM response was truncated at the output token limit (%s=%r), so no JSON memory update could be parsed and memory was not updated. Raise the memory model's max_tokens: %s",
+                    termination.reason_field,
+                    termination.reason_value,
+                    e,
+                )
+            else:
+                logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
