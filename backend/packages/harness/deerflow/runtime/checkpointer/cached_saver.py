@@ -55,10 +55,15 @@ def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
 
     ``get_tuple`` returns ``pending_writes`` already in the canonical
     ``writes_sort_key`` order — ``(task_path, task_id, idx)`` per checkpoint
-    (``InMemorySaver`` sorts its storage by that key; the SQL savers emit
-    ``ORDER BY task_id, idx``). The inner ``get_delta_channel_history`` walks
-    use the same order, so simply filtering by channel keeps the cached
-    composition in agreement with the authoritative walk.
+    (``InMemorySaver`` sorts its storage by that key; sqlite applies the same
+    key in Python inside ``load_pending_writes`` — its ``pending_writes_sql``
+    has no ``ORDER BY`` — and postgres aggregates with
+    ``array_agg(... ORDER BY cw.task_id, cw.idx)``). The inner
+    ``get_delta_channel_history`` walks use the same order, so simply
+    filtering by channel keeps the cached composition in agreement with the
+    authoritative walk. Re-sorting by ``task_id`` was therefore not a no-op
+    on sqlite either: it broke sqlite exactly the way it broke
+    ``InMemorySaver``.
 
     Re-sorting by ``task_id`` alone would *break* that agreement on fan-out
     supersteps (several parallel tasks writing one channel): tasks are

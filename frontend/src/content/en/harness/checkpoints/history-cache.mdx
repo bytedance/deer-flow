@@ -64,7 +64,7 @@ That is why the whole policy is performance-only and safe to differ per worker.
 | `thread_id` is left readable | Ops can identify a thread's keys without recomputing the digest |
 | The remaining components are hashed with NUL separators | A namespace containing `:` cannot produce an ambiguous key |
 | Thread purge stem | `{key_prefix}:{thread_id}:` — a prefix match, never per-key invalidation |
-| Default prefix | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`, with `CACHE_FORMAT_VERSION = 1` |
+| Default prefix | `ckpt-hist:v{CACHE_FORMAT_VERSION}:{hash12(database identity)}`, with `CACHE_FORMAT_VERSION = 2` |
 | `database.checkpoint_cache.key_prefix` | Replaces the whole derived prefix |
 | Database identity | Credential-free: postgres `host:port/database:schema`, the sqlite path, else `memory`. Rotating credentials does not change the namespace, so a credential rotation cannot cold-start the cache and orphan keys until TTL. Two deployments sharing one redis get different prefixes by default. |
 
