@@ -188,6 +188,10 @@ export const zhCN: Translations = {
         "deerflow-extension-knowledge-center",
         "zh-CN",
       ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
+        "zh-CN",
+      ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
       weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
       example: bundledCopy("deerflow-extension-example", "zh-CN"),

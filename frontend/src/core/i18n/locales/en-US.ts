@@ -200,6 +200,10 @@ export const enUS: Translations = {
         "deerflow-extension-knowledge-center",
         "en-US",
       ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
+        "en-US",
+      ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "en-US"),
       weknora: bundledCopy("deerflow-extension-weknora", "en-US"),
       example: bundledCopy("deerflow-extension-example", "en-US"),
