@@ -78,8 +78,12 @@ Queries still tokenize only the first 500 characters and use the first 32 terms.
 Active sources retain casefolded substring matching; archived sources retain FTS
 token matching. Han runs produce character bigrams; adjacent non-Han
 alphanumeric runs retain whole-word matching. Location uses the same tokenizer.
+The boundary rule applies to BMP Han and non-Han text. Adjacent Latin and
+other scripts, and astral/compatibility Han, can still form an unsplit term.
 Existing archives rebuild their stored search terms transactionally on the next
 search or capture, preserving source IDs, text and checkpoint reachability.
+If the archive is read-only or temporarily locked, search keeps using the old
+index and retries the upgrade later. Reindexing processes bounded row batches.
 Length-changing casefolds such as `Straße` map back to original positions; the
 combining dot produced by folding `İ` follows the existing tokenization rules.
 FTS normalization may not map exactly to indexed terms, such as `cafe` matching

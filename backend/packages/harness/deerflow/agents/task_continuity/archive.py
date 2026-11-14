@@ -103,8 +103,14 @@ def index_text(text: str) -> str:
 def _upgrade_index(db: sqlite3.Connection) -> None:
     """Reindex legacy terms under the caller's write transaction, once per archive."""
     if db.execute("PRAGMA user_version").fetchone()[0] < 1:
-        rows = db.execute("SELECT rowid, payload FROM sources").fetchall()
-        db.executemany("UPDATE sources SET words=? WHERE rowid=?", [(index_text(json.loads(payload)["text"]), rowid) for rowid, payload in rows])
+        # Bound peak memory during interactive searches of large archives.
+        last_rowid = 0
+        while rows := db.execute(
+            "SELECT rowid, payload FROM sources WHERE rowid > ? ORDER BY rowid LIMIT 64",
+            (last_rowid,),
+        ).fetchall():
+            db.executemany("UPDATE sources SET words=? WHERE rowid=?", [(index_text(json.loads(payload)["text"]), rowid) for rowid, payload in rows])
+            last_rowid = rows[-1][0]
         db.execute("PRAGMA user_version=1")
 
 
@@ -218,10 +224,15 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if query is not None and db.execute("PRAGMA user_version").fetchone()[0] < 1:
                     # Open an existing archive for a transactional upgrade only
                     # when needed; ordinary searches and reads stay read-only.
-                    with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as writer, writer:
-                        writer.execute("PRAGMA max_page_count=32768")
-                        writer.execute("BEGIN IMMEDIATE")
-                        _upgrade_index(writer)
+                    try:
+                        with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=2)) as writer, writer:
+                            writer.execute("PRAGMA max_page_count=32768")
+                            writer.execute("BEGIN IMMEDIATE")
+                            _upgrade_index(writer)
+                    except (OSError, sqlite3.Error):
+                        # A read-only archive or busy writer must not hide
+                        # results that the existing index can still serve.
+                        logger.warning("Task history index upgrade deferred; searching existing terms", exc_info=False)
                 placeholders = ",".join("?" for _ in batches)
                 present = db.execute(f"SELECT count(*) FROM batches WHERE id IN ({placeholders})", batches).fetchone()[0]
                 if present != len(batches) and status != "unavailable":

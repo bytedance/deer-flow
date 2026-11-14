@@ -1158,3 +1158,46 @@ def test_mixed_han_keywords_upgrade_legacy_index(role_runtime, recapture):
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT batch, id, payload FROM sources").fetchall() == original
         assert db.execute("SELECT words FROM sources").fetchone()[0] == "约定 定使 使用 sqlite 保存 存缓 缓存"
+
+
+def test_legacy_archive_still_searches_when_upgrade_is_readonly(role_runtime, monkeypatch):
+    import sqlite3
+
+    message = HumanMessage(content="Citrine report and legacy search", id="read-only-legacy")
+    history = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version=0")
+
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        if "mode=rw" in str(args[0]):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    result = archive.lookup({"task_history": history}, role_runtime, query="Citrine")
+    assert result["status"] == "available"
+    assert [row["text"] for row in result["results"]] == [message.content]
+    with real_connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_legacy_index_upgrade_reindexes_multiple_bounded_batches(role_runtime):
+    import sqlite3
+
+    config = TaskContinuityConfig(enabled=True, max_records_per_batch=256)
+    messages = [HumanMessage(content=f"约定使用SQLite记录 {i}", id=f"record-{i}") for i in range(130)]
+    history = archive.capture({}, role_runtime, messages, config)
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sources SET words='legacy'")
+        db.execute("PRAGMA user_version=0")
+
+    result = archive.lookup({"task_history": history}, role_runtime, query="SQLite")
+    assert result["status"] == "available"
+    assert result["results"]
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM sources WHERE words LIKE '%sqlite%'").fetchone()[0] == len(messages)
