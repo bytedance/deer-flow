@@ -742,6 +742,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="SPECSTREAM_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="olostep",
+        display_name="Olostep",
+        description="Live web search with title, URL and description per result, API key required",
+        use="deerflow.community.olostep.tools:web_search_tool",
+        env_var="OLOSTEP_API_KEY",
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [
@@ -826,6 +834,14 @@ WEB_FETCH_PROVIDERS: list[WebProvider] = [
         description="Page text as markdown, also PDF, Word and Excel, API key required",
         use="deerflow.community.specstream.tools:web_fetch_tool",
         env_var="SPECSTREAM_API_KEY",
+        tool_name="web_fetch",
+    ),
+    WebProvider(
+        name="olostep",
+        display_name="Olostep",
+        description="Page scraped as markdown, API key required",
+        use="deerflow.community.olostep.tools:web_fetch_tool",
+        env_var="OLOSTEP_API_KEY",
         tool_name="web_fetch",
     ),
 ]

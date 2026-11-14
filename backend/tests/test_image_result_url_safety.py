@@ -113,6 +113,21 @@ def _stub_groundroute(module, url):
     ], _async(module.web_search_tool)
 
 
+def _stub_olostep(module, url):
+    data = {"result": {"links": [{"title": "t", "url": url, "description": "c"}]}}
+    config = SimpleNamespace(get_tool_config=lambda _: SimpleNamespace(model_extra={"api_key": "synthetic-test-key"}))
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=data))
+    real_client = httpx.AsyncClient
+    return [
+        patch.object(module, "get_app_config", return_value=config),
+        patch.object(
+            module,
+            "httpx",
+            SimpleNamespace(AsyncClient=lambda **kwargs: real_client(transport=transport, **kwargs), HTTPStatusError=httpx.HTTPStatusError),
+        ),
+    ], _async(module.web_search_tool)
+
+
 def _stub_sofya(module, url):
     data = {"results": [{"title": "t", "url": url, "content": "c"}]}
     return [patch.object(module, "_get_api_key", return_value="k"), patch.object(module, "_sofya_post", return_value=(data, None))], _sync(module.web_search_tool)
@@ -173,6 +188,7 @@ _TEXT_SEARCH_STUBS = {
     "tencent_wsa": _stub_tencent_wsa,
     "serply": _stub_serply,
     "groundroute": _stub_groundroute,
+    "olostep": _stub_olostep,
     "sofya": _stub_sofya,
     "specstream": _stub_specstream,
     "ddg_search": _stub_ddg_search,
