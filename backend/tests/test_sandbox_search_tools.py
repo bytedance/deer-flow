@@ -133,6 +133,32 @@ def _remote_search_runtime():
 @pytest.mark.parametrize(
     ("tool", "arguments"),
     [
+        (ls_tool, {}),
+        (glob_tool, {"pattern": "**/*.py"}),
+        (grep_tool, {"pattern": "needle"}),
+    ],
+)
+def test_search_tools_report_the_requested_path_when_sandbox_setup_fails(monkeypatch, tool, arguments) -> None:
+    """A sandbox setup failure must not be masked by an unbound ``requested_path``."""
+
+    def _raise_file_not_found(runtime):
+        raise FileNotFoundError("sandbox root is unavailable")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", _raise_file_not_found)
+
+    result = tool.func(
+        runtime=_remote_search_runtime(),
+        description="scoped search",
+        path="/mnt/user-data/workspace",
+        **arguments,
+    )
+
+    assert result == "Error: Directory not found: /mnt/user-data/workspace"
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
         (glob_tool, {"pattern": "src/*.py"}),
         (grep_tool, {"pattern": "needle", "glob": "src/*.py"}),
     ],

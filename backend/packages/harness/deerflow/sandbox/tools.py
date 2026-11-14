@@ -3072,6 +3072,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         path: The **absolute** path to the directory to list.
         description: Optional short explanation of this listing shown in the UI.
     """
+    requested_path = path
     try:
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
@@ -3080,7 +3081,6 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         thread_data = None
         user_data_dirs = None
         if is_local_sandbox(runtime):
@@ -3154,6 +3154,7 @@ def glob_tool(
         include_dirs: Whether matching directories should also be returned. Default is False.
         max_results: Maximum number of paths to return. Default is 200.
     """
+    requested_path = path
     try:
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
@@ -3162,7 +3163,6 @@ def glob_tool(
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "glob",
             max_results,
@@ -3239,6 +3239,7 @@ def grep_tool(
         case_sensitive: Whether matching is case-sensitive. Default is False.
         max_results: Maximum number of matching lines to return. Default is 100.
     """
+    requested_path = path
     try:
         user_id = resolve_runtime_user_id(runtime)
         # Block access to disabled skill directories
@@ -3247,7 +3248,6 @@ def grep_tool(
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "grep",
             max_results,
