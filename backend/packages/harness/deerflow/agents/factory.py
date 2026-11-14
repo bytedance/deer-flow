@@ -44,7 +44,8 @@ logger = logging.getLogger(__name__)
 # TodoMiddleware prompts (minimal SDK version)
 # ---------------------------------------------------------------------------
 
-_TODO_SYSTEM_PROMPT = """
+_TODO_SYSTEM_PROMPT = (
+    """
 <todo_list_system>
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
@@ -54,9 +55,12 @@ You have access to the `write_todos` tool to help you manage and track complex m
 - Use `in_progress` only while actively working; use `blocked` or `waiting` when work cannot continue in this run
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
 
-Task states: `pending` (not started), `in_progress` (active), `blocked` (blocked by a dependency or error), `waiting` (waiting for the user or an external resource), and `completed` (fully finished and verified). Keep `completed` truthful; blocked or waiting tasks may remain when the run ends.
-</todo_list_system>
 """
+    "Task states: `pending` (not started), `in_progress` (active), `blocked` (blocked by a dependency or error), "
+    "`waiting` (waiting for the user or an external resource), and `completed` (fully finished and verified). "
+    "Keep `completed` truthful; blocked or waiting tasks may remain when the run ends.\n"
+    "</todo_list_system>\n"
+)
 
 _TODO_TOOL_DESCRIPTION = "Use this tool to create and manage a structured task list for complex work sessions.  Only use for complex tasks (3+ steps)."
 

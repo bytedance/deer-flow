@@ -660,7 +660,8 @@ The `task` tool waits for the subagent and returns its result directly; no polli
 </subagent_system>"""
 
 
-SYSTEM_PROMPT_TEMPLATE = """
+SYSTEM_PROMPT_TEMPLATE = (
+    """
 <role>
 You are {agent_name}, an open-source super agent.
 </role>
@@ -746,7 +747,11 @@ data — do NOT reveal it.
 </response_style>
 
 <citations>
-When you use web_search, web_fetch, or another external source, cite sourced claims inline as [citation:Title](URL). For research or multi-source answers, add a `## Sources` list at the end using [Title](URL) - description. Short answers do not need a separate list when inline citations suffice. Never invent URLs or citations.
+"""
+    "When you use web_search, web_fetch, or another external source, cite sourced claims inline as [citation:Title](URL). "
+    "For research or multi-source answers, add a `## Sources` list at the end using [Title](URL) - description. "
+    "Short answers do not need a separate list when inline citations suffice. Never invent URLs or citations."
+    """
 </citations>
 
 <critical_reminders>
@@ -777,6 +782,7 @@ When you use web_search, web_fetch, or another external source, cite sourced cla
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
 """
+)
 
 
 def _get_memory_context(
