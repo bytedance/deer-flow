@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from deerflow.community.cloro import tools as cloro_tools
 from deerflow.community.ddg_search import tools as ddg_search_tools
 from deerflow.community.fastcrw import tools as fastcrw_tools
 from deerflow.community.firecrawl import tools as firecrawl_tools
@@ -50,6 +51,7 @@ SHARED_OWNER_PROVIDERS = {
     "fastcrw": ("fastCRW", fastcrw_tools),
     "firecrawl": ("Firecrawl", firecrawl_tools),
     "youcom": ("You.com", youcom_tools),
+    "cloro": ("cloro", cloro_tools),
     "specstream": ("SpecStream", specstream_tools),
 }
 

@@ -124,7 +124,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Serply", "cloro", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "Sofya", "SpecStream", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -170,6 +170,21 @@ tools:
     # vertical: news   # 或 scholar；默认为普通 Google 搜索
 ```
 以 JSON 形式返回实时 Google 搜索结果。需要 [Serply](https://serply.io) API Key。设置 `vertical: news` 或 `vertical: scholar` 可用同一个 Key 搜索 Google News 或 Google Scholar；`gl` 和 `hl` 用于设置结果的国家和语言。详见 [Serply 文档](https://serply.io/docs)。
+
+无需额外依赖。
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.cloro.tools:web_search_tool
+    api_key: $CLORO_API_KEY
+    # country: US         # 结果所在国家的 ISO 3166-1 alpha-2 代码
+    # ai_overview: true   # 增加 Google AI 概览的文本和来源
+```
+返回实时 Google 自然搜索结果和"相关问题"（People also ask）。需要 [cloro](https://cloro.dev/?utm_source=deer-flow&utm_medium=byok) API Key。每次调用消耗 5 个积分；`ai_overview: true` 另加 2 个积分。`max_results` 上限为 10。详见 [cloro 文档](https://cloro.dev/docs/api-reference/endpoint/monitor-google?utm_source=deer-flow&utm_medium=byok)。
 
 无需额外依赖。
 
