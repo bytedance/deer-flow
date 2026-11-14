@@ -86,3 +86,7 @@ and states why.
 
 When you add a scoped `AGENTS.md`, add its path to `EXPECTED_GUIDANCE_PATHS` in
 `test_agent_guidance_check.py` in the same change.
+
+Version-bump retries use the real shell scripts in an isolated checkout. Fail
+`uv lock` once, then rerun the same version and assert the lock refresh and
+verification occur while already aligned source bytes remain unchanged.
