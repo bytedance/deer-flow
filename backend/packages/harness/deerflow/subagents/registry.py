@@ -51,6 +51,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         model=custom.model,
         thinking_enabled=custom.thinking_enabled,
         reasoning_effort=custom.reasoning_effort,
+        reasoning_source=custom.reasoning_source,
         max_turns=custom.max_turns,
         timeout_seconds=custom.timeout_seconds,
     )
@@ -101,6 +102,7 @@ def _build_managed_subagent_config(name: str, *, app_config: Any | None = None) 
             model=definition.model,
             thinking_enabled=definition.thinking_enabled,
             reasoning_effort=definition.reasoning_effort,
+            reasoning_source=definition.reasoning_source,
             max_turns=definition.max_turns,
             timeout_seconds=definition.timeout_seconds,
         )
@@ -178,6 +180,9 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
         overrides["skills"] = effective_skills
 
     # Thinking: per-agent override only (no global default)
+    if agent_override is not None and agent_override.reasoning_source is not None:
+        overrides["reasoning_source"] = agent_override.reasoning_source
+
     effective_thinking = subagents_config.get_thinking_enabled_for(name)
     if effective_thinking is not None and effective_thinking != config.thinking_enabled:
         logger.debug("Subagent '%s': thinking_enabled overridden (%s -> %s)", name, config.thinking_enabled, effective_thinking)

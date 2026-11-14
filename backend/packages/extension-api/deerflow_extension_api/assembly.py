@@ -50,7 +50,8 @@ class AgentAssemblyDescriptor:
     requested_model: str | None
     effective_model: str
     model_parameters: dict[str, Any]
-    thinking_enabled: bool
+    #: None leaves an optional model's provider default unspecified.
+    thinking_enabled: bool | None
     reasoning_effort: Any
     base_prompt_hash: str
     tools: tuple[ToolDescriptor, ...]

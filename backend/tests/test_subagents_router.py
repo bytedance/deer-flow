@@ -139,21 +139,24 @@ async def test_admin_can_create_update_and_delete_managed_subagent():
             system_prompt="You are a creative planner.",
             thinking_enabled=True,
             reasoning_effort="xhigh",
+            reasoning_source="model",
         ),
     )
     assert created.source == "managed"
     assert created.system_prompt == "You are a creative planner."
     assert created.thinking_enabled is True
     assert created.reasoning_effort == "xhigh"
+    assert created.reasoning_source == "model"
 
     updated = await router.update_managed_subagent(
         "planner",
         _request("admin"),
-        router.ManagedSubagentUpdateRequest(enabled=False, thinking_enabled=False, reasoning_effort=None),
+        router.ManagedSubagentUpdateRequest(enabled=False, thinking_enabled=False, reasoning_effort=None, reasoning_source="inherit"),
     )
     assert updated.enabled is False
     assert updated.thinking_enabled is False
     assert updated.reasoning_effort is None
+    assert updated.reasoning_source == "inherit"
 
     await router.delete_managed_subagent("planner", _request("admin"))
     with pytest.raises(HTTPException) as excinfo:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import abc
 import re
 from collections.abc import Hashable
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -40,6 +41,7 @@ class ManagedSubagentDefinition(BaseModel):
     model: str = "inherit"
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
+    reasoning_source: Literal["inherit", "model"] = "inherit"
     max_turns: int = Field(default=50, ge=1)
     timeout_seconds: int = Field(default=900, ge=1)
     enabled: bool = True

@@ -1116,6 +1116,8 @@ async def task_tool(
         "config": config,
         "tools": tools,
         "parent_model": parent_model,
+        "parent_thinking_enabled": metadata.get("thinking_enabled"),
+        "parent_reasoning_effort": metadata.get("reasoning_effort"),
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "uploaded_files": uploaded_files,

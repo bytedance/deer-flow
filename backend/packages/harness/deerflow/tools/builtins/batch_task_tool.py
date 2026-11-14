@@ -253,6 +253,8 @@ async def batch_task(
     execution_spec = {
         "subagent_config": {**asdict(config), "prompt_overlay": config.prompt_overlay.model_dump()},
         "parent_model": metadata.get("model_name"),
+        "parent_thinking_enabled": metadata.get("thinking_enabled"),
+        "parent_reasoning_effort": metadata.get("reasoning_effort"),
         "tool_groups": metadata.get("tool_groups"),
         "mcp_plugins": metadata.get("mcp_plugins"),
         "user_role": context.get("user_role"),

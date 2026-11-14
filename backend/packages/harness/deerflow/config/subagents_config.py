@@ -1,6 +1,7 @@
 """Configuration for the subagent system loaded from config.yaml."""
 
 import logging
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
@@ -106,13 +107,14 @@ class SubagentOverrideConfig(BaseModel):
         min_length=1,
         description="Model name for this subagent (None = inherit from parent agent)",
     )
+    reasoning_source: Literal["inherit", "model"] | None = Field(default=None, description="Default source for unset thinking and effort")
     thinking_enabled: bool | None = Field(
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
     reasoning_effort: str | None = Field(
         default=None,
-        description="Reasoning effort accepted or mapped by the selected model (None = use its default)",
+        description="Explicit reasoning effort (None = use reasoning_source)",
     )
     skills: list[str] | None = Field(
         default=None,
@@ -154,13 +156,14 @@ class CustomSubagentConfig(BaseModel):
         default="inherit",
         description="Model to use - 'inherit' uses parent's model",
     )
+    reasoning_source: Literal["inherit", "model"] = Field(default="inherit", description="Default source for unset thinking and effort")
     thinking_enabled: bool | None = Field(
         default=None,
         description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
     reasoning_effort: str | None = Field(
         default=None,
-        description="Reasoning effort accepted or mapped by the selected model (None = use its default)",
+        description="Explicit reasoning effort (None = use reasoning_source)",
     )
     max_turns: int = Field(
         default=50,

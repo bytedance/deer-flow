@@ -97,7 +97,7 @@ class ResolvedReasoning:
     ``effort_unsupported``, ``effort_aliased``, ``effort_unsupported_value``.
     """
 
-    thinking_enabled: bool
+    thinking_enabled: bool | None
     reasoning_effort: str | None
     adjustments: tuple[str, ...] = ()
 
@@ -139,8 +139,11 @@ def resolve_reasoning_contract(model_config: Any) -> ReasoningContract:
     )
 
 
-def resolve_reasoning_request(contract: ReasoningContract, *, thinking_enabled: bool, reasoning_effort: str | None) -> ResolvedReasoning:
+def resolve_reasoning_request(contract: ReasoningContract, *, thinking_enabled: bool | None, reasoning_effort: str | None) -> ResolvedReasoning:
     """Apply a generic request to the contract.
+
+    ``thinking_enabled=None`` preserves an optional model/provider default;
+    required and unsupported models still resolve to a definite capability.
 
     Raises:
         ReasoningPolicyError: the model requires thinking, the caller asked for
@@ -153,13 +156,13 @@ def resolve_reasoning_request(contract: ReasoningContract, *, thinking_enabled: 
             adjustments.append("thinking_unsupported")
         effective_thinking = False
     elif contract.thinking == "required":
-        if not thinking_enabled:
+        if thinking_enabled is False:
             if contract.on_disable_request == "reject":
                 raise ReasoningPolicyError("model requires thinking, but the request asked for it to be disabled")
             adjustments.append("thinking_forced_on")
         effective_thinking = True
     else:
-        effective_thinking = bool(thinking_enabled)
+        effective_thinking = thinking_enabled
 
     effort = contract.effort
     if effort is None:
