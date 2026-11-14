@@ -959,6 +959,7 @@ class SubagentExecutor:
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
+        agent_mcp_authority: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -1039,6 +1040,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1932,6 +1934,10 @@ class SubagentExecutor:
             # audit). user_id reuses the resolved tracing id; on every
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
+            if self.agent_mcp_authority is not None:
+                from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
+
+                context[AGENT_AUTH_CONTEXT_KEY] = self.agent_mcp_authority
             context["user_role"] = self.user_role
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id

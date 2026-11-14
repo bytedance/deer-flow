@@ -65,6 +65,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
     effective_total_subagents_per_run,
 )
+from deerflow.mcp.agent_auth import AGENT_AUTH_CONTEXT_KEY, AgentMcpAuthority
 from deerflow.models import create_chat_model
 from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
 from deerflow.runtime.checkpoint_mode import (
@@ -1028,7 +1029,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         scheduler_capability = None
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    agent_authority = runtime_context.get(AGENT_AUTH_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    pinned_agent = isinstance(agent_authority, AgentMcpAuthority) and not is_bootstrap and not cfg.get("is_subagent")
+    if pinned_agent:
+        agent_config = agent_authority.agent_config()
+        if agent_authority.user_id != resolved_user_id or agent_config is None or agent_config.name != agent_name:
+            raise ValueError("Admitted MCP agent definition does not match this run")
+    else:
+        agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
@@ -1424,6 +1432,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         max_concurrent_subagents=max_concurrent_subagents,
         max_total_subagents=max_total_subagents,
         agent_name=agent_name,
+        agent_soul=agent_authority.soul if pinned_agent else None,
         available_skills=available_skills,
         app_config=resolved_app_config,
         deferred_names=setup.deferred_names,

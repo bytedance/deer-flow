@@ -67,7 +67,7 @@ jobs:
         working-directory: backend
         run: |
           # Fail instead of silently skipping data-analysis tests on missing extras.
-          uv run --locked python -c "import duckdb, openpyxl, requests"
+          uv run --locked python -c "import duckdb, openpyxl, pandas, requests, xlrd"
           uv run --locked python -m pytest ../tests/skills -q -rs
 
   skill-review:

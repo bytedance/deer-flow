@@ -513,6 +513,10 @@ class SubagentBatchService:
                 )
                 return
             executor_kwargs = {}
+            if "mcp_agent_auth" in spec:
+                from deerflow.mcp.agent_auth import restore_agent_authority
+
+                executor_kwargs["agent_mcp_authority"] = restore_agent_authority(batch["user_id"], spec["mcp_agent_auth"])
             if THREAD_INCARNATION_CONTEXT_KEY in spec:
                 executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
             executor = SubagentExecutor(

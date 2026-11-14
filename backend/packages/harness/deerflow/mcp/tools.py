@@ -883,6 +883,7 @@ def _make_background_submit_tool(
     status_tool: str,
     cancel_tool: str,
     connection_scope: str,
+    agent_auth: bool = False,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -897,6 +898,9 @@ def _make_background_submit_tool(
         context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
         tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
+        from deerflow.mcp.agent_auth import task_agent_reference
+
+        agent_reference = task_agent_reference(deerflow_runtime, server_name, required=agent_auth)
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -913,6 +917,7 @@ def _make_background_submit_tool(
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
                     "connection_scope": connection_scope,
+                    **({"agent_auth": agent_reference} if agent_reference is not None else {}),
                 },
             ),
         )
@@ -989,6 +994,7 @@ def _configure_task_tools_for_server(
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
                 connection_scope=connection_scope,
+                agent_auth=server_config.agent_auth,
             )
         )
     return configured
@@ -1097,7 +1103,7 @@ class _PreparedServerDiscovery:
     pool: MCPSessionPool
     bindings: dict[str, ServerBinding]
     ownership_domain: MCPPoolDomain
-    connection_scope: str
+    connection_scope: MCPPoolDomain
     personal_user_id: str | None = None
 
 
@@ -1109,6 +1115,7 @@ def _prepare_server_client(
     client_cls: Any,
     initial_oauth_header: str | None,
     oauth_token_manager: OAuthTokenManager,
+    connection_scope: MCPPoolDomain = "deployment",
 ) -> _PreparedServerClient:
     """Build the client/interceptors for one selected server."""
     server_cfg = extensions_config.mcp_servers.get(server_name)
@@ -1120,6 +1127,7 @@ def _prepare_server_client(
     )
     tool_interceptors = build_mcp_tool_interceptors(
         server_view,
+        connection_scope=connection_scope,
         oauth_builder=lambda config: build_oauth_tool_interceptor(config, token_manager=oauth_token_manager),
         resolver=resolve_variable,
         target_logger=logger,
@@ -1415,6 +1423,7 @@ async def _discover_and_wrap_prepared(
             client_cls=client_cls,
             initial_oauth_header=initial_oauth_headers.get(server_name),
             oauth_token_manager=oauth_token_manager,
+            connection_scope=prepared.connection_scope,
         )
         for server_name in prepared.server_names
     ]
