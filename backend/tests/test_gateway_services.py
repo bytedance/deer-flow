@@ -1070,6 +1070,30 @@ def test_state_values_keep_usable_promoted_record():
     assert strip_server_owned_state_metadata({"promoted": record})["promoted"] == record
 
 
+def test_state_values_strip_forged_metadata_from_promoted_record():
+    """The dedicated ``promoted`` branch must not bypass the generic metadata strip.
+
+    A caller-supplied record reaches the checkpoint through this branch, so a
+    preserved ``additional_kwargs`` would seed server-owned provenance
+    (``origin_task_id``) that only the server may write. The sibling
+    implementation of this boundary returns the accepted record untouched, so
+    this case pins the difference and fails on that shape.
+    """
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    stripped = strip_server_owned_state_metadata(
+        {
+            "promoted": {
+                "catalog_hash": "abc",
+                "names": [],
+                "additional_kwargs": {"origin_task_id": "forged", "keep": "me"},
+            }
+        }
+    )
+
+    assert stripped["promoted"]["additional_kwargs"] == {"keep": "me"}
+
+
 @pytest.mark.parametrize(
     "message",
     [
