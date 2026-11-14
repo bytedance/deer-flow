@@ -64,6 +64,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.tool_streaming_config import ToolStreamingConfig
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.env import load_selected_env_file
@@ -322,6 +323,7 @@ class AppConfig(BaseModel):
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     verification: VerificationConfig = Field(default_factory=VerificationConfig, description="Subagent result verification (receipts, checklist, judge)")
     hitl_approval: HitlApprovalConfig = Field(default_factory=HitlApprovalConfig, description="Human-in-the-loop approval for high-risk tool calls")
+    tool_streaming: ToolStreamingConfig = Field(default_factory=ToolStreamingConfig, description="Real-time tool output streaming middleware configuration")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     harness_guard: HarnessGuardConfig = Field(default_factory=HarnessGuardConfig, description="HarnessGuard tool-loop interceptor middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")

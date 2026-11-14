@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 66
+config_version: 67
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1593,6 +1593,20 @@ pii_redaction:
 #     - write_todos
 #     - present_files
 #     - task
+
+# ============================================================================
+# Tool Output Streaming (issue #4150)
+# ============================================================================
+# When enabled, ToolStreamingMiddleware emits `tool_output_chunk` lifecycle
+# events during tool execution (start / error / final). Built-in tools do not
+# currently emit intermediate output chunks. These events propagate to the
+# frontend SSE stream and through subagents via SubagentExecutor.
+#
+# Defaults to disabled (opt-in). Tool execution results still arrive through
+# the canonical ToolMessage regardless of this setting.
+
+# tool_streaming:
+#   enabled: false
 
 # ============================================================================
 # Read-Before-Write File Gate (issue #3857)
