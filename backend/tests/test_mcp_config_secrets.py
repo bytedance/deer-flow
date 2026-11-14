@@ -220,6 +220,12 @@ def test_merge_preserves_masked_env_values():
     assert merged.env["KEY"] == "real_secret"
 
 
+def test_bulk_merge_preserves_agent_auth_until_explicitly_changed():
+    existing = McpServerConfigResponse(type="http", url="https://mcp.example", agent_auth=True)
+    assert _merge_preserving_secrets(McpServerConfigResponse(description="Renamed"), existing).agent_auth is True
+    assert _merge_preserving_secrets(McpServerConfigResponse(agent_auth=False), existing).agent_auth is False
+
+
 def test_merge_preserves_masked_header_values():
     """Incoming '***' header values should be replaced with existing secrets."""
     incoming = McpServerConfigResponse(headers={"Authorization": "***"})

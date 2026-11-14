@@ -530,6 +530,118 @@ token and refresh token in the `mcp_oauth_tokens` table (migration
   so that startup check cannot see them; set the variable on every
   multi-instance deployment that uses them.
 
+## Per-agent credentials (deployment HTTP servers)
+
+For a shared HTTP MCP server, an administrator can grant a different OAuth
+service account to each custom agent. The Gateway admits an owner and an
+approved agent definition; changing a client-supplied `agent_name` or creating
+a same-named agent in another account does not grant credentials.
+
+Enable enforcement on the deployment server in `extensions_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "ticketing": {
+      "type": "http",
+      "url": "https://ticketing.example/mcp",
+      "headers": {"Authorization": "Bearer $MCP_DISCOVERY_TOKEN"},
+      "agent_auth": true
+    }
+  }
+}
+```
+
+Tool discovery still uses the server's static headers or server-level OAuth.
+Use a discovery credential limited to listing tools. Calls to a protected
+server always require an agent grant; there is no passthrough to discovery
+credentials. Default Lead, bootstrap runs and owners without a matching grant
+cannot call its tools. Personal MCP connections cannot enable this feature.
+
+Keep the grants in operator-owned `config.yaml`, separately from the
+API-writable server configuration:
+
+```yaml
+mcp_agent_auth:
+  research-tickets:  # Stable binding ID; durable tasks retain this reference.
+    server: ticketing
+    agent: research-bot
+    owners: ["alice-user-id", "bob-user-id"]
+    definition_digests: ["<approved 64-character SHA-256 digest>"]
+    oauth:
+      grant_type: client_credentials
+      token_url: https://idp.example/realms/work/protocol/openid-connect/token
+      client_id: research-bot
+      client_secret: $RESEARCH_BOT_CLIENT_SECRET
+      scope: tickets.read
+```
+
+This first version supports explicit owner IDs and OAuth `client_credentials`
+on deployment-managed HTTP servers. An owners list lets a GitOps job maintain
+membership for identical per-user copies. Wildcards, group matching, static
+per-agent tokens and refresh-token grants are not supported. Enabled bindings
+must not overlap for the same server, agent and owner.
+
+### Approve a definition
+
+Generate the digest in the Gateway environment with the same DeerFlow version
+and data root, after reviewing the stored agent:
+
+```bash
+uv run --no-sync --project backend python - alice-user-id research-bot <<'PY'
+import sys
+from deerflow.config.agents_config import load_agent_config, load_agent_soul
+from deerflow.mcp.agent_auth import agent_definition_digest
+
+owner, name = sys.argv[1:]
+config = load_agent_config(name, user_id=owner)
+if config is None:
+    raise SystemExit("Agent not found")
+print(agent_definition_digest(config, load_agent_soul(name, user_id=owner)))
+PY
+```
+
+The versioned digest covers the parsed `AgentConfig` and the exact SOUL text.
+The Gateway verifies these at run admission and assembles the run from that
+same in-memory snapshot. Editing either invalidates admission until an
+administrator approves the new digest. Editing an agent does not edit its
+grant. For rolling syncs, the binding can temporarily allow both old and new
+digests, then remove the old one after copies have been updated.
+
+The digest does not attest dynamic tool schemas, skill file contents, remote
+data or the model's behavior. Review the approved tool/skill selections and
+enforce service-account permissions at the MCP service. Operator-controlled
+custom interceptors remain trusted code.
+
+### Delegation, tasks and revocation
+
+Ordinary subagents inherit the calling agent's grant, even if a child has its
+own name or binding. Durable subagent batches and ordinary MCP background
+tasks store only nonsecret binding/definition references, then restore that
+identity after worker recovery. A new definition rollout does not switch an
+existing task's service account or break its status/cancel calls.
+
+Each call checks the current operator grant, including when the access token
+is cached. Disable/delete the binding or remove an owner to deny subsequent
+calls, polls and cancellations. A call already sent cannot be recalled.
+Changing the OAuth endpoint, client, scope or audience also invalidates old
+references; rotating the same account's client secret keeps them valid and
+refreshes the cache. Missing grants or failed token acquisition never fall
+back to user or server credentials.
+
+Grant edits are hot-reloaded independently of the server connection snapshot.
+As with other task-tool connection settings, changing the server's
+`agent_auth` flag requires a Gateway restart when it has `task_toolsets`.
+Environment secrets are resolved at configuration load; roll out a config
+reload or restart when rotating them. Access tokens are cached in process by
+server, binding and credential configuration, using the existing OAuth expiry
+and refresh logic. Logs identify the server, agent, owner and binding without
+logging credential values.
+
+Config loading rejects enabled `user_auth` on protected servers and any enabled
+`headers_from_context` mapping of `Authorization`, regardless of header casing.
+Non-auth context headers can still be forwarded on foreground calls.
+
 ## Request-Scoped Headers (HTTP/SSE MCP Servers)
 
 When the credential is chosen by the *caller* rather than by the operator —
@@ -600,15 +712,16 @@ The caller supplies the values on each run request:
   way a value reaches these headers: `user_auth`, the OAuth token returned by
   the token endpoint, and the static `headers` in the config file.
 - Precedence for a server declaring several sources: static `headers` <
-  `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
-  request is the most specific, so it wins.
+  `oauth` < `user_auth` < `headers_from_context`. Protected `agent_auth` servers
+  reject competing built-in auth sources as described above.
 - `sse`/`http` only. A stdio server has no HTTP headers; declaring the block
   there logs a warning and is ignored.
 - Durable background tasks are the one exception, and only half of one: a
   `task_toolsets` submit is awaited inside the Agent run and carries these
   headers, but the status and cancel polls run after that run ends, so they skip
   them and use configured static/OAuth credentials or the persisted owner's
-  `user_auth` credential. See *Durable Background
+  `user_auth` credential, or the admitted agent binding on `agent_auth` servers.
+  See *Durable Background
   Tasks* above.
 
 Use `user_auth` instead when the credential belongs to a configured DeerFlow
@@ -635,7 +748,7 @@ Each entry is a Python import path in `module:variable` format (resolved via `re
 Tool discovery is server-scoped, so every server gets its own interceptor instance built
 from a single-server configuration view, and a stateful interceptor (a counter, a cache,
 a rate limiter) only ever observes that server's calls. Do not rely on one instance being
-shared across servers. The built-in OAuth, per-user and context-header interceptors are
+shared across servers. The built-in OAuth, agent, user and context-header interceptors are
 unaffected: they resolve everything per `request.server_name`. Servers that are not
 discovered never run their builder.
 

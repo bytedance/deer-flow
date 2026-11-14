@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
+from deerflow.mcp.agent_auth import build_agent_auth_interceptor
 from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths
 from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
@@ -24,11 +25,15 @@ def build_mcp_tool_interceptors(
     resolver: Any = resolve_variable,
     target_logger: logging.Logger = logger,
 ) -> list[Any]:
-    """Build OAuth, user-scoped auth, context headers, then custom MCP interceptors."""
+    """Build OAuth, agent/user auth, context headers, then custom interceptors."""
     interceptors: list[Any] = []
     oauth_interceptor = oauth_builder(extensions_config)
     if oauth_interceptor is not None:
         interceptors.append(oauth_interceptor)
+
+    agent_auth_interceptor = build_agent_auth_interceptor(extensions_config)
+    if agent_auth_interceptor is not None:
+        interceptors.append(agent_auth_interceptor)
 
     # After OAuth so a server declaring both gets the per-user credential:
     # interceptors wrap outermost-first, so the later-registered user-scoped

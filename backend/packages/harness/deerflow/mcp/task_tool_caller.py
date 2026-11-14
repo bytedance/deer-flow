@@ -14,6 +14,7 @@ from typing import Any, Literal
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
 from deerflow.constants import MCP_TMP_SUBDIR
+from deerflow.mcp.agent_auth import McpAgentAuthorizationError, bind_task_agent_authority, validate_task_agent_reference
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
@@ -117,6 +118,7 @@ class McpTaskToolCaller:
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
+        agent_auth: dict[str, Any] | None = None,
     ) -> Any:
         """Call a raw MCP tool.
 
@@ -126,31 +128,29 @@ class McpTaskToolCaller:
         run after that run ended. ``connection_scope`` is captured in the task
         binding, so an equal deployment server name cannot change its owner.
         """
-        if connection_scope == "personal":
-            caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
-            await require_personal_mcp_access(user_id, caller._extensions_config.mcp_servers[server_name])
-            return await caller._call_configured_tool(
-                server_name=server_name,
-                tool_name=tool_name,
-                arguments=arguments,
-                user_id=user_id,
-                thread_id=thread_id,
-                thread_incarnation=thread_incarnation,
-                request_scoped_headers=request_scoped_headers,
-                connection_scope="personal",
-            )
-        if connection_scope != "deployment":
-            raise ValueError("Invalid MCP task connection scope")
-        return await self._call_configured_tool(
-            server_name=server_name,
-            tool_name=tool_name,
-            arguments=arguments,
-            user_id=user_id,
-            thread_id=thread_id,
-            thread_incarnation=thread_incarnation,
-            request_scoped_headers=request_scoped_headers,
-            connection_scope="deployment",
-        )
+        try:
+            if connection_scope == "personal" and agent_auth is not None:
+                raise McpAgentAuthorizationError("Personal MCP tasks cannot use deployment agent credentials")
+            authority = await validate_task_agent_reference(user_id, server_name, agent_auth)
+            with bind_task_agent_authority(authority):
+                caller = self
+                if connection_scope == "personal":
+                    caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
+                    await require_personal_mcp_access(user_id, caller._extensions_config.mcp_servers[server_name])
+                elif connection_scope != "deployment":
+                    raise ValueError("Invalid MCP task connection scope")
+                return await caller._call_configured_tool(
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    thread_incarnation=thread_incarnation,
+                    request_scoped_headers=request_scoped_headers,
+                    connection_scope=connection_scope,
+                )
+        except McpAgentAuthorizationError as exc:
+            raise McpTaskConnectionUnavailableError(str(exc)) from None
 
     def _personal_caller_for(self, user_id: str, server_name: str) -> McpTaskToolCaller:
         with self._personal_callers_lock:
@@ -258,13 +258,13 @@ class McpTaskToolCaller:
                 connection_scope=connection_scope,
             )
 
-        authorization = await self._oauth_token_manager.get_authorization_header(server_name)
+        authorization = None if server_config.agent_auth else await self._oauth_token_manager.get_authorization_header(server_name)
         if authorization:
             connection["headers"] = apply_header_overrides(
                 connection.get("headers") or {},
                 {"Authorization": authorization},
             )
-        # Only HTTP/SSE servers with enabled user_auth need an ambient owner.
+        # Agent/user-auth background calls need the persisted owner's identity.
         # Leave other custom-interceptor contexts unchanged.
         user_auth = server_config.user_auth
         return await self._invoke(
@@ -275,7 +275,7 @@ class McpTaskToolCaller:
             server_name=server_name,
             tool_name=tool_name,
             arguments=arguments,
-            background_user_id=user_id if is_background_call and user_auth is not None and user_auth.enabled else None,
+            background_user_id=user_id if is_background_call and (server_config.agent_auth or (user_auth is not None and user_auth.enabled)) else None,
             timeout_seconds=server_config.tool_call_timeout,
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,

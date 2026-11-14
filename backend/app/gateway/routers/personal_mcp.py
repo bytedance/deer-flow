@@ -45,6 +45,8 @@ def _read_personal_config(user_id: str) -> dict:
 
 
 def _validate_personal_server(server: mcp.McpServerConfigResponse, *, admin: bool) -> None:
+    if server.agent_auth:
+        raise HTTPException(422, "agent_auth is available only for deployment MCP servers")
     # A personal store must not grant ordinary users the deployment operator's
     # ability to launch arbitrary host packages or query internal services.
     if not admin:

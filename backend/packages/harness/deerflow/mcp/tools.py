@@ -883,6 +883,7 @@ def _make_background_submit_tool(
     status_tool: str,
     cancel_tool: str,
     connection_scope: str,
+    agent_auth: bool = False,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -897,6 +898,9 @@ def _make_background_submit_tool(
         context = deerflow_runtime.context if deerflow_runtime is not None and deerflow_runtime.context else {}
         run_id = context.get("run_id")
         tool_call_id = getattr(deerflow_runtime, "tool_call_id", None) if deerflow_runtime is not None else None
+        from deerflow.mcp.agent_auth import task_agent_reference
+
+        agent_reference = task_agent_reference(deerflow_runtime, server_name, required=agent_auth)
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
@@ -913,6 +917,7 @@ def _make_background_submit_tool(
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
                     "connection_scope": connection_scope,
+                    **({"agent_auth": agent_reference} if agent_reference is not None else {}),
                 },
             ),
         )
@@ -989,6 +994,7 @@ def _configure_task_tools_for_server(
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
                 connection_scope=connection_scope,
+                agent_auth=server_config.agent_auth,
             )
         )
     return configured
