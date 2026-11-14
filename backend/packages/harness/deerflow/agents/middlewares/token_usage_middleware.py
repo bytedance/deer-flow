@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -18,6 +19,20 @@ logger = logging.getLogger(__name__)
 
 TOKEN_USAGE_ATTRIBUTION_KEY = "token_usage_attribution"
 SUBAGENT_TOKEN_USAGE_ATTRIBUTED_KEY = "subagent_token_usage_attributed"
+
+
+@dataclass(frozen=True)
+class DeferredSubagentUsage:
+    """Usage whose terminal ToolMessage no longer occupies the active tool step.
+
+    Keep the dispatch identity beside the normalized usage at collection time;
+    the provider call ID is only for diagnostics, never for choosing a charge.
+    RunInputControl consumes these entries once when delivering child receipts.
+    """
+
+    tool_call_id: str
+    dispatch_message_id: str | None
+    usage: dict[str, int]
 
 
 def _string_arg(value: Any) -> str | None:
@@ -291,7 +306,7 @@ def _add_subagent_usage(message: AIMessage, usage: dict[str, int]) -> AIMessage:
     return message.model_copy(update={"usage_metadata": merged})
 
 
-def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[str, dict[str, int]]]) -> list[AIMessage]:
+def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[DeferredSubagentUsage]) -> list[AIMessage]:
     """Return AIMessage copies carrying usage of subagents that outlived their ToolMessage.
 
     A steered task's pending ToolMessage is no longer next to the latest
@@ -300,13 +315,18 @@ def attribute_deferred_subagent_usage(messages: list[Any], deferred: list[tuple[
     """
     updates: dict[int, AIMessage] = {}
     indexes = [idx for idx in range(len(messages) - 1, -1, -1) if isinstance(messages[idx], AIMessage)]
-    for tool_call_id, usage in deferred:
-        # Compaction can drop the dispatch, so fall back to the newest AIMessage.
-        target = next((idx for idx in indexes if _has_tool_call(messages[idx], tool_call_id)), indexes[0] if indexes else None)
+    for entry in deferred:
+        # Provider IDs may repeat while earlier work is still paused. Charge
+        # the captured dispatch, not whichever response last reused its ID.
+        target = next((idx for idx in indexes if entry.dispatch_message_id is not None and messages[idx].id == entry.dispatch_message_id), None)
         if target is None:
-            logger.warning("Token budget missed subagent usage for %s: no AIMessage to charge", tool_call_id)
+            # Preserve budget accounting if compaction removed the dispatch,
+            # or a direct integration did not supply a message ID at all.
+            target = indexes[0] if indexes else None
+        if target is None:
+            logger.warning("Token budget missed subagent usage for %s: no AIMessage to charge", entry.tool_call_id)
             continue
-        updates[target] = _add_subagent_usage(updates.get(target, messages[target]), usage)
+        updates[target] = _add_subagent_usage(updates.get(target, messages[target]), entry.usage)
     return [updates[idx] for idx in sorted(updates)]
 
 
