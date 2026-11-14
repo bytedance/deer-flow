@@ -36,14 +36,15 @@ from typing import Any, Final, Literal, cast
 from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.interaction_policy import RunInteractionPolicy, resolve_run_interaction_policy
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
-from deerflow.config.app_config import AppConfig
+from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, DELIVERY_PRESENTATION_TOOL_NAMES, TOOL_RESULTS_DIRNAME
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
 from deerflow.mcp_scope import (
     THREAD_INCARNATION_CONTEXT_KEY,
@@ -68,6 +69,7 @@ from deerflow.runtime.context_keys import (
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
+from deerflow.runtime.events.producer import current_producer, publisher_scope, run_producer_context
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -89,10 +91,13 @@ from deerflow.runtime.goal import (
     read_thread_goal,
     should_continue_goal,
     visible_conversation_signature,
+    wake_goal_after_external_wait,
     write_thread_goal,
 )
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.run_origin import origin_kind_of
+from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
@@ -109,6 +114,7 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
+from .schemas import GOAL_RUN_HARD_STOP_REASONS as _GOAL_RUN_HARD_STOP_REASONS
 from .schemas import RunStatus, ThreadOperationKind
 from .store.base import canonical_run_created_at
 
@@ -235,6 +241,8 @@ def _release_run_scoped_references(
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
         "__run_journal",
+        "__run_input_control",
+        "__tool_approval_runtime",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         SCHEDULER_CAPABILITY_CONTEXT_KEY,
@@ -316,13 +324,14 @@ async def _persist_delivery_receipt(
     attempts = len(_DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS) + 1
     for attempt in range(attempts):
         try:
-            await event_store.put_if_absent(
-                thread_id=thread_id,
-                run_id=run_id,
-                event_type="run.delivery",
-                category="outputs",
-                content=content,
-            )
+            with publisher_scope("run.delivery"):
+                await event_store.put_if_absent(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    event_type="run.delivery",
+                    category="outputs",
+                    content=content,
+                )
             return True
         except Exception:
             if attempt == attempts - 1:
@@ -349,6 +358,26 @@ async def _persist_delivery_receipt(
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+_RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+_RECURSION_CAPPED_LISTED_OUTPUTS = 5
+
+
+def _recursion_capped_message(recursion_limit: object, delivery_content: dict[str, Any] | None) -> str:
+    """Say a run hit its step budget, listing outputs it created but never presented.
+
+    LangGraph's own text points at a config key and a troubleshooting URL; users
+    see it as an unexplained failure and assume the files they waited for are lost.
+    """
+    limit = f" (recursion_limit={recursion_limit})" if isinstance(recursion_limit, int) and not isinstance(recursion_limit, bool) else ""
+    message = f"The run stopped at its step limit{limit} before finishing."
+    content = delivery_content or {}
+    presented = set(content.get("matched_paths") or [])
+    unpresented = [path for path in content.get("produced_paths") or [] if path not in presented]
+    if unpresented:
+        listed = ", ".join(unpresented[:_RECURSION_CAPPED_LISTED_OUTPUTS])
+        more = len(unpresented) - _RECURSION_CAPPED_LISTED_OUTPUTS
+        message += f" Created but not presented: {listed}{f' and {more} more' if more > 0 else ''}."
+    return f"{message} Send a message to continue."
 
 
 def _empty_delivery_content() -> dict[str, Any]:
@@ -372,14 +401,15 @@ def _delivery_content_with_outputs(
             return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
         return content
 
-    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    by_tool = content.get("by_tool", {})
+    presented_paths = [path for tool_name in DELIVERY_PRESENTATION_TOOL_NAMES for path in by_tool.get(tool_name, [])]
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
     return {
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "verified_presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
         "presented_paths": presented_paths,
@@ -594,6 +624,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            "__run_input_control",
+            "__tool_approval_runtime",
+            "_hitl_disabled_resume_escape",
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -703,6 +736,7 @@ class RunContext:
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
     mcp_task_repo: Any | None = field(default=None)
+    approval_store: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -719,6 +753,8 @@ class RunContext:
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
+    # Host-only preflight under durable run ownership; failures reject execution.
+    verify_artifacts: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -965,6 +1001,7 @@ async def _drain_run_finalization(task: asyncio.Task[None], *, on_host_cancel: C
         raise deferred
 
 
+@run_producer_context
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -1044,6 +1081,10 @@ async def run_agent(
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
+    pending_pause = False
+    streamed_interrupts: list[Any] = []
+    input_control = None
+    approval_runtime = None
     scheduled_goal: GoalState | None = None
     final_goal_verdict: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
@@ -1088,6 +1129,14 @@ async def run_agent(
         nonlocal checkpoint_rollback_completed
         if record.ownership_lost:
             return
+        from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+        cleanup_error = None
+        try:
+            await cancel_sandbox_execution_lease_async(runtime_ctx)
+        except Exception:
+            cleanup_error = "Sandbox process cleanup could not be confirmed"
+            logger.warning("Run %s: %s", run_id, cleanup_error, exc_info=True)
         await _ensure_stream_producer_lease()
         await run_manager.set_finalizing(run_id, True)
         if record.ownership_lost:
@@ -1097,7 +1146,7 @@ async def run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
-                error="Rolled back by user",
+                error=f"Rolled back by user; {cleanup_error}" if cleanup_error else "Rolled back by user",
                 **({"persist": False} if record.rollback_finalization_pending else terminal_status_kwargs),
             )
             if record.ownership_lost:
@@ -1128,6 +1177,7 @@ async def run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
+                error=cleanup_error,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -1192,6 +1242,14 @@ async def run_agent(
             return
         started = True
 
+        goal_wakeup = (record.metadata or {}).get("batch_goal_wakeup") if origin_kind_of(record.metadata) == "subagent_batch" else None
+        if goal_wakeup is not None:
+            if not await wake_goal_after_external_wait(checkpointer, thread_id, run_id, goal_wakeup):
+                await run_manager.set_status(run_id, RunStatus.interrupted, stop_reason="goal_wakeup_superseded")
+                return
+        if ctx.verify_artifacts is not None:
+            await ctx.verify_artifacts()
+
         if ctx.on_run_admitted is not None:
             try:
                 await ctx.on_run_admitted(record, config)
@@ -1200,23 +1258,26 @@ async def run_agent(
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
-            task_store = ExtensionData(task_id)
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
+            identity = TaskInfo(
                 task_id=task_id,
                 run_id=run_id,
                 thread_id=thread_id,
                 kind="lead",
                 agent_name=record.assistant_id,
             )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
+            task_store = ExtensionData(task_id)
+            # Seed the identity for every hook handed this store, not only
+            # lifecycle contributors: compaction events are named from it.
+            task_store.set(identity)
+            # A lifecycle contributor always implies a task store.
+            if extensions.has_task_lifecycle:
+                task_info = identity
+                await notify_task_start(
+                    extensions,
+                    task_store,
+                    task_info,
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
 
         if not record.ownership_lost and thread_store is not None:
             try:
@@ -1290,11 +1351,25 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
+        hitl_app_config = ctx.app_config
+        all_reject_hitl_resume = _is_all_reject_hitl_resume(graph_input)
+        if hitl_app_config is None and all_reject_hitl_resume:
+            hitl_app_config = get_app_config()
+        hitl_config = getattr(hitl_app_config, "hitl_approval", None)
+        hitl_resume_escape = hitl_config is not None and not hitl_config.enabled and all_reject_hitl_resume
+        hitl_resume_actions = await _pending_hitl_resume_actions(checkpointer, checkpoint_config, graph_input)
+        hitl_resume_calls = _hitl_action_calls(hitl_resume_actions)
+        if journal is not None and hitl_resume_calls:
+            journal.adopt_resumed_tool_calls(hitl_resume_calls)
+        agent_app_config = ctx.app_config
+        if hitl_resume_escape:
+            agent_app_config = hitl_app_config.model_copy(deep=True)
+            agent_app_config.hitl_approval.enabled = True
         runtime_ctx = _build_runtime_context(
             thread_id,
             run_id,
             config.get("context"),
-            ctx.app_config,
+            agent_app_config,
             task_store,
             extensions,
             ctx.conversation_reader,
@@ -1302,6 +1377,12 @@ async def run_agent(
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
         )
+        # A disabled all-reject escape still needs the HITL hook to consume the
+        # pending interrupt. The assembly marker makes that hook deny rather
+        # than pause again; all other runs cannot inject this internal mode.
+        runtime_ctx.pop("_hitl_disabled_resume_escape", None)
+        if hitl_resume_escape:
+            runtime_ctx["_hitl_disabled_resume_escape"] = True
         register_sandbox_prewarm_cleanup(runtime_ctx)
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1328,6 +1409,42 @@ async def run_agent(
         # runtime-internal channel; user code must not depend on the key name.
         if journal is not None:
             runtime_ctx["__run_journal"] = journal
+        if ctx.agent_runs is not None and run_manager.input_store is not None and not runtime_ctx.get("non_interactive"):
+            from .input_control import RunInputControl
+            from .inputs import INPUT_CONTEXT_KEY, RunInputs
+
+            def record_deferred_result(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_deferred_task_result(message)
+
+            def record_steered_response(message):
+                if journal is not None and not record.ownership_lost:
+                    journal.record_steered_response(message)
+
+            input_control = RunInputControl(
+                RunInputs(run_manager.input_store, run_id, record.user_id, run_manager.worker_id),
+                agent_runs=ctx.agent_runs,
+                thread_id=thread_id,
+                checkpointer=checkpointer,
+                on_result=record_deferred_result,
+                on_replan=record_steered_response,
+            )
+            runtime_ctx[INPUT_CONTEXT_KEY] = input_control
+        if ctx.approval_store is not None and hitl_config is not None and hitl_config.enabled and isinstance(thread_incarnation, str) and record.user_id:
+            from deerflow.approvals.policy import resolve_mode
+            from deerflow.approvals.runtime import ApprovalRuntime
+
+            approval_runtime = ApprovalRuntime(
+                ctx.approval_store,
+                scope=(record.user_id, thread_id, thread_incarnation),
+                run_id=run_id,
+                mode=resolve_mode(hitl_config, runtime_ctx),
+                timeout=hitl_config.child_approval_timeout_seconds,
+                record=record,
+                journal=journal,
+                interactive=resolve_run_interaction_policy({"context": runtime_ctx}).allows_clarification and origin_kind_of(record.metadata) is None,
+            )
+            runtime_ctx["__tool_approval_runtime"] = approval_runtime
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
@@ -1355,8 +1472,8 @@ async def run_agent(
             return continuation
 
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
-        if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent_factory_kwargs["app_config"] = ctx.app_config
+        if agent_app_config is not None and _agent_factory_supports_app_config(agent_factory):
+            agent_factory_kwargs["app_config"] = agent_app_config
         from deerflow.extensions import bind_agent_build_extensions
         from deerflow.runtime.assembly_evidence import capture_assembly, project_assembly_evidence
 
@@ -1521,8 +1638,60 @@ async def run_agent(
         # re-enter the stream and would otherwise discard the resolved seqs.
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
+        def observe_stream_pause(mode: str, chunk: Any, namespace: tuple[str, ...]) -> None:
+            if namespace or mode not in {"values", "updates"} or not isinstance(chunk, Mapping):
+                return
+            if mode == "values":
+                streamed_interrupts.clear()
+            interrupts = chunk.get("__interrupt__")
+            if not interrupts:
+                return
+            streamed_interrupts.extend(interrupts if isinstance(interrupts, (list, tuple)) else [interrupts])
+
+        def remember_approval(interrupts: Any) -> None:
+            from deerflow.approvals.protocol import combine_approval_payloads
+
+            payloads = []
+            for pending_interrupt in interrupts:
+                value = pending_interrupt.get("value") if isinstance(pending_interrupt, Mapping) else getattr(pending_interrupt, "value", None)
+                if isinstance(value, dict) and value.get("kind") == "hitl_approval":
+                    payloads.append(value)
+            if payloads:
+                record.metadata["hitl_approval"] = combine_approval_payloads(payloads)
+
+        async def detect_pending_pause() -> None:
+            nonlocal pending_pause
+            if pending_pause or record.abort_event.is_set():
+                return
+            # Values/update frames expose interrupts directly, so disabled HITL
+            # keeps the old hot path there. Message-only streams need the snapshot
+            # fallback for generic (non-HITL) interrupts as well.
+            hitl_enabled = bool(hitl_config is not None and hitl_config.enabled)
+            if streamed_interrupts and not hitl_enabled:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+                return
+            if not hitl_enabled and {"values", "updates"} & requested_modes:
+                return
+            snapshot_capable = accessor is not None and accessor.checkpointer is not None and callable(getattr(getattr(accessor, "graph", None), "aget_state", None))
+            if not snapshot_capable:
+                if streamed_interrupts:
+                    pending_pause = True
+                    remember_approval(streamed_interrupts)
+                return
+            snapshot = await accessor.aget({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})
+            snapshot_tasks = getattr(snapshot, "tasks", None) or ()
+            pending_pause = any(getattr(task, "interrupts", ()) for task in snapshot_tasks)
+            if pending_pause:
+                remember_approval([item for task in snapshot_tasks for item in (getattr(task, "interrupts", ()) or ())])
+            elif streamed_interrupts:
+                pending_pause = True
+                remember_approval(streamed_interrupts)
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
+            if input_control is not None:
+                await input_control.inputs.reopen()
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
@@ -1548,6 +1717,7 @@ async def run_agent(
                                 await bridge.publish(run_id, sse_event, single_payload)
                                 if single_mode == "messages" and partial_assistant_response is not None:
                                     partial_assistant_response.observe(chunk)
+                                observe_stream_pause(single_mode, chunk, ())
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1596,6 +1766,7 @@ async def run_agent(
                                 # includes the child messages task_running custom events
                                 # carry, which are root frames too.
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            observe_stream_pause(mode, chunk, namespace)
                             await _publish_stream_item(
                                 bridge=bridge,
                                 run_id=run_id,
@@ -1661,7 +1832,10 @@ async def run_agent(
 
         evidence_execution_started = True
         await _stream_once(graph_input, initial_runnable_config)
-        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+        if input_control is not None:
+            await input_control.confirm_checkpoint()
+        await detect_pending_pause()
+        while not pending_pause and not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
                 accessor=accessor,
@@ -1688,6 +1862,7 @@ async def run_agent(
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
+            await detect_pending_pause()
 
         record.goal_verdict = final_goal_verdict
 
@@ -1726,21 +1901,27 @@ async def run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
-            produced_output_paths = await _produced_output_paths(
-                pre_run_workspace_snapshot,
-                thread_id=thread_id,
-                user_id=workspace_changes_user_id,
-                extra_excluded_dir_names=workspace_excluded_dir_names,
-            )
-            delivery_content = _delivery_content_with_outputs(
-                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
-                produced_output_paths,
-                pre_run_snapshot=pre_run_workspace_snapshot,
-            )
-            delivery_error = _delivery_error(delivery_content)
+            if stop_reason in GOAL_RUN_HARD_STOP_REASONS:
+                from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+                await cancel_sandbox_execution_lease_async(runtime_ctx)
+            delivery_error = None
+            if not pending_pause:
+                produced_output_paths = await _produced_output_paths(
+                    pre_run_workspace_snapshot,
+                    thread_id=thread_id,
+                    user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                )
+                delivery_content = _delivery_content_with_outputs(
+                    journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                    produced_output_paths,
+                    pre_run_snapshot=pre_run_workspace_snapshot,
+                )
+                delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
-                RunStatus.error if delivery_error else RunStatus.success,
+                RunStatus.error if delivery_error else (RunStatus.waiting_for_input if pending_pause else RunStatus.success),
                 error=delivery_error,
                 stop_reason=stop_reason,
                 goal_verdict=record.goal_verdict,
@@ -1753,15 +1934,62 @@ async def run_agent(
         await _finish_cancellation(record.abort_action)
 
     except Exception as exc:
+        try:
+            from deerflow.sandbox.lease import cancel_sandbox_execution_lease_async
+
+            await cancel_sandbox_execution_lease_async(runtime_ctx)
+        except Exception:
+            logger.warning("Failed to stop commands after run failure", exc_info=True)
         checkpoint_resume_rejected = isinstance(exc, CheckpointResumeRejected)
         error_msg = f"{exc}"
-        logger.exception("Run %s failed: %s", run_id, error_msg)
+        stop_status_kwargs: dict[str, Any] = {}
+        if isinstance(exc, GraphRecursionError) and evidence_execution_started:
+            # The run used up its step budget: an expected stop, not a crash.
+            # Report it plainly with the outputs it never presented, and stand
+            # the goal down without an evaluator call.
+            logger.warning("Run %s stopped at its step limit: %s", run_id, error_msg)
+            produced_output_paths = await _produced_output_paths(
+                pre_run_workspace_snapshot,
+                thread_id=thread_id,
+                user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
+            )
+            delivery_content = _delivery_content_with_outputs(
+                journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
+                produced_output_paths,
+                pre_run_snapshot=pre_run_workspace_snapshot,
+            )
+            error_msg = _recursion_capped_message(config.get("recursion_limit"), delivery_content)
+            if not record.abort_event.is_set():
+                await _prepare_goal_continuation_input(
+                    bridge=bridge,
+                    accessor=accessor,
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    model_name=record.model_name,
+                    app_config=ctx.app_config,
+                    abort_event=record.abort_event,
+                    user_id=resolve_runtime_user_id(runtime),
+                    deerflow_trace_id=deerflow_trace_id,
+                    task_store=task_store,
+                    extensions=extensions,
+                    run_stop_reason=_RECURSION_CAPPED_STOP_REASON,
+                    interaction_policy=resolve_run_interaction_policy(config),
+                    expected_goal=scheduled_goal,
+                    verdict_callback=capture_goal_verdict,
+                )
+                record.goal_verdict = final_goal_verdict
+            stop_status_kwargs = {"stop_reason": _RECURSION_CAPPED_STOP_REASON, "goal_verdict": record.goal_verdict}
+        else:
+            logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_stream_producer_lease()
         await _ensure_finalizing_before_edit_failure(run_manager, record)
         cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
             RunStatus.error,
             error=error_msg,
+            **stop_status_kwargs,
             **terminal_status_kwargs,
         )
         if cancel_action is not None:
@@ -1792,13 +2020,22 @@ async def run_agent(
 
         async def finalize() -> None:
             nonlocal completion_hook_task
-            nonlocal journal, seq_stamper
+            nonlocal journal, seq_stamper, approval_runtime
             nonlocal accessor, agent, agent_result, cancel_action, checkpoint_rollback_completed
             nonlocal completion_data, deferred_finalization_interrupt, delivery_content, goal_completion, goal_evaluator_model
             nonlocal graph_input, pre_run_workspace_snapshot, produced_output_paths, rollback_point, runtime
             nonlocal runtime_ctx, subagent_events, task_info, task_store, terminal_error_frame
 
             try:
+                if input_control is not None:
+                    try:
+                        await input_control.close()
+                        if not record.ownership_lost:
+                            await input_control.confirm_checkpoint()
+                            if record.status != RunStatus.success or record.stop_reason:
+                                await input_control.inputs.pause()
+                    except Exception:
+                        logger.warning("Could not finalize Run input receipts for %s", run_id, exc_info=True)
                 if record.ownership_lost:
                     logger.warning(
                         "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -1933,6 +2170,11 @@ async def run_agent(
                                 await run_manager.persist_current_status(run_id)
                     except Exception:
                         logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+                if record.status == RunStatus.waiting_for_input and not record.ownership_lost:
+                    # A full metadata snapshot also carries the status. Write it
+                    # only after the explicit terminal transition above, otherwise
+                    # the same-status row short-circuits terminal event attribution.
+                    await run_manager.persist_metadata(run_id)
                 # Only a confirmed terminal write or ownership loss releases the
                 # renewal barrier in multi-worker mode. A returned/aborted call is
                 # not evidence that this worker committed its terminal outcome.
@@ -1999,7 +2241,7 @@ async def run_agent(
                 # Update threads_meta status based on run outcome
                 if started and not record.ownership_lost and thread_store is not None:
                     try:
-                        final_status = "idle" if record.status == RunStatus.success else record.status.value
+                        final_status = "idle" if record.status == RunStatus.success else ("interrupted" if record.status == RunStatus.waiting_for_input else record.status.value)
                         await thread_store.update_status(thread_id, final_status)
                     except Exception:
                         logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
@@ -2018,7 +2260,7 @@ async def run_agent(
                     except Exception:
                         logger.warning("Failed to confirm terminal status for run %s before completion hook", run_id, exc_info=True)
 
-                if not record.ownership_lost and getattr(record, "terminal_status_persisted", True) and ctx.on_run_completed is not None:
+                if not record.ownership_lost and record.status != RunStatus.waiting_for_input and getattr(record, "terminal_status_persisted", True) and ctx.on_run_completed is not None:
                     try:
                         # Preserve hook liveness without forwarding cancellation
                         # to the finalizer's durable writes or resource cleanup.
@@ -2109,6 +2351,12 @@ async def run_agent(
                                 raise RuntimeError(evidence_failure)
 
                         evidence_receipt = await journal.finish_evidence(before_receipt=confirm_terminal)
+                        if evidence_receipt is not None and (subagent_events is None or not subagent_events._pending):
+                            from deerflow.runtime.events.store.db import DbRunEventStore
+
+                            if isinstance(event_store, DbRunEventStore) and current_producer() is not None:
+                                if not await event_store.close_producer(current_producer()):
+                                    raise RuntimeError("Run evidence producer could not be closed")
                         if evidence_receipt is not None:
                             if not evidence_execution_started:
                                 evidence_failure = "Lead graph execution did not begin; producer coverage is partial."
@@ -2150,6 +2398,12 @@ async def run_agent(
                     raise deferred_finalization_interrupt
             finally:
                 try:
+                    if approval_runtime is not None:
+                        try:
+                            await approval_runtime.close()
+                        except Exception:
+                            logger.warning("Failed to cancel pending child approvals for run %s", run_id, exc_info=True)
+                        approval_runtime = None
                     if journal is not None:
                         try:
                             await journal.close(flush=not record.ownership_lost)
@@ -2240,7 +2494,10 @@ async def run_agent(
 # Helpers
 # ---------------------------------------------------------------------------
 
-_GOAL_RUN_HARD_STOP_REASONS = frozenset({"token_capped", "loop_capped"})
+
+# Stops that end the run with an error before the turn has a final reply: the
+# goal stands down without an evaluator call, since there is nothing to judge.
+_GOAL_RUN_ERROR_STOP_REASONS = frozenset({_RECURSION_CAPPED_STOP_REASON})
 
 
 @dataclass(frozen=True)
@@ -2656,6 +2913,21 @@ async def _prepare_goal_continuation_input(
         evidence_signature = latest_visible_assistant_signature(messages)
         operation_progress = observe_goal_operations(goal, messages)
 
+        if run_stop_reason in _GOAL_RUN_ERROR_STOP_REASONS:
+            # Checked first: otherwise the stop would read as a missing receipt
+            # or cost an evaluator call, depending on the last message's text.
+            # Keep it ahead of the evaluator section: the step-limit caller in
+            # run_agent passes no evaluator_model_factory or usage_callback.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="run_failed",
+                reason="The run reached its step limit before finishing.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature, operation_progress=operation_progress)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=run_stop_reason)
+            return None
+
         if _ends_on_human_input_request(messages):
             # The agent asked the user something. Continuing would tell it to keep
             # going while the question is still open on screen.
@@ -2687,7 +2959,9 @@ async def _prepare_goal_continuation_input(
         return None
 
     try:
-        evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
+        # The factory builds the evaluator on first use, which can read local
+        # credentials; keep that off the event loop (see utils/AGENTS.md).
+        evaluator_model = await run_assembly(evaluator_model_factory) if evaluator_model_factory is not None else None
         for attempt in range(2):
             try:
                 evaluation = await evaluate_goal_completion(
@@ -2937,6 +3211,77 @@ def _complete_state_replacement_values(
 def _is_resume_command_input(graph_input: Any) -> bool:
     """Identify requests that need to preserve interrupted execution position."""
     return isinstance(graph_input, Command) and graph_input.resume is not None
+
+
+def _hitl_action_calls(actions: list[Mapping[str, Any]]) -> dict[str, str]:
+    """Calls for journal adoption: only actions that also carry a usable ``tool_call_id``.
+
+    The calls were dispatched by the paused Run, but the resume Run produces
+    their results: a rejection is returned by the approval gate without a tool
+    callback, so the resume journal must adopt these calls to persist it.
+    """
+    return {action["tool_call_id"]: action["tool_name"] for action in actions if isinstance(action.get("tool_call_id"), str) and action["tool_call_id"] and isinstance(action.get("tool_name"), str)}
+
+
+async def _pending_hitl_resume_actions(checkpointer: Any, checkpoint_config: dict[str, Any], graph_input: Any) -> list[Mapping[str, Any]]:
+    """Return the actions of the live durable pause this resume answers."""
+    if checkpointer is None or not _is_resume_command_input(graph_input) or not isinstance(graph_input.resume, Mapping):
+        return []
+    from deerflow.approvals.protocol import approval_responses
+    from deerflow.runtime.checkpoint_history import recent_checkpoint_history
+
+    responses = approval_responses(graph_input.resume)
+    if not isinstance(responses, list):
+        return []
+    response_ids = {response.get("tool_call_id") for response in responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
+    if not response_ids:
+        return []
+    async for checkpoint_tuple in recent_checkpoint_history(checkpointer, checkpoint_config):
+        writes = list(getattr(checkpoint_tuple, "pending_writes", ()) or ())
+        # The newest checkpoint carrying either marker decides whether the pause
+        # is still live. A newer head-moving write must not hide an interrupt;
+        # a newer resume must not resurrect an older one.
+        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
+            return []
+        interrupt_writes = [write for write in writes if isinstance(write, (list, tuple)) and len(write) >= 3 and write[1] == "__interrupt__"]
+        if not interrupt_writes:
+            continue
+        matched: list[Mapping[str, Any]] = []
+        for write in interrupt_writes:
+            interrupts = write[2] if isinstance(write[2], (list, tuple)) else (write[2],)
+            for pending_interrupt in interrupts:
+                payload = getattr(pending_interrupt, "value", None)
+                if not isinstance(payload, Mapping) or payload.get("kind") != "hitl_approval":
+                    continue
+                # Version 2 routes parallel decisions by LangGraph interrupt
+                # ID. Match each pause against its own response group, rather
+                # than comparing every action with the flattened batch.
+                interrupt_id = getattr(pending_interrupt, "id", None)
+                grouped_responses = responses if "responses" in graph_input.resume else approval_responses(graph_input.resume.get(interrupt_id))
+                if not isinstance(grouped_responses, list):
+                    continue
+                group_ids = {response.get("tool_call_id") for response in grouped_responses if isinstance(response, Mapping) and isinstance(response.get("tool_call_id"), str)}
+                pending_ids = payload.get("pending_tool_call_ids")
+                actions = payload.get("actions")
+                if not isinstance(pending_ids, list) or set(pending_ids) != group_ids or not isinstance(actions, list):
+                    continue
+                matched.extend(action for action in actions if isinstance(action, Mapping))
+        return matched
+    return []
+
+
+def _is_all_reject_hitl_resume(graph_input: Any) -> bool:
+    """Return whether this is a well-formed reject-only HITL resume payload."""
+    if not isinstance(graph_input, Command) or not isinstance(graph_input.resume, dict):
+        return False
+    from deerflow.approvals.protocol import approval_responses
+
+    responses = approval_responses(graph_input.resume)
+    return (
+        isinstance(responses, list)
+        and bool(responses)
+        and all(isinstance(response, dict) and response.get("option_id") == "reject" and isinstance(response.get("tool_call_id"), str) and bool(response["tool_call_id"]) for response in responses)
+    )
 
 
 class CheckpointResumeRejected(RuntimeError):

@@ -8,11 +8,12 @@ gates the release on them agreeing with the tag.
 
 ## Version sources
 
-A release version must appear, identically, in four places:
+A release version must appear, identically, in five places:
 
 | File                                   | Field                |
 | -------------------------------------- | -------------------- |
 | `backend/pyproject.toml`               | `version = "X.Y.Z"`  |
+| `backend/packages/harness/pyproject.toml` | `version = "X.Y.Z"` |
 | `frontend/package.json`                | `"version": "X.Y.Z"` |
 | `deploy/helm/deer-flow/Chart.yaml`     | `version: X.Y.Z`     |
 | `deploy/helm/deer-flow/Chart.yaml`     | `appVersion: "X.Y.Z"`|
@@ -32,7 +33,7 @@ distinguishes it from a release.
 
 ## Helper scripts
 
-- `scripts/bump_version.sh <version>` — set all four fields at once, refresh
+- `scripts/bump_version.sh <version>` — set all five fields at once, refresh
   `backend/uv.lock`, then self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
   Needs `uv` on `PATH` (`backend/uv.lock` pins the root package version too, and
   lint CI runs `uv lock --check`); the script fails before editing anything when
@@ -77,7 +78,7 @@ distinguishes it from a release.
 
 ### Release candidates
 
-Release-candidate tags must include the same prerelease suffix in all four
+Release-candidate tags must include the same prerelease suffix in all five
 version fields. For example, before tagging `v2.1.0-rc0`, run
 `bash scripts/bump_version.sh 2.1.0-rc0` and run
 `bash scripts/verify_versions.sh 2.1.0-rc0` from the repository root. Commit
@@ -150,7 +151,7 @@ Both features stay opt-in: the provisioner ignores them until
 
 Both publishing workflows call `.github/workflows/verify-versions.yml` as their
 first job. It runs `scripts/verify_versions.sh` against the tag (minus the
-`v`). If any of the four version sources doesn't match the tag, or
+`v`). If any of the five version sources doesn't match the tag, or
 `backend/uv.lock` is stale, the verify job fails and **all** publish jobs are
 skipped — no images, no chart.
 

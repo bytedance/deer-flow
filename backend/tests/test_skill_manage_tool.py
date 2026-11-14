@@ -764,3 +764,47 @@ def test_skill_manage_later_call_does_not_overtake_a_parked_waiter(monkeypatch):
         assert storage.callers == ["queued", "late"]
 
     asyncio.run(scenario())
+
+
+def _patch_skill_manage_env(monkeypatch, tmp_path):
+    """Config, user paths and the scanner stubs every tool-level case needs."""
+    skills_root = tmp_path / "skills"
+    config = _make_config(skills_root)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.skills.security_scanner.get_app_config", lambda: config)
+    from deerflow.config.paths import Paths
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+
+    async def _refresh(user_id: str):
+        return None
+
+    monkeypatch.setattr(skill_manage_module, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skill_manage_module, "scan_skill_content", lambda *args, **kwargs: _async_result("allow", "ok"))
+    return tmp_path / "users" / "default" / "skills" / "custom"
+
+
+def test_skill_manage_create_rejects_windows_device_names(monkeypatch, tmp_path):
+    """Creation is the only action that must refuse a host-incompatible name."""
+    user_custom = _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+
+    with pytest.raises(ValueError, match="not portable to Windows"):
+        anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "create", "nul", _skill_content("nul"))
+
+    # ``nul`` resolves to the NUL device on Windows, so assert on ``is_dir``.
+    assert not (user_custom / "nul").is_dir()
+
+
+def test_skill_manage_edits_stay_permissive_for_device_named_skills(monkeypatch, tmp_path):
+    """An existing skill an older release created on Linux stays editable/deletable."""
+    _patch_skill_manage_env(monkeypatch, tmp_path)
+    runtime = _make_runtime(user_id="default")
+
+    # The name passes validation; the skill simply does not exist, which is a
+    # different error than the creation-time portability rejection.
+    with pytest.raises(FileNotFoundError, match="not found"):
+        anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "edit", "nul", _skill_content("nul"))
+    with pytest.raises(FileNotFoundError, match="not found"):
+        anyio.run(skill_manage_module.skill_manage_tool.coroutine, runtime, "delete", "nul")

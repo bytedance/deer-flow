@@ -72,6 +72,7 @@ describe("useArtifactContent", () => {
         threadId: "thread-a",
         isMock: false,
         full: false,
+        signal: expect.any(AbortSignal),
       });
     });
 
@@ -85,6 +86,7 @@ describe("useArtifactContent", () => {
         threadId: "thread-a",
         isMock: false,
         full: true,
+        signal: expect.any(AbortSignal),
       });
     });
 
@@ -96,6 +98,7 @@ describe("useArtifactContent", () => {
         threadId: "thread-b",
         isMock: false,
         full: false,
+        signal: expect.any(AbortSignal),
       });
     });
   });

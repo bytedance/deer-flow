@@ -27,16 +27,23 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import mimetypes
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+from starlette.requests import Request
 from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
+from app.gateway import services
+from app.gateway.authz import AuthContext
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.routers.artifacts import ArtifactUpdateRequest, get_artifact, update_artifact
+from deerflow.storage import BlobRef
 
 pytestmark = pytest.mark.asyncio
 
@@ -149,3 +156,41 @@ async def test_large_artifact_validator_does_not_block_event_loop(tmp_path: Path
 
     assert isinstance(response, FileResponse)
     assert response.headers["etag"].startswith('"stat-')
+
+
+async def test_shared_image_blob_cold_mime_lookup_does_not_block(tmp_path, monkeypatch):
+    payload = b"\x89PNG\r\n\x1a\nimage"
+    virtual_path = "/mnt/user-data/outputs/chart.png"
+    ref = BlobRef(sha256=hashlib.sha256(payload).hexdigest(), size=len(payload), kind="viewed-image", content_type="image/png")
+    mime_file = tmp_path / "mime.types"
+    await asyncio.to_thread(mime_file.write_text, "image/png png\n", encoding="utf-8")
+    # Restore all globals replaced by init(), not just its lazy-init flag.
+    for name in ("suffix_map", "encodings_map", "types_map", "common_types"):
+        monkeypatch.setattr(mimetypes, name, getattr(mimetypes, name))
+    monkeypatch.setattr(mimetypes, "inited", False)
+    monkeypatch.setattr(mimetypes, "_db", None)
+    monkeypatch.setattr(mimetypes, "knownfiles", [str(mime_file)])
+
+    class Accessor:
+        async def aget(self, _config):
+            return SimpleNamespace(values={"viewed_images": {virtual_path: {"mime_type": "image/png", "size": len(payload), "sha256": ref.sha256, "blob_ref": ref.model_dump(mode="json")}}})
+
+    async def build_accessor(_request, *, thread_id):
+        return Accessor(), {"configurable": {"thread_id": thread_id}}
+
+    class Store:
+        def get_bytes(self, requested_ref):
+            assert requested_ref == ref
+            return payload
+
+    monkeypatch.setattr(services, "build_thread_checkpoint_state_accessor", build_accessor)
+    monkeypatch.setattr("deerflow.storage.get_blob_store_if_enabled", lambda: Store())
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda *_args, **_kwargs: tmp_path / "missing.png")
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b"", "app": SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(check_access=AsyncMock(return_value=True))))})
+    user = SimpleNamespace(id="owner", system_role="user")
+    request.state.user = user
+    request.state.auth = AuthContext(user=user, permissions=["threads:read"])
+
+    response = await _get_artifact("thread-1", virtual_path.lstrip("/"), request=request)
+    assert response.status_code == 200
+    assert response.body == payload

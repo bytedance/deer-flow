@@ -15,6 +15,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.llm_text import extract_response_text
 
 logger = logging.getLogger(__name__)
@@ -27,10 +28,9 @@ class ScanResult:
     available: bool = True
 
 
-def _resolve_fail_closed(app_config: AppConfig | None) -> bool:
+def _resolve_fail_closed(config: AppConfig | None) -> bool:
     """Resolve the fail-closed policy, defaulting to True if config is unavailable."""
     try:
-        config = app_config or get_app_config()
         return bool(getattr(config.skill_evolution, "security_fail_closed", True))
     except Exception:
         return True
@@ -126,11 +126,16 @@ async def scan_skill_content(
     prompt = f"Location: {location}\nExecutable: {str(executable).lower()}\nDeterministic SkillScan findings:\n{_format_static_findings_context(static_findings or [])}\n\nReview this content:\n-----\n{content}\n-----"
 
     model_responded = False
+    config = app_config
     try:
-        config = app_config or get_app_config()
+        # Off the event loop (see utils/AGENTS.md): reading the live config
+        # stats and hashes config.yaml, and provider construction can read
+        # local credentials. The fail-closed fallback below reuses this config.
+        if config is None:
+            config = await run_assembly(get_app_config)
         model_name = config.skill_evolution.moderation_model_name
         model_kwargs = {"thinking_enabled": False, "app_config": config, "attach_tracing": attach_tracing}
-        model = create_chat_model(name=model_name, **model_kwargs) if model_name else create_chat_model(**model_kwargs)
+        model = await run_assembly(create_chat_model, name=model_name, **model_kwargs) if model_name else await run_assembly(create_chat_model, **model_kwargs)
         invoke_config: dict[str, Any] = {"run_name": "security_agent"}
         if attach_tracing:
             # Standalone callers own the trace root, so they must inject their own
@@ -175,7 +180,7 @@ async def scan_skill_content(
         return ScanResult("block", "Security scan produced unparseable output; manual review required.", available=False)
     if executable:
         return ScanResult("block", "Security scan unavailable for executable content; manual review required.", available=False)
-    if _resolve_fail_closed(app_config):
+    if _resolve_fail_closed(config):
         return ScanResult("block", "Security scan unavailable for skill content; manual review required.", available=False)
     logger.warning("Security scan unavailable; failing open for non-executable skill content at %s (manual review recommended)", location)
     return ScanResult("warn", "Security scan unavailable for non-executable skill content; manual review recommended.", available=False)

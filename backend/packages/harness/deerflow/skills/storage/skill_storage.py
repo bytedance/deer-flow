@@ -79,13 +79,27 @@ class SkillStorage(ABC):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def validate_skill_name(name: str) -> str:
-        """Validate and normalise a skill name; return the normalised form."""
+    def validate_skill_name(name: str, *, for_creation: bool = False) -> str:
+        """Validate and normalise a skill name; return the normalised form.
+
+        ``for_creation`` also refuses names that cannot be created as a host
+        path component. The hyphen-case grammar admits Windows reserved device
+        names (``nul``, ``con``, ``com1``, ...); a skill name is a directory
+        under ``custom/``, so creating one of those "succeeds" on Windows
+        without producing a directory and the first write inside it fails with
+        ``FileNotFoundError``. Only creation paths set this, so reading and
+        deleting a skill an older release created on a Linux host keeps
+        working.
+        """
         normalized = name.strip()
         if not _SKILL_NAME_PATTERN.fullmatch(normalized):
             raise ValueError("Skill name must be hyphen-case using lowercase letters, digits, and hyphens only.")
         if len(normalized) > 64:
             raise ValueError("Skill name must be 64 characters or fewer.")
+        if for_creation:
+            reason = windows_incompatible_segment(normalized)
+            if reason is not None:
+                raise ValueError(f"Skill name {normalized!r} is not portable to Windows: {reason}.")
         return normalized
 
     @staticmethod
@@ -372,12 +386,24 @@ class SkillStorage(ABC):
         # to enabled when no explicit config entry exists (so newly
         # installed skills appear active without requiring a manual toggle).
         try:
-            from deerflow.config.extensions_config import ExtensionsConfig
+            from deerflow.config.extensions_config import ExtensionsConfig, _describe_load_failure
 
             extensions_config = ExtensionsConfig.from_file()
             skills = [dataclasses.replace(s, enabled=extensions_config.is_skill_enabled(s.name, s.category)) for s in skills]
         except Exception as e:
-            logger.warning("Failed to load extensions config: %s", e)
+            # A config that cannot be read says nothing about which skills are
+            # enabled, so the parsed default (``enabled=True``) must not stand
+            # in for an answer: that would turn every disabled skill back on
+            # because of an unrelated defect elsewhere in the file (a malformed
+            # ``mcpServers`` entry, a trailing comma). Fail closed instead —
+            # the skills stay listed, they just cannot be activated until the
+            # config is readable again. The sandbox projection already fails
+            # closed on the same error (``projection._rebuild_public_locked``);
+            # this keeps the runtime half of the gate consistent with it.
+            # ``from_file`` resolves ``$VAR`` placeholders before validation, so
+            # only the failure shape is safe to log (see ``_describe_load_failure``).
+            logger.warning("Failed to load extensions config; treating every skill as disabled (%s)", _describe_load_failure(e))
+            skills = [dataclasses.replace(s, enabled=False) for s in skills]
 
         if enabled_only:
             skills = [s for s in skills if s.enabled]

@@ -1,0 +1,104 @@
+name: Bundled Extension Tests
+
+# Bundled extension examples own their behavior suites, which carry the
+# `bundled_extension` marker. The core backend shards exclude them so an
+# optional example cannot fail an unrelated core PR; this workflow runs them
+# whenever an example, the extension contract, the host they load into or the
+# bundled tests change.
+#
+# The filter is deliberately bounded: the marked modules import `deerflow.*`
+# (packages) and `app.gateway.*`, so only the Gateway subtree is listed rather
+# than all of `backend/app`. Test files are listed one by one instead of
+# `backend/tests/**`, and `test_bundled_extension_ci.py` fails when a module
+# carries the marker without appearing here, so this list cannot drift.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'examples/deerflow-extension-*/**'
+      - 'backend/packages/**'
+      - 'backend/app/gateway/**'
+      - 'backend/tests/conftest.py'
+      - 'backend/tests/support/**'
+      - 'backend/tests/test_agent_teams_plugin.py'
+      - 'backend/tests/test_bookmark_plugin.py'
+      - 'backend/tests/test_bundled_extension_ci.py'
+      - 'backend/tests/test_jev_classify_extension.py'
+      - 'backend/tests/test_jev_context_extension.py'
+      - 'backend/tests/test_jev_result_screening_extension.py'
+      - 'backend/tests/test_jev_screening_pipeline.py'
+      - 'backend/tests/test_jev_screening_policy.py'
+      - 'backend/tests/test_knowledge_center_extension.py'
+      - 'backend/tests/test_knowledge_management_extension.py'
+      - 'backend/tests/test_knowledge_platform_extension.py'
+      - 'backend/tests/test_lightrag_relations_extension.py'
+      - 'backend/tests/test_report_sections_extension.py'
+      - 'backend/tests/test_retrieval_plugin_artifacts.py'
+      - 'backend/tests/test_weknora_extension.py'
+      - 'backend/tests/test_workflow_plugin.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'backend/Makefile'
+      - '.github/workflows/bundled-extension-tests.yml'
+  push:
+    branches: [main, "*-dev"]
+    paths:
+      - 'examples/deerflow-extension-*/**'
+      - 'backend/packages/**'
+      - 'backend/app/gateway/**'
+      - 'backend/tests/conftest.py'
+      - 'backend/tests/support/**'
+      - 'backend/tests/test_agent_teams_plugin.py'
+      - 'backend/tests/test_bookmark_plugin.py'
+      - 'backend/tests/test_bundled_extension_ci.py'
+      - 'backend/tests/test_jev_classify_extension.py'
+      - 'backend/tests/test_jev_context_extension.py'
+      - 'backend/tests/test_jev_result_screening_extension.py'
+      - 'backend/tests/test_jev_screening_pipeline.py'
+      - 'backend/tests/test_jev_screening_policy.py'
+      - 'backend/tests/test_knowledge_center_extension.py'
+      - 'backend/tests/test_knowledge_management_extension.py'
+      - 'backend/tests/test_knowledge_platform_extension.py'
+      - 'backend/tests/test_lightrag_relations_extension.py'
+      - 'backend/tests/test_report_sections_extension.py'
+      - 'backend/tests/test_retrieval_plugin_artifacts.py'
+      - 'backend/tests/test_weknora_extension.py'
+      - 'backend/tests/test_workflow_plugin.py'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - 'backend/Makefile'
+      - '.github/workflows/bundled-extension-tests.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundled-extension-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bundled-extension-tests:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Run bundled extension behavior tests
+        working-directory: backend
+        run: make test-bundled-extensions

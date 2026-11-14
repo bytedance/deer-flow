@@ -105,3 +105,49 @@ async def test_channel_consumes_error_sse_and_releases_dedupe_after_final_publis
         else:
             assert "Error" in logged
             assert "unknown" in logged
+
+
+_STEP_LIMIT_TEXT = "The run stopped at its step limit (recursion_limit=6) before finishing. Created but not presented: /mnt/user-data/outputs/report.md. Send a message to continue."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_partial", [False, True], ids=["empty", "partial-text"])
+async def test_channel_reports_a_step_limit_stop_instead_of_a_generic_failure(monkeypatch, tmp_path, has_partial):
+    bridge = MemoryStreamBridge()
+    record = RunRecord(
+        run_id="stream-run",
+        thread_id="thread-1",
+        assistant_id=None,
+        status=RunStatus.error,
+        on_disconnect=DisconnectMode.continue_,
+        error=_STEP_LIMIT_TEXT,
+        stop_reason="recursion_capped",
+    )
+
+    async def start_run(*args, **kwargs):
+        messages = [{"type": "ai", "content": "Writing the report.", "tool_calls": [{"id": "w-1", "name": "write_file", "args": {}}]}] if has_partial else []
+        await bridge.publish(record.run_id, "values", {"messages": messages})
+        await bridge.publish(record.run_id, "error", {"name": "GraphRecursionError", "message": _STEP_LIMIT_TEXT})
+        await bridge.publish_end(record.run_id)
+        return record
+
+    monkeypatch.setattr(thread_runs, "start_run", start_run)
+    app = make_authed_test_app()
+    app.include_router(thread_runs.router)
+    app.state.stream_bridge = bridge
+    app.state.run_manager = SimpleNamespace(get=AsyncMock(return_value=record))
+    bus = MessageBus()
+    manager = ChannelManager(bus=bus, store=JsonChannelStore(path=tmp_path / "channels.json"))
+    inbound = InboundMessage(channel_name="feishu", chat_id="chat-1", user_id="user-1", text="Write the report", metadata={"message_id": "message-1"})
+    assert await manager._is_duplicate_inbound(inbound) is False
+    outbound = []
+    bus.subscribe_outbound(outbound.append)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test/api") as http:
+        await manager._handle_streaming_chat(LangGraphClient(http), inbound, "thread-1", "lead_agent", {}, {}, {"role": "user", "content": "Write the report"})
+
+    final = outbound[-1]
+    assert final.is_final
+    # The narration stays; the stop replaces the generic failure.
+    assert final.text == (f"Writing the report.\n\n{_STEP_LIMIT_TEXT}" if has_partial else _STEP_LIMIT_TEXT)
+    # The run ended, so a redelivery may retry it, as after any error frame.
+    assert await manager._is_duplicate_inbound(inbound) is False

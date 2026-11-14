@@ -803,6 +803,27 @@ async def test_goal_set_failure_shows_error_tone():
 
 
 @pytest.mark.asyncio
+async def test_goal_from_chat_is_explained_not_saved_as_literal():
+    """The shared parser yields from_chat; the TUI must not fall through to set.
+
+    Saving the guidance as a literal objective would be the exact bug the
+    first-PR design calls out: the TUI has no synthesis wiring yet, so it
+    explains instead, and makes no gateway call.
+    """
+    session = _GoalSession()
+    app = DeerFlowTUI(session, LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._conv_thread_id = "t-1"
+        app._handle_goal("from-chat focus on the vendor total")
+        await pilot.pause()
+    assert session.client.calls == []
+    rows = _system_rows(app)
+    assert any("from-chat" in r.text and "/goal" in r.text for r in rows)
+    assert not any("Goal set" in r.text for r in rows)
+
+
+@pytest.mark.asyncio
 async def test_multiline_paste_keeps_leading_indentation_and_trailing_newline():
     session = _FakeSession()
     app = DeerFlowTUI(session, LaunchPlan(mode="tui"))

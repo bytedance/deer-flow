@@ -18,6 +18,7 @@ from app.gateway.routers import thread_runs
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
 THREAD_ID = "thread-archive"
 RUN_ID = "run-archive"
@@ -53,6 +54,7 @@ def _archive_app(
     run_thread_id: str = THREAD_ID,
     run_status: str = "success",
     with_receipt: bool = True,
+    delivery_tool: str = "present_files",
 ) -> tuple[TestClient, MemoryRunStore, MemoryRunEventStore]:
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -77,7 +79,7 @@ def _archive_app(
                 content={
                     "presented": len(presented),
                     "paths": presented,
-                    "by_tool": {"present_files": presented},
+                    "by_tool": {delivery_tool: presented},
                 },
             )
         )
@@ -131,7 +133,8 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert "not-presented.txt" not in archive.namelist()
 
 
-def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("delivery_tool", ["present_files", "present_shared_artifact"])
+def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch, delivery_tool: str) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     client, _, _ = _archive_app(
@@ -142,6 +145,7 @@ def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypa
             "/mnt/user-data/outputs/data.csv",
             "/mnt/user-data/outputs/data.csv",
         ],
+        delivery_tool=delivery_tool,
     )
 
     with client:
@@ -313,6 +317,27 @@ def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch, method: 
         response = getattr(client, method)(ARCHIVE_URL)
 
     assert response.status_code == 404
+
+
+def test_archive_returns_503_when_sandbox_config_is_unavailable(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=["/mnt/user-data/outputs/report.txt"],
+    )
+
+    async def unavailable():
+        raise SandboxAuthorizationError("Sandbox execution is temporarily unavailable")
+
+    monkeypatch.setattr(thread_runs, "safe_app_config_async", unavailable)
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Artifact archive is temporarily unavailable"
 
 
 def test_archive_conflicts_with_an_active_run(tmp_path, monkeypatch) -> None:

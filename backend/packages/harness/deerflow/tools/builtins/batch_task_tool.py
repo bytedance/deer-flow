@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, replace
 from typing import Annotated, Any, cast
 
+from deerflow_extension_api.agent_runs import AGENT_RUNS_CONTEXT_KEY
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
@@ -34,12 +35,14 @@ from deerflow.subagents.batch_runtime import (
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
+from deerflow.utils.assembly_io import run_assembly
 
 
 class BatchTaskItem(BaseModel):
     key: str = Field(min_length=1, max_length=128)
     prompt: str = Field(min_length=1, max_length=100_000)
     acceptance_criteria: list[str] | None = Field(default=None, description="Optional completion requirements checked separately from execution status, using the same bounded checklist as task.")
+    depends_on: list[str] = Field(default_factory=list, description="Keys of prerequisite items in this batch. Supply the required result paths in this item's prompt; no result text is copied automatically.")
 
 
 _NO_EXPLICIT_BATCH_SUBMITTER = object()
@@ -160,11 +163,14 @@ async def batch_task(
     tool_call_id: Annotated[str, InjectedToolCallId],
     max_live_items: int | None = None,
     max_running_items: int | None = None,
+    continuation: str | None = None,
 ) -> Command:
-    """Submit many independent items to DeerFlow's explicit durable batch mode.
+    """Submit durable native-subagent items with optional explicit prerequisites.
 
-    Use this only when every item is independent, idempotent or read-only, and
-    can be completed without another item's output. This tool returns a batch
+    Use this for idempotent or read-only items. Declare depends_on when an item
+    needs another item's completed output; waiting items use no worker slot.
+    A failed or capped prerequisite prevents its dependents from starting.
+    This tool returns a batch
     identifier immediately; it never inserts thousands of results into the lead
     agent context. Use ``batch_status`` for a compact progress snapshot.
 
@@ -185,6 +191,9 @@ async def batch_task(
         subagent_type: Native subagent definition used for every item.
         max_live_items: Optional queued-plus-running item window; when set it must be >= 1.
         max_running_items: Optional per-batch real execution concurrency; when set it must be >= 1.
+        continuation: Optional remaining work for the lead Agent after this batch ends, such as combining and presenting results.
+            Use only for follow-up already requested by the user. Omit for progress monitoring.
+            An active Goal resumes only from external waiting and within its existing limits.
     """
     submitter = _batch_submitter()
     if submitter is None:
@@ -195,6 +204,8 @@ async def batch_task(
         )
     if not items:
         return _result(tool_call_id, content="A batch must contain at least one item.", error=True)
+    if continuation is not None and (not continuation.strip() or len(continuation) > 4000):
+        return _result(tool_call_id, content="The follow-up must contain 1 to 4000 characters.", error=True)
     keys = [item.key for item in items]
     if len(set(keys)) != len(keys):
         return _result(tool_call_id, content="Batch item keys must be unique.", error=True)
@@ -205,8 +216,11 @@ async def batch_task(
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
-    available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
-    config = get_subagent_config(subagent_type, app_config=app_config)
+    # Registry reads sweep the managed-definition store for its signature
+    # (file stats, or a SQL query) on every TTL miss; resolve them on the
+    # assembly pool so they cannot stall the streaming event loop (issue #5172).
+    available = await run_assembly(get_available_subagent_names, app_config=app_config, allowed_subagents=allowed_subagents)
+    config = await run_assembly(get_subagent_config, subagent_type, app_config=app_config)
     if config is None or subagent_type not in available:
         names = ", ".join(available) if available else "none"
         return _result(
@@ -223,6 +237,17 @@ async def batch_task(
     if not thread_id:
         return _result(tool_call_id, content="Durable batches require a thread_id.", error=True)
     user_id = resolve_runtime_user_id(runtime)
+    continuation_context = None
+    if continuation:
+        state = getattr(runtime, "state", None)
+        goal = state.get("goal") if isinstance(state, dict) else None
+        continuation_context = {
+            "goal": {key: goal.get(key) for key in ("created_at", "status", "objective")} if isinstance(goal, dict) else None,
+            "context": {**(runtime.config.get("configurable") or {}), **context},
+            "config": {"recursion_limit": runtime.config["recursion_limit"]} if "recursion_limit" in runtime.config else {},
+        }
+        if metadata.get("model_name"):
+            continuation_context["context"]["model_name"] = metadata["model_name"]
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
     execution_spec = {
@@ -255,6 +280,9 @@ async def batch_task(
                 max_live_items=max_live_items,
                 max_running_items=max_running_items,
                 execution_spec=execution_spec,
+                continuation=continuation,
+                continuation_authority=context.get(AGENT_RUNS_CONTEXT_KEY) if continuation else None,
+                continuation_context=continuation_context if continuation else None,
             )
         )
     except Exception as exc:
@@ -262,7 +290,11 @@ async def batch_task(
     return _result(
         tool_call_id,
         batch=batch,
-        content=(f"Batch {batch['id']} accepted with {batch['total_items']} items. It is running independently and survives Gateway restarts. Use batch_status for progress; do not launch ordinary task calls for these items."),
+        content=(
+            f"Batch {batch['id']} accepted with {batch['total_items']} items. It is running independently and survives Gateway restarts. "
+            + ("The requested follow-up is scheduled after completion; this turn can finish without polling. " if continuation else "Use batch_status for progress. ")
+            + "Do not launch ordinary task calls for these items."
+        ),
     )
 
 
@@ -303,7 +335,10 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     submitter = _batch_submitter()
     if submitter is None:
         return "Durable subagent batches are unavailable."
-    batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
+    context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    # Only submitters that run follow-ups take the caller's run authority.
+    authority = {"continuation_authority": context.get(AGENT_RUNS_CONTEXT_KEY)} if getattr(submitter, "accepts_continuation_authority", False) else {}
+    batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime), **authority)
     if batch is None:
         return "Batch not found."
     return f"Batch {batch_id} cancellation requested."

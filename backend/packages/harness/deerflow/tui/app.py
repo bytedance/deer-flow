@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from threading import Event, Thread
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -76,7 +77,13 @@ SelectScreen OptionList {
 
 
 class SelectScreen(ModalScreen):
-    """A centered modal that returns the id of the chosen option (or None)."""
+    """A centered modal that returns the id of the chosen option (or None).
+
+    Labels are shown as written. Textual parses a plain ``str`` as content
+    markup, so a thread title like ``Fix [/bold] in parser`` would raise
+    ``MarkupError`` and ``[a]`` would vanish; wrapping in ``Text`` keeps them
+    literal.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Close")]
 
@@ -87,8 +94,8 @@ class SelectScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(self._title, id="dialog-title")
-            yield OptionList(*[Option(label, id=oid) for oid, label in self._options], id="dialog-list")
+            yield Label(Text(self._title), id="dialog-title")
+            yield OptionList(*[Option(Text(label), id=oid) for oid, label in self._options], id="dialog-list")
 
     def on_mount(self) -> None:
         self.query_one(OptionList).focus()
@@ -609,6 +616,13 @@ class DeerFlowTUI(App):
                     self._dispatch(SystemMessage("Could not clear goal.", tone="error"))
                     return
             self._dispatch(SystemMessage("Goal cleared."))
+            return
+
+        if command.kind == "from_chat":
+            # Synthesis lives on the Gateway and is wired for the IM surfaces
+            # first; falling through to `set` would silently save the guidance
+            # text as a literal objective. Wiring is a follow-up.
+            self._dispatch(SystemMessage("/goal from-chat is not supported in the TUI yet. Set the full objective with /goal <text>."))
             return
 
         if self._conv_thread_id is None:

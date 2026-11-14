@@ -137,6 +137,8 @@ class Channel(ABC):
         self.config = config
         self._running = False
         self._connection_repo: Any = config.get("connection_repo")
+        # Language of the /connect replies (a ReplyLocaleResolver); ChannelService injects it.
+        self._reply_locale: Any = config.get("reply_locale")
         # Provider SDK callbacks often run on a dedicated thread and submit
         # preparation work to the Gateway loop. Submission and shutdown share
         # this lock so stop() cannot miss a future created concurrently.
@@ -248,7 +250,12 @@ class Channel(ABC):
         log_prefix: str | None = None,
         operation_name: str = "send",
     ) -> T:
-        """Run an outbound send operation with the shared channel retry policy."""
+        """Run an outbound send operation with the shared channel retry policy.
+
+        The wait between attempts is ``_outbound_retry_delay``. The default
+        is ``2**attempt``; a provider that is told how long to wait overrides
+        that without changing the attempt bound or the other channels.
+        """
         prefix = log_prefix or f"[{self.name}]"
         last_exc: Exception | None = None
         for attempt in range(max_retries):
@@ -257,9 +264,9 @@ class Channel(ABC):
             except Exception as exc:
                 last_exc = exc
                 if attempt < max_retries - 1:
-                    delay = 2**attempt
+                    delay = self._outbound_retry_delay(attempt, exc)
                     logger.warning(
-                        "%s %s failed (attempt %d/%d), retrying in %ds: %s",
+                        "%s %s failed (attempt %d/%d), retrying in %ss: %s",
                         prefix,
                         operation_name,
                         attempt + 1,
@@ -273,6 +280,16 @@ class Channel(ABC):
         if last_exc is None:
             raise RuntimeError(f"{self.name} {operation_name} failed without an exception from any attempt")
         raise last_exc
+
+    def _outbound_retry_delay(self, attempt: int, exc: Exception) -> float:
+        """Seconds to wait before the next attempt.
+
+        ``exc`` is the failure just caught. The shared policy ignores it and
+        sleeps ``2**attempt`` (1s, then 2s, then 4s, ...). A provider that
+        receives a server wait hint overrides this and may return a longer
+        delay; it must not shorten the local backoff.
+        """
+        return 2**attempt
 
     def _log_future_error(self, fut: Any, name: str, msg_id: Any) -> None:
         """Callback for concurrent futures scheduled from channel worker threads."""
@@ -449,6 +466,20 @@ class Channel(ABC):
         if self._connection_repo is None:
             return None
         return extract_connect_code(text)
+
+    async def _connect_reply_text(self, key: str, *, owner_user_id: str | None = None) -> str:
+        """A ``/connect`` (Telegram ``/start``) reply in its reader's language.
+
+        Once the code is consumed, pass its ``owner_user_id``: the reply follows
+        that user's web UI language. Before that (an invalid or expired code)
+        it uses ``channel_connections.notification_locale``. Never raises.
+        """
+        # Deferred: it loads the scheduler's locale list, and importing
+        # app.channels must stay light (tests/test_channel_capabilities.py).
+        from app.channels.reply_locale import ReplyLocaleResolver, connect_reply_text
+
+        resolver = self._reply_locale or ReplyLocaleResolver()
+        return connect_reply_text(key, provider=self.name, locale=await resolver.locale_for(owner_user_id))
 
     def _make_inbound(
         self,

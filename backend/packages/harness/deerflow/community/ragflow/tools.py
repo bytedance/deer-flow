@@ -531,7 +531,8 @@ async def knowledge_search(
         if resolved_scope["mode"] == "disabled":
             return "Error: Knowledge search is disabled for this turn."
 
-    settings, error = _settings_or_error()
+    # Config resolution stats and hashes the config files; keep it off the event loop.
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 
@@ -592,7 +593,7 @@ async def knowledge_search(
 
 async def list_knowledge_bases() -> str:
     """List accessible RAGFlow knowledge-base names without exposing UUIDs."""
-    settings, error = _settings_or_error()
+    settings, error = await asyncio.to_thread(_settings_or_error)
     if settings is None:
         return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 

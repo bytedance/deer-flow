@@ -23,6 +23,18 @@ The selection is written to the new Gateway thread's channel metadata and, for a
 Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
 `/agent use lead_agent` starts a new conversation with the default agent.
 
+### Goal status (`/goal`)
+
+`/goal <condition>` sets a goal on the chat's conversation and starts a run with the condition as the task; `/goal clear` clears it. `/goal` alone reports what the web goal bar shows: the goal, `In progress.` while a run is pending or running, and once auto-continue has stood down, why (for example `Stopped: the continuation limit was reached.` or `Waiting for you: it needs your input.`). A met goal is cleared and recorded in the thread state, so `/goal` answers `Goal met: <goal>` until the next goal change. Reasons come only from host-written codes; the goal checker's notes and provider errors are never sent.
+
+`/goal from-chat [hint]` composes the goal from the conversation instead of taking the text literally. The Gateway reads the thread summary plus recent agreement turns — visible user/assistant text, the assistant's clarification questions, and the user's answers to clarification cards — asks a non-thinking model (the deployment default; the goal evaluator instead uses the run's recorded model) to preserve the constraints and stopping condition agreed in the chat, and saves the objective through the existing goal route; the manager then sends the saved objective as its own final message and starts exactly one run through the ordinary chat path. An optional hint after the command adds a constraint without restating the whole goal. Evidence tool output, subagent chatter and attachments are not part of the synthesis context: they inform execution, not the objective. If the conversation does not yield a clear goal, nothing is saved or started and the reply explains why; a conversation whose last turn is an unanswered human-input request (a clarification, a sandbox-network approval, another `human_input_request`) is reported as pending instead of being synthesized, because the agreement is incomplete; a busy thread is rejected before the model call when this Gateway worker owns the run, while a run admitted by another worker is still rejected by the save-time reservation (so the model call may already have happened). Because the saved objective is shown first, a run that cannot start is followed by the channel's busy or error reply. Like `PUT`/`DELETE /goal`, the save is rejected while a tool approval is pending, so a new goal cannot silently discard it. Model-generated failure reasons are never sent back to the chat.
+
+The synthesis model call is subject to the same model-use authorization as other model-backed routes: a role denied the deployment default model gets the route's 403 and the conversation is never sent to that model. The save is a compare-and-swap against the checkpoint the synthesis read — a goal or checkpoint write that lands during the model call rejects the stale objective with a 409, and the channel replies that the conversation changed and nothing was saved. If the chat switches conversations (`/new`) while synthesis is in flight, the goal stays saved in the original thread but the manager does not start a run in the new conversation; the reply says so and carries the saved objective.
+
+Run handoff stays pinned to the thread where the goal was saved and checks the conversation binding again after confirmation delivery and run preparation. A rejected start gets an explicit goal-saved, task-not-started reply. If the response is lost after submission, the reply says the task may still be running and asks the user to check the conversation in DeerFlow before retrying.
+
+DeerFlow's own replies here and to `/connect` use the binding owner's web UI language (the `locale` user preference), else `channel_connections.notification_locale` (`en-US` by default). A reply with no known owner, such as one to an invalid or expired code, uses the configured default. Agent replies are not translated.
+
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.
 
 ## Connect-code Flow
@@ -37,22 +49,22 @@ sequenceDiagram
     participant Store as SQL store<br/>channel_oauth_states
     participant Worker as Provider worker<br/>(Telegram/Slack/...)
     participant Repo as ChannelConnection repo<br/>(upsert_connection)
+    participant Chat as IM chat
 
     Browser->>Gateway: POST /api/channels/{provider}/connect
     Gateway->>Store: insert code (token_urlsafe(16), TTL=600s, single-use)
     Gateway-->>Browser: code + (Telegram: deep-link URL)
 
-    Note over Browser,Worker: User sends /connect <code> (or /start <code>) to the provider bot
-
+    Chat->>Worker: /connect <code> (Telegram: /start <code>)
     Worker->>Store: consume_oauth_state(code)
     alt valid + unexpired
         Store-->>Worker: ok (state consumed once)
         Worker->>Repo: upsert_connection(provider, external_account_id, workspace_id, owner_user_id)
         Repo-->>Worker: connection row (active)
-        Worker-->>Browser: success reply (via channel callback)
+        Worker-->>Chat: "connected" reply in the code owner's web UI language
     else invalid / expired / used
         Store-->>Worker: reject
-        Worker-->>Browser: rejected (no reply in chat)
+        Worker-->>Chat: "invalid or expired" reply in channel_connections.notification_locale
     end
 
     Note over Repo: Partial unique index uq_channel_connection_active_identity<br/>revokes prior owner's active row for the same identity
@@ -180,6 +192,16 @@ graph TB
     Msg --> Stream2 --> Stream --> Mid1 --> Mid2 --> Final
     Msg --> Stream3 --> Stream --> Mid1 --> Mid2 --> Final
 ```
+
+Feishu rejects a card whose request body exceeds 30 KB (`230025`). The channel
+budgets card text at 24 KB of that body, measured as the bytes the text adds
+after both JSON escapes, and sends CJK unescaped (3 bytes per character, about
+8,000 per card). A streamed update that no longer fits shows the part that does,
+ending in `…`. A longer final answer fills the running card and continues in up
+to 10 cards replied to the same source message, split at line breaks; past that
+the last card is clipped and marked `... (truncated)`. A retry of a partially
+delivered answer resumes after the cards already sent, and a reply to any of the
+cards continues the conversation.
 
 For the special GitHub case (`fire_and_forget=True` channel policy), the manager calls `runs.create()` and returns once the run is `pending` — no outbound reply, because GitHub agents post via the `gh` CLI from inside their sandbox. See [GITHUB_AGENTS.md](GITHUB_AGENTS.md) for the full GitHub flow.
 
@@ -380,6 +402,8 @@ When `channel_connections.enabled` and `require_bound_identity` are true, auth-e
 Upgrade note: existing auth-enabled deployments that already have `channel_connections.enabled: true` will start rejecting ordinary unbound IM messages after this field is introduced because `require_bound_identity` defaults to true. Legacy operator-owned/open-bot deployments that intentionally allow unbound platform users to create DeerFlow runs should set `require_bound_identity: false` before upgrading and restart the service.
 
 ## Connect Flow
+
+Every worker answers the bind message in the chat: `<Provider> connected to DeerFlow.` on success, otherwise that the code (Telegram: the link) is invalid or expired, or that the bind could not be completed from that message. Replies use the code owner's web UI language once the code is consumed, else `channel_connections.notification_locale` ([reply language](#goal-status-goal)).
 
 Telegram:
 
@@ -819,6 +843,12 @@ WeCom groups bound before group destinations were introduced keep their legacy
 chat identity. That compatibility applies only to the old group-binding shape;
 a new private binding never authorizes messages from an unbound group. Bind a
 specific group again with a name to make it available as a notification target.
+
+Each WeCom group is its own conversation, with one DeerFlow thread per member;
+a private chat is keyed by the sender alone. A group bound with its own
+`/connect` keeps the thread it had before groups got their own conversation. A
+legacy group binding covers every group of the bot, so its earlier thread is
+not continued in any of them; each group starts a new one.
 
 ### WeChat private notifications
 

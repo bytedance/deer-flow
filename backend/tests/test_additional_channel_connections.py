@@ -136,6 +136,55 @@ def test_feishu_connect_command_binds_identity(tmp_path):
     anyio.run(go)
 
 
+def test_feishu_connect_replies_follow_the_code_owner_language(tmp_path, monkeypatch):
+    """Success speaks the binding owner's web UI language; an invalid code has no owner yet."""
+    import anyio
+
+    from app.channels.feishu import FeishuChannel
+    from app.channels.reply_locale import ReplyLocaleResolver
+
+    lookups = []
+
+    class _Preferences:  # stands in for the user_preferences table
+        def __init__(self, sessions):
+            self.sessions = sessions
+
+        async def get(self, user_id):
+            lookups.append((user_id, self.sessions))
+            return {"locale": "zh-CN"} if user_id == "deerflow-user-1" else {}
+
+    monkeypatch.setattr("app.channels.reply_locale.UserPreferencesRepository", _Preferences)
+
+    async def go():
+        repo = await _make_repo(tmp_path, "feishu-zh")
+        state = "feishu-bind-code-zh"
+        await _seed_state(repo, "feishu", state)
+        channel = FeishuChannel(
+            bus=MessageBus(),
+            config={
+                "app_id": "app",
+                "app_secret": "secret",
+                "connection_repo": repo,
+                # What ChannelService injects: the shared database, configured default en-US.
+                "reply_locale": ReplyLocaleResolver(session_factory=repo.session_factory, default_locale="en-US"),
+            },
+        )
+        channel._reply_card = AsyncMock()
+
+        await channel._bind_connection_from_connect_code(message_id="om-1", chat_id="oc-chat-1", user_id="ou-user-1", code=state)
+        await channel._bind_connection_from_connect_code(message_id="om-2", chat_id="oc-chat-1", user_id="ou-user-1", code=state)
+
+        assert [call.args for call in channel._reply_card.await_args_list] == [
+            ("om-1", "飞书已连接到 DeerFlow。"),
+            # The code is spent: no owner is known, so the configured default applies.
+            ("om-2", "Feishu connection code is invalid or expired."),
+        ]
+        assert lookups == [("deerflow-user-1", repo.session_factory)]
+        await repo.close()
+
+    anyio.run(go)
+
+
 def test_dingtalk_connect_command_binds_identity(tmp_path):
     import anyio
 

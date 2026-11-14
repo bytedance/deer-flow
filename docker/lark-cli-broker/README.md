@@ -39,6 +39,9 @@ image ships Python 3, so the default path needs no configuration.
 
 ## Build
 
+The image bundles the broker script and its shared atomic-write helper modules.
+It requires no separate DeerFlow harness installation for either mode.
+
 Build context is the **repo root** (the broker module lives under `backend/`):
 
 ```bash
