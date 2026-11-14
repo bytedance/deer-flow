@@ -40,7 +40,9 @@ The standard lead-agent builders (including custom-agent bootstrap) and
   remain model reports.
 - `history_search`: keyword search over the current messages and compacted source
   batches reachable from the current checkpoint. English words and Chinese
-  character bigrams are supported. Returns up to eight excerpts of at most 600 characters.
+  character bigrams are supported. English words and alphanumeric names remain
+  searchable when adjacent to Chinese characters, such as `使用SQLite保存` or
+  `用Qwen3生成`. Returns up to eight excerpts of at most 600 characters.
   Repeated archives of one source share one result slot, preserving FTS ranking.
   The optional `role="user"`, `"assistant"`, or `"tool"` filters by message author
   type; omission or `null` preserves search across all roles. These values map to
@@ -74,7 +76,18 @@ ranking is unchanged. Repeated terms do not increase the result count.
 
 Queries still tokenize only the first 500 characters and use the first 32 terms.
 Active sources retain casefolded substring matching; archived sources retain FTS
-token matching. Location shares the English-word and Chinese-bigram tokenizer.
+token matching. Han runs produce character bigrams; adjacent non-Han
+alphanumeric runs retain whole-word matching. Location uses the same tokenizer.
+The boundary rule applies to BMP Han and non-Han text. Adjacent Latin and
+other scripts, and astral/compatibility Han, can still form an unsplit term.
+Existing archives rebuild their stored search terms transactionally on the next
+search or capture, preserving source IDs, text and checkpoint reachability.
+The best-effort upgrade runs outside the capture transaction and requires spare
+database capacity. If it is deferred by limited space, a read-only archive or
+a write lock, archived queries and excerpts use the legacy tokenizer, and new
+captures in that archive keep the legacy index format until migration succeeds.
+Active-history matching always uses the current tokenizer. The upgrade can be
+retried on later searches or captures and processes bounded row batches.
 Length-changing casefolds such as `Straße` map back to original positions; the
 combining dot produced by folding `İ` follows the existing tokenization rules.
 FTS normalization may not map exactly to indexed terms, such as `cafe` matching

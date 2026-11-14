@@ -1093,3 +1093,216 @@ def test_repeated_archive_sources_keep_canonical_read_version(role_runtime):
     assert row["truncated"] is source["truncated"] is True
     assert source["text"] == text[:1000]
     assert row["excerpt"] == source["text"][row["excerpt_start"] : row["excerpt_end"]]
+
+
+@pytest.mark.parametrize("async_mode", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("keyword", ["SQLite", "Qwen3", "Straße"])
+@pytest.mark.asyncio
+async def test_mixed_han_keywords_survive_capture(role_runtime, async_mode, keyword):
+    import json
+
+    text = "😀 ß " * 300 + f"约定使用{keyword}保存缓存。" + " tail" * 200
+    message = HumanMessage(content=text, id="mixed")
+    role_runtime.state = {"messages": [message]}
+    args = {"runtime": role_runtime, "query": keyword.upper(), "role": "user"}
+
+    async def search(arguments):
+        return json.loads(await history_search.ainvoke(arguments) if async_mode else history_search.invoke(arguments))
+
+    active = await search(args)
+    source_id = active["results"][0]["id"]
+    config = TaskContinuityConfig(enabled=True)
+    history = await archive.acapture({}, role_runtime, [message], config) if async_mode else archive.capture({}, role_runtime, [message], config)
+    role_runtime.state = {"task_history": history}
+    result = await search(args)
+    assert result["status"] == "available"
+    assert len(result["results"]) == 1
+    row = result["results"][0]
+    assert row["id"] == source_id
+    assert row["excerpt_match"] is True
+    assert keyword in row["excerpt"]
+    assert row["excerpt_start"] > 0
+    assert row["excerpt"] == text[row["excerpt_start"] : row["excerpt_end"]]
+    read_args = {"runtime": role_runtime, "source_id": source_id, "offset": row["excerpt_start"]}
+    page = json.loads(await history_read.ainvoke(read_args) if async_mode else history_read.invoke(read_args))
+    assert page["text"].startswith(row["excerpt"])
+    assert (await search({**args, "query": "保存"}))["results"]
+    assert (await search({**args, "query": f"使用{keyword}保存"}))["results"]
+    assert not (await search({**args, "query": keyword[1:]}))["results"]
+    assert not (await search({**args, "role": "assistant"}))["results"]
+
+
+@pytest.mark.parametrize("recapture", [False, True], ids=["search-upgrade", "capture-upgrade"])
+def test_mixed_han_keywords_upgrade_legacy_index(role_runtime, recapture):
+    import json
+    import sqlite3
+
+    message = HumanMessage(content="约定使用SQLite保存缓存。", id="legacy")
+    config = TaskContinuityConfig(enabled=True)
+    history = archive.capture({}, role_runtime, [message], config)
+    source_id = archive.records([message])[0]["id"]
+    path, _ = archive.scope(role_runtime)
+    # Reproduce the persisted pre-fix FTS format, retaining real captured payloads.
+    with sqlite3.connect(path) as db:
+        original = db.execute("SELECT batch, id, payload FROM sources").fetchall()
+        db.execute("UPDATE sources SET words=?", ("约定 定使 使用 用s sq ql li it te e保 保存 存缓 缓存",))
+        db.execute("PRAGMA user_version=0")
+    role_runtime.state = {"task_history": history}
+    if recapture:
+        assert archive.capture(role_runtime.state, role_runtime, [message], config) == history
+    result = json.loads(history_search.invoke({"runtime": role_runtime, "query": "SQLite"}))
+    assert result["status"] == "available"
+    assert [row["id"] for row in result["results"]] == [source_id]
+    assert result["results"][0]["excerpt_match"] is True
+    assert json.loads(history_read.invoke({"runtime": role_runtime, "source_id": source_id}))["text"] == message.content
+    with sqlite3.connect(path) as db:
+        assert db.execute("SELECT batch, id, payload FROM sources").fetchall() == original
+        assert db.execute("SELECT words FROM sources").fetchone()[0] == "约定 定使 使用 sqlite 保存 存缓 缓存"
+
+
+def test_legacy_archive_still_searches_when_upgrade_is_readonly(role_runtime, monkeypatch):
+    import sqlite3
+
+    message = HumanMessage(content="Citrine report and legacy search", id="read-only-legacy")
+    history = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("PRAGMA user_version=0")
+
+    real_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        if "mode=rw" in str(args[0]):
+            raise sqlite3.OperationalError("attempt to write a readonly database")
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    result = archive.lookup({"task_history": history}, role_runtime, query="Citrine")
+    assert result["status"] == "available"
+    assert [row["text"] for row in result["results"]] == [message.content]
+    with real_connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_legacy_index_upgrade_reindexes_multiple_bounded_batches(role_runtime):
+    import sqlite3
+
+    config = TaskContinuityConfig(enabled=True, max_records_per_batch=256)
+    messages = [HumanMessage(content=f"约定使用SQLite记录 {i}", id=f"record-{i}") for i in range(130)]
+    history = archive.capture({}, role_runtime, messages, config)
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sources SET words='legacy'")
+        db.execute("PRAGMA user_version=0")
+
+    result = archive.lookup({"task_history": history}, role_runtime, query="SQLite")
+    assert result["status"] == "available"
+    assert result["results"]
+    with sqlite3.connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM sources WHERE words LIKE '%sqlite%'").fetchone()[0] == len(messages)
+
+
+def test_deferred_legacy_upgrade_preserves_mixed_script_search(role_runtime, monkeypatch):
+    import json
+    import sqlite3
+
+    message = HumanMessage(content="后续用Qwen3生成摘要。", id="legacy-mixed")
+    history = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sources SET words=?", ("后续 续用 用q qw we en n3 3生 生成 成摘 摘要",))
+        db.execute("PRAGMA user_version=0")
+
+    original_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        if "mode=rw" in str(args[0]):
+            raise sqlite3.OperationalError("database is locked")
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    role_runtime.state = {"task_history": history}
+    result = json.loads(history_search.invoke({"runtime": role_runtime, "query": "用Qwen3"}))
+    assert result["status"] == "available"
+    assert len(result["results"]) == 1
+    assert result["results"][0]["excerpt_match"] is True
+    assert "用Qwen3" in result["results"][0]["excerpt"]
+    with original_connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_sqlite_full_during_legacy_upgrade_does_not_break_capture(role_runtime, monkeypatch):
+    import sqlite3
+
+    config = TaskContinuityConfig(enabled=True)
+    first = HumanMessage(content="后续用Qwen3生成摘要。", id="first-legacy")
+    first_history = archive.capture({}, role_runtime, [first], config)
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sources SET words=?", ("后续 续用 用q qw we en n3 3生 生成 成摘 摘要",))
+        db.execute("PRAGMA user_version=0")
+
+    injection_count = 0
+
+    class FullOnIndexRewrite(sqlite3.Connection):
+        def executemany(self, statement, values):
+            nonlocal injection_count
+            if statement.startswith("UPDATE sources SET words="):
+                injection_count += 1
+                raise sqlite3.OperationalError("database or disk is full")
+            return super().executemany(statement, values)
+
+    original_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        return original_connect(*args, factory=FullOnIndexRewrite, **kwargs)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    second = HumanMessage(content="后续用SQLite记录状态。", id="second-legacy")
+    second_history = archive.capture({"task_history": first_history}, role_runtime, [second], config)
+    assert injection_count > 0
+    assert second_history["status"] == "available"
+    assert len(second_history["batches"]) == 2
+
+    with original_connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
+        indexed = db.execute("SELECT words FROM sources WHERE id=?", (archive.records([second])[0]["id"],)).fetchone()
+        assert indexed is not None
+        assert "用s" in indexed[0]
+
+    result = archive.lookup({"task_history": second_history}, role_runtime, query="用SQLite")
+    assert result["status"] == "available"
+    assert [row["text"] for row in result["results"]] == [second.content]
+
+
+def test_legacy_reindex_defers_when_database_has_no_spare_pages(role_runtime, monkeypatch):
+    import sqlite3
+
+    message = HumanMessage(content="后续用Qwen3生成摘要。", id="capacity-legacy")
+    history = archive.capture({}, role_runtime, [message], TaskContinuityConfig(enabled=True))
+    path, _ = archive.scope(role_runtime)
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE sources SET words=?", ("后续 续用 用q qw we en n3 3生 生成 成摘 摘要",))
+        db.execute("PRAGMA user_version=0")
+
+    original_connect = sqlite3.connect
+
+    class NoSparePages(sqlite3.Connection):
+        def execute(self, statement, parameters=()):
+            if statement == "PRAGMA max_page_count=32768":
+                pages = super().execute("PRAGMA page_count").fetchone()[0]
+                statement = f"PRAGMA max_page_count={pages}"
+            return super().execute(statement, parameters)
+
+    def connect(*args, **kwargs):
+        if "mode=rw" in str(args[0]):
+            return original_connect(*args, factory=NoSparePages, **kwargs)
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(archive.sqlite3, "connect", connect)
+    result = archive.lookup({"task_history": history}, role_runtime, query="用Qwen3")
+    assert result["status"] == "available"
+    assert [row["text"] for row in result["results"]] == [message.content]
+    with original_connect(path) as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 0
