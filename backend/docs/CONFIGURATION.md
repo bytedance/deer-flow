@@ -201,14 +201,15 @@ models:
 
 **Auth behavior for CLI-backed providers**:
 - `CodexChatModel` loads Codex CLI auth from `~/.codex/auth.json`
-- Completed Codex refusal explanations are returned as assistant text and retained
-  in `additional_kwargs.refusal`. A nonblank refusal completes the turn instead
-  of triggering empty-response retries. Mixed text/refusal parts keep their
-  original order; blank or malformed parts do not gain fabricated explanations.
 - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
 - `ClaudeChatModel` accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
 - A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` handoff is drained on first use and the token is kept for the life of the process, so every `ClaudeChatModel` instance reuses it
 - On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
+
+Completed Codex refusal explanations are returned as assistant text and retained
+in `additional_kwargs.refusal`. A nonblank refusal completes the turn instead
+of triggering empty-response retries. Mixed text/refusal parts keep their
+original order; blank or malformed parts do not gain fabricated explanations.
 
 To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
 
