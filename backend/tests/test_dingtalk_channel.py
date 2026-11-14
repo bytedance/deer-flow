@@ -1233,6 +1233,32 @@ class TestAdaptMarkdownForDingtalk:
         assert "```" not in result
         assert "> plain code" in result
 
+    @pytest.mark.parametrize("lang", ["c#", "c++", "objective-c"])
+    def test_fenced_code_block_language_with_symbols(self, lang):
+        text = f"Before\n```{lang}\nint x = 1;\n```\nMiddle\n```python\nprint(1)\n```\nAfter"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert f"> **{lang}**\n> int x = 1;\n" in result
+        assert "\nMiddle\n" in result
+        assert "> **python**\n> print(1)\n" in result
+
+    def test_inline_triple_backticks_leave_next_block_intact(self):
+        text = "Use ```x``` here\n```python\nprint(1)\n```"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "> **python**\n> print(1)\n" in result
+
+    @pytest.mark.parametrize(("opener", "lang"), [('```c# title="demo"', "c#"), ("```python 3", "python")])
+    def test_fenced_code_block_with_info_after_language(self, opener, lang):
+        result = _adapt_markdown_for_dingtalk(f"{opener}\nint x = 1;\n```")
+        assert "```" not in result
+        assert f"> **{lang}**\n> int x = 1;\n" in result
+
+    def test_indented_fence_in_list_item_is_converted(self):
+        text = "1. Install:\n   ```bash\n   pip install deerflow\n   ```\n2. Run it"
+        result = _adapt_markdown_for_dingtalk(text)
+        assert "```" not in result
+        assert "> **bash**" in result
+
     def test_inline_code_to_bold(self):
         text = "Use `pip install` to install"
         result = _adapt_markdown_for_dingtalk(text)
