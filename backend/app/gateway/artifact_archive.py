@@ -246,7 +246,11 @@ def build_artifact_archive(
     collision_set = set(collision_keys)
     if len(collision_keys) != len(collision_set):
         raise _reject()
-    implicit_dirs = {"/".join(parts[:i]) for key in collision_keys for parts in (key.split("/"),) for i in range(1, len(parts))}
+    implicit_dirs = set()
+    for key in collision_keys:
+        parts = key.split("/")
+        for i in range(1, len(parts)):
+            implicit_dirs.add("/".join(parts[:i]))
     if collision_set & implicit_dirs:
         raise _reject()
 

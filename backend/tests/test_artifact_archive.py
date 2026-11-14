@@ -419,8 +419,14 @@ def test_archive_rejects_file_colliding_with_implicit_directory(tmp_path, monkey
     outputs.mkdir()
     file_entry = outputs / "Report"
     file_entry.write_text("file content", encoding="utf-8")
+    lower_report = outputs / "report"
+    if lower_report.exists() and file_entry.samefile(lower_report):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
     nested_dir = outputs / "report" / "slides"
-    nested_dir.mkdir(parents=True)
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("case-sensitive filenames are unavailable on this filesystem")
     nested_entry = nested_dir / "lesson.pptx"
     nested_entry.write_text("slides content", encoding="utf-8")
 
@@ -443,8 +449,14 @@ def test_archive_rejects_unicode_nfc_nfd_implicit_directory_collision(tmp_path, 
     nfd_dir = "Cafe\u0301"
     file_entry = outputs / nfc_name
     file_entry.write_text("cafe content", encoding="utf-8")
+    nfd_path = outputs / nfd_dir
+    if nfd_path.exists() and file_entry.samefile(nfd_path):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
     nested_dir = outputs / nfd_dir
-    nested_dir.mkdir(parents=True)
+    try:
+        nested_dir.mkdir(parents=True)
+    except (NotADirectoryError, FileExistsError):
+        pytest.skip("normalization-sensitive filenames are unavailable on this filesystem")
     nested_entry = nested_dir / "menu.txt"
     nested_entry.write_text("menu content", encoding="utf-8")
 
