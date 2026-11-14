@@ -70,6 +70,11 @@ PATH_START_BOUNDARY = rf"(?<!{_PATH_START_BLOCKERS.pattern})"
 # entry under the same base to the model unmasked. ``;``, the Windows list
 # separator, already ended it. A ``:`` inside one path (``grep -n`` output,
 # a file name) only shortens the match; the rest is copied through verbatim.
+#
+# ``,`` ends the tail for the same reason: a ``,``-joined list (comma-
+# separated argument listings) would otherwise hide every later entry inside
+# the first match's tail. A ``,`` inside one path only shortens the match;
+# the rest is spliced through verbatim.
 _PATH_TAIL = r"(?:[/\\][^\s\"';&|<>():,]*)?"
 
 _SEGMENT_BOUNDARY_CHAR = re.compile(r"[^\w./-]")

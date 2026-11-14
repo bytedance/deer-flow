@@ -11,8 +11,8 @@ expressions, run once on the parent commit. That run cannot be committed: after
 this lands there is no old inline expression left to diff against, only the
 frozen copies below. So the committed guard is the weaker snapshot, and its
 red-ness rests on those literals — not on the length of ``_BASES``. The tail has
-changed exactly once since then (it now stops at ``:``), and the base gained a
-left-hand path-start boundary; the snapshot names those deltas instead of
+changed twice since then (it now stops at ``:`` and ``,``), and the base gained
+a left-hand path-start boundary; the snapshot names those deltas instead of
 re-freezing the literals, so any other drift still goes red.
 """
 
@@ -42,9 +42,10 @@ def _legacy_local_pattern(base: str) -> re.Pattern[str]:
     return re.compile(re.escape(base) + r"(?=/|$|[^\w./-])" + r"(?:[/\\][^\s\"';&|<>()]*)?")
 
 
-# The only intentional change to either expression since the extraction: the
-# tail also stops at ``:``, so a ``:``-joined path list ($PATH, $PYTHONPATH)
-# cannot swallow a second host path into the first match's tail.
+# The intentional tail changes since the extraction: it also stops at ``:``,
+# so a ``:``-joined path list ($PATH, $PYTHONPATH) cannot swallow a second
+# host path into the first match's tail, and at ``,``, so a comma-separated
+# argument listing cannot either.
 _LEGACY_TAIL = r"(?:[/\\][^\s\"';&|<>()]*)?"
 _CURRENT_TAIL = r"(?:[/\\][^\s\"';&|<>():,]*)?"
 
