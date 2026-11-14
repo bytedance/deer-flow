@@ -49,6 +49,12 @@ make test-blocking-io
   deployment credential.
 - **The OAuth store keeps refresh tokens only**, encrypted and keyed by scope,
   owner and server. Personal managers pass `owner_user_id`.
+- **OAuth refresh coordination** keeps the cached token and a loop-independent
+  completion signal in shared `_OAuthState`. The thread lock protects short state
+  transitions. Waiters suspend on their own event loops, keeping executor threads
+  available for the refresh owner's DNS and token-store work. Cancelling a waiter
+  leaves the shared signal intact. Owner failure or cancellation wakes waiters to
+  retry.
 - **Background task calls have no request.** `McpTaskToolCaller` binds the task
   owner's identity for the call and restores the previous value afterwards.
 
