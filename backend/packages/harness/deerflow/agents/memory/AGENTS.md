@@ -57,6 +57,9 @@ client or the real storage, because the payload shape is the contract.
 
 - **Facts are one Markdown file each.** `memory.json` holds shared summaries and
   revision data only. It never holds facts or a fact index.
+- **Parse fact Markdown on LF boundaries.** Unicode next-line, line-separator
+  and paragraph-separator characters can occur inside JSON strings; treating
+  them as line breaks corrupts the stored content.
 - **Writes take the user lock and check revisions.** A snapshot operation reloads
   and recomputes after a manifest conflict. The Gateway maps the conflict to
   HTTP 409.

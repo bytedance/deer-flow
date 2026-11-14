@@ -58,6 +58,9 @@ fail the storage operation; retry after access recovers.
 `storage_path` must point to the data root directory, not an existing JSON file.
 Hand-edited DeerMem summaries and fact Markdown files may have a leading UTF-8
 BOM; reads accept it, while writes remain BOM-free UTF-8.
+Canonical fact bodies preserve embedded Unicode next-line (U+0085), line-separator
+(U+2028), and paragraph-separator (U+2029) characters, including inside JSON strings.
+Leading and trailing whitespace in fact bodies is trimmed as before.
 
 Gateway shutdown drains memory updates before closing the backend, even when
 shutdown is cancelled. Config reload failures are logged without aborting runtime
