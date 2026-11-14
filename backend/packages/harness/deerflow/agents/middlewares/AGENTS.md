@@ -31,8 +31,8 @@ make test-blocking-io
 - **Tool wrappers nest.** Receipts wrap authorization, audit and write checks, so
   a denied call still gets a receipt. Progress tracking wraps error handling, so it
   sees the result that error handling produced.
-- **Progress tracking fences late results and hint retries by graph entry**, also
-  within one run.
+- **Progress tracking fences late results and hint retries by live graph entry**,
+  also within one run; unrelated model-only entries do not evict active fences.
 
 ## Rules for a middleware that changes messages
 
