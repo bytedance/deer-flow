@@ -52,11 +52,13 @@ export async function loadArtifactContent({
   threadId,
   isMock,
   full = false,
+  signal,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   full?: boolean;
+  signal?: AbortSignal;
 }) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
@@ -65,6 +67,7 @@ export async function loadArtifactContent({
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url, {
     cache: "no-store",
+    signal,
     headers: full
       ? undefined
       : { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },

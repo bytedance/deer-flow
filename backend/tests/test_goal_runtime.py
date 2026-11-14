@@ -560,6 +560,17 @@ def test_evaluate_goal_completion_shows_tool_evidence_to_the_evaluator():
     assert 'Tool result (present_files): "Successfully presented files"' in human_message.content
 
 
+def test_evaluator_does_not_treat_async_registration_as_completion():
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": false, "blocker": "external_wait", "reason": "The result is still pending", "evidence_summary": "Registered only"}'))
+
+    asyncio.run(goal.evaluate_goal_completion(goal.build_goal_state("Produce and deliver the final report"), _file_task_messages(), model=fake_model))
+
+    system_message, _ = fake_model.ainvoke.await_args.args[0]
+    assert "Registering a Batch, job, task, or scheduled continuation is not evidence that the objective is complete" in system_message.content
+    assert "actual requested result or artifact must exist or be delivered" in system_message.content
+
+
 def test_evaluate_goal_completion_injects_langfuse_metadata(monkeypatch):
     """Regression test for the goal evaluator's Langfuse tracing gap.
 
@@ -822,3 +833,34 @@ def test_parse_goal_command_set_trims_and_preserves_objective():
     assert goal.parse_goal_command("  finish the work  ") == goal.GoalCommand("set", "finish the work")
     # A multi-word objective that merely starts with an alias is a set, not a clear.
     assert goal.parse_goal_command("clear the build cache") == goal.GoalCommand("set", "clear the build cache")
+
+
+def test_parse_goal_command_from_chat_without_guidance():
+    assert goal.parse_goal_command("from-chat") == goal.GoalCommand("from_chat", "")
+    assert goal.parse_goal_command("  from-chat  ") == goal.GoalCommand("from_chat", "")
+
+
+def test_parse_goal_command_from_chat_with_guidance():
+    assert goal.parse_goal_command("from-chat focus on the vendor total") == goal.GoalCommand("from_chat", "focus on the vendor total")
+    # Guidance keeps its inner spacing and is trimmed at the edges.
+    assert goal.parse_goal_command("from-chat   keep  both totals ") == goal.GoalCommand("from_chat", "keep  both totals")
+
+
+def test_parse_goal_command_from_chat_is_case_insensitive():
+    for form in ("FROM-CHAT", "From-Chat", "  FrOm-ChAt  hint"):
+        command = goal.parse_goal_command(form)
+        assert command.kind == "from_chat"
+
+
+def test_parse_goal_command_from_chat_exact_token_only():
+    # Longer or glued tokens are literal objectives, not the from-chat mode.
+    assert goal.parse_goal_command("from-chatting is fun") == goal.GoalCommand("set", "from-chatting is fun")
+    assert goal.parse_goal_command("from-chatx") == goal.GoalCommand("set", "from-chatx")
+    assert goal.parse_goal_command("build from-chat reports") == goal.GoalCommand("set", "build from-chat reports")
+
+
+def test_parse_goal_command_existing_forms_unchanged_with_from_chat():
+    # The three pre-existing forms keep their exact semantics.
+    assert goal.parse_goal_command("") == goal.GoalCommand("status")
+    assert goal.parse_goal_command("clear") == goal.GoalCommand("clear")
+    assert goal.parse_goal_command("ship it") == goal.GoalCommand("set", "ship it")

@@ -7,7 +7,7 @@ import pytest
 from _repository_race_helpers import miss_select_factory
 from sqlalchemy.exc import IntegrityError
 
-from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.feedback import FeedbackAlreadyExistsError, FeedbackRepository
 from deerflow.persistence.feedback.sql import _UPSERT_MAX_ATTEMPTS
 
 
@@ -66,6 +66,41 @@ class TestFeedbackRepository:
         record = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
         assert record["user_id"] == "user-1"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_twice_for_same_run_and_user_raises_already_exists(self, tmp_path):
+        """A second create for one (thread, run, user) raises a domain error, not a raw IntegrityError."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1", message_id="msg-a")
+            with pytest.raises(FeedbackAlreadyExistsError):
+                await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="u1", message_id="msg-b")
+
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first["feedback_id"], 1)]
+            # The session was rolled back, so the repository keeps working.
+            other = await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+            assert other["user_id"] == "u2"
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_reraises_integrity_errors_other_than_the_run_user_key(self, tmp_path, monkeypatch):
+        """A violation that is not the (thread, run, user) key, e.g. a feedback_id collision, is not reported as 'already exists'."""
+        import uuid
+        from types import SimpleNamespace
+
+        from deerflow.persistence.feedback import sql as feedback_sql
+
+        fixed_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+        monkeypatch.setattr(feedback_sql, "uuid", SimpleNamespace(uuid4=lambda: fixed_id))
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            with pytest.raises(IntegrityError):
+                await repo.create(run_id="r2", thread_id="t1", rating=1, user_id="u2")
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_create_invalid_rating_zero(self, tmp_path):

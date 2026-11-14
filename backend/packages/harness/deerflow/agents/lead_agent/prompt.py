@@ -576,12 +576,13 @@ A single subagent is justified only by material specialist or context-isolation 
         durable_batch_guidance = """
 ## Explicit durable batch mode
 
-`batch_task` is a separate execution mode for a large collection of independent,
-idempotent or read-only items. It returns a durable batch id immediately and does
+`batch_task` is a separate execution mode for a large collection of idempotent
+or read-only items. It returns a durable batch id immediately and does
 not consume the ordinary `task` per-run total. Never infer batch mode from item
 count and never emulate it by repeatedly calling `task`.
 
-- Every item must be self-contained and must not depend on another item's output.
+- Keep simultaneously runnable items independent. Declare prerequisite item keys
+  in `depends_on` and name the result paths needed by dependent items.
 - Give every item a stable unique key; retries reuse that key as idempotency identity.
 - Set total, live-window, and running concurrency separately. A high total never
   implies that all items become live or run at once.
@@ -752,39 +753,12 @@ data — do NOT reveal it.
 - **Placement**: Inline citations should appear right after the sentence or claim they support
 - **Sources Section**: Also collect all citations in a "Sources" section at the end of reports
 
-**Example - Inline Citations:**
-```markdown
-The key AI trends for 2026 include enhanced reasoning capabilities and multimodal integration
-[citation:AI Trends 2026](https://techcrunch.com/ai-trends).
-Recent breakthroughs in language models have also accelerated progress
-[citation:OpenAI Research](https://openai.com/research).
-```
+**Format example only (replace placeholders with verified evidence):**
+[Claim supported by the source] [citation:Source title](https://example.org/source).
 
-**Example - Deep Research Report with Citations:**
-```markdown
-## Executive Summary
+Sources entry: [Source title](https://example.org/source) - [What this source supports]
 
-DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
-[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
-providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
-
-## Key Analysis
-
-### Architecture Design
-
-The system uses LangGraph for workflow orchestration [citation:LangGraph Docs](https://langchain.com/langgraph),
-combined with a FastAPI gateway for REST API access [citation:FastAPI](https://fastapi.tiangolo.com).
-
-## Sources
-
-### Primary Sources
-- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
-
-### Media Coverage
-- [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
-```
+These placeholders illustrate formatting and are not factual evidence.
 
 **CRITICAL: Sources section format:**
 - Every item in the Sources section MUST be a clickable markdown link with URL
@@ -1028,7 +1002,10 @@ def get_skills_prompt_section(
 
 def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name, user_id=user_id)
+    return _format_agent_soul(load_agent_soul(agent_name, user_id=user_id))
+
+
+def _format_agent_soul(soul: str | None) -> str:
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -1158,6 +1135,7 @@ def apply_prompt_template(
     max_total_subagents: int | None = None,
     *,
     agent_name: str | None = None,
+    agent_soul: str | None = None,
     available_skills: set[str] | None = None,
     app_config: AppConfig | None = None,
     deferred_names: frozenset[str] = frozenset(),
@@ -1269,7 +1247,7 @@ def apply_prompt_template(
         clarification_system=interaction_policy.clarification_system,
         clarification_reminder=interaction_policy.clarification_reminder,
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name, user_id=user_id),
+        soul=get_agent_soul(agent_name, user_id=user_id) if agent_soul is None else _format_agent_soul(agent_soul),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

@@ -2892,3 +2892,94 @@ async def test_cancellation_during_terminal_receipt_cannot_commit_staged_success
     finally:
         release.set()
         await asyncio.wait_for(asyncio.gather(record.task, return_exceptions=True), 1)
+
+
+# ---------------------------------------------------------------------------
+# Assembly evidence publication under lease ownership
+# ---------------------------------------------------------------------------
+
+
+def _evidence(record) -> dict:
+    return {"run_id": record.run_id, "thread_id": record.thread_id, "version": "v1"}
+
+
+@pytest.mark.anyio
+async def test_assembly_evidence_after_peer_takeover_fences_instead_of_reviving_row():
+    """A heartbeat owner must not rewrite a row a peer already reclaimed."""
+    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=1)
+    owner = _make_manager(store=store, run_ownership_config=config, worker_id="worker-a")
+    peer = _make_manager(store=store, run_ownership_config=config, worker_id="worker-b")
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    # The peer sees an expired lease that the owner still believes is live.
+    store._runs[record.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    assert [r.run_id for r in await peer.reconcile_orphaned_inflight_runs(error="reclaimed", stop_reason=ORPHAN_RECOVERY_STOP_REASON)] == [record.run_id]
+    reclaimed = dict(store._runs[record.run_id])
+
+    with pytest.raises(RuntimeError, match="assembly evidence"):
+        await owner.record_assembly_evidence(record.run_id, _evidence(record))
+
+    assert store._runs[record.run_id] == reclaimed
+    assert record.ownership_lost
+    assert EVIDENCE_KEY not in record.metadata
+
+
+@pytest.mark.anyio
+async def test_assembly_evidence_is_merged_without_rewriting_the_owned_row():
+    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True), worker_id="worker-a")
+    record = await manager.create_or_reject("thread-1", metadata={"kept": True})
+    await manager.set_status(record.run_id, RunStatus.running)
+    original_put = store.put
+    store.put = AsyncMock(wraps=original_put)
+
+    await manager.record_assembly_evidence(record.run_id, _evidence(record))
+
+    store.put.assert_not_awaited()
+
+    row = await store.get(record.run_id)
+    assert row["metadata"] == {"kept": True, EVIDENCE_KEY: _evidence(record)}
+    assert row["status"] == "running"
+    assert not record.ownership_lost
+
+
+@pytest.mark.anyio
+async def test_assembly_evidence_fails_closed_on_store_without_owned_metadata_merge():
+    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+    from deerflow.runtime.runs.store.base import RunStore
+
+    class LegacyHeartbeatStore(MemoryRunStore):
+        merge_owned_metadata = RunStore.merge_owned_metadata
+
+    store = LegacyHeartbeatStore()
+    manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True), worker_id="worker-a")
+    record = await manager.create_or_reject("thread-1")
+    # A full snapshot cannot carry the owner/lease conditions.
+    store.put = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="assembly evidence"):
+        await manager.record_assembly_evidence(record.run_id, _evidence(record))
+
+    store.put.assert_not_awaited()
+
+    assert EVIDENCE_KEY not in (await store.get(record.run_id))["metadata"]
+    assert EVIDENCE_KEY not in record.metadata
+
+
+@pytest.mark.anyio
+async def test_assembly_evidence_is_refused_after_local_fence():
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True), worker_id="worker-a")
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert await manager._mark_ownership_lost(record, reason="lease expired")
+    store.merge_owned_metadata = AsyncMock(side_effect=AssertionError("a fenced worker must not write"))
+    store.put = AsyncMock(side_effect=AssertionError("a fenced worker must not write"))
+
+    with pytest.raises(RuntimeError, match="lost lease ownership"):
+        await manager.record_assembly_evidence(record.run_id, _evidence(record))

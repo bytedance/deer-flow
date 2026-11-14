@@ -9,10 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from langchain_core.messages import HumanMessage
 from langgraph.store.memory import InMemoryStore
 from pydantic import ValidationError
+from starlette.datastructures import URL
 
 from app.gateway.authz import AuthContext
 from app.gateway.run_models import RunCreateRequest
@@ -33,7 +34,8 @@ def _setup(*, user_id="alice", permissions=("runs:read",), enabled=True, tool_ou
         }
     )
     user = SimpleNamespace(id=user_id, system_role="admin")
-    request = SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user, list(permissions))), url="https://deerflow.example/api/threads/current/runs")
+    request = Request({"type": "http", "method": "POST", "scheme": "https", "server": ("deerflow.example", 443), "path": "/api/threads/current/runs", "headers": [(b"host", b"deerflow.example")]})
+    request.state.auth = AuthContext(user, list(permissions))
     events = MemoryRunEventStore()
     threads = MemoryThreadMetaStore(InMemoryStore())
     manager = AsyncMock()
@@ -148,6 +150,31 @@ def test_reader_pages_visible_text_and_keeps_source_unchanged():
     asyncio.run(exercise())
 
 
+def test_reader_skips_malformed_optional_metadata_without_losing_the_page(caplog):
+    async def exercise():
+        prepare, events, threads, manager, _ = _setup()
+        await threads.create("source", user_id="alice")
+        await _put(events, "valid before")
+        malformed = await events.put(
+            thread_id="source",
+            run_id="run-2",
+            category="message",
+            event_type="llm.ai.response",
+            content={"type": "ai", "id": "malformed", "content": "valid after", "additional_kwargs": "legacy"},
+            metadata=["legacy metadata"],
+        )
+        reader, _ = prepare(["source"])
+        with caplog.at_level("WARNING", logger="app.gateway.conversation_access"):
+            page = json.loads(await reader(thread_id="source", cursor=None, limit=20))
+        assert page["status"] == "ok"
+        assert [message["text"] for message in page["messages"]] == ["valid before", "valid after"]
+        assert malformed is not None
+        assert any("thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
+        assert any("additional_kwargs" in record.message and "thread source" in record.message and "row seq 2" in record.message for record in caplog.records)
+
+    asyncio.run(exercise())
+
+
 def test_wrong_owner_missing_and_unlisted_targets_are_denied_before_content_read():
     async def exercise():
         prepare, events, threads, _, _ = _setup()
@@ -190,7 +217,7 @@ def test_missing_transcript_is_reported_without_checkpoint_reconstruction():
 
 
 def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
-    from test_gateway_services import _make_start_run_persistence_context
+    from test_gateway_services import _make_start_run_persistence_context, _seed_generic_resume_checkpoint
 
     from app.gateway import services
     from deerflow.config.app_config import reset_app_config, set_app_config
@@ -202,7 +229,7 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         request.state.user = user
         request.state.auth = AuthContext(user, ["runs:create", "runs:read"])
         request.state.auth_source = "session"
-        request.url = "https://deerflow.example/api/threads/current/runs"
+        request.url = URL("https://deerflow.example/api/threads/current/runs")
         await threads.create("source", user_id="alice")
         captured = []
 
@@ -220,6 +247,7 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
         second = await services.start_run(RunCreateRequest(input={"messages": [{"role": "user", "content": 'Quoted text: "read source"'}]}), "later", request)
         await second.task
         assert captured[1]["ctx"].conversation_reader is None
+        await _seed_generic_resume_checkpoint(request.app.state.checkpointer, "resume")
         resumed = await services.start_run(RunCreateRequest(command={"resume": "source"}), "resume", request)
         await resumed.task
         assert captured[2]["ctx"].conversation_reader is None

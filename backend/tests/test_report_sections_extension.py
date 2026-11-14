@@ -10,6 +10,8 @@ from deerflow_extension_api.plugins import ToolContext
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.extensions.plugin_tools import build_plugin_tools
 
+pytestmark = pytest.mark.bundled_extension
+
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/deerflow-extension-report-sections"
 
 OUTLINE = "# 2026 年新能源汽车行业研究报告\n\n本报告分五章。"

@@ -6,6 +6,7 @@ import {
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
+  findToolCallResult,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
   getMessageCopyData,
@@ -38,6 +39,82 @@ function aiMessage(content: string): Message {
     content,
   } as Message;
 }
+
+test.each(["OK", "Error: failed"])(
+  "selected unique calls resolve a leading result: %s",
+  (content) => {
+    const messages = [
+      { id: "result", type: "tool", tool_call_id: "call_0", content },
+      {
+        id: "owner",
+        type: "ai",
+        content: "",
+        tool_calls: [{ id: "call_0", name: "write_file", args: {} }],
+      },
+    ] as Message[];
+    expect(findToolCallResult("call_0", messages, "owner")).toBe(content);
+    expect(findToolCallResult("call_0", messages, "missing")).toBeUndefined();
+    expect(
+      findToolCallResult("call_0", messages.slice(1), "owner"),
+    ).toBeUndefined();
+    const nextTurn = [
+      messages[0]!,
+      { type: "human", content: "next" } as Message,
+      messages[1]!,
+    ];
+    expect(findToolCallResult("call_0", nextTurn, "owner")).toBeUndefined();
+  },
+);
+
+test("tool result lookup stays within the selected assistant occurrence", () => {
+  const assistant = (id: string): Message => ({
+    id,
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "call_0", name: "write_file", args: {} }],
+  });
+  const messages = [
+    assistant("a1"),
+    { id: "t1", type: "tool", tool_call_id: "call_0", content: "OK" },
+    assistant("a2"),
+    {
+      id: "t2",
+      type: "tool",
+      tool_call_id: "call_0",
+      content: "Error: failed",
+    },
+    assistant("a3"),
+  ] as Message[];
+  expect(findToolCallResult("call_0", messages, "a1")).toBe("OK");
+  expect(findToolCallResult("call_0", messages, "a2")).toBe("Error: failed");
+  expect(findToolCallResult("call_0", messages, "a3")).toBeUndefined();
+  expect(findToolCallResult("call_0", messages, "unloaded")).toBeUndefined();
+});
+
+test.each([false, true])(
+  "an unrelated assistant fences result lookup (leading=%s)",
+  (leading) => {
+    const owner = {
+      id: "owner",
+      type: "ai",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "write_file", args: {} }],
+    } as Message;
+    const other = {
+      id: "other",
+      type: "ai",
+      content: "An unrelated answer",
+    } as Message;
+    const result = {
+      type: "tool",
+      tool_call_id: "call_0",
+      content: "OK",
+    } as Message;
+    const messages = leading ? [result, other, owner] : [owner, other, result];
+    expect(findToolCallResult("call_0", messages, "owner")).toBeUndefined();
+    expect(findToolCallResult("call_0", messages, "other")).toBeUndefined();
+  },
+);
 
 test("aggregates token usage messages once per assistant turn", () => {
   const messages = [

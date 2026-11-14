@@ -413,6 +413,96 @@ def check_config_loadable(config_path: Path) -> CheckResult:
         )
 
 
+def check_memory_backend_config(config_path: Path) -> CheckResult:
+    """Statically validate the selected memory backend's backend_config.
+
+    A stale backend_config (DeerMem-only keys left in place after switching
+    manager_class to openviking) used to surface only when MemoryMiddleware
+    constructed the manager mid-conversation, after model tokens had already
+    been spent. from_backend_config is side-effect-free, so the same errors
+    can be reported here before an agent turn is accepted.
+    """
+    if not config_path.exists():
+        return CheckResult("memory backend config", "skip")
+
+    try:
+        config = _load_app_config(config_path)
+    except Exception:
+        # check_config_loadable already reports load failures.
+        return CheckResult("memory backend config", "skip")
+
+    return _check_memory_backend_config(config)
+
+
+def _check_memory_backend_config(config: object) -> CheckResult:
+    memory = getattr(config, "memory", None)
+    manager_class = str(getattr(memory, "manager_class", "") or "").strip()
+    label = f"memory backend config ({manager_class or 'unspecified'})"
+    if memory is None or not getattr(memory, "enabled", True):
+        return CheckResult(label, "skip", "memory disabled")
+
+    backend_config = getattr(memory, "backend_config", None) or {}
+    if not _resolves_to_builtin_openviking(manager_class):
+        return CheckResult(label, "skip", "no static validator for this backend")
+
+    try:
+        from deerflow.agents.memory.backends.openviking.config import OpenVikingConfig
+    except Exception as exc:
+        # Importing the backend package executes openviking/__init__.py, which
+        # pulls pydantic and deerflow internals; a broken backend environment
+        # degrades to a skip instead of crashing the report (same policy as
+        # resolve_config_path).
+        return CheckResult(label, "skip", str(exc))
+
+    try:
+        OpenVikingConfig.from_backend_config(dict(backend_config))
+    except Exception as exc:
+        detail = str(exc).strip().splitlines()[0] if str(exc).strip() else repr(exc)
+        return CheckResult(label, "fail", detail, fix=_memory_backend_config_fix(detail))
+    return CheckResult(label, "ok")
+
+
+def _resolves_to_builtin_openviking(manager_class: str) -> bool:
+    """True when manager_class resolves to the built-in OpenViking manager.
+
+    Only the built-in backend's config contract is known here: a custom
+    ``OpenVikingMemoryManager`` subclass pointed at by a dotted path owns its
+    backend_config shape, so doctor must not reject it with the built-in
+    rules. Resolution failures are the factory's to report (it fails loudly
+    in get_memory_manager), not this check's.
+    """
+    try:
+        from deerflow.agents.memory.backends.openviking.openviking_manager import OpenVikingMemoryManager
+        from deerflow.agents.memory.manager import _resolve_manager_class
+    except Exception:
+        return False
+    try:
+        return _resolve_manager_class(manager_class) is OpenVikingMemoryManager
+    except Exception:
+        return False
+
+
+def _memory_backend_config_fix(detail: str) -> str | None:
+    """Remediation matched to the validator's failure modes; None lets the
+    verbatim error speak for itself."""
+    if "USER API key is missing; set" in detail:
+        var = detail.rsplit("set ", 1)[-1].strip().rstrip(".")
+        return f"Add {var}=<your-key> to your .env file"
+    if "Unknown OpenViking backend_config fields" in detail:
+        return "Remove the fields named in the error from memory.backend_config, or switch manager_class back"
+    if "trusted mode is no longer supported" in detail:
+        return "Use a USER API key (api_key_env) and configure owner_user_id instead of auth_mode/account"
+    if "custom HTTP client fields are no longer supported" in detail:
+        return "Remove the custom HTTP client fields from memory.backend_config"
+    return None
+
+
+def _looks_like_key_placeholder(value: str) -> bool:
+    """Recognize sample key values without logging or transmitting them."""
+    normalized = value.strip().lower()
+    return normalized.startswith(("your-", "replace-with-", "sk-your-", "sk-replace-with-"))
+
+
 def check_llm_api_key(config_path: Path) -> list[CheckResult]:
     """Check that each model's env var is set in the environment."""
     if not config_path.exists():
@@ -448,14 +538,15 @@ def check_llm_api_key(config_path: Path) -> list[CheckResult]:
             model_name = model.get("name", "default")
             for var in env_refs:
                 label = f"{var} set (model: {model_name})"
-                if os.environ.get(var):
+                value = os.environ.get(var)
+                if value and value.strip() and not _looks_like_key_placeholder(value):
                     results.append(CheckResult(label, "ok"))
                 else:
                     results.append(
                         CheckResult(
                             label,
                             "fail",
-                            fix=f"Add {var}=<your-key> to your .env file",
+                            fix=f"Set {var} to a real key in your .env file",
                         )
                     )
     except Exception as exc:
@@ -607,8 +698,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "serper": "SERPER_API_KEY",
                 "serply": "SERPLY_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
                 "webz": "WEBZ_API_KEY",
+                "groundroute": "GROUNDROUTE_API_KEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",
@@ -616,7 +709,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "firecrawl": "FIRECRAWL_API_KEY",
                 "fastcrw": "CRW_API_KEY",
                 "sofya": "SOFYA_API_KEY",
+                "specstream": "SPECSTREAM_API_KEY",
                 "unbrowse": "UNBROWSE_API_KEY",
+                "groundroute": "GROUNDROUTE_API_KEY",
+                "browserless": "BROWSERLESS_TOKEN",
             },
             "image_search": {
                 "brave": "BRAVE_SEARCH_API_KEY",
@@ -628,27 +724,77 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             },
         }
         key_fields = {
+            "web_fetch": {
+                "browserless": "token",
+            },
             "web_capture": {
                 "browserless": "token",
             },
         }
+        # Browserless treats a configured token field as authoritative, blank or
+        # not, and reads BROWSERLESS_TOKEN only when the field is omitted
+        # (community/browserless/tools.py). The other providers fall back to
+        # their variable whenever the configured value gives no key.
+        authoritative_key_providers = {"browserless"}
+        # InfoQuest reads only INFOQUEST_API_KEY; an api_key field in its tool
+        # config never reaches the client (community/infoquest/).
+        env_only_key_providers = {"infoquest"}
+        # Keyless providers that still send a key when one is set, and whether
+        # they read an api_key field before the variable (Jina reads only the
+        # variable).
+        free_provider_keys = {"youcom": ("YDC_API_KEY", True), "jina_ai": ("JINA_API_KEY", False)}
 
-        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key") -> tuple[Status, str] | None:
+        def _is_placeholder(value: object) -> bool:
+            # Ask the runtime's owner of the rule: providers drop an .env.example
+            # value, so doctor must not report it as a configured key. Without
+            # the harness, the config checks already fail with the fix.
+            try:
+                from deerflow.community.provider_credentials import is_template_placeholder
+            except ImportError:
+                return False
+            return isinstance(value, str) and is_template_placeholder(value)
+
+        def _real_key(value: object) -> bool:
+            return isinstance(value, str) and bool(value.strip()) and not _is_placeholder(value)
+
+        def _configured_key_detail(tool: dict, default_var: str, key_field: str = "api_key", *, authoritative: bool = False) -> tuple[Status, str] | None:
             configured_key = tool.get(key_field)
-            if isinstance(configured_key, str) and configured_key.strip():
+            if _real_key(configured_key):
                 key = configured_key.strip()
-                if key.startswith("$"):
-                    env_name = key[1:]
-                    val = os.environ.get(env_name)
-                    if val and val.strip():
-                        return ("ok", f"{env_name} set from config")
-                    # The referenced var is unset; fall through to the default
-                    # env var below, which tools use as a runtime fallback.
-                else:
+                if not key.startswith("$"):
                     return ("warn", f"literal {key_field} set in config")
+                env_name = key[1:]
+                if _real_key(os.environ.get(env_name)):
+                    return ("ok", f"{env_name} set from config")
+            if authoritative and key_field in tool:
+                return None
+            # A blank or placeholder configured value gives no key, and the tool
+            # falls back to its default variable. An unset $VAR reference never
+            # gets here at runtime: config loading fails, which
+            # check_config_loadable reports.
+            return ("ok", f"{default_var} set") if _real_key(os.environ.get(default_var)) else None
 
-            val = os.environ.get(default_var)
-            return ("ok", f"{default_var} set") if val and val.strip() else None
+        def _config_source(tool: dict, key_field: str) -> tuple[str, object]:
+            """The configured key's name in a message, and its value after a ``$VAR`` reference."""
+            value = tool.get(key_field)
+            if isinstance(value, str) and value.strip().startswith("$"):
+                name = value.strip()[1:]
+                return name, os.environ.get(name)
+            return f"{key_field} in config", value
+
+        def _missing_key_reason(tool: dict, var: str, key_field: str, *, authoritative: bool) -> tuple[str, bool]:
+            """Why no key reaches the provider, and whether a placeholder is the cause."""
+            name, value = _config_source(tool, key_field)
+            if authoritative and key_field in tool:
+                if _is_placeholder(value):
+                    return f"{name} still holds the .env.example placeholder", True
+                if name == var:
+                    return f"{var} not set", False
+                return f"{name} is empty, and {var} is read only when {key_field} is omitted", False
+            for source, candidate in ((name, value), (var, os.environ.get(var))):
+                if _is_placeholder(candidate):
+                    return f"{source} still holds the .env.example placeholder", True
+            return f"{var} not set", False
 
         def _browserless_self_hosted(tool: dict) -> bool:
             base_url = str(tool.get("base_url") or "http://localhost:3032").lower()
@@ -705,6 +851,13 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             use = tool.get("use", "")
             for provider, detail in free_providers.get(tool_name, {}).items():
                 if provider in use:
+                    var, reads_config = free_provider_keys.get(provider, (None, False))
+                    sources = [_config_source(tool, "api_key")] if reads_config else []
+                    if var:
+                        sources.append((var, os.environ.get(var)))
+                    ignored = next((name for name, value in sources if _is_placeholder(value)), None)
+                    if ignored:
+                        detail = f"{detail}; {ignored} holds the .env.example placeholder and is ignored"
                     return CheckResult(label, "ok", detail)
 
         for tool in tool_entries:
@@ -712,7 +865,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
             for provider, var in key_providers.get(tool_name, {}).items():
                 if provider in use:
                     key_field = key_fields.get(tool_name, {}).get(provider, "api_key")
-                    key_status = _configured_key_detail(tool, var, key_field=key_field)
+                    authoritative = provider in authoritative_key_providers
+                    # What the provider reads: an env-only provider never sees the field.
+                    read = {name: value for name, value in tool.items() if name != key_field} if provider in env_only_key_providers else tool
+                    key_status = _configured_key_detail(read, var, key_field=key_field, authoritative=authoritative)
                     if key_status:
                         status, detail = key_status
                         if status == "warn":
@@ -723,13 +879,14 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                                 fix=f"Move the {key_field} to .env as {var}=<your-key> and reference it as ${var}",
                             )
                         return CheckResult(label, "ok", f"{provider} ({detail})")
-                    if tool_name == "web_capture" and provider == "browserless" and _browserless_self_hosted(tool):
+                    reason, placeholder = _missing_key_reason(read, var, key_field, authoritative=authoritative)
+                    if not placeholder and provider == "browserless" and _browserless_self_hosted(tool):
                         return CheckResult(label, "ok", "browserless (self-hosted, token optional)")
                     return CheckResult(
                         label,
                         "warn",
-                        f"{provider} configured but {var} not set",
-                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'",
+                        f"{provider} configured but {reason}",
+                        fix=f"Add {var}=<your-key> to .env, or run 'make setup'" if not (authoritative and key_field in read) else f"Set {key_field} to ${var} with the real token in .env, or remove {key_field} to use {var}",
                     )
 
         for tool in tool_entries:
@@ -923,6 +1080,7 @@ def main() -> int:
         config_failure or check_config_exists(config_path),
         check_config_version(config_path, project_root),
         check_config_loadable(config_path),
+        check_memory_backend_config(config_path),
         check_models_configured(config_path),
     ]
     sections.append(("Configuration", cfg_checks))

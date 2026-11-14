@@ -14,6 +14,7 @@ not a server-enforced handshake (§11).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Literal
@@ -103,13 +104,10 @@ class PurgeResponse(BaseModel):
 
 
 def _projects_config() -> ProjectsConfig:
-    """Projects config, falling back to defaults when the app config is unavailable."""
+    """Read the retention policy; an unavailable config must not shorten it."""
     from deerflow.config.app_config import get_app_config
 
-    try:
-        return get_app_config().projects
-    except Exception:
-        return ProjectsConfig()
+    return get_app_config().projects
 
 
 def _not_found() -> HTTPException:
@@ -149,10 +147,11 @@ async def list_trash_documents(
     repo = get_project_document_repo(request)
     user_id = get_effective_user_id()
     try:
+        config = await asyncio.to_thread(_projects_config)
         await run_trash_retention_sweep(
             repo,
             get_paths(),
-            retention_days=_projects_config().trash_retention_days,
+            retention_days=config.trash_retention_days,
             user_id=user_id,
             include_reconciliation=_reconciliation_due(user_id),
         )

@@ -530,6 +530,9 @@ def build_oauth_tool_interceptor(
     spellings_by_server = {server_name: header_spellings(server_config.headers) for server_name, server_config in extensions_config.get_enabled_mcp_servers().items()}
 
     async def oauth_interceptor(request: Any, handler: Any) -> Any:
+        server = extensions_config.mcp_servers.get(request.server_name)
+        if server is not None and server.agent_auth:
+            return await handler(request)
         header = await token_manager.get_authorization_header(request.server_name)
         if not header:
             return await handler(request)

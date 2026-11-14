@@ -411,11 +411,25 @@ class BrowserSession:
         async with self._ensure_page_lock:
             if self._page is not None and not self._page.is_closed():
                 return self._page
+            # A closed popup/tab does not end the browsing session. Reuse a
+            # surviving tab, or open one in the same context to retain cookies
+            # and storage. Closed contexts disappear from browser.contexts.
+            if self._browser is not None and self._browser.is_connected() and self._context is not None and self._context in self._browser.contexts:
+                pages = [page for page in self._context.pages if not page.is_closed()]
+                page = pages[-1] if pages else await self._context.new_page()
+                if not self._connected_over_cdp:
+                    await page.bring_to_front()
+                self._set_active_page(page)
+                return self._page
+
             from playwright.async_api import async_playwright
 
             if self._playwright is None:
                 self._playwright = await async_playwright().start()
 
+            # These registrations belong to the context being replaced.
+            self._request_guard_bound = False
+            self._page_listener_bound = False
             if self._cdp_url:
                 # Attach to the user's running Chrome (started with
                 # --remote-debugging-port). Reuse its default context + an existing

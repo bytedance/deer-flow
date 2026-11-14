@@ -42,7 +42,8 @@ def test_tool_choice_survives_request_and_tool_followup(monkeypatch, tool_choice
     requests = []
     clients = []
     responses = []
-    client_class = httpx.Client
+    client_name = "AsyncClient" if invocation.endswith("ainvoke") else "Client"
+    client_class = getattr(httpx, client_name)
 
     def handle(request):
         payload = json.loads(request.content)
@@ -61,7 +62,7 @@ def test_tool_choice_survives_request_and_tool_followup(monkeypatch, tool_choice
         clients.append(client)
         return client
 
-    monkeypatch.setattr(provider.httpx, "Client", make_client)
+    monkeypatch.setattr(provider.httpx, client_name, make_client)
     history = [HumanMessage(content="Read the quarterly report.")]
 
     if invocation == "invoke":
@@ -175,14 +176,15 @@ def test_no_function_tools_preserves_nonforcing_choices(monkeypatch, tools, tool
     monkeypatch.setattr(provider, "load_codex_cli_credential", lambda: CodexCliCredential("fake-token", "fake-account"))
     model = provider.CodexChatModel(retry_max_attempts=1)
     payloads = []
-    client_class = httpx.Client
+    client_name = "AsyncClient" if invocation.endswith("ainvoke") else "Client"
+    client_class = getattr(httpx, client_name)
 
     def handle(request):
         payloads.append(json.loads(request.content))
         event = {"type": "response.completed", "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "OK"}]}]}}
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=f"data: {json.dumps(event)}\n\n".encode())
 
-    monkeypatch.setattr(provider.httpx, "Client", lambda **options: client_class(transport=httpx.MockTransport(handle), **options))
+    monkeypatch.setattr(provider.httpx, client_name, lambda **options: client_class(transport=httpx.MockTransport(handle), **options))
     runnable = model.bind_tools(tools or [], tool_choice=tool_choice) if invocation.startswith("bound_") else model
     kwargs = {} if invocation.startswith("bound_") else {"tools": tools, "tool_choice": tool_choice}
     answer = asyncio.run(runnable.ainvoke([HumanMessage(content="Say OK.")], **kwargs)) if invocation.endswith("ainvoke") else runnable.invoke([HumanMessage(content="Say OK.")], **kwargs)
