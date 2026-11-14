@@ -89,3 +89,10 @@ make test-blocking-io
   handlers remain for hosts without a lifespan, such as the embedded client.
 - **Build the readiness client off the event loop**, and close a client that
   arrives after the caller was cancelled.
+
+## Bash cleanup receipts
+
+Exec/poll errors plus failed or rejected close receipts set
+`_command_cleanup_failed` so normal release cannot return the sandbox to the warm
+pool. Confirmed terminal commands remain reusable. Cover sync and managed paths
+in `test_aio_bash_cleanup_recycle.py`.

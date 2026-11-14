@@ -103,6 +103,10 @@ This section accumulates work toward the **2.3.0** milestone
   The cap now matches the platform's 10 MB for images; the 20 MB file limit is
   unchanged. ([#8174])
 
+- **sandbox:** AIO sandboxes are recycled when a Bash command may still be
+  running and its session cannot be closed, preventing late writes after warm
+  reuse. Commands confirmed to have terminated remain reusable.
+
 - **threads:** Deleting a conversation on Windows no longer fails with
   `Failed to delete local thread data.` when the workspace holds a file whose
   path exceeds `MAX_PATH`. The thread directory is now resolved through the
