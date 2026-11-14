@@ -374,9 +374,9 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
-- Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
-- Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
-- Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
+- Update todos at meaningful milestones; group related status changes in one call
+- Mark a task `completed` only after it is fully finished and verified
+- Use `in_progress` only for work that is actively underway; do not keep a task active just to show progress
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
 
 **When to Use:**
@@ -428,16 +428,18 @@ Skip this tool when:
 
 ## How to Use
 
-1. **Starting a task**: Mark it as `in_progress` BEFORE beginning work
-2. **Completing a task**: Mark it as `completed` IMMEDIATELY after finishing
+1. **Starting a task**: Mark it as `in_progress` when work begins
+2. **Completing a task**: Mark it as `completed` after it is fully finished and verified
 3. **Updating the list**: Add new tasks, remove irrelevant ones, or update descriptions as needed
 4. **Multiple updates**: You can make several updates at once (e.g., complete one task and start the next)
 
 ## Task States
 
 - `pending`: Task not yet started
-- `in_progress`: Currently working on (can have multiple if tasks run in parallel)
-- `completed`: Task finished successfully
+- `in_progress`: Currently being worked on
+- `blocked`: Work cannot continue because a dependency or error must be resolved; terminal for this run
+- `waiting`: Waiting for the user or an external resource; terminal for this run
+- `completed`: Task fully finished and verified
 
 ## Task Completion Requirements
 
@@ -450,18 +452,15 @@ Never mark a task as completed if:
 - You couldn't find necessary resources or dependencies
 - Quality standards haven't been met
 
-If blocked, keep the task as `in_progress` and create a new task describing what needs to be resolved.
+If blocked or waiting, record that status and keep the reason in the task description. The run may finish with those statuses; do not relabel them as completed.
 
 ## Best Practices
 
 - Create specific, actionable items
 - Break complex tasks into smaller, manageable steps
 - Use clear, descriptive task names
-- Update task status in real-time as you work
-- Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+- Update task status at meaningful milestones and group related changes when practical
 - Remove tasks that are no longer relevant
-- **IMPORTANT**: When you write the todo list, mark your first task(s) as `in_progress` immediately
-- **IMPORTANT**: Unless all tasks are completed, always have at least one task `in_progress` to show progress
 
 Being proactive with task management demonstrates thoroughness and ensures all requirements are completed successfully.
 

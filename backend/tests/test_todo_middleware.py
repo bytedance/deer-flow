@@ -449,6 +449,39 @@ class TestAfterModel:
         }
         assert mw.after_model(state, _make_runtime()) is None
 
+    @pytest.mark.parametrize("status", ["blocked", "waiting"])
+    def test_returns_none_when_todos_are_terminal_for_this_run(self, status):
+        mw = TodoMiddleware()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [{"status": status, "content": "Cannot continue here"}],
+        }
+        assert mw.after_model(state, _make_runtime()) is None
+
+    def test_reminder_skips_blocked_and_waiting_items(self):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {
+            "messages": [_ai_no_tool_calls()],
+            "todos": [
+                {"status": "blocked", "content": "Blocked dependency"},
+                {"status": "waiting", "content": "User approval"},
+                {"status": "pending", "content": "Continue implementation"},
+            ],
+        }
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+        seen: list[ModelRequest] = []
+        mw.wrap_model_call(
+            _make_model_request(state["messages"], runtime=runtime),
+            lambda request: seen.append(request) or "response",
+        )
+
+        reminder = seen[0].messages[-1].content
+        assert "Blocked dependency" not in reminder
+        assert "User approval" not in reminder
+        assert "Continue implementation" in reminder
+
     def test_returns_none_when_no_messages(self):
         mw = TodoMiddleware()
         state = {

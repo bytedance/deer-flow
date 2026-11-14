@@ -75,7 +75,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         }
 
     todos = state.get("todos")
-    pending = in_progress = 0
+    pending = in_progress = blocked = waiting = 0
     if isinstance(todos, list):
         for item in todos:
             if not isinstance(item, Mapping):
@@ -84,6 +84,10 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
                 pending += 1
             elif item.get("status") == "in_progress":
                 in_progress += 1
+            elif item.get("status") == "blocked":
+                blocked += 1
+            elif item.get("status") == "waiting":
+                waiting += 1
     summary = state.get("summary_text")
     return {
         "scope": scope,
@@ -93,7 +97,7 @@ def snapshot_run_status(state: Mapping[str, Any], context: Mapping[str, Any], *,
         "tool_calls_this_run": tool_calls if scope == "current_run_visible" else None,
         "context_fill": fill,
         "has_summary": isinstance(summary, str) and bool(summary.strip()),
-        "todos": {"pending": pending, "in_progress": in_progress},
+        "todos": {"pending": pending, "in_progress": in_progress, "blocked": blocked, "waiting": waiting},
     }
 
 

@@ -49,10 +49,12 @@ _TODO_SYSTEM_PROMPT = """
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
-- Mark todos as completed IMMEDIATELY after finishing each step - do NOT batch completions
-- Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
-- Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
+- Update todos at meaningful milestones and group related changes when practical
+- Mark `completed` only after a task is fully finished and verified
+- Use `in_progress` only while actively working; use `blocked` or `waiting` when work cannot continue in this run
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
+
+Task states: `pending` (not started), `in_progress` (active), `blocked` (blocked by a dependency or error), `waiting` (waiting for the user or an external resource), and `completed` (fully finished and verified). Keep `completed` truthful; blocked or waiting tasks may remain when the run ends.
 </todo_list_system>
 """
 

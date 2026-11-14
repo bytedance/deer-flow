@@ -113,7 +113,7 @@ title:
 
 ### TodoMiddleware
 
-当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具，随着完成复杂目标，将任务标记为 `pending`、`in_progress` 或 `completed`。
+当计划模式激活时，维护一个对用户可见的结构化任务列表。Agent 使用 `write_todos` 工具在有意义的里程碑更新任务。状态包括 `pending`、`in_progress`、`completed`、`blocked` 和 `waiting`；只有完全完成并验证过的工作才能标记为 `completed`。
 
 **激活**：在请求配置中设置 `is_plan_mode: true` 时自动启用。不需要 `config.yaml` 条目。
 

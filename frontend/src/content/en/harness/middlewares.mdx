@@ -117,7 +117,7 @@ title:
 
 ### TodoMiddleware
 
-When plan mode is active, maintains a structured task list visible to the user. The agent uses the `write_todos` tool to mark tasks as `pending`, `in_progress`, or `completed` as it works through a complex objective.
+When plan mode is active, maintains a structured task list visible to the user. The agent uses the `write_todos` tool to update tasks at meaningful milestones. Statuses are `pending`, `in_progress`, `completed`, `blocked`, and `waiting`; only fully finished and verified work is `completed`.
 
 **Activation**: enabled automatically when `is_plan_mode: true` is set in the request configuration. No `config.yaml` entry required.
 
