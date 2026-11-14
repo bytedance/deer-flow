@@ -5,6 +5,8 @@ import {
   CheckIcon,
   Loader2Icon,
   MessageCircleQuestionMarkIcon,
+  ShieldCheckIcon,
+  XIcon,
 } from "lucide-react";
 import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
@@ -24,9 +26,14 @@ import {
   buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildInitialHumanInputFormValues,
+  createHitlApprovalResponses,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
+  parseApprovalArgsSummary,
   readHumanInputFormValue,
+  type HitlApprovalDecision,
+  type HitlApprovalRequest,
+  type HitlApprovalResponse,
   type HumanInputField,
   type HumanInputFormValue,
   type HumanInputOption,
@@ -38,6 +45,7 @@ import { cn } from "@/lib/utils";
 
 import { MarkdownContent } from "./markdown-content";
 import { createMarkdownLinkComponent } from "./markdown-link";
+import { ToolCallDetails } from "./tool-call-details";
 
 export type HumanInputSubmitResult = boolean | void;
 
@@ -593,6 +601,395 @@ export function HumanInputCard({
               {t.humanInput.answeredValue(answeredResponse.value)}
             </p>
           ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function ToolApprovalCard({
+  request,
+  disabled = false,
+  onSubmit,
+}: {
+  request: HitlApprovalRequest;
+  disabled?: boolean;
+  onSubmit?: (
+    request: HitlApprovalRequest,
+    responses: HitlApprovalResponse[],
+  ) => HumanInputSubmitResult | Promise<HumanInputSubmitResult>;
+}) {
+  const { t } = useI18n();
+  const copy = t.humanInput.approval;
+  const titleId = useId();
+  const reasonId = useId();
+  const [decisionState, setDecisionState] = useState<{
+    requestId: string;
+    values: Record<string, HitlApprovalDecision | undefined>;
+  }>({ requestId: request.request_id, values: {} });
+  const [rejectionReason, setRejectionReason] = useState("");
+  const [argumentState, setArgumentState] = useState<{
+    requestId: string;
+    values: Record<string, string>;
+  }>({ requestId: request.request_id, values: {} });
+  const [submitting, setSubmitting] = useState(false);
+  const [answeredRequestId, setAnsweredRequestId] = useState<string | null>(
+    null,
+  );
+  const [error, setError] = useState("");
+  const decisions =
+    decisionState.requestId === request.request_id ? decisionState.values : {};
+  const answered = answeredRequestId === request.request_id;
+  const readOnly = !onSubmit;
+  const isDisabled = disabled || submitting || answered || readOnly;
+  const allowApprove = request.allowed_decisions.includes("approve");
+  const allowReject = request.allowed_decisions.includes("reject");
+  const argumentTexts =
+    argumentState.requestId === request.request_id ? argumentState.values : {};
+  const editedArguments: Record<string, Record<string, unknown> | undefined> =
+    {};
+  for (const action of request.actions) {
+    if (decisions[action.tool_call_id] !== "edit") continue;
+    try {
+      const parsed: unknown = JSON.parse(
+        argumentTexts[action.tool_call_id] ?? JSON.stringify(action.args ?? {}),
+      );
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+        editedArguments[action.tool_call_id] = parsed as Record<
+          string,
+          unknown
+        >;
+    } catch {
+      /* An invalid edit keeps Submit disabled. */
+    }
+  }
+  const responses = createHitlApprovalResponses(
+    request,
+    decisions,
+    rejectionReason,
+    editedArguments,
+  );
+
+  const submitBatch = async (batch: HitlApprovalResponse[] | null) => {
+    if (isDisabled || !onSubmit || batch?.length !== request.actions.length) {
+      return;
+    }
+    setSubmitting(true);
+    setError("");
+    try {
+      const result = await onSubmit(request, batch);
+      if (result === false) {
+        setError(copy.submitFailed);
+      } else {
+        setAnsweredRequestId(request.request_id);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const setDecision = (toolCallId: string, decision: HitlApprovalDecision) => {
+    setDecisionState((current) => ({
+      requestId: request.request_id,
+      values: {
+        ...(current.requestId === request.request_id ? current.values : {}),
+        [toolCallId]: decision,
+      },
+    }));
+  };
+
+  const submitAll = (decision: HitlApprovalDecision) =>
+    submitBatch(
+      createHitlApprovalResponses(
+        request,
+        Object.fromEntries(
+          request.actions.map((action) => [action.tool_call_id, decision]),
+        ),
+        rejectionReason,
+      ),
+    );
+
+  return (
+    <section
+      aria-labelledby={titleId}
+      className="border-border bg-card/70 text-card-foreground rounded-lg border p-4 shadow-xs"
+      data-testid="tool-approval-card"
+    >
+      <div className="flex items-start gap-3">
+        <div className="bg-primary/10 text-primary mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md">
+          <ShieldCheckIcon className="size-4" />
+        </div>
+        <div className="min-w-0 flex-1 space-y-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="space-y-1">
+              <h2 id={titleId} className="text-sm leading-5 font-medium">
+                {copy.title}
+              </h2>
+              <p className="text-muted-foreground text-sm leading-6">
+                {copy.description}
+              </p>
+              {request.transport === "live" ? (
+                <p className="text-muted-foreground text-xs">
+                  {copy.childApproval}
+                </p>
+              ) : null}
+            </div>
+            {answered || submitting || readOnly ? (
+              <Badge variant={answered ? "outline" : "secondary"}>
+                {submitting ? (
+                  <Loader2Icon className="size-3 animate-spin" />
+                ) : null}
+                {answered ? <CheckCircle2Icon className="size-3" /> : null}
+                {answered
+                  ? t.humanInput.answered
+                  : submitting
+                    ? t.humanInput.pending
+                    : t.humanInput.readOnly}
+              </Badge>
+            ) : null}
+          </div>
+
+          <div className="space-y-3">
+            {request.actions.map((action) => {
+              const args =
+                action.args ?? parseApprovalArgsSummary(action.args_summary);
+              const oldString = args.old_str;
+              const newString = args.new_str;
+              const hasReplacementDiff =
+                action.tool_name === "str_replace" &&
+                typeof oldString === "string" &&
+                typeof newString === "string";
+              return (
+                <div
+                  className="border-border/70 rounded-md border p-3"
+                  data-testid={`approval-action-${action.tool_call_id}`}
+                  key={action.tool_call_id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-mono text-sm font-medium">
+                      {action.tool_name}
+                    </span>
+                    <div
+                      className="flex flex-wrap gap-1"
+                      aria-label={action.tool_name}
+                    >
+                      {action.grant_allowed &&
+                      request.allowed_decisions.includes("approve_thread") ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            decisions[action.tool_call_id] === "approve_thread"
+                              ? "secondary"
+                              : "outline"
+                          }
+                          disabled={isDisabled}
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "approve_thread"
+                          }
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "approve_thread")
+                          }
+                        >
+                          {copy.approveThread}
+                        </Button>
+                      ) : null}
+                      {action.args &&
+                      request.allowed_decisions.includes("edit") ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={
+                            decisions[action.tool_call_id] === "edit"
+                              ? "secondary"
+                              : "outline"
+                          }
+                          disabled={isDisabled}
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "edit"
+                          }
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "edit")
+                          }
+                        >
+                          {copy.editArguments}
+                        </Button>
+                      ) : null}
+                      {allowApprove ? (
+                        <Button
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "approve"
+                          }
+                          disabled={isDisabled}
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "approve")
+                          }
+                          size="sm"
+                          type="button"
+                          variant={
+                            decisions[action.tool_call_id] === "approve"
+                              ? "secondary"
+                              : "outline"
+                          }
+                        >
+                          <CheckIcon className="size-3.5" />
+                          {copy.approve}
+                        </Button>
+                      ) : null}
+                      {allowReject ? (
+                        <Button
+                          aria-pressed={
+                            decisions[action.tool_call_id] === "reject"
+                          }
+                          disabled={isDisabled}
+                          onClick={() =>
+                            setDecision(action.tool_call_id, "reject")
+                          }
+                          size="sm"
+                          type="button"
+                          variant={
+                            decisions[action.tool_call_id] === "reject"
+                              ? "secondary"
+                              : "outline"
+                          }
+                        >
+                          <XIcon className="size-3.5" />
+                          {copy.reject}
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                  <ToolCallDetails
+                    args={args}
+                    callId={action.tool_call_id}
+                    name={action.tool_name}
+                    pendingResultLabel={copy.waiting}
+                  >
+                    {hasReplacementDiff ? (
+                      <div className="grid gap-2" data-testid="approval-diff">
+                        <pre className="bg-destructive/10 max-h-64 overflow-auto rounded p-2 font-mono text-xs whitespace-pre-wrap">
+                          {oldString
+                            .split("\n")
+                            .map((line) => `- ${line}`)
+                            .join("\n")}
+                        </pre>
+                        <pre className="bg-primary/10 max-h-64 overflow-auto rounded p-2 font-mono text-xs whitespace-pre-wrap">
+                          {newString
+                            .split("\n")
+                            .map((line) => `+ ${line}`)
+                            .join("\n")}
+                        </pre>
+                      </div>
+                    ) : null}
+                  </ToolCallDetails>
+                  {action.reason ? (
+                    <p className="text-muted-foreground mt-2 text-sm">
+                      {action.reason}
+                    </p>
+                  ) : null}
+                  {action.args ? (
+                    <details className="mt-2 text-xs">
+                      <summary>{copy.fullArguments}</summary>
+                      <pre className="max-h-80 overflow-auto whitespace-pre-wrap">
+                        {JSON.stringify(action.args, null, 2)}
+                      </pre>
+                    </details>
+                  ) : null}
+                  {decisions[action.tool_call_id] === "approve_thread" ? (
+                    <p className="text-muted-foreground mt-2 text-xs">
+                      {copy.grantScope}
+                    </p>
+                  ) : null}
+                  {decisions[action.tool_call_id] === "edit" ? (
+                    <div className="mt-2 space-y-2">
+                      <Textarea
+                        aria-label={copy.editArguments + " " + action.tool_name}
+                        className="min-h-40 font-mono text-xs"
+                        disabled={isDisabled}
+                        value={
+                          argumentTexts[action.tool_call_id] ??
+                          JSON.stringify(action.args ?? {}, null, 2)
+                        }
+                        onChange={(event) =>
+                          setArgumentState({
+                            requestId: request.request_id,
+                            values: {
+                              ...argumentTexts,
+                              [action.tool_call_id]: event.target.value,
+                            },
+                          })
+                        }
+                      />
+                      {!editedArguments[action.tool_call_id] ? (
+                        <p role="alert" className="text-destructive text-xs">
+                          {copy.invalidArguments}
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+
+          {allowReject ? (
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium" htmlFor={reasonId}>
+                {copy.reasonLabel}
+              </label>
+              <Textarea
+                className="min-h-20 resize-y text-sm"
+                disabled={isDisabled}
+                id={reasonId}
+                maxLength={2000}
+                placeholder={copy.reasonPlaceholder}
+                value={rejectionReason}
+                onChange={(event) => setRejectionReason(event.target.value)}
+              />
+            </div>
+          ) : null}
+
+          {error ? (
+            <p className="text-destructive text-sm" role="alert">
+              {error}
+            </p>
+          ) : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {allowReject ? (
+              <Button
+                disabled={isDisabled}
+                onClick={() => void submitAll("reject")}
+                type="button"
+                variant="outline"
+              >
+                {copy.rejectAll}
+              </Button>
+            ) : null}
+            {allowApprove ? (
+              <Button
+                disabled={
+                  isDisabled || Object.values(decisions).includes("edit")
+                }
+                onClick={() => void submitAll("approve")}
+                type="button"
+                variant="secondary"
+              >
+                {copy.approveAll}
+              </Button>
+            ) : null}
+            <Button
+              disabled={isDisabled || responses === null}
+              onClick={() => void submitBatch(responses)}
+              type="button"
+            >
+              {submitting ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : null}
+              {copy.submitDecisions}
+            </Button>
+          </div>
         </div>
       </div>
     </section>

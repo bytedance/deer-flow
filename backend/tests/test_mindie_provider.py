@@ -586,10 +586,10 @@ class TestPatchResult:
         messages = [HumanMessage(content="process the data")]
 
         if mode == "sync":
-            with patch("deerflow.models.mindie_provider.ChatOpenAI._generate", return_value=result):
+            with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._generate", return_value=result):
                 calls = model._generate(messages).generations[0].message.tool_calls
         else:
-            with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
+            with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
                 if mode == "async":
                     calls = (await model._agenerate(messages)).generations[0].message.tool_calls
                 else:
@@ -608,10 +608,10 @@ class TestPatchResult:
         messages = [HumanMessage(content="write a two-line file")]
 
         if mode == "sync":
-            with patch("deerflow.models.mindie_provider.ChatOpenAI._generate", return_value=result):
+            with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._generate", return_value=result):
                 calls = model._generate(messages).generations[0].message.tool_calls
         else:
-            with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
+            with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._agenerate", new_callable=AsyncMock, return_value=result):
                 if mode == "async":
                     calls = (await model._agenerate(messages)).generations[0].message.tool_calls
                 else:
@@ -655,7 +655,7 @@ class TestMindIEInit:
         def fake_init(self, **kwargs):
             captured.update(kwargs)
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI.__init__", new=fake_init):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI.__init__", new=fake_init):
             MindIEChatModel(
                 model="mindie-test",
                 api_key="test-key",
@@ -678,7 +678,7 @@ class TestMindIEInit:
         def fake_init(self, **kwargs):
             captured.update(kwargs)
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI.__init__", new=fake_init):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI.__init__", new=fake_init):
             MindIEChatModel(
                 model="mindie-test",
                 api_key="test-key",
@@ -699,7 +699,7 @@ class TestMindIEInit:
 
 class TestGenerate:
     def test_generate_calls_fix_messages_and_patch(self):
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._generate") as mock_super_gen, patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._generate") as mock_super_gen, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_super_gen.return_value = _make_chat_result("hello")
             model = MindIEChatModel.__new__(MindIEChatModel)
 
@@ -720,7 +720,7 @@ class TestGenerate:
 class TestAGenerate:
     @pytest.mark.asyncio
     async def test_agenerate_patches_result(self):
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._agenerate", new_callable=AsyncMock) as mock_ag, patch.object(MindIEChatModel, "__init__", return_value=None):
             mock_ag.return_value = _make_chat_result("world\\nfoo")
             model = MindIEChatModel.__new__(MindIEChatModel)
 
@@ -749,7 +749,7 @@ class TestAStream:
             for char in ["hel", "lo"]:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=char))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
             chunks = await self._collect(model._astream([HumanMessage(content="hi")]))
 
@@ -763,7 +763,7 @@ class TestAStream:
         async def fake_stream(*args, **kwargs):
             yield ChatGenerationChunk(message=AIMessageChunk(content="a\\nb"))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
             chunks = await self._collect(model._astream([HumanMessage(content="x")]))
 
@@ -789,7 +789,7 @@ class TestAStream:
             for text in raw_chunks:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=text))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
             chunks = await self._collect(model._astream([HumanMessage(content="write example code")]))
 
@@ -841,7 +841,7 @@ class TestAStream:
             for text in raw_chunks:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=text))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
             chunks = await self._collect(model._astream([HumanMessage(content="q")]))
 
@@ -861,7 +861,7 @@ class TestAStream:
             for text in raw_chunks:
                 yield ChatGenerationChunk(message=AIMessageChunk(content=text))
 
-        with patch("deerflow.models.mindie_provider.ChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
+        with patch("deerflow.models.mindie_provider.GuardedChatOpenAI._astream", side_effect=fake_stream), patch.object(MindIEChatModel, "__init__", return_value=None):
             model = MindIEChatModel.__new__(MindIEChatModel)
             chunks = await self._collect(model._astream([HumanMessage(content="q")]))
 

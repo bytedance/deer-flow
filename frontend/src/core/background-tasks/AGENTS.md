@@ -1,14 +1,13 @@
-# Background-task queries
+# Background-task queries (`core/background-tasks/`)
 
-Cancelling a task must not be undone by a poll that started before the cancel
-answered. Await cancellation of the exact list and target-detail queries before
-seeding either cache, then invalidate only the exact list query. Preserve sibling
-detail requests, including their initial loads. Both GETs consume the query's
-AbortSignal; callers that omit it retain the single-argument fetch call.
-Same ordering contract as `core/memory` (#6959).
+On a successful cancel, await cancellation of the exact thread list and target
+detail queries before writing the confirmed result to either cache. Then
+invalidate only the exact list. Other task details keep loading. Both GETs pass
+TanStack Query's `AbortSignal` to `fetch`. Callers that omit the signal keep the
+single-argument `fetch` call. `core/memory` follows the same cache update order.
 
-Keep the QueryClient regressions in `frontend/tests/unit/core/background-tasks/hooks.dom.test.tsx`.
-Real-hook/HTTP coverage in `frontend/tests/unit/core/background-tasks/cancellation-http.dom.test.tsx`
-also pins closed panels, cached and initial reads, transport aborts, sibling/thread
-isolation, and failed cancellation. An uncached list stays undefined until a fresh
-list GET succeeds; the cancel response must not fabricate a one-task list.
+`frontend/tests/unit/core/background-tasks/hooks.dom.test.tsx` exercises the
+cache updates with a real `QueryClient`. The sibling `cancellation-http.dom.test.tsx`
+covers closed panels, HTTP aborts, cached and initial reads, isolation between
+tasks and threads, and failed cancellations. An uncached list stays undefined
+until a fresh list GET succeeds.

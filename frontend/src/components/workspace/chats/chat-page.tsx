@@ -18,12 +18,10 @@ import {
   type InputBoxSubmitOptions,
 } from "@/components/workspace/input-box";
 import { KnowledgeScopeSelector } from "@/components/workspace/knowledge-scope-selector";
-import {
-  MessageList,
-  MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
-} from "@/components/workspace/messages";
+import { MESSAGE_LIST_DEFAULT_PADDING_BOTTOM } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
+import { SearchableMessageList as MessageList } from "@/components/workspace/search-message-window";
 import {
   SidecarProvider,
   SidecarTrigger,
@@ -216,6 +214,10 @@ export default function ChatPage() {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    approvalRequests,
+    hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
     displayThreadId: threadId,
@@ -246,6 +248,9 @@ export default function ChatPage() {
         });
       }
     },
+    restInterrupts: threadMetadata.data?.interrupts,
+    restInterruptsLoading: threadMetadata.isLoading,
+    restInterruptsError: threadMetadata.isError,
   });
 
   const hasThreadMessages = thread.messages.length > 0;
@@ -442,6 +447,17 @@ export default function ChatPage() {
       }
       const executionOptions = {
         ...scopedOptions,
+        onSent: () => {
+          const url = new URL(window.location.href);
+          url.searchParams.delete("message");
+          url.searchParams.delete("message_seq");
+          history.replaceState(
+            null,
+            "",
+            `${url.pathname}${url.search}${url.hash}`,
+          );
+          scopedOptions?.onSent?.();
+        },
         additionalKwargs: {
           ...scopedOptions?.additionalKwargs,
           ...modelInput.additionalKwargs,
@@ -498,6 +514,13 @@ export default function ChatPage() {
       return sent;
     },
     [currentKnowledgeScopeSnapshot, sendMessage, threadId],
+  );
+  const handleSubmitApproval = useCallback(
+    (
+      request: (typeof approvalRequests)[number],
+      responses: Parameters<typeof submitHitlApproval>[2],
+    ) => submitHitlApproval(threadId, request, responses),
+    [submitHitlApproval, threadId],
   );
   const handleStop = useCallback(async () => {
     await thread.stop();
@@ -581,7 +604,8 @@ export default function ChatPage() {
     !isUploading &&
     !thread.isLoading &&
     !branchThread.isPending &&
-    !hasOpenHumanInputCard;
+    !hasOpenHumanInputCard &&
+    !hasPendingApproval;
 
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
@@ -675,12 +699,25 @@ export default function ChatPage() {
                   loadMoreHistory={loadMoreHistory}
                   isHistoryLoading={isHistoryLoading}
                   tokenUsageInlineMode={tokenUsageInlineMode}
+                  approvalRequests={approvalRequests}
+                  approvalMetadataLoading={
+                    hasPendingApproval && approvalRequests.length === 0
+                  }
+                  approvalMetadataError={
+                    hasPendingApproval &&
+                    approvalRequests.length === 0 &&
+                    threadMetadata.isError
+                  }
+                  onReloadApprovalMetadata={() => threadMetadata.refetch()}
+                  waitingForInputRunIds={waitingForInputRunIds}
+                  onSubmitApproval={handleSubmitApproval}
                   canRegenerate={
                     !isNewThread &&
                     !isMock &&
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                     !isUploading &&
-                    !thread.isLoading
+                    !thread.isLoading &&
+                    !hasPendingApproval
                   }
                   onRegenerateMessage={handleRegenerate}
                   canEdit={editBase && !hasGoal}
@@ -697,7 +734,8 @@ export default function ChatPage() {
                     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
                     !isUploading &&
                     !thread.isLoading &&
-                    !branchThread.isPending
+                    !branchThread.isPending &&
+                    !hasPendingApproval
                   }
                   onBranchTurn={handleBranchTurn}
                 />
@@ -736,6 +774,12 @@ export default function ChatPage() {
                           outcome={goalOutcome}
                           isRunning={thread.isLoading}
                           hasOpenHumanInputCard={hasOpenHumanInputCard}
+                          hasPendingApproval={hasPendingApproval}
+                          approvalMetadataError={
+                            hasPendingApproval &&
+                            approvalRequests.length === 0 &&
+                            threadMetadata.isError
+                          }
                         />
                         {hasTodos && (
                           <TodoList
@@ -785,7 +829,11 @@ export default function ChatPage() {
                           selectorVisible && knowledgeScope ? (
                             <KnowledgeScopeSelector
                               agentName="lead_agent"
-                              disabled={thread.isLoading || isUploading}
+                              disabled={
+                                thread.isLoading ||
+                                isUploading ||
+                                hasPendingApproval
+                              }
                               selection={knowledgeScope}
                               onChange={setKnowledgeScope}
                             />
@@ -810,8 +858,10 @@ export default function ChatPage() {
                           env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                           isUploading ||
                           modelControl.busy ||
-                          (!isNewThread && isHistoryLoading)
+                          (!isNewThread && isHistoryLoading) ||
+                          hasPendingApproval
                         }
+                        inputLocked={hasPendingApproval}
                         onContextChange={(context, options) => {
                           if (options?.automatic)
                             resolveThreadContext(threadId, context);

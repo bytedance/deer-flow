@@ -94,6 +94,69 @@ _explicit_app_config: ContextVar[Any | None] = ContextVar(
 )
 
 
+def _preflight_delegation_checks(
+    *,
+    subagent_type: str,
+    context_mode: str,
+    runtime_app_config: Any | None,
+    allowed_subagents: Any | None,
+) -> tuple[Any | None, str | None]:
+    """Read-only preflight (validate-then-mutate).
+
+    Runs every precondition check in one pass before any side-effecting
+    delegation work (tool assembly, SubagentExecutor creation, background task
+    registration) is triggered.
+
+    This helper has zero side effects of its own:
+    - Does not create a SubagentExecutor
+    - Does not register background tasks
+    - Does not assemble MCP/business tools
+    - Does not snapshot the parent context
+    - Does not preempt or cancel any source task
+
+    Returns (config, None) when every check passes; returns (None, error_str)
+    when rejected, and the caller should return the failure directly. The
+    helper's internal state is unchanged, so callers can retry safely.
+    Note: before this helper runs, the caller has already registered a child
+    gateway entry on RunInputControl; that entry can be reused for benign
+    retries and is not a side effect of this helper itself.
+
+    If the recovery feature lands later, add read-only source-task
+    recoverability checks here (type compatibility, extractable history,
+    non-empty), and have the caller run supersede_and_claim_resumable_task only
+    after all checks pass, so a rejected recovery request does not consume the
+    source task (see issue #7633).
+    """
+    config: Any | None = None
+
+    if context_mode not in {"isolated", "snapshot"}:
+        return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
+
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
+            return None, LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+
+    # Catalog discovery only after the cheapest guards pass: an invalid
+    # context_mode must not reach the managed-subagent store lookup.
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    else:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if config is None or subagent_type not in available_subagent_names:
+        if available_subagent_names:
+            available = ", ".join(available_subagent_names)
+        elif allowed_subagents is not None:
+            available = "none permitted by caller policy"
+        else:
+            available = "none"
+        return None, f"Unknown subagent type '{subagent_type}'. Available: {available}"
+
+    return config, None
+
+
 def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> None:
     """Run one subagent middleware-journal append on the journal owner's loop."""
     try:
@@ -880,42 +943,35 @@ async def task_tool(
     input_control = run_input_control(parent_context)
     input_gate = input_control.child(tool_call_id) if input_control is not None else None
     result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else _task_result_command
-    if context_mode not in {"isolated", "snapshot"}:
-        return result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
-    # Preserve the dedicated sandbox-policy guidance before the generic
-    # registry/policy membership gate filters bash from the visible catalog.
-    if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-        if not host_bash_allowed:
-            return result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
-            )
-
-    # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-    if config is None or subagent_type not in available_subagent_names:
-        if available_subagent_names:
-            available = ", ".join(available_subagent_names)
-        elif allowed_subagents is not None:
-            available = "none permitted by caller policy"
-        else:
-            available = "none"
-        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
+    # Preflight: read-only checks with zero side effects. Complete every
+    # precondition check in one pass before any side-effecting delegation work
+    # (tool assembly, executor creation, background task registration). Return
+    # immediately on failure; the helper's internal state is unchanged, so the
+    # caller can retry safely. The context_mode guard is the first branch
+    # executed inside the helper, and catalog discovery was moved after the
+    # guard so an invalid mode never triggers a managed-subagent store access.
+    # The helper sweeps the managed-definition store for its signature (file
+    # stats, or a SQL query) on every TTL miss, and the sandbox-policy check
+    # may read config files, so it resolves on the assembly pool like every
+    # other blocking hop below (issue #5172).
+    preflight_config, preflight_error = await run_assembly(
+        _preflight_delegation_checks,
+        subagent_type=subagent_type,
+        context_mode=context_mode,
+        runtime_app_config=runtime_app_config,
+        allowed_subagents=allowed_subagents,
+    )
+    if preflight_error is not None:
         return result_command(
             tool_call_id=tool_call_id,
             status="failed",
-            error=error,
+            error=preflight_error,
         )
+    config = preflight_config
     # Rejected delegations must not serialize the retained history. Capture
     # after delegation validation, before child setup (including tool loading).
     context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
@@ -1025,7 +1081,11 @@ async def task_tool(
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+        # get_app_config() reads config/extension files (and may fully reload
+        # them) on every miss. Resolve it on the assembly pool like every other
+        # fallback above so the inherit path cannot stall the calling event
+        # loop (issue #5172).
+        resolved_app_config = await run_assembly(get_app_config)
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive
@@ -1077,6 +1137,9 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    approval_runtime = parent_context.get("__tool_approval_runtime")
+    if approval_runtime is not None:
+        executor_kwargs["approval_runtime"] = approval_runtime.child()
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:

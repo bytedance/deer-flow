@@ -3,6 +3,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   describeGoalBar,
+  describeGoalBarCopy,
   GOAL_HOST_REASON_TEXTS,
   goalBarAnnounceKey,
   goalOutcomeKey,
@@ -11,6 +12,7 @@ import {
   isThreadGoalOutcome,
   sameGoalInstance,
 } from "@/components/workspace/goal-status-helpers";
+import { enUS } from "@/core/i18n/locales/en-US";
 import type { GoalState, ThreadGoalOutcome } from "@/core/threads/types";
 
 function makeGoal(overrides: Partial<GoalState> = {}): GoalState {
@@ -76,6 +78,45 @@ describe("describeGoalBar", () => {
     expect(describeGoalBar({ goal, outcome: null, isRunning: true })).toEqual({
       kind: "inProgress",
       goal,
+    });
+  });
+
+  it("shows waiting for approval instead of reply or in-progress states", () => {
+    const goal = makeGoal();
+    for (const isRunning of [false, true]) {
+      expect(
+        describeGoalBar({
+          goal,
+          outcome: null,
+          isRunning,
+          hasPendingApproval: true,
+        }),
+      ).toEqual({ kind: "awaitingApproval", goal });
+    }
+  });
+
+  it("prioritizes approval over a stood-down human-input state", () => {
+    const goal = stoodDown("blocked:needs_user_input");
+    expect(
+      describeGoalBar({
+        goal,
+        outcome: null,
+        isRunning: false,
+        hasOpenHumanInputCard: true,
+        hasPendingApproval: true,
+      }),
+    ).toEqual({ kind: "awaitingApproval", goal });
+  });
+
+  it("uses approval-specific waiting copy and next step", () => {
+    const goal = makeGoal();
+    expect(
+      describeGoalBarCopy({ kind: "awaitingApproval", goal }, enUS),
+    ).toMatchObject({
+      chip: "Waiting for approval",
+      detail: "Review the tool approval above to continue.",
+      announcement:
+        "Waiting for approval: Review the tool approval above to continue.",
     });
   });
 

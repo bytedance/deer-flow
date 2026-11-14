@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -122,7 +123,7 @@ async def generate_suggestions(
     # default when the caller omits model_name. Keep permission failures out
     # of the best-effort LLM error handler below so a denial remains a 403.
     user = await get_current_user_from_request(request)
-    authorize_model_use(user, body.model_name, is_internal=_is_internal_caller(request, user), app_config=config)
+    await asyncio.to_thread(authorize_model_use, user, body.model_name, is_internal=_is_internal_caller(request, user), app_config=config)
 
     system_instruction = (
         "You are generating follow-up questions to help the user continue the conversation.\n"

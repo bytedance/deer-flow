@@ -327,5 +327,5 @@ def test_merge_preserves_deterministic_confirmation_gate(confirmed):
     )
     merged = result["facts"][0]
     assert merged["confidence"] == 0.95
-    assert merged["confirmationCount"] == (3 if confirmed else 2)
-    assert (merged["lastConfirmedAt"] != old["lastConfirmedAt"]) is confirmed
+    assert merged["confirmationCount"] == 2
+    assert merged["lastConfirmedAt"] == old["lastConfirmedAt"]

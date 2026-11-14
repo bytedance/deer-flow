@@ -862,6 +862,119 @@ def test_normalize_input_rejects_malformed_message_with_400():
 
 
 @pytest.mark.parametrize(
+    "tool_artifacts",
+    [
+        "oops",
+        ["oops"],
+        [{"display_name": "report.md"}],
+        [{"handle": 3}],
+        [{"handle": ["h"]}],
+        {"type": "__overwrite__", "value": []},
+    ],
+    ids=["non-list", "non-object-entry", "missing-handle", "non-string-handle", "unhashable-handle", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_tool_artifacts_with_400(tool_artifacts):
+    """An entry the registry reducer cannot key must be a 400 here.
+
+    ``merge_tool_artifacts`` keys each entry by ``handle``; a missing or
+    unhashable handle raised while the state update merged, and the state route
+    persists reducer values with ``Overwrite``, so the thread stayed broken for
+    every later artifact capture.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"tool_artifacts": tool_artifacts})
+
+    assert excinfo.value.status_code == 400
+    assert "input.tool_artifacts" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_tool_artifacts():
+    from app.gateway.services import normalize_input
+
+    entry = {"handle": "art_00000001", "display_name": "report.md", "artifact_type": "file"}
+
+    assert normalize_input({"tool_artifacts": [entry]})["tool_artifacts"] == [entry]
+
+
+def test_state_values_reject_unusable_tool_artifacts_with_400():
+    """The thread-state update route shares the artifact-registry boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"tool_artifacts": [{"handle": ["h"]}]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.tool_artifacts" in excinfo.value.detail
+
+
+def test_state_values_strip_server_owned_metadata_from_tool_artifacts():
+    """The registry branch keeps the per-entry strip the generic list branch applied."""
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"handle": "art_1", "additional_kwargs": {"original_user_content": "forged", "title": "kept"}}
+
+    stripped = strip_server_owned_state_metadata({"tool_artifacts": [entry]})["tool_artifacts"][0]
+
+    assert stripped["additional_kwargs"] == {"title": "kept"}
+
+
+@pytest.mark.parametrize(
+    "skill_context",
+    [
+        "oops",
+        ["oops"],
+        [{"name": "pdf"}],
+        [{"path": 3}],
+        [{"path": ""}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-path", "non-string-path", "empty-path"],
+)
+def test_normalize_input_rejects_unusable_skill_context_with_400(skill_context):
+    """A skill reference the durable-context reducer cannot read must be a 400,
+    not an ``AttributeError``/``KeyError`` while the state update merges.
+
+    ``merge_skill_context`` normalizes entries with ``entry.get(...)`` and
+    ``str(entry["path"])``; both crash on the shapes below.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"skill_context": skill_context})
+
+    assert excinfo.value.status_code == 400
+    assert "input.skill_context" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_skill_context_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"name": "pdf", "path": "/mnt/skills/pdf/SKILL.md", "description": "PDF tooling", "loaded_at": 3}
+
+    assert normalize_input({"skill_context": [entry]})["skill_context"] == [entry]
+
+
+def test_state_values_reject_unusable_skill_context_with_400():
+    """The thread-state update path shares the skill-reference boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"skill_context": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.skill_context" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
     "message",
     [
         {"role": "ai", "content": "", "tool_calls": "x"},
@@ -2971,6 +3084,26 @@ def test_inject_authenticated_user_context_strips_internal_spoofed_attribution()
     assert "oauth_id" not in config["context"]
 
 
+async def _seed_generic_resume_checkpoint(checkpointer, thread_id):
+    from langchain_core.messages import HumanMessage
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def answer(_state):
+        interrupt({"question": "Continue?"})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("answer", answer)
+    builder.set_entry_point("answer")
+    builder.set_finish_point("answer")
+    graph = builder.compile(checkpointer=checkpointer)
+    await graph.ainvoke(
+        {"messages": [HumanMessage(content="start")]},
+        {"configurable": {"thread_id": thread_id}},
+    )
+
+
 async def _capture_start_run_graph_input(body, *, auth_source=None):
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -2998,6 +3131,8 @@ async def _capture_start_run_graph_input(body, *, auth_source=None):
         state=SimpleNamespace(auth_source=auth_source),
         app=SimpleNamespace(state=state),
     )
+    if getattr(body, "command", None) and body.command.get("resume") is not None:
+        await _seed_generic_resume_checkpoint(state.checkpointer, "thread-command-test")
     captured: dict[str, object] = {}
 
     async def fake_run_agent(*args, **kwargs):
@@ -4024,6 +4159,7 @@ def test_start_run_pins_the_resolved_project_context(_stub_app_config):
         "project_id": "p-1",
         "name": "Roadmap",
         "instructions": "Prefer boring solutions.",
+        "memory": {"enabled": True, "revision": 0, "facts": []},
     }
 
 

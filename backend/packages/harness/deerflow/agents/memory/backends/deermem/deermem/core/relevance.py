@@ -49,6 +49,27 @@ def warm_tokenizer() -> None:
         jieba.initialize()
 
 
+def cjk_token(part: str) -> list[str]:
+    """Character-level tokens for one unsegmented CJK run.
+
+    Single characters stay single; longer runs become character bigrams.
+    Shared with the FTS5 retrieval index so both strategies agree on Chinese.
+    """
+    if len(part) == 1:
+        return [part]
+    return [part[index : index + 2] for index in range(len(part) - 1)]
+
+
+def iter_fallback_tokens(text: str) -> Iterator[str]:
+    """Split text into words and CJK bigrams without jieba."""
+    for match in _WORD_RE.finditer(text):
+        part = match.group()
+        if "\u3400" <= part[0] <= "\u9fff":
+            yield from cjk_token(part)
+        else:
+            yield part
+
+
 def tokenize(text: str) -> list[str]:
     """Tokenize at most 4096 characters into at most 128 relevance tokens.
 
@@ -65,20 +86,7 @@ def tokenize(text: str) -> list[str]:
         # fallback does so they neither count as matches nor eat the budget.
         tokens = (token for token in jieba.cut(lowered) if any(char.isalnum() for char in token))
         return list(islice(tokens, _SIMILARITY_TOKEN_BUDGET))
-
-    def fallback_tokens() -> Iterator[str]:
-        for match in _WORD_RE.finditer(lowered):
-            part = match.group()
-            if "\u3400" <= part[0] <= "\u9fff":
-                if len(part) == 1:
-                    yield part
-                else:
-                    for index in range(len(part) - 1):
-                        yield part[index : index + 2]
-            else:
-                yield part
-
-    return list(islice(fallback_tokens(), _SIMILARITY_TOKEN_BUDGET))
+    return list(islice(iter_fallback_tokens(lowered), _SIMILARITY_TOKEN_BUDGET))
 
 
 def build_idf(corpus: list[list[str]]) -> dict[str, float]:

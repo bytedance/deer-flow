@@ -49,6 +49,7 @@ from importlib.metadata import PackageNotFoundError, version
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
@@ -98,14 +99,8 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
     if config is not None:
         extra = config.model_extra or {}
         max_results = extra.get("max_results")
-        candidate = extra.get("api_key")
-        if isinstance(candidate, str) and candidate.strip():
-            api_key = candidate.strip()
-    if api_key is None:
-        env_key = os.getenv("YDC_API_KEY")
-        if isinstance(env_key, str) and env_key.strip():
-            api_key = env_key.strip()
-    return api_key, max_results
+        api_key = resolve_api_key(extra.get("api_key"))
+    return api_key or resolve_api_key(os.getenv("YDC_API_KEY")), max_results
 
 
 async def _resolve_user_agent() -> str:
