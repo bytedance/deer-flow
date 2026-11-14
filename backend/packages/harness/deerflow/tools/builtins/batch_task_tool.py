@@ -266,6 +266,11 @@ async def batch_task(
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:
         execution_spec["knowledge_scope"] = execution_scope(context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
+    from deerflow.mcp.agent_auth import export_agent_authority, runtime_agent_authority
+
+    agent_authority = export_agent_authority(runtime_agent_authority(runtime))
+    if agent_authority is not None:
+        execution_spec["mcp_agent_auth"] = agent_authority
     try:
         batch = await submitter.submit(
             BatchSubmitRequest(

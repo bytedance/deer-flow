@@ -2957,6 +2957,23 @@ scheduler:
   recursion_limit: 1000
 
 # ============================================================================
+# Per-agent MCP credentials (opt-in, deployment-managed HTTP servers only).
+# Bindings stay operator-owned here; set agent_auth: true on the matching
+# extensions_config.json server. See backend/docs/MCP_SERVER.md for the digest
+# command, GitOps rollouts, and durable-task revocation behavior.
+mcp_agent_auth: {}
+# mcp_agent_auth:
+#   research-tickets:
+#     server: ticketing
+#     agent: research-bot
+#     owners: ["member-user-id"]  # Explicit IDs; one list may cover shared copies.
+#     definition_digests: ["<approved 64-character SHA-256 digest>"]
+#     oauth:
+#       grant_type: client_credentials
+#       token_url: https://idp.example/realms/work/protocol/openid-connect/token
+#       client_id: research-bot
+#       client_secret: $RESEARCH_BOT_CLIENT_SECRET
+
 # Long-running MCP Tasks Configuration
 # ============================================================================
 # Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
