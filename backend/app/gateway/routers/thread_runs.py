@@ -370,10 +370,36 @@ class ThreadTokenUsageCallerBreakdown(BaseModel):
     middleware: int = 0
 
 
+class ThreadContextUsageBreakdown(BaseModel):
+    """Approximate composition of the last model request, by source.
+
+    Counts only: percentages are relative to ``context_window`` when the model
+    declares one, and the frontend derives the per-category share when it does
+    not. ``percentage``/``remaining_tokens`` are null in that case.
+    """
+
+    total_tokens: int = 0
+    percentage: float | None = None
+    remaining_tokens: int | None = None
+    system_prompt_tokens: int = 0
+    builtin_tools_tokens: int = 0
+    mcp_tools_tokens: int = 0
+    skill_body_tokens: int = 0
+    memory_tokens: int = 0
+    task_state_tokens: int = 0
+    other_injection_tokens: int = 0
+    conversation_tokens: int = 0
+    tool_result_tokens: int = 0
+    model_name: str | None = None
+    context_window: int | None = None
+    captured_at: str | None = None
+
+
 class ThreadContextUsage(BaseModel):
     token_count: int = 0
     max_context_tokens: int | None = None
     percentage: float | None = None
+    breakdown: ThreadContextUsageBreakdown | None = None
 
 
 class ThreadTokenUsageResponse(BaseModel):

@@ -126,7 +126,10 @@ import {
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
 import type { RunInputMode } from "@/core/threads/run-inputs";
-import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
+import {
+  threadTokenUsageQueryKey,
+  type ContextUsageBreakdown,
+} from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
@@ -158,6 +161,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ContextUsageRing } from "./context-usage-ring";
 import { InputAttachment } from "./input-attachment";
 import {
   abortGoalRequest,
@@ -356,6 +360,9 @@ export function InputBox({
   inputLocked = false,
   agentSkillNames,
   agentSkillsLoading = false,
+  contextUsageBreakdown = null,
+  contextUsageEnabled = false,
+  onContextUsageOpen,
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
@@ -442,6 +449,15 @@ export function InputBox({
    * stays the enforcement point.
    */
   canCreateRuns?: boolean;
+  /**
+   * Composition of the last model request. The ring is read-only; ``null``
+   * renders the neutral placeholder used before a snapshot exists.
+   */
+  contextUsageBreakdown?: ContextUsageBreakdown | null;
+  /** Whether the Gateway tracks token usage; hides the ring when false. */
+  contextUsageEnabled?: boolean;
+  /** Called when the composition popover opens, to refresh the snapshot. */
+  onContextUsageOpen?: () => void;
 }) {
   const { locale, t } = useI18n();
   const [runInputMode, setRunInputMode] = useState<RunInputMode>("queue");
@@ -3603,6 +3619,15 @@ export function InputBox({
               >
                 {goalObjectiveCounter.length}/{goalObjectiveCounter.max}
               </span>
+            )}
+            {contextUsageEnabled && (
+              <ContextUsageRing
+                breakdown={contextUsageBreakdown}
+                contextWindow={selectedModel?.context_window}
+                modelName={selectedModel?.name}
+                onOpen={onContextUsageOpen}
+                className="hidden sm:inline-flex"
+              />
             )}
             <ModelPicker
               open={modelDialogOpen}

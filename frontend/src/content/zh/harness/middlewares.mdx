@@ -36,16 +36,17 @@ import { Callout } from "nextra/components";
 9. `MemoryMiddleware` — 跨会话记忆注入和队列
 10. `ViewImageMiddleware` — 图像细节注入（如果模型支持视觉）
 11. `DeferredToolFilterMiddleware` — 隐藏延迟工具 schema（如果启用工具搜索）
-12. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
-13. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
-14. `LoopDetectionMiddleware` — 打破重复工具调用循环
-15. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
-16. 自定义中间件（如有）
-17. 配置的扩展中间件（如有）
-18. `TerminalResponseMiddleware` — 重试一次空的最终响应
-19. `ModelLengthFinishReasonMiddleware` — 记录受长度限制的完成
-20. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
-21. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
+12. `ContextUsageMiddleware` — 记录模型请求的 token 构成快照（如果启用 token 统计）
+13. `SystemMessageCoalescingMiddleware` — 合并面向 provider 的 system messages
+14. `SubagentLimitMiddleware` — 限制并行子 Agent 调用（如果启用子 Agent）
+15. `LoopDetectionMiddleware` — 打破重复工具调用循环
+16. `TokenBudgetMiddleware` — 每次运行的 token 预算限制（如果启用）
+17. 自定义中间件（如有）
+18. 配置的扩展中间件（如有）
+19. `TerminalResponseMiddleware` — 重试一次空的最终响应
+20. `ModelLengthFinishReasonMiddleware` — 记录受长度限制的完成
+21. `SafetyFinishReasonMiddleware` — provider 安全终止后抑制工具执行（如果启用）
+22. `ClarificationMiddleware` — 拦截澄清请求（始终最后）
 
 顺序很重要。Durable context 会在摘要压缩之前捕获已委托任务的派发状态、终态结果和已加载的技能引用，确保它们不会随原始 transcript 压缩而丢失。澄清总是最后运行，这样它可以在所有其他中间件完成后拦截。
 
@@ -129,6 +130,16 @@ title:
 token_usage:
   enabled: true
 ```
+
+---
+
+### ContextUsageMiddleware
+
+记录每次模型请求的 token 构成：系统提示词、内置与 MCP 工具 schema、已加载的技能正文、记忆、任务状态、其他注入上下文、对话消息和工具结果。它只读取请求，不会修改请求。
+
+快照在 `SystemMessageCoalescingMiddleware` 之前生成，因此注入的 system message 会保留来源，而不会被并入系统提示词。之后运行的请求清理与 run 输入准入仍可能缩小实际发给 provider 的内容，因此计数描述的是该边界上的请求，而非 provider 最终收到的精确载荷。计数为近似值，保存在本次运行最后一条 `AIMessage` 上，并通过线程 token 统计接口的 `context_usage.breakdown` 暴露，由输入框的上下文圆环展示。手动压缩上下文会清除保留消息上的快照，因为它统计的消息已被删除；圆环会回到占位态，直到下一次模型调用记录新的快照。模型配置了 `context_window` 时，百分比以该窗口为分母；否则以请求自身的总 token 数为分母。
+
+**配置**：跟随 `config.yaml` 中的 `token_usage.enabled`；关闭 token 统计时圆环隐藏。
 
 ---
 

@@ -252,10 +252,16 @@ async def compact_thread_context(
     update_config = dict(snapshot.config)
     if binding_known:
         update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
+    # The retained AIMessage carries a stamp for the request that produced it,
+    # which counted messages compaction is now removing. Clear it so the thread
+    # endpoint shows the placeholder instead of a stale composition.
+    from deerflow.agents.middlewares.context_usage_middleware import strip_context_usage_stamps
+
+    preserved_messages = strip_context_usage_stamps(result.preserved_messages)
     updated_config = await accessor.aupdate(
         update_config,
         {
-            "messages": Overwrite(list(result.preserved_messages)),
+            "messages": Overwrite(list(preserved_messages)),
             "summary_text": result.summary_text,
             **({"task_history": result.task_history} if getattr(result, "task_history", None) is not None else {}),
         },
@@ -267,7 +273,7 @@ async def compact_thread_context(
         thread_id=thread_id,
         compacted=True,
         removed_message_count=len(result.messages_to_summarize),
-        preserved_message_count=len(result.preserved_messages),
+        preserved_message_count=len(preserved_messages),
         summary_updated=True,
         checkpoint_id=new_checkpoint_id,
         total_tokens=result.total_tokens,

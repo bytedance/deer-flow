@@ -78,6 +78,14 @@ class _FakeCompactionMiddleware:
         )
 
 
+class _PreserveAIMiddleware(_FakeCompactionMiddleware):
+    """Keep the assistant message so its persisted metadata can be inspected."""
+
+    def _prepare_compaction(self, state, *, force=False):
+        self.prepare_calls += 1
+        return (state["messages"][:-1], state["messages"][-1:], state.get("summary_text"), 10)
+
+
 @pytest.mark.asyncio
 async def test_compact_thread_context_reads_materialized_state_and_overwrites_messages(monkeypatch):
     messages = [
@@ -128,6 +136,33 @@ async def test_compact_thread_context_reads_materialized_state_and_overwrites_me
     assert middleware.runtime_contexts == [
         {"thread_id": "thread-1", "user_id": "user-1", "agent_name": "research-agent"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_clears_the_stale_context_usage_stamp(monkeypatch):
+    from deerflow.agents.middlewares.context_usage_middleware import CONTEXT_USAGE_KEY
+
+    stamped = AIMessage(
+        content="old answer",
+        additional_kwargs={
+            CONTEXT_USAGE_KEY: {"conversation_tokens": 40, "context_window": 1000},
+            "display": "kept",
+        },
+    )
+    accessor = _FakeAccessor({"messages": [HumanMessage(content="old question"), stamped]})
+    monkeypatch.setattr(
+        context_compaction,
+        "_create_compaction_middleware",
+        lambda **_kwargs: _PreserveAIMiddleware(),
+    )
+
+    await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    assert accessor.update_args is not None
+    preserved = accessor.update_args[1]["messages"].value
+    assert [message.additional_kwargs for message in preserved] == [{"display": "kept"}]
+    # The retained message is copied, not mutated in place.
+    assert CONTEXT_USAGE_KEY in stamped.additional_kwargs
 
 
 @pytest.mark.asyncio

@@ -699,6 +699,22 @@ def build_middlewares(
 
         assert_mcp_routing_before_deferred_filter(middlewares)
 
+    # Record the context-window composition of the final request. It must run
+    # before SystemMessageCoalescingMiddleware below: coalescing merges every
+    # SystemMessage into one block and overwrites its provenance, after which
+    # the date reminder, recalled memory and durable-context contract can no
+    # longer be attributed. Read-only: it stamps counts on the response's last
+    # AIMessage for GET /api/threads/{id}/token-usage.
+    if resolved_app_config.token_usage.enabled:
+        from deerflow.agents.middlewares.context_usage_middleware import ContextUsageMiddleware
+
+        middlewares.append(
+            ContextUsageMiddleware(
+                model_name=model_name,
+                context_window=getattr(model_config, "context_window", None),
+            )
+        )
+
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
     # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.
