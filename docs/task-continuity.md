@@ -82,8 +82,12 @@ The boundary rule applies to BMP Han and non-Han text. Adjacent Latin and
 other scripts, and astral/compatibility Han, can still form an unsplit term.
 Existing archives rebuild their stored search terms transactionally on the next
 search or capture, preserving source IDs, text and checkpoint reachability.
-If the archive is read-only or temporarily locked, search keeps using the old
-index and retries the upgrade later. Reindexing processes bounded row batches.
+The best-effort upgrade runs outside the capture transaction and requires spare
+database capacity. If it is deferred by limited space, a read-only archive or
+a write lock, archived queries and excerpts use the legacy tokenizer, and new
+captures in that archive keep the legacy index format until migration succeeds.
+Active-history matching always uses the current tokenizer. The upgrade can be
+retried on later searches or captures and processes bounded row batches.
 Length-changing casefolds such as `Straße` map back to original positions; the
 combining dot produced by folding `İ` follows the existing tokenization rules.
 FTS normalization may not map exactly to indexed terms, such as `cafe` matching
