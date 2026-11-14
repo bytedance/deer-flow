@@ -109,18 +109,32 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     return changed
 
 
+def _is_hidden_output_path(path: str) -> bool:
+    """Whether any segment below the outputs root starts with a dot.
+
+    Scheduled tasks and agents keep working state under outputs (a cursor or
+    state JSON, a ``.work/`` scratch tree). Those files are not deliverables, so
+    they must not make an otherwise finished run fail delivery verification.
+    """
+    _prefix, separator, relative = path.partition("/outputs/")
+    if not separator:
+        return False
+    return any(segment.startswith(".") for segment in relative.split("/") if segment)
+
+
 def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
     """Return regular output changes established by the bounded snapshots.
 
     Paths absent from a truncated before snapshot are omitted, including
     genuinely new files; modifications observed in both snapshots are retained.
-    The worker's delivery check relies on this list and is skipped when it is
-    empty, so an empty result does not prove that the run produced no outputs.
+    Hidden paths are working state, not deliverables. The worker's delivery
+    check relies on this list and is skipped when it is empty, so an empty
+    result does not prove that the run produced no outputs.
     """
     paths: list[str] = []
     for path in sorted(get_changed_paths(before, after)):
         snapshot = after.files.get(path)
-        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink:
+        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink and not _is_hidden_output_path(path):
             paths.append(path)
     return paths
 
