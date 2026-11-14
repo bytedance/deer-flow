@@ -211,6 +211,24 @@ def is_valid_receipt(receipt: object) -> bool:
     return isinstance(output_bytes, int) and not isinstance(output_bytes, bool)
 
 
+def ledger_header_lines() -> list[str]:
+    """Instruction lines that introduce receipts to the model."""
+    return [
+        "## Tool receipts (execution record)",
+        # The example is generated from format_citation/parse_citations' shared
+        # format so the instruction can never drift from the verifier.
+        f"Cite receipt ids (e.g. {format_citation(receipt_id(1), 'write_file')}) in your final report for every claim about an action you took.",
+        # Anti-automation-bias (design rule 4): the ledger always states its
+        # evidence boundary so the model never reads provenance as endorsement.
+        "Execution evidence only — receipts record that a call happened and its status; they do not validate claim correctness or task acceptance.",
+    ]
+
+
+def render_receipt_line(receipt: ToolReceipt) -> str:
+    """One model-visible receipt line."""
+    return f"- [{receipt['id']}] {receipt['tool_name']} status={receipt['status']} args_sha256={receipt['args_sha256']} output_sha256={receipt['output_sha256']} bytes={receipt['output_bytes']}"
+
+
 def render_tool_receipts_with_snapshot(
     receipts: list[ToolReceipt],
     *,
@@ -225,16 +243,8 @@ def render_tool_receipts_with_snapshot(
     """
     if not receipts:
         return "", []
-    lines = [
-        "## Tool receipts (execution record)",
-        # The example is generated from format_citation/parse_citations' shared
-        # format so the instruction can never drift from the verifier.
-        f"Cite receipt ids (e.g. {format_citation(receipt_id(1), 'write_file')}) in your final report for every claim about an action you took.",
-        # Anti-automation-bias (design rule 4): the ledger always states its
-        # evidence boundary so the model never reads provenance as endorsement.
-        "Execution evidence only — receipts record that a call happened and its status; they do not validate claim correctness or task acceptance.",
-    ]
-    receipt_lines = [f"- [{receipt['id']}] {receipt['tool_name']} status={receipt['status']} args_sha256={receipt['args_sha256']} output_sha256={receipt['output_sha256']} bytes={receipt['output_bytes']}" for receipt in receipts]
+    lines = ledger_header_lines()
+    receipt_lines = [render_receipt_line(receipt) for receipt in receipts]
     if len("\n".join([*lines, *receipt_lines])) <= max_chars:
         lines.extend(receipt_lines)
         retained_receipts = receipts
