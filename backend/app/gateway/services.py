@@ -2336,6 +2336,7 @@ async def start_run(
     require_existing_thread: bool = False,
     evidence_origin: str | None = None,
     scheduled_task_runtime: Mapping[str, Any] | None = None,
+    thread_is_new: bool = False,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -2350,6 +2351,10 @@ async def start_run(
     require_existing_thread : bool
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
+    thread_is_new : bool
+        The caller just generated ``thread_id`` (stateless run without one), so no
+        thread row or project membership can exist yet; admission skips the project
+        context resolution instead of logging its expected "row does not exist" failure.
     evidence_origin : str | None
         Trusted Python entry-point provenance, never copied from request data.
         Internal launches without an explicit origin remain unknown.
@@ -2706,11 +2711,15 @@ async def start_run(
         # nothing re-resolves membership mid-run, and admission never writes
         # membership (§10.7). Resolution failure degrades to unassigned with a
         # warning inside the resolver; it never fails the run.
-        project_context = await resolve_project_context(
-            run_ctx.thread_store,
-            getattr(request.app.state, "project_repo", None),
-            thread_id,
-            getattr(request.app.state, "project_document_repo", None),
+        project_context = (
+            None
+            if thread_is_new
+            else await resolve_project_context(
+                run_ctx.thread_store,
+                getattr(request.app.state, "project_repo", None),
+                thread_id,
+                getattr(request.app.state, "project_document_repo", None),
+            )
         )
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
@@ -3108,6 +3117,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    thread_is_new: bool = False,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -3189,6 +3199,7 @@ async def launch_scheduled_thread_run(
                 idempotency_key=idempotency_key,
                 evidence_origin="scheduled",
                 scheduled_task_runtime=scheduled_task_runtime,
+                **({"thread_is_new": True} if thread_is_new else {}),
             )
         except HTTPException as exc:
             if isinstance(exc.detail, dict) and exc.detail.get("code") == "approval_pending":

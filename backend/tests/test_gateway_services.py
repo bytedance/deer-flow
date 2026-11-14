@@ -6289,3 +6289,33 @@ async def test_start_run_forwards_sanitized_client_context_to_runtime_context_on
     assert stored["kwargs"]["config"] == expected_stored_config
     assert record.kwargs["config"] == expected_stored_config
     assert body.config == original_config
+
+
+def test_launch_scheduled_thread_run_forwards_thread_is_new(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+
+    async def _scenario(**extra):
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="p",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+                metadata={"scheduled_task_id": "task-1", "scheduled_task_run_id": "task-run-1"},
+                **extra,
+            )
+        return captured
+
+    assert asyncio.run(_scenario(thread_is_new=True)).get("thread_is_new") is True
+    assert not asyncio.run(_scenario()).get("thread_is_new")

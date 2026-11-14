@@ -376,3 +376,50 @@ async def test_update_status_lease_guard_does_not_read_a_stale_snapshot(tmp_path
         assert row["lease_owner"] == "scheduler-B"
     finally:
         await close_engine()
+
+
+async def _dispatch_once(tmp_path, *, task_id: str, context_mode: str, thread_id: str | None) -> list:
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        launched: list = []
+        service = _make_service(task_repo, run_repo, launched)
+        await task_repo.create(
+            task_id=task_id,
+            user_id="user-1",
+            thread_id=thread_id,
+            context_mode=context_mode,
+            assistant_id="lead_agent",
+            title=task_id,
+            prompt="do the thing",
+            schedule_type="cron",
+            schedule_spec={"cron": "*/5 * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        task = await task_repo.get(task_id, user_id="user-1")
+        assert task is not None
+        result = await service.dispatch_task(dict(task), now=datetime.now(UTC), trigger="manual")
+        assert result["outcome"] == "launched", result
+        return launched
+    finally:
+        await close_engine()
+
+
+async def test_dispatch_marks_fresh_thread_per_run_as_new(tmp_path):
+    launched = await _dispatch_once(tmp_path, task_id="t-fresh", context_mode="fresh_thread_per_run", thread_id=None)
+    assert launched[0]["thread_is_new"] is True
+
+
+async def test_dispatch_marks_reuse_thread_without_stored_id_as_new(tmp_path):
+    launched = await _dispatch_once(tmp_path, task_id="t-reuse-none", context_mode="reuse_thread", thread_id=None)
+    assert launched[0]["thread_is_new"] is True
+
+
+async def test_dispatch_does_not_mark_reused_existing_thread_as_new(tmp_path):
+    launched = await _dispatch_once(tmp_path, task_id="t-reuse-existing", context_mode="reuse_thread", thread_id="existing-thread")
+    assert launched[0]["thread_id"] == "existing-thread"
+    assert "thread_is_new" not in launched[0]
