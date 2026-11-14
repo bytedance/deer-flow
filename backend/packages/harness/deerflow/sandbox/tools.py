@@ -2037,7 +2037,7 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
         # boundary above admits PATH-style concatenation, but a tail that ran
         # through the ``:`` swallowed every later entry of the list, leaving
         # those virtual paths unresolved in the command.
-        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():]*)?")
+        pattern = re.compile(rf"{PATH_START_BOUNDARY}{re.escape(VIRTUAL_PATH_PREFIX)}(?=/|$|[^\w./-])(/[^\s\"';&|<>():,]*)?")
 
         def replace_user_data_match(match: re.Match) -> str:
             resolved = replace_virtual_path(match.group(0), thread_data).replace("\\", "/")
