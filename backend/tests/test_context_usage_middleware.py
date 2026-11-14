@@ -8,7 +8,7 @@ import pytest
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelRequest
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
@@ -75,20 +75,21 @@ def _request(messages, *, system: str | None = "S" * 40, tools=(), runtime=None)
     )
 
 
-def _capture(middleware: ContextUsageMiddleware, request: ModelRequest) -> None:
-    middleware.wrap_model_call(request, lambda _request: AIMessage(content="ok"))
+def _run(middleware: ContextUsageMiddleware, request: ModelRequest, messages=None) -> tuple[ModelResponse, ModelResponse]:
+    """Drive one model call through the middleware's wrap hook.
 
-
-def _stamp(middleware: ContextUsageMiddleware, runtime=None) -> dict | None:
-    update = middleware.after_model({"messages": [AIMessage(content="final", id="ai-1")]}, runtime or _runtime())
-    if update is None:
-        return None
-    return update["messages"][0].additional_kwargs[CONTEXT_USAGE_KEY]
+    Returns the fake model's response and the response the middleware
+    returned, so tests can assert that the original stayed untouched.
+    """
+    response = ModelResponse(result=list(messages if messages is not None else [AIMessage(content="final", id="ai-1")]))
+    returned = middleware.wrap_model_call(request, lambda _request: response)
+    assert isinstance(returned, ModelResponse)
+    return response, returned
 
 
 def _snapshot(middleware: ContextUsageMiddleware, request: ModelRequest) -> dict:
-    _capture(middleware, request)
-    payload = _stamp(middleware, request.runtime)
+    _, returned = _run(middleware, request)
+    payload = returned.result[-1].additional_kwargs.get(CONTEXT_USAGE_KEY)
     assert payload is not None
     return payload
 
@@ -162,8 +163,8 @@ def test_static_system_prompt_and_tool_schemas_are_counted_once_per_assembly() -
     middleware = _middleware(counter)
     request = _request([HumanMessage(content="hi")], tools=[builtin_tool, _mcp_tool()])
 
-    _capture(middleware, request)
-    _capture(middleware, request)
+    _run(middleware, request)
+    _run(middleware, request)
 
     assert counter.tool_count_calls == 2  # one built-in group, one MCP group
 
@@ -172,8 +173,8 @@ def test_tool_set_change_invalidates_the_static_cache() -> None:
     counter = _CountingCounter()
     middleware = _middleware(counter)
 
-    _capture(middleware, _request([], tools=[builtin_tool]))
-    _capture(middleware, _request([], tools=[builtin_tool, _mcp_tool()]))
+    _run(middleware, _request([], tools=[builtin_tool]))
+    _run(middleware, _request([], tools=[builtin_tool, _mcp_tool()]))
 
     assert counter.tool_count_calls == 3
 
@@ -181,47 +182,72 @@ def test_tool_set_change_invalidates_the_static_cache() -> None:
 def test_counting_failure_does_not_break_the_model_call() -> None:
     middleware = ContextUsageMiddleware(model_name="test-model", context_window=1000, token_counter=_RaisingCounter())
     handler_calls: list[ModelRequest] = []
+    response = ModelResponse(result=[AIMessage(content="ok", id="ai-1")])
 
-    result = middleware.wrap_model_call(_request([HumanMessage(content="hi")]), lambda request: handler_calls.append(request) or AIMessage(content="ok"))
+    returned = middleware.wrap_model_call(_request([HumanMessage(content="hi")]), lambda request: handler_calls.append(request) or response)
 
-    assert isinstance(result, AIMessage)
+    assert returned is response
     assert len(handler_calls) == 1
-    assert middleware.after_model({"messages": [AIMessage(content="final")]}, _runtime()) is None
+    assert CONTEXT_USAGE_KEY not in response.result[0].additional_kwargs
 
 
-def test_after_model_stamps_the_last_ai_message_without_mutating_it() -> None:
+def test_wrap_model_call_stamps_the_last_ai_message_without_mutating_it() -> None:
     middleware = _middleware()
     original = AIMessage(content="final", id="ai-1")
-    _capture(middleware, _request([HumanMessage(content="hi")]))
 
-    update = middleware.after_model({"messages": [HumanMessage(content="hi"), original]}, _runtime())
+    response, returned = _run(middleware, _request([HumanMessage(content="hi")]), [original])
 
-    assert update is not None
-    stamped = update["messages"][0]
+    stamped = returned.result[-1]
+    assert returned is not response
+    assert stamped is not original
     assert stamped.id == "ai-1"
     assert CONTEXT_USAGE_KEY not in original.additional_kwargs
     assert stamped.additional_kwargs[CONTEXT_USAGE_KEY]["conversation_tokens"] == 2
     assert stamped.additional_kwargs[CONTEXT_USAGE_KEY]["total_tokens"] == 42
 
 
-def test_after_model_is_a_noop_without_a_capture_or_an_ai_message() -> None:
+def test_wrap_model_call_leaves_a_response_without_an_ai_message_untouched() -> None:
     middleware = _middleware()
-    assert middleware.after_model({"messages": [AIMessage(content="final")]}, _runtime()) is None
+    tool_message = ToolMessage(content="result", tool_call_id="call-1")
 
-    _capture(middleware, _request([HumanMessage(content="hi")]))
-    assert middleware.after_model({"messages": [HumanMessage(content="still waiting")]}, _runtime()) is None
+    response, returned = _run(middleware, _request([HumanMessage(content="hi")]), [tool_message])
+
+    assert returned is response
+    assert CONTEXT_USAGE_KEY not in tool_message.additional_kwargs
 
 
-def test_snapshots_are_kept_per_thread() -> None:
+def test_stamp_lands_on_the_ai_message_before_a_structured_output_tool_message() -> None:
     middleware = _middleware()
-    _capture(middleware, _request([HumanMessage(content="one")], runtime=_runtime("thread-a")))
-    _capture(middleware, _request([HumanMessage(content="two-two")], runtime=_runtime("thread-b")))
+    ai_message = AIMessage(content="", id="ai-1")
+    tool_message = ToolMessage(content='{"answer": 1}', tool_call_id="call-1")
 
-    first = _stamp(middleware, _runtime("thread-a"))
-    second = _stamp(middleware, _runtime("thread-b"))
+    _, returned = _run(middleware, _request([HumanMessage(content="hi")]), [ai_message, tool_message])
 
-    assert first["conversation_tokens"] == 3
-    assert second["conversation_tokens"] == 7
+    assert CONTEXT_USAGE_KEY in returned.result[0].additional_kwargs
+    assert returned.result[1] is tool_message
+    assert CONTEXT_USAGE_KEY not in tool_message.additional_kwargs
+
+
+def test_each_model_call_stamps_only_its_own_response() -> None:
+    middleware = _middleware()
+
+    _, first = _run(middleware, _request([HumanMessage(content="one")], runtime=_runtime("thread-a")))
+    _, second = _run(middleware, _request([HumanMessage(content="two-two")], runtime=_runtime("thread-b")))
+
+    assert first.result[-1].additional_kwargs[CONTEXT_USAGE_KEY]["conversation_tokens"] == 3
+    assert second.result[-1].additional_kwargs[CONTEXT_USAGE_KEY]["conversation_tokens"] == 7
+
+
+def test_the_stamp_adds_no_stream_step() -> None:
+    """A graph node per model call would add a ``values`` SSE event and drift the
+    replay golden, so the stamp must ride the model node's own response."""
+    baseline = create_agent(FakeListChatModel(responses=["done"]))
+    instrumented = create_agent(FakeListChatModel(responses=["done"]), middleware=[_middleware()])
+
+    def steps(graph) -> int:
+        return sum(1 for _ in graph.stream({"messages": [HumanMessage(content="hi")]}, stream_mode="values"))
+
+    assert steps(instrumented) == steps(baseline)
 
 
 def test_snapshot_runs_before_system_message_coalescing() -> None:
@@ -256,10 +282,11 @@ def test_snapshot_runs_before_system_message_coalescing() -> None:
 
 
 def test_snapshot_survives_token_usage_attribution_in_the_same_step() -> None:
-    """TokenUsageMiddleware runs after the snapshot in the reverse hook chain.
+    """TokenUsageMiddleware's after_model node rewrites the same AIMessage.
 
-    It rewrites the same AIMessage; if it did not merge the existing kwargs the
-    snapshot would be silently dropped in every real lead-agent run.
+    It runs after the model node stamped the response; if it did not merge the
+    existing kwargs the snapshot would be silently dropped in every real
+    lead-agent run.
     """
     from deerflow.agents.middlewares.token_usage_middleware import TOKEN_USAGE_ATTRIBUTION_KEY, TokenUsageMiddleware
 

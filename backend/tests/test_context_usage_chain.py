@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from langchain.agents.middleware.types import ModelRequest
+from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, SystemMessage
 
 from deerflow.agents.lead_agent.agent import build_middlewares
@@ -58,10 +59,19 @@ def test_context_usage_middleware_receives_the_model_capacity() -> None:
         runtime=runtime,
     )
 
-    middleware.wrap_model_call(request, lambda _request: AIMessage(content="ok"))
-    update = middleware.after_model({"messages": [AIMessage(content="done", id="ai-1")]}, runtime)
+    returned = middleware.wrap_model_call(request, lambda _request: ModelResponse(result=[AIMessage(content="done", id="ai-1")]))
 
-    snapshot = update["messages"][0].additional_kwargs[CONTEXT_USAGE_KEY]
+    snapshot = returned.result[0].additional_kwargs[CONTEXT_USAGE_KEY]
     assert snapshot["context_window"] == 64000
     assert snapshot["model_name"] == "offline"
     assert middleware.release_policy_parameters()["snapshot_version"] == 1
+
+
+def test_context_usage_middleware_registers_no_after_model_node() -> None:
+    """LangChain gives every middleware that overrides ``after_model`` its own
+    graph node, and each node execution emits an extra ``values`` SSE event per
+    model call. That drifted the replay golden, so the stamp must ride the model
+    node's own response instead.
+    """
+    assert ContextUsageMiddleware.after_model is AgentMiddleware.after_model
+    assert ContextUsageMiddleware.aafter_model is AgentMiddleware.aafter_model

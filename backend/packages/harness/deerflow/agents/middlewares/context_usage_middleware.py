@@ -9,6 +9,12 @@ It is read-only: it never rewrites the request. The only state it writes is one
 JSON-safe dict on the response's last AIMessage (``deerflow_context_usage``),
 which the Gateway reads back for ``GET /api/threads/{id}/token-usage``.
 
+The stamp rides ``wrap_model_call`` rather than ``after_model`` on purpose.
+LangChain registers a separate graph node for every middleware that overrides
+``after_model``, and each node execution emits one extra ``values`` SSE event
+per model call. Stamping the response inside the model node keeps the streamed
+event sequence identical to a chain without this middleware.
+
 Ordering matters. The snapshot must run *outside* (earlier than)
 ``SystemMessageCoalescingMiddleware``: coalescing merges every SystemMessage
 into one block and overwrites its provenance, after which the date reminder,
@@ -27,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, override
 
@@ -37,9 +43,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from langchain_core.messages.utils import count_tokens_approximately
-from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.tools.mcp_metadata import is_mcp_tool
 
 logger = logging.getLogger(__name__)
@@ -214,7 +218,6 @@ class ContextUsageMiddleware(AgentMiddleware[AgentState]):
         self._token_counter = token_counter
         self._static_fingerprint: tuple[Any, ...] | None = None
         self._static_counts: tuple[int, int, int] = (0, 0, 0)
-        self._pending: BoundedDict = BoundedDict(maxsize=256)
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -224,15 +227,6 @@ class ContextUsageMiddleware(AgentMiddleware[AgentState]):
             "model_name": self._model_name,
             "context_window": self._context_window,
         }
-
-    @staticmethod
-    def _thread_id(runtime: Runtime | None) -> str | None:
-        context = getattr(runtime, "context", None)
-        if isinstance(context, Mapping):
-            thread_id = context.get("thread_id")
-            if isinstance(thread_id, str) and thread_id:
-                return thread_id
-        return None
 
     def _count_tools(self, tools: list[Any]) -> int:
         if not tools:
@@ -277,32 +271,43 @@ class ContextUsageMiddleware(AgentMiddleware[AgentState]):
             captured_at=datetime.now(UTC).isoformat(timespec="seconds"),
         )
 
-    def _capture(self, request: ModelRequest) -> None:
+    def _capture(self, request: ModelRequest) -> ContextUsageSnapshot | None:
         # Observability must never break the run: a tool schema the counter
         # cannot serialize or an unexpected message shape skips the snapshot.
         try:
-            snapshot = self._build_snapshot(request)
+            return self._build_snapshot(request)
         except Exception:
             logger.warning("Context usage snapshot failed; skipping this model call", exc_info=True)
-            return
-        self._pending[self._thread_id(getattr(request, "runtime", None))] = snapshot
+            return None
 
-    def _stamp(self, state: AgentState, runtime: Runtime | None) -> dict[str, Any] | None:
-        snapshot = self._pending.pop(self._thread_id(runtime), None)
+    @staticmethod
+    def _attach(response: ModelResponse, snapshot: ContextUsageSnapshot | None) -> ModelResponse:
+        """Return *response* with the snapshot on its last AIMessage.
+
+        The scan is backwards because structured-output handlers return the
+        AIMessage followed by its ToolMessage; the snapshot belongs on the
+        assistant message, not on the tool result. The provider message is
+        copied rather than mutated: other middlewares may still hold the
+        original response object.
+        """
         if snapshot is None:
-            return None
-        messages = state.get("messages") or []
-        if not messages:
-            return None
-        last = messages[-1]
-        if not isinstance(last, AIMessage):
-            return None
-        payload = snapshot.to_dict()
-        additional_kwargs = dict(getattr(last, "additional_kwargs", {}) or {})
-        if additional_kwargs.get(CONTEXT_USAGE_KEY) == payload:
-            return None
-        additional_kwargs[CONTEXT_USAGE_KEY] = payload
-        return {"messages": [last.model_copy(update={"additional_kwargs": additional_kwargs})]}
+            return response
+        try:
+            messages = list(response.result)
+            payload = snapshot.to_dict()
+            for index in range(len(messages) - 1, -1, -1):
+                message = messages[index]
+                if not isinstance(message, AIMessage):
+                    continue
+                additional_kwargs = dict(getattr(message, "additional_kwargs", {}) or {})
+                if additional_kwargs.get(CONTEXT_USAGE_KEY) == payload:
+                    return response
+                additional_kwargs[CONTEXT_USAGE_KEY] = payload
+                messages[index] = message.model_copy(update={"additional_kwargs": additional_kwargs})
+                return replace(response, result=messages)
+        except Exception:
+            logger.warning("Context usage stamp could not be attached; skipping this model call", exc_info=True)
+        return response
 
     @override
     def wrap_model_call(
@@ -310,8 +315,8 @@ class ContextUsageMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        self._capture(request)
-        return handler(request)
+        snapshot = self._capture(request)
+        return self._attach(handler(request), snapshot)
 
     @override
     async def awrap_model_call(
@@ -319,13 +324,5 @@ class ContextUsageMiddleware(AgentMiddleware[AgentState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        self._capture(request)
-        return await handler(request)
-
-    @override
-    def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        return self._stamp(state, runtime)
-
-    @override
-    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        return self._stamp(state, runtime)
+        snapshot = self._capture(request)
+        return self._attach(await handler(request), snapshot)
