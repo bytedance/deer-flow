@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "catalog/weknora",
+  "locales": {
+    "zh-CN": {
+      "title": "WeKnora 知识检索",
+      "description": "检索 WeKnora 知识库和所选文档，并展示来源引用。",
+      "usage": [
+        {
+          "title": "选择检索范围",
+          "description": "在对话中选择已授权的 WeKnora 知识库，按需缩小到具体文档。"
+        },
+        {
+          "title": "提问并核对来源",
+          "description": "提出与已入库资料相关的问题，查看返回片段和来源引用。"
+        }
+      ],
+      "requirements": [
+        "已有完成索引的 WeKnora 知识库；管理员已配置连接、凭据、用户授权和检索工具。"
+      ]
+    },
+    "en-US": {
+      "title": "WeKnora knowledge retrieval",
+      "description": "Search WeKnora knowledge bases and selected documents with source citations.",
+      "usage": [
+        {
+          "title": "Select a search scope",
+          "description": "Choose an authorized WeKnora knowledge base in chat and narrow it to specific documents when needed."
+        },
+        {
+          "title": "Ask and verify sources",
+          "description": "Ask a question about indexed content and inspect the retrieved excerpts and source citations."
+        }
+      ],
+      "requirements": [
+        "An indexed WeKnora knowledge base is required, with an administrator-configured connection, credentials, user grants and retrieval tool."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-weknora#readme"
+}

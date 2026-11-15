@@ -39,6 +39,28 @@ _UNKNOWN_TOOL_NAME = "unknown_tool"
 _EMPTY_TOOL_NAME_ERROR = "Tool call could not be executed because its name was missing or empty."
 _SYNTHETIC_TOOL_CALL_ID_PREFIX = "deerflow_synthetic_tool_call_"
 
+# Middleware producers spell an absent provider ID differently: "" is the canonical
+# spelling, but ``str(tool_call.get("id", ""))`` yields "None" once the key is present
+# with a null value, and the artifact/deferred/knowledge middlewares fall back to
+# "missing_tool_call_id". They all answer the same call, so pairing treats them alike.
+_ABSENT_TOOL_CALL_ID_SPELLINGS = frozenset({"None", "missing_tool_call_id"})
+
+
+def _canonical_tool_call_id(tool_call_id: object) -> object:
+    """Return one value for every spelling middleware uses for "this call had no ID"."""
+    return "" if _absent_tool_call_id(tool_call_id) else tool_call_id
+
+
+def _absent_tool_call_id(tool_call_id: object) -> bool:
+    """Whether an ID is missing in any spelling: null, blank, or a producer sentinel."""
+    if not _valid_tool_call_id(tool_call_id):
+        return True
+    return isinstance(tool_call_id, str) and tool_call_id in _ABSENT_TOOL_CALL_ID_SPELLINGS
+
+
+def _same_tool_call_id(left: object, right: object) -> bool:
+    return _canonical_tool_call_id(left) == _canonical_tool_call_id(right)
+
 
 def _valid_tool_name(name: object) -> bool:
     return isinstance(name, str) and bool(name.strip())
@@ -93,12 +115,12 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
 
 
 def _turn_malformed_result_count(messages: list, start: int) -> int:
-    """Count the malformed results issued by the turn opened at ``start``."""
+    """Count the unpaired results issued by the turn opened at ``start``."""
     count = 0
     for msg in messages[start + 1 :]:
         if getattr(msg, "type", None) == "ai":
             break
-        if isinstance(msg, ToolMessage) and not _valid_tool_call_id(msg.tool_call_id):
+        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id):
             count += 1
     return count
 
@@ -123,7 +145,7 @@ def _claim_synthetic_id(open_calls: list[dict], result: ToolMessage, positional:
     Returning ``None`` leaves the result malformed for the orphan pass to drop, which is
     what an unattributable result gets today — better than inventing a pairing.
     """
-    candidates = [position for position, entry in enumerate(open_calls) if entry["original"] == result.tool_call_id and _names_can_pair(entry["name"], result.name)]
+    candidates = [position for position, entry in enumerate(open_calls) if _same_tool_call_id(entry["original"], result.tool_call_id) and _names_can_pair(entry["name"], result.name)]
     if not candidates or (len(candidates) > 1 and not positional):
         return None
     return open_calls.pop(candidates[0])["synthetic"]
@@ -415,8 +437,9 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                 continue
 
             # Re-point an already-paired result at its call's new id so the pairing
-            # below keeps it instead of dropping it as an orphan.
-            if not isinstance(msg, ToolMessage) or _valid_tool_call_id(msg.tool_call_id):
+            # below keeps it instead of dropping it as an orphan. Results carrying a
+            # producer sentinel are still unpaired — the sentinel is not the call's id.
+            if not isinstance(msg, ToolMessage) or not _absent_tool_call_id(msg.tool_call_id):
                 continue
             synthetic = _claim_synthetic_id(open_calls, msg, positional)
             if synthetic is not None:

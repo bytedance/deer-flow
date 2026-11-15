@@ -152,6 +152,7 @@ class RemoteSandboxBackend(SandboxBackend):
         max_shell_sessions: int | None = None,
         *,
         required_shell_sessions: int = 0,
+        max_bash_sessions: int | None = None,
     ):
         """Initialize with the provisioner service URL and optional API key.
 
@@ -163,10 +164,12 @@ class RemoteSandboxBackend(SandboxBackend):
             max_shell_sessions: Optional AIO shell-session capacity forwarded
                                 to each provisioned sandbox Pod.
             required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
+            max_bash_sessions: Bash capacity to provision and attest before admission.
         """
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
         self._max_shell_sessions = max_shell_sessions
+        self._max_bash_sessions = max_bash_sessions
         self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
 
     @property
@@ -185,7 +188,17 @@ class RemoteSandboxBackend(SandboxBackend):
         except (TypeError, ValueError):
             return True
 
-    def _sandbox_info(self, payload: dict, sandbox_id: str) -> SandboxInfo:
+    def _requires_bash_capacity_replacement(self, payload: dict) -> bool:
+        if self._max_bash_sessions is None:
+            return False
+        reported = payload.get("max_bash_sessions")
+        if type(reported) is not int or reported <= 0:
+            # Unknown metadata is not proof that a healthy Pod needs deletion.
+            raise RuntimeError("Provisioner did not report valid max_bash_sessions; upgrade the provisioner before admitting Bash commands")
+        return reported < self._max_bash_sessions
+
+    def _sandbox_info(self, payload: dict, sandbox_id: str, *, check_bash_capacity: bool = True) -> SandboxInfo:
+        bash_replacement = check_bash_capacity and self._requires_bash_capacity_replacement(payload)
         broker = payload.get("lark_cli_broker")
         generation = payload.get("container_id")
         return SandboxInfo(
@@ -193,7 +206,7 @@ class RemoteSandboxBackend(SandboxBackend):
             sandbox_url=payload["sandbox_url"],
             container_id=generation if isinstance(generation, str) and generation else None,
             lark_cli_broker=broker if isinstance(broker, bool) else None,
-            requires_replacement=self._requires_shell_capacity_replacement(payload),
+            requires_replacement=self._requires_shell_capacity_replacement(payload) or bash_replacement,
         )
 
     # ── SandboxBackend interface ──────────────────────────────────────────
@@ -339,6 +352,8 @@ class RemoteSandboxBackend(SandboxBackend):
         }
         if self._max_shell_sessions is not None:
             payload["max_shell_sessions"] = self._max_shell_sessions
+        if self._max_bash_sessions is not None:
+            payload["max_bash_sessions"] = self._max_bash_sessions
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,
@@ -356,7 +371,13 @@ class RemoteSandboxBackend(SandboxBackend):
             )
             resp.raise_for_status()
             data = resp.json()
-            info = self._sandbox_info(data, sandbox_id)
+            info = self._sandbox_info(data, sandbox_id, check_bash_capacity=False)
+            try:
+                insufficient_bash = self._requires_bash_capacity_replacement(data)
+            except RuntimeError as exc:
+                raise SandboxCreationError(str(exc), info=info) from exc
+            if insufficient_bash:
+                raise SandboxCreationError(f"Provisioner returned sandbox {sandbox_id} with insufficient Bash-session capacity", info=info)
             if self._max_shell_sessions is not None and "max_shell_sessions" not in data:
                 raise SandboxCreationError("Provisioner did not report max_shell_sessions; Gateway/provisioner version skew prevents shell-capacity validation", info=info)
             if self._requires_shell_capacity_replacement(data):

@@ -488,6 +488,13 @@ def _resolve_current_user_sid() -> str:
         ["whoami", "/user", "/fo", "csv", "/nh"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        # whoami writes the account name in the console's ANSI code page, which does
+        # not need to match the interpreter's encoding (e.g. UTF-8 mode on a Chinese Windows).
+        # Without errors="replace" the decoder raises inside subprocess's reader
+        # thread and leaves stdout as None. Only the SID (ASCII) and the CSV
+        # delimiters matter here, so replacing the account name is harmless.
+        errors="replace",
         check=False,
     )
     if result.returncode != 0:

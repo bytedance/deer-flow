@@ -74,6 +74,15 @@ into a normal assistant error message), so the Layer-1 golden can't catch a miss
 by shape alone — it inspects `replay_provider.replay_misses()` and fails loud
 instead. Layer-2 already fails on a miss (the recorded turns never render).
 
+The `write_read_file.ultra.json` fixture includes a transport-encoding migration
+for the request-only tool-result JSON envelope. Its two affected lead-agent input
+and conversation hashes were recomputed after checking that decoding the envelope
+exactly matched the original recorded inputs. All recorded assistant outputs,
+title/suggestion entries, and the SSE golden are unchanged. This is an offline
+fixture migration, not a new live recording or evidence of model behavior under
+the new encoding; normal replay still requires exact hashes, including tool
+content and execution status.
+
 ## Record a new scenario (needs a real key — dev machine only)
 
 Recording drives the **real frontend** so captured inputs match exactly what the

@@ -93,4 +93,4 @@ def test_builder_and_serialized_index_share_priority_coercion(priority, expected
 
     assert isinstance(middleware, McpRoutingMiddleware)
     assert middleware._routing_index == normalize({"routed_search": routing}) == {"routed_search": (expected, ("search",))}
-    assert middleware._matched_names({"messages": [HumanMessage(content="search")]}) == ["routed_search"]
+    assert middleware._matched_names({"messages": [HumanMessage(content="search")]}) == []

@@ -109,3 +109,27 @@ async def test_preset_catalog_registration_and_native_client_stay_off_loop(tmp_p
     profile = ManagedModel(name=result["name"], provider="anthropic", model="arbitrary")
     assert await router.test_model(request, router.SaveModelRequest(config=profile, expected_revision=result["revision"])) == {"ok": False, "message": "authentication_failed"}
     assert built == [True]
+
+
+@pytest.mark.asyncio
+async def test_catalog_reads_and_client_construction_stay_off_loop(tmp_path, monkeypatch):
+    from app.gateway import model_discovery
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    original = httpx.AsyncClient.__init__
+
+    def initialize(self, *args, **kwargs):
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", initialize)
+
+    async def send(client, request, **kwargs):
+        return httpx.Response(200, request=request, json={"data": [{"id": "a"}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await model_discovery.fetch_model_catalog(ManagedModel(provider="openai", model="catalog", api_key="test"))
+    assert result == (["a"], False)
+    admin = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    assert (await router.discover_models(admin, router.ModelConnection(provider="openai", api_key="test")))["models"] == [{"id": "a", "configured": False}]

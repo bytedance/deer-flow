@@ -270,6 +270,48 @@ describe("SubtaskCard message synchronization", () => {
     );
   });
 
+  it("keeps full live steps when a delayed backfill contains truncated copies", async () => {
+    let finishBackfill!: (steps: NonNullable<Subtask["steps"]>) => void;
+    rs.mocked(fetchSubtaskSteps).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishBackfill = resolve;
+        }),
+    );
+    const view = setup(true);
+    fireEvent.click(screen.getByRole("button"));
+    expect(fetchSubtaskSteps).toHaveBeenCalledWith(
+      "thread-1",
+      "run-1",
+      "task-1",
+    );
+    const historical = {
+      kind: "tool" as const,
+      message_index: 1,
+      text: "history",
+      tool_name: "read_file",
+    };
+    const live = {
+      kind: "ai" as const,
+      message_index: 2,
+      text: `${"x".repeat(8192)} live reasoning tail`,
+      tool_calls: [{ name: "web_search", args: { query: "sources" } }],
+    };
+    await act(async () => view.publish({ id: "task-1", steps: [live] }));
+    expect(view.container.textContent).toContain("live reasoning tail");
+
+    // Persisted steps are bounded; a late response must only fill missing indices.
+    await act(async () =>
+      finishBackfill([
+        historical,
+        { ...live, text: live.text.slice(0, 8192), truncated: true },
+      ]),
+    );
+    expect(view.read().steps).toEqual([historical, live]);
+    expect(screen.getAllByText("read_file")).toHaveLength(1);
+    expect(view.container.textContent).toContain("live reasoning tail");
+  });
+
   it("updates the folded title when final arguments and task_started arrive together", async () => {
     const view = setup();
     expect(screen.getByRole("button").textContent).toContain("Res");

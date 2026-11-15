@@ -11,8 +11,8 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled
-from deerflow.scheduler.schedules import next_run_at, should_advance_schedule_cursor
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, once_run_still_scheduled, pause_unschedulable
+from deerflow.scheduler.schedules import should_advance_schedule_cursor, stored_next_run_at
 from deerflow.utils.time import coerce_iso
 
 if TYPE_CHECKING:
@@ -150,6 +150,7 @@ async def finalize_occurrence(
         account_launch(task, occurrence, run_id)
     if not can_project(task, occurrence):
         return True
+    schedule_error = None
     if run_id is not None and task.last_run_id != run_id:
         launched_at = utc(occurrence.started_at or occurrence.scheduled_for)
         task.last_run_at = launched_at
@@ -158,7 +159,7 @@ async def finalize_occurrence(
         # A manual recurring run is an extra trial. Keep the task's existing
         # cadence; only scheduled runs and once-task boundary logic advance it.
         if should_advance_schedule_cursor(task.schedule_type, trigger=occurrence.trigger):
-            task.next_run_at = next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
+            task.next_run_at, schedule_error = stored_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=launched_at)
         task.lease_owner = None
         task.lease_expires_at = None
         if task.schedule_type != "once" and task.status == "running":
@@ -195,6 +196,7 @@ async def finalize_occurrence(
         task.last_error = AUTO_PAUSE_LAST_ERROR
         if not was_paused:
             events += ("task_paused",)
+    pause_unschedulable(task, schedule_error)
     task.updated_at = finished_at
     if observer is not None:
         await observer(session, task, occurrence, events=events)

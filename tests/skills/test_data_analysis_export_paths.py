@@ -66,13 +66,18 @@ def test_cli_exports_basename_from_real_read_only_cache(tmp_path, extension):
     source = tmp_path / "source.csv"
     source.write_text("answer,label\n42,分析\n", encoding="utf-8")
     analysis = runpy.run_path(str(SCRIPT))
-    key = analysis["compute_files_hash"]([str(source)])
-    table_map = {}
-    with duckdb.connect(str(cache_dir / f"{key}.duckdb")) as con:
-        analysis["_load_csv"](con, str(source), table_map)
-    (cache_dir / f"{key}.table_map.json").write_text(
-        json.dumps(table_map), encoding="utf-8"
-    )
+    scope = analysis["main"].__globals__
+    scope["CACHE_DIR"] = str(cache_dir)
+
+    def load_csv(con, files):
+        table_map = {}
+        for path in files:
+            analysis["_load_csv"](con, path, table_map)
+        return table_map
+
+    scope["load_files"] = load_csv
+    with analysis["open_analysis_cache"]([str(source)]):
+        pass
     output = f"report.{extension}"
     completed = subprocess.run(
         [

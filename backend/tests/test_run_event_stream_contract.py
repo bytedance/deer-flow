@@ -580,7 +580,7 @@ def test_known_gaps_do_not_reclassify_current_events_as_missing():
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("status", ["success", "error", "interrupted", "timeout"])
+@pytest.mark.parametrize("status", ["success", "error", "interrupted", "timeout", "waiting_for_input"])
 async def test_authoritative_terminal_producer_matches_contract(status):
     from deerflow.runtime.events.terminal import confirm_terminal_event
 

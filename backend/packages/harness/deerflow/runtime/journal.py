@@ -903,6 +903,18 @@ class RunJournal(BaseCallbackHandler):
             self._current_tool_result_ids.pop(tool_call_id, None)
             self._terminal_task_results.discard(tool_call_id)
 
+    def adopt_resumed_tool_calls(self, calls: Mapping[str, str]) -> None:
+        """Own lead-agent calls an earlier Run paused and this Run resolves.
+
+        A HITL resume answers calls the paused Run dispatched. An approved call
+        executes here and reaches ``on_tool_end``, but a rejection is written by
+        the middleware without any tool callback, so final-output
+        reconciliation must treat these calls as this Run's to persist it.
+        """
+        for tool_call_id, name in calls.items():
+            if isinstance(tool_call_id, str) and tool_call_id:
+                self._current_run_tool_call_names[tool_call_id] = str(name or "")
+
     def _persist_tool_result_message(self, message: BaseMessage) -> None:
         # Tool callbacks run before the graph reducer assigns missing ids.
         # Assign on the returned object so the feed and checkpoint share the

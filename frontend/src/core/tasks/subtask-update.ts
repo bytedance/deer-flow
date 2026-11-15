@@ -1,6 +1,10 @@
 import { mergeSteps } from "./steps";
 import type { Subtask } from "./types";
 
+export interface SubtaskUpdateOptions {
+  stepSource?: "live" | "history";
+}
+
 export function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
   return status === "completed" || status === "failed";
 }
@@ -22,6 +26,7 @@ export function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
 export function computeNextSubtask(
   previous: Subtask | undefined,
   task: Partial<Subtask> & { id: string },
+  { stepSource = "live" }: SubtaskUpdateOptions = {},
 ): { next: Subtask; becameTerminal: boolean; changed: boolean } {
   const previousStatus = previous?.status;
 
@@ -37,7 +42,12 @@ export function computeNextSubtask(
   } as Subtask;
 
   if (task.steps) {
-    next.steps = mergeSteps(previous?.steps ?? [], task.steps);
+    // Persisted steps are bounded previews. A delayed backfill must not
+    // replace a complete live step that arrived while the read was pending.
+    next.steps =
+      stepSource === "history"
+        ? mergeSteps(task.steps, previous?.steps ?? [])
+        : mergeSteps(previous?.steps ?? [], task.steps);
   }
 
   // Usage events are cumulative snapshots. A delayed older frame must never

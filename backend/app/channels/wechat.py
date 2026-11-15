@@ -1084,16 +1084,9 @@ class WechatChannel(Channel):
     def _update_longpoll_timeout(self, data: Mapping[str, Any]) -> None:
         if not self._respect_server_longpoll_timeout:
             return
-        raw_timeout = data.get("longpolling_timeout_ms")
-        if raw_timeout is None:
-            return
-        try:
-            timeout_ms = float(raw_timeout)
-        except (TypeError, ValueError):
-            return
-        if timeout_ms <= 0:
-            return
-        self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
+        timeout_ms = self._coerce_float(data.get("longpolling_timeout_ms"), 0.0)
+        if 1_000 <= timeout_ms <= 300_000:
+            self._server_longpoll_timeout_seconds = timeout_ms / 1000.0
 
     def _base_info(self) -> dict[str, str]:
         return {"channel_version": self._channel_version}

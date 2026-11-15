@@ -1080,3 +1080,21 @@ def test_thread_projection_upgrades_metadata_only_manifest(projection_env) -> No
     ensure_thread_skill_projection(env.storage, "thread-old-manifest", {"alpha"})
 
     assert target.read_bytes() == source.read_bytes()
+
+
+def test_undecodable_manifest_is_treated_as_missing(tmp_path: Path) -> None:
+    """A manifest we cannot decode must not stop the projection from being rebuilt."""
+    from deerflow.skills.projection import _read_manifest
+
+    (tmp_path / ".projection-manifest.json").write_bytes(b"\xff\xfe")
+
+    assert _read_manifest(tmp_path) is None
+
+
+def test_undecodable_skill_states_file_is_treated_as_empty(projection_env) -> None:
+    """An undecodable states file reads as 'no overrides', not as a crash."""
+    state_file = projection_env.paths.user_skills_dir("alice") / "_skill_states.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_bytes(b"\xff\xfe")
+
+    assert projection_env.storage._read_skill_states() == {}

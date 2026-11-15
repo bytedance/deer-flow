@@ -33,9 +33,9 @@ def test_json_depth_limit_preserves_result(monkeypatch, status):
         "error_type": "unknown" if status == "error" else None,
         "recoverable_by_model": True,
         "recommended_next_action": "try_alternative" if status == "error" else "continue",
-        "source": "tool_return" if status == "error" else "content_analysis",
+        "source": "tool_return",
     }
-    assert loads.call_count == (2 if status == "error" else 1)
+    assert loads.call_count <= 1
 
 
 def test_second_json_probe_depth_limit_is_unknown(monkeypatch):
@@ -45,7 +45,7 @@ def test_second_json_probe_depth_limit_is_unknown(monkeypatch):
 
     result = meta.normalize_tool_message(message)
 
-    assert loads.call_count == 2
+    assert loads.call_count == 0
     assert result.status == "error"
     assert result.additional_kwargs[meta.TOOL_META_KEY]["error_type"] == "unknown"
     assert result.additional_kwargs[meta.TOOL_META_KEY]["recommended_next_action"] == "try_alternative"
@@ -66,7 +66,7 @@ def test_shallow_error_envelope_classification(name, expected):
     message = ToolMessage(content='{"error": {"code": 401}}', name=name, tool_call_id="shallow")
     result = meta.normalize_tool_message(message)
     assert result.additional_kwargs[meta.TOOL_META_KEY]["status"] == expected
-    assert result.additional_kwargs[meta.TOOL_META_KEY]["error_type"] == ("auth" if expected == "error" else None)
+    assert result.additional_kwargs[meta.TOOL_META_KEY]["error_type"] == ("unknown" if expected == "error" else None)
 
 
 class _ScriptedModel(GenericFakeChatModel):

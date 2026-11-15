@@ -5,6 +5,9 @@ production authentication or a substitute for Gateway run-control tests.
 """
 
 import asyncio
+import base64
+import json
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,8 +27,10 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.checkpoint.memory import InMemorySaver
 
+from app.gateway.extension_artifacts import read_output_snapshot, write_import_snapshot
 from app.gateway.routers.plugins import router
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
+from deerflow.config.paths import get_paths
 from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.tools.builtins.clarification_tool import ask_clarification_tool
 
@@ -37,9 +42,13 @@ class PreviewModel(FakeMessagesListChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         latest = next(m for m in reversed(messages) if m.type == "human")
         response = latest.additional_kwargs.get("human_input_response")
+        try:
+            current_request = json.loads(latest.content.split("\n", 1)[1]).get("request", "")
+        except (ValueError, IndexError):
+            current_request = latest.content
         if response:
             answer = AIMessage(content=f"Clarification accepted: {response['value']}.")
-        elif "Clarification fixture" in latest.content:
+        elif "Clarification fixture" in current_request:
             answer = AIMessage(content="", tool_calls=[{"name": "ask_clarification", "id": "clarify-environment", "args": {"question": "Which environment should I check?", "clarification_type": "missing_info"}, "type": "tool_call"}])
         else:
             answer = AIMessage(content="Release evidence verified. See the shared team record.")
@@ -51,6 +60,7 @@ class PreviewRuns:
         self.threads = {}
         self.runs = {}
         self.tasks = set()
+        self.artifact_gate = asyncio.Event()
         self.graph = create_agent(PreviewModel(responses=[]), tools=[ask_clarification_tool], middleware=[ClarificationMiddleware()], checkpointer=InMemorySaver())
 
     def bound(self, owner):
@@ -75,9 +85,25 @@ class PreviewRuns:
                 state = await host.graph.aget_state({"configurable": {"thread_id": thread_id}})
                 if not state.values:
                     raise AgentRunError(404, "No checkpoint")
-                return {"values": {"messages": [m.model_dump() for m in state.values["messages"]]}, "next": list(state.next)}
+                return {"values": {"messages": [m.model_dump() for m in state.values["messages"]]}, "next": list(state.next), "checkpoint_id": state.config["configurable"]["checkpoint_id"]}
 
-            async def start(self, *, thread_id, input, idempotency_key):
+            async def validate_artifact_source(self, *, thread_id, run_id, idempotency_key):
+                self.check(thread_id)
+                run = host.runs.get(run_id)
+                if run is None or run.thread_id != thread_id or run.status != "running" or run_id != idempotency_key:
+                    raise AgentRunError(422, "Producing run is not executing")
+
+            async def read_artifact(self, *, thread_id, path, expected_checkpoint_id=None):
+                self.check(thread_id)
+                if expected_checkpoint_id is not None and (await self.get_state(thread_id=thread_id))["checkpoint_id"] != expected_checkpoint_id:
+                    raise AgentRunError(412, "Producing checkpoint changed")
+                return await asyncio.to_thread(read_output_snapshot, owner, thread_id, path)
+
+            async def import_artifact(self, *, thread_id, filename, content):
+                self.check(thread_id)
+                return await asyncio.to_thread(write_import_snapshot, owner, thread_id, "community.agent-teams", filename, content)
+
+            async def start(self, *, thread_id, input, idempotency_key, artifact_imports=None):
                 self.check(thread_id)
                 if idempotency_key in host.runs:
                     return host.runs[idempotency_key]
@@ -87,6 +113,8 @@ class PreviewRuns:
                 host.runs[idempotency_key] = run
 
                 async def execute():
+                    if "Artifact fixture" in input["messages"][0]["content"]:
+                        await host.artifact_gate.wait()
                     await host.graph.ainvoke(input, config={"configurable": {"thread_id": thread_id}})
                     host.runs[idempotency_key] = AgentRun(thread_id, idempotency_key, "success", run.assistant_id)
 
@@ -103,6 +131,7 @@ class PreviewRuns:
 
 
 def create_app(directory):
+    os.environ["DEER_FLOW_HOME"] = str(directory)
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples/deerflow-extension-agent-teams"))
     extensions, diagnostics = load_extensions([ExtensionSpec(use="deerflow_extension_agent_teams:install", config={"enabled": True, "storage_path": str(Path(directory) / "teams.sqlite")}, required=True)])
     assert not diagnostics
@@ -142,6 +171,40 @@ def create_app(directory):
     async def public_state(payload: dict, request: Request):
         handlers = {"publish": service.publish_state, "read": service.read_state, "update": service.update_state}
         return await handlers[payload["operation"]](payload["input"], ToolContext(ExtensionPrincipal(request.state.user.id), {"enabled": True}, payload["source_thread"], agent_runs=runs.bound(request.state.user.id)))
+
+    @app.post("/preview/artifact")
+    async def artifact(payload: dict, request: Request):
+        from deerflow_extension_api.plugins import ActionContext
+
+        owner = request.state.user.id
+        bound = runs.bound(owner)
+        ctx = ActionContext(ExtensionPrincipal(owner), {"enabled": True}, agent_runs=bound)
+        team = await service.get({"team_id": payload["team_id"]}, ctx)
+        member = team["members"][0]
+        runs.artifact_gate.clear()
+        try:
+            await service.send({"team_id": team["id"], "member_id": member["id"], "request_id": payload["request_id"], "text": "Artifact fixture: produce a release report"}, ctx)
+            await service.tick()
+            path = get_paths().sandbox_outputs_dir(member["thread_id"], user_id=owner) / "report.bin"
+
+            def write():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(base64.b64decode(payload["content_base64"], validate=True))
+
+            await asyncio.to_thread(write)
+            return await service.register_artifact(
+                {"team_id": team["id"], "request_id": payload["request_id"], "name": payload["name"], "path": "/mnt/user-data/outputs/report.bin", **({"artifact_id": payload["artifact_id"]} if "artifact_id" in payload else {})},
+                ToolContext(ExtensionPrincipal(owner), {"enabled": True}, member["thread_id"], agent_runs=bound, run_id=next(r.run_id for r in runs.runs.values() if r.thread_id == member["thread_id"] and r.status == "running")),
+            )
+        finally:
+            runs.artifact_gate.set()
+
+    @app.get("/preview/imported")
+    async def imported(team_id: str, member_id: str, request: Request):
+        team = await service.db("get", request.state.user.id, team_id)
+        member = next(member for member in team["members"] if member["id"] == member_id)
+        directory = get_paths().sandbox_uploads_dir(member["thread_id"], user_id=request.state.user.id)
+        return await asyncio.to_thread(lambda: [{"filename": file.name, "content_base64": base64.b64encode(file.read_bytes()).decode()} for file in directory.glob("artifact-*")])
 
     @app.get("/api/agents")
     async def catalog():

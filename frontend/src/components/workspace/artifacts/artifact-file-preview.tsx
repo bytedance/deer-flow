@@ -1,11 +1,12 @@
 "use client";
 
-import { DownloadIcon } from "lucide-react";
+import { RotateCwIcon } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { defaultUrlTransform, type UrlTransform } from "streamdown";
 
 import { Button } from "@/components/ui/button";
+import { FileTypeIcon } from "@/components/workspace/file-type-icon";
 import { prepareHtmlPreview } from "@/core/artifacts/html-assets";
 import {
   getTabularDelimiter,
@@ -16,7 +17,6 @@ import {
 import {
   type ArtifactImageContext,
   resolveArtifactImageURL,
-  urlOfArtifact,
 } from "@/core/artifacts/utils";
 import { extractCitationSources } from "@/core/citations/sources";
 import { useI18n } from "@/core/i18n/hooks";
@@ -24,15 +24,12 @@ import {
   SafeStreamdown,
   toStreamdownComponents,
 } from "@/core/streamdown/components";
-import {
-  getFileExtensionDisplayName,
-  getFileIcon,
-  getFileName,
-} from "@/core/utils/files";
+import { getFileExtensionDisplayName, getFileName } from "@/core/utils/files";
 
 import { ArtifactLink } from "../citations/artifact-link";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 
+import { ArtifactDownloadButton } from "./artifact-download-button";
 import { artifactMarkdownPlugins } from "./markdown-preview-plugins";
 
 export function ArtifactPreviewError({
@@ -41,32 +38,34 @@ export function ArtifactPreviewError({
   isMock,
   message,
   downloadLabel,
+  onRetry,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   message: string;
   downloadLabel: string;
+  onRetry?: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="flex size-full items-center justify-center p-6">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <p className="text-muted-foreground text-sm">{message}</p>
-        <Button asChild>
-          <a
-            href={urlOfArtifact({
-              filepath,
-              threadId,
-              download: true,
-              isMock,
-            })}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <DownloadIcon className="size-4" />
-            {downloadLabel}
-          </a>
-        </Button>
+        <div className="flex flex-wrap justify-center gap-2">
+          {onRetry && (
+            <Button variant="outline" onClick={onRetry}>
+              <RotateCwIcon className="size-4" />
+              {t.artifactPreview.retry}
+            </Button>
+          )}
+          <ArtifactDownloadButton
+            filepath={filepath}
+            threadId={threadId}
+            isMock={isMock}
+            label={downloadLabel}
+          />
+        </div>
       </div>
     </div>
   );
@@ -90,35 +89,24 @@ export function ArtifactDownloadFallback({
 }) {
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
+  const { t } = useI18n();
 
   return (
     <div className="flex size-full items-center justify-center p-6">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
-        <div className="text-muted-foreground">
-          {getFileIcon(filepath, "size-12")}
-        </div>
+        <FileTypeIcon filename={filepath} className="size-16 [&>svg]:size-9" />
         <div className="space-y-1">
           <div className="font-medium break-all">{filename}</div>
-          <div className="text-muted-foreground text-sm">{fileType} file</div>
+          <div className="text-muted-foreground text-sm">{fileType}</div>
         </div>
         <p className="text-muted-foreground text-sm">
-          This file type cannot be previewed in the browser.
+          {t.artifactPreview.unavailable}
         </p>
-        <Button asChild>
-          <a
-            href={urlOfArtifact({
-              filepath,
-              threadId,
-              download: true,
-              isMock,
-            })}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <DownloadIcon className="size-4" />
-            Download
-          </a>
-        </Button>
+        <ArtifactDownloadButton
+          filepath={filepath}
+          threadId={threadId}
+          isMock={isMock}
+        />
       </div>
     </div>
   );

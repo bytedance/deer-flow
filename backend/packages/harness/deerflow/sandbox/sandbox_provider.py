@@ -23,6 +23,9 @@ class SandboxProvider(ABC):
     # provider's current Agent-accessible tool surface. Host-backed providers
     # must return False whenever shell access can bypass managed path mappings.
     supports_agent_skill_isolation: bool = False
+    # Opt in only when acquire/reuse itself exposes the prepared thread view,
+    # without a separate sync_agent_skills upload before tools can access it.
+    supports_lazy_agent_skill_isolation: bool = False
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:

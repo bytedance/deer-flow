@@ -177,9 +177,8 @@ async def test_safety_termination_event_reaches_astream_events():
     assert _TOOL_INVOCATIONS == []
 
 
-def test_content_filter_without_tool_calls_passes_through_unchanged():
-    """No tool calls => issue scope says don't intervene; the partial
-    response should be delivered as-is so the user sees what they got."""
+def test_content_filter_without_tool_calls_preserves_text_and_marks_termination():
+    """Keep the partial response visible while telling later hooks to stop."""
     _TOOL_INVOCATIONS.clear()
 
     class _NoToolModel(BaseChatModel):
@@ -210,8 +209,7 @@ def test_content_filter_without_tool_calls_passes_through_unchanged():
 
     # Content untouched.
     assert final_ai.content == "Partial answer truncated by safety filter"
-    # No safety_termination stamp because we didn't intervene.
-    assert "safety_termination" not in final_ai.additional_kwargs
+    assert final_ai.additional_kwargs["safety_termination"]["suppressed_tool_call_count"] == 0
     # tool node never ran (there were no tool calls in the first place).
     assert _TOOL_INVOCATIONS == []
 

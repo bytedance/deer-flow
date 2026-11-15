@@ -173,6 +173,35 @@ def test_tree_does_not_guess_another_branch(monkeypatch, fallback_client):
     assert asked == ["/repos/owner/repo/git/trees/HEAD"]
 
 
+@pytest.mark.parametrize("truncated", [False, True])
+def test_tree_reports_upstream_truncation(fallback_client, truncated):
+    client, _ = fallback_client
+    result = client.format_tree({"tree": [{"path": "README.md", "type": "blob"}], "truncated": truncated})
+    assert result.startswith("README.md")
+    assert ("GitHub" in result and "truncated" in result) is truncated
+
+
+@pytest.mark.parametrize("count", [99, 100, 101])
+def test_tree_reports_local_entry_limit(fallback_client, count):
+    client, _ = fallback_client
+    tree = [{"path": f"file-{i}", "type": "blob"} for i in range(count)]
+    result = client.format_tree({"tree": tree, "truncated": False})
+    assert ("output limit" in result) is (count > 100)
+    assert "file-98" in result
+    if count > 100:
+        assert "file-100" not in result
+
+
+def test_tree_reports_both_limits_and_ignores_entries_below_max_depth(fallback_client):
+    client, _ = fallback_client
+    hidden = [{"path": f"folder/file-{i}", "type": "blob"} for i in range(101)]
+    assert client.format_tree({"tree": hidden}, max_depth=1) == ""
+    visible = [{"path": f"file-{i}", "type": "blob"} for i in range(101)]
+    result = client.format_tree({"tree": visible, "truncated": True})
+    assert "output limit" in result
+    assert "GitHub truncated" in result
+
+
 def _client_returning_status(monkeypatch, transport, status, body=b'{"ok": true}'):
     """One client whose transport answers ``status`` for every request, plus its module.
 

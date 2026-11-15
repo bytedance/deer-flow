@@ -150,6 +150,45 @@ class TestTokenUsageMiddleware:
             },
         ]
 
+    def test_stored_todos_with_unreadable_entries_still_get_attribution(self):
+        middleware = TokenUsageMiddleware()
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "write_todos:1",
+                    "name": "write_todos",
+                    "args": {"todos": [{"content": "Ship it", "status": "in_progress"}]},
+                }
+            ],
+            usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        )
+        state = {"messages": [message], "todos": ["oops", None, {"content": "Ship it", "status": "pending"}]}
+
+        result = middleware.after_model(state, _make_runtime())
+
+        attribution = result["messages"][0].additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY]
+        assert attribution["actions"] == [{"kind": "todo_start", "content": "Ship it", "tool_call_id": "write_todos:1"}]
+
+    def test_stored_todos_that_are_not_a_list_still_get_attribution(self):
+        middleware = TokenUsageMiddleware()
+        message = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "id": "write_todos:1",
+                    "name": "write_todos",
+                    "args": {"todos": [{"content": "Ship it", "status": "in_progress"}]},
+                }
+            ],
+        )
+        state = {"messages": [message], "todos": {"content": "Ship it", "status": "pending"}}
+
+        result = middleware.after_model(state, _make_runtime())
+
+        attribution = result["messages"][0].additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY]
+        assert attribution["actions"] == [{"kind": "todo_start", "content": "Ship it", "tool_call_id": "write_todos:1"}]
+
     def test_annotates_subagent_and_search_steps(self):
         middleware = TokenUsageMiddleware()
         message = AIMessage(

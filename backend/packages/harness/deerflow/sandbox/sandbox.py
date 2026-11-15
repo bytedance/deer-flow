@@ -46,6 +46,9 @@ class Sandbox(ABC):
     """Abstract base class for sandbox environments"""
 
     _id: str
+    # Explicit POSIX directory used for confined remote artifact snapshots.
+    # Custom providers remain unsupported until they declare their real root.
+    artifact_root: str | None = None
 
     #: Whether ``execute_command`` reuses one persistent shell session across
     #: calls (shell state — exports, cwd, functions — survives from one call

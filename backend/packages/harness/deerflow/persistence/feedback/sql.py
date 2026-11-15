@@ -19,6 +19,10 @@ from deerflow.utils.time import coerce_iso
 _UPSERT_MAX_ATTEMPTS = 3
 
 
+class FeedbackAlreadyExistsError(Exception):
+    """The user already has feedback for this run (``uq_feedback_thread_run_user``)."""
+
+
 class FeedbackRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -42,7 +46,11 @@ class FeedbackRepository:
         message_id: str | None = None,
         comment: str | None = None,
     ) -> dict:
-        """Create a feedback record. rating must be +1 or -1."""
+        """Create a feedback record. rating must be +1 or -1.
+
+        Raises ``FeedbackAlreadyExistsError`` when the user already has
+        feedback for this run; use ``upsert`` to replace it.
+        """
         if rating not in (1, -1):
             raise ValueError(f"rating must be +1 or -1, got {rating}")
         resolved_user_id = resolve_user_id(user_id, method_name="FeedbackRepository.create")
@@ -58,7 +66,27 @@ class FeedbackRepository:
         )
         async with self._sf() as session:
             session.add(row)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                # Only a committed row for this (thread, run, user) key means
+                # "already exists"; any other violation propagates unchanged.
+                # A NULL user_id never conflicts on that key.
+                if resolved_user_id is None:
+                    raise
+                existing = await session.scalar(
+                    select(FeedbackRow.feedback_id)
+                    .where(
+                        FeedbackRow.thread_id == thread_id,
+                        FeedbackRow.run_id == run_id,
+                        FeedbackRow.user_id == resolved_user_id,
+                    )
+                    .limit(1)
+                )
+                if existing is None:
+                    raise
+                raise FeedbackAlreadyExistsError(f"Feedback already exists for run {run_id}") from exc
             await session.refresh(row)
             return self._row_to_dict(row)
 

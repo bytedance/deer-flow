@@ -209,6 +209,15 @@ function BatchCard({
           </span>
         )}
       </div>
+      {batch.continuation_status &&
+        batch.continuation_status !== "dispatched" && (
+          <p className="text-muted-foreground mt-2 text-xs">
+            {batch.continuation_status === "pending" ||
+            batch.continuation_status === "dispatching"
+              ? t.subagentBatches.followUpPending
+              : t.subagentBatches.followUpStopped}
+          </p>
+        )}
       <div className="mt-3 flex flex-wrap gap-2">
         <Button
           type="button"

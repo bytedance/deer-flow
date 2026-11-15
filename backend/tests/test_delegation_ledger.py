@@ -536,7 +536,7 @@ class TestReceiptVerdictRendering:
         verdict["citation_resolved"] = False
         messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", verdict)]
         rendered = render_delegation_ledger(extract_delegations(messages))
-        assert "citations: UNVERIFIED — action claims without receipt citations" in rendered
+        assert "citations: UNVERIFIED — no receipt citations" in rendered
 
     def test_legacy_messages_without_verdict_render_unchanged(self):
         messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", None)]

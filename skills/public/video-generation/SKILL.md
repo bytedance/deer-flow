@@ -53,7 +53,7 @@ Parameters:
 - `--prompt-file`: Absolute path to JSON prompt file (required)
 - `--reference-images`: Absolute paths to reference images (optional). Images used by the provider must have a recognized filename extension: `.png`, `.jpg`, `.jpeg`, `.webp`, or `.gif` (case-insensitive). Missing or other extensions are rejected before submission. Filenames must match their contents: the script neither validates image contents nor converts bytes. Recognizing an extension does not guarantee that the selected provider accepts that format.
 - `--output-file`: Absolute path to output image file (required)
-- `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
+- `--aspect-ratio` sets the video aspect ratio for Gemini (optional, defaults to 16:9).
 
 [!NOTE]
 Do NOT read the python file, instead just call it with the parameters.
@@ -113,6 +113,9 @@ Step 3: Use the image-generation skill to generate the reference image
 Load the image-generation skill and generate a single reference image `narnia-farewell-scene-01.jpg` according to the skill.
 
 Step 4: Use the generate.py script to generate the video
+
+With Gemini, set the aspect ratio on the command line.
+
 ```bash
 python /mnt/skills/public/video-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/narnia-farewell-scene.json \
@@ -120,6 +123,17 @@ python /mnt/skills/public/video-generation/scripts/generate.py \
   --output-file /mnt/user-data/outputs/narnia-farewell-scene-01.mp4 \
   --aspect-ratio 16:9
 ```
+
+With MiniMax, set resolution and duration on the same command that runs the script.
+
+```bash
+VIDEO_GENERATION_PROVIDER=minimax MINIMAX_VIDEO_RESOLUTION=1080P MINIMAX_VIDEO_DURATION=6 \
+  python /mnt/skills/public/video-generation/scripts/generate.py \
+  --prompt-file /mnt/user-data/workspace/narnia-farewell-scene.json \
+  --reference-images /mnt/user-data/outputs/narnia-farewell-scene-01.jpg \
+  --output-file /mnt/user-data/outputs/narnia-farewell-scene-01.mp4
+```
+
 > Do NOT read the python file, just call it with the parameters.
 
 ## Output Handling
@@ -153,6 +167,11 @@ Auto-selected by environment variables (CLI unchanged):
 - Only `MINIMAX_API_KEY` set → MiniMax video (`/v1/video_generation`, async 3-step poll/download).
 - Force with `VIDEO_GENERATION_PROVIDER=gemini|minimax`.
 
-MiniMax overrides: `MINIMAX_API_HOST` (default `https://api.minimaxi.com`),
-`MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). The first reference image is used
-as MiniMax `first_frame_image`. MiniMax ignores `--aspect-ratio` (it uses resolution/duration).
+MiniMax uses `MINIMAX_API_HOST` (default `https://api.minimaxi.com`) and
+`MINIMAX_VIDEO_MODEL` (default `MiniMax-Hailuo-2.3`). It uses the first reference
+image as `first_frame_image`.
+
+Set `MINIMAX_VIDEO_RESOLUTION` and `MINIMAX_VIDEO_DURATION` (integer seconds) to
+override the API defaults. With Hailuo 2.3, use `768P` at 6 or 10 seconds, or
+`1080P` at 6 seconds. For a draft and final pass, start at `768P` and switch to
+`1080P` for the final 6-second clip.

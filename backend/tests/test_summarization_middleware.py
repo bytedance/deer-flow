@@ -10,7 +10,9 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import RunnableBinding
 from langgraph.constants import TAG_NOSTREAM
 from pydantic import ValidationError
 
@@ -23,6 +25,7 @@ from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.model_config import ModelConfig, ReasoningCapabilities
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.summarization_config import ContextSize, SummarizationConfig
+from deerflow.models.vllm_provider import VllmChatModel
 
 
 def _messages() -> list:
@@ -1205,6 +1208,151 @@ def _factory_app_config(model_names, *, summary_model_name=None, summarization_k
         models=models,
         get_model_config=lambda name: next((model for model in models if model.name == name), None),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True], ids=["automatic", "manual"])
+@pytest.mark.parametrize("custom_prompt", [None, "Operator summary:\n{messages}"], ids=["built-in", "custom"])
+async def test_compaction_requests_use_configured_or_builtin_summary_prompt(monkeypatch, manual, custom_prompt):
+    model = MagicMock()
+    model.invoke.return_value = AIMessage(content="compressed summary")
+    model.ainvoke = AsyncMock(return_value=AIMessage(content="compressed summary"))
+    model.with_config.return_value = model
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda *args, **kwargs: model)
+    app_config = _factory_app_config(
+        ("summary-model",),
+        summarization_kwargs={
+            "trigger": ContextSize(type="messages", value=4),
+            "keep": ContextSize(type="messages", value=2),
+            "summary_prompt": custom_prompt,
+        },
+    )
+    messages = _messages()
+    approval = 'Wait for the exact phrase "review V-592 approved" and then wait for final confirmation.'
+    messages[0] = HumanMessage(content=approval)
+    state = {"messages": messages}
+
+    if manual:
+        from deerflow.runtime.context_compaction import _create_compaction_middleware
+
+        middleware = _create_compaction_middleware(app_config=app_config, keep=None)
+        assert await middleware.acompact_state(state, _runtime(), force=True) is not None
+        prompt = model.ainvoke.await_args.args[0]
+    else:
+        middleware = create_summarization_middleware(app_config=app_config)
+        assert middleware is not None
+        assert middleware.before_model(state, _runtime()) is not None
+        prompt = model.invoke.call_args.args[0]
+
+    assert approval in prompt
+    if custom_prompt is None:
+        assert "## ACTIVE USER REQUIREMENTS" in prompt
+        assert "Preserve the original wording of any literal approval phrase" in prompt
+        assert "which action it permits" in prompt
+    else:
+        assert prompt.startswith("Operator summary:\n")
+        assert "## ACTIVE USER REQUIREMENTS" not in prompt
+
+
+@pytest.fixture
+def vllm_compaction(monkeypatch):
+    models = {
+        "vllm": VllmChatModel(model="test-model", api_key="dummy", base_url="http://localhost:8000/v1"),
+        "summary": _StaticChatModel(text="compressed summary"),
+    }
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.summarization_middleware.create_chat_model",
+        lambda name, **_: models[name],
+    )
+    config = _factory_app_config(
+        ("vllm", "summary"),
+        summary_model_name="summary",
+        summarization_kwargs={"trigger": ContextSize(type="tokens", value=150)},
+    )
+    middleware = create_summarization_middleware(app_config=config, run_model_name="vllm", keep=("tokens", 100))
+    assert middleware is not None
+    return middleware
+
+
+_REPLAYED_REASONING = "Review the tool results. " * 100
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["single-binding", "double-binding"])
+def test_vllm_compaction_counts_reasoning_through_bindings(vllm_compaction, nested):
+    model = vllm_compaction.model
+    if nested:
+        model = RunnableBinding(bound=model)
+    middleware = DeerFlowSummarizationMiddleware(model=model)
+    message = AIMessage(content="Checked.", additional_kwargs={"reasoning": _REPLAYED_REASONING})
+    counted = AIMessage(content="Checked." + _REPLAYED_REASONING)
+
+    assert middleware.token_counter([message]) == count_tokens_approximately([counted])
+
+
+@pytest.mark.parametrize(
+    ("fields", "replayed"),
+    [
+        pytest.param({}, None, id="ordinary-message"),
+        pytest.param({"reasoning": _REPLAYED_REASONING}, _REPLAYED_REASONING, id="reasoning-only"),
+        pytest.param({"reasoning_content": _REPLAYED_REASONING}, _REPLAYED_REASONING, id="legacy-only"),
+        pytest.param({"reasoning": None, "reasoning_content": _REPLAYED_REASONING}, _REPLAYED_REASONING, id="null-canonical"),
+        pytest.param({"reasoning": _REPLAYED_REASONING, "reasoning_content": _REPLAYED_REASONING}, _REPLAYED_REASONING, id="duplicate-alias"),
+        pytest.param({"reasoning": _REPLAYED_REASONING, "reasoning_content": "different text" * 500}, _REPLAYED_REASONING, id="canonical-wins"),
+        pytest.param({"reasoning": "", "reasoning_content": _REPLAYED_REASONING}, "", id="empty-canonical"),
+    ],
+)
+def test_vllm_compaction_counts_replayed_reasoning_once(vllm_compaction, fields, replayed):
+    message = AIMessage(
+        content="Checked.",
+        additional_kwargs=fields,
+        tool_calls=[{"name": "check", "args": {}, "id": "call-1"}],
+    )
+    payload = vllm_compaction.model._get_request_payload([message])
+    assert payload["messages"][0].get("reasoning") == replayed
+    assert "reasoning_content" not in payload["messages"][0]
+
+    counted = message.model_copy(update={"content": message.content + (replayed or "")})
+    assert vllm_compaction.token_counter([message]) == count_tokens_approximately([counted])
+    assert message.content == "Checked."
+    assert message.additional_kwargs == fields
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("manual", [False, True], ids=["auto", "manual"])
+async def test_vllm_compaction_uses_replayed_reasoning_for_trigger_and_retention(vllm_compaction, manual):
+    messages = _messages()
+    plain_state = {"messages": messages}
+    assert await vllm_compaction.abefore_model(plain_state, _runtime()) is None
+    messages[1] = messages[1].model_copy(update={"additional_kwargs": {"reasoning": _REPLAYED_REASONING}})
+    state = {"messages": messages}
+
+    if manual:
+        result = await vllm_compaction.acompact_state(state, _runtime(), force=True)
+        assert result is not None
+        assert result.total_tokens >= 150
+        assert list(result.preserved_messages) == messages[2:]
+        assert result.summary_text == "compressed summary"
+    else:
+        update = await vllm_compaction.abefore_model(state, _runtime())
+        assert update is not None
+        assert update["messages"][1:] == messages[2:]
+        assert update["summary_text"] == "compressed summary"
+
+
+def test_non_vllm_compaction_keeps_existing_token_estimate():
+    middleware = DeerFlowSummarizationMiddleware(model=_StaticChatModel())
+    message = AIMessage(content="Checked.", additional_kwargs={"reasoning": _REPLAYED_REASONING})
+    assert middleware.token_counter([message]) == count_tokens_approximately([message])
+
+
+def test_vllm_compaction_ignores_reasoning_when_using_responses_api(vllm_compaction):
+    model = vllm_compaction.model.bound.model_copy(update={"use_responses_api": True})
+    middleware = DeerFlowSummarizationMiddleware(model=model)
+    message = AIMessage(content="Checked.", additional_kwargs={"reasoning": _REPLAYED_REASONING})
+    payload = model._get_request_payload([message])
+    assert "input" in payload
+    assert _REPLAYED_REASONING not in repr(payload["input"])
+    assert middleware.token_counter([message]) == count_tokens_approximately([message])
 
 
 @pytest.mark.parametrize("trim_limit", [None, 80, 4000])

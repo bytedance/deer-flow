@@ -10,7 +10,8 @@ from decimal import Decimal, InvalidOperation
 import httpx
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
-from langchain_openai import ChatOpenAI
+
+from deerflow.models.openai_response import GuardedChatOpenAI
 
 _JSON_NUMBER_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
 
@@ -310,7 +311,7 @@ class _EscapedNewlineStreamDecoder:
         return pending
 
 
-class MindIEChatModel(ChatOpenAI):
+class MindIEChatModel(GuardedChatOpenAI):
     """Chat model adapter for MindIE engine.
 
     Addresses compatibility issues including:

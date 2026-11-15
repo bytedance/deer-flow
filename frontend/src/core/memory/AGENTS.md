@@ -1,6 +1,5 @@
-# Memory queries
+# Memory queries (`core/memory/`)
 
-Successful mutations cancel the exact `["memory"]` query before caching their
-response; older reads must not undo confirmed edits. Preserve failed mutations
-and later refreshes. Regressions use real QueryClient hooks in
-`frontend/tests/unit/core/memory/hooks.dom.test.tsx`.
+A successful mutation cancels the exact `["memory"]` query before it caches its
+response, so an older read cannot undo a confirmed edit. Failed mutations and
+later refreshes keep their normal behavior. Test it with a real `QueryClient`.

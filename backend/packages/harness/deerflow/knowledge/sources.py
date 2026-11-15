@@ -91,10 +91,10 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
         remaining = budget - used_chars - len(separator)
         entry = header + content
         if len(entry) > remaining:
-            # Drop the entire hit when it cannot fit with real evidence. This
-            # keeps the stable source identity independent of total budget.
+            # Skip this hit without changing its excerpt or source identity;
+            # a later, shorter entry may still fit the remaining budget.
             truncated = True
-            break
+            continue
         entries.append(separator + entry)
         used_chars += len(separator) + len(entry)
         if source is not None:

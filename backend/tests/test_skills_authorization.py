@@ -1079,7 +1079,7 @@ def test_subagent_executor_resolves_skill_authorization_for_chain(monkeypatch):
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
     executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
     executor.model_name = "m"
     executor.thinking_enabled = False
     executor.reasoning_effort = None
@@ -1446,7 +1446,7 @@ def test_subagent_executor_shares_one_skill_authorization_instance(monkeypatch):
 
     executor = SubagentExecutor.__new__(SubagentExecutor)
     executor.input_gate = None
-    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25)
+    executor.config = SimpleNamespace(name="sub", skills=None, max_turns=25, tools=None, disallowed_tools=["task"])
     executor.model_name = "m"
     executor.thinking_enabled = False
     executor.reasoning_effort = None

@@ -7,7 +7,11 @@ import {
   useState,
 } from "react";
 
-import { computeNextSubtask, subtaskNotification } from "./subtask-update";
+import {
+  computeNextSubtask,
+  subtaskNotification,
+  type SubtaskUpdateOptions,
+} from "./subtask-update";
 import type { Subtask } from "./types";
 
 export interface SubtaskContextValue {
@@ -68,7 +72,10 @@ export function useUpdateSubtask() {
   });
 
   const updateSubtask = useCallback(
-    (task: Partial<Subtask> & { id: string }) => {
+    (
+      task: Partial<Subtask> & { id: string },
+      options?: SubtaskUpdateOptions,
+    ) => {
       // Read the *latest* state via the ref, never a `tasks` snapshot captured in
       // this callback's closure. Without this, an in-flight
       // fetchSubtaskSteps().then(updateSubtask) resolving late would write a stale
@@ -77,6 +84,7 @@ export function useUpdateSubtask() {
       const { next, becameTerminal, changed } = computeNextSubtask(
         current[task.id],
         task,
+        options,
       );
 
       current[task.id] = next;

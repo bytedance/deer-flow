@@ -241,10 +241,13 @@ def _subagent_usage_from_tool_message(message: ToolMessage) -> dict[str, int] | 
     return normalize_token_usage(additional_kwargs.get(SUBAGENT_TOKEN_USAGE_KEY))
 
 
-def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
+def _build_attribution(message: AIMessage, todos: Any) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
-    current_todos = list(todos)
+    # ``todos`` is the stored channel value: checkpoint writes and direct
+    # integrations can Overwrite it with any shape, so normalize it before
+    # reading entries instead of trusting the write_todos shape.
+    current_todos = _normalize_todos(todos)
 
     for raw_tool_call in tool_calls:
         if not isinstance(raw_tool_call, dict):

@@ -106,4 +106,9 @@ class HonchoClient:
         if filters:
             payload["filters"] = filters
         data = self._post(f"/v3/workspaces/{workspace}/search", payload)
-        return list(data) if isinstance(data, list) else []
+        results = list(data) if isinstance(data, list) else []
+        for index, item in enumerate(results):
+            metadata = item.get("metadata") if isinstance(item, dict) else None
+            if metadata is not None and not isinstance(metadata, dict):
+                raise HonchoRequestError(f"Honcho search results[{index}].metadata must be an object or null")
+        return results

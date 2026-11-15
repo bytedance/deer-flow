@@ -195,8 +195,9 @@ test("new preset needs only provider, API key and arbitrary model ID", async () 
     ).toBe(false),
   );
   fireEvent.click(screen.getByRole("button", { name: "Add model" }));
-  expect(screen.getByRole("combobox", { name: "Provider" }).textContent).toBe(
-    "OpenAI",
+  expect(screen.getByRole("combobox", { name: "Provider" })).toHaveProperty(
+    "value",
+    "openai",
   );
   expect(screen.queryByLabelText("Base URL")).toBeNull();
   expect(screen.queryByLabelText("Unique name")).toBeNull();
@@ -222,12 +223,10 @@ test("new preset needs only provider, API key and arbitrary model ID", async () 
 });
 
 async function selectProvider(name: string) {
-  fireEvent.pointerDown(screen.getByRole("combobox", { name: "Provider" }), {
-    button: 0,
-    ctrlKey: false,
-    pointerType: "mouse",
+  const option = await screen.findByRole("option", { name });
+  fireEvent.change(screen.getByRole("combobox", { name: "Provider" }), {
+    target: { value: option.getAttribute("value") },
   });
-  fireEvent.click(await screen.findByRole("option", { name }));
 }
 
 test("switching providers clears test status and cannot reuse a saved key", async () => {
@@ -493,4 +492,30 @@ test("revision/name conflicts are localized and the unsaved draft survives", asy
     "draft-model",
   );
   expect(screen.queryByText("private server detail")).toBeNull();
+});
+
+test("changing a custom destination clears its key without losing model settings", async () => {
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "Edit model" }));
+  fireEvent.change(screen.getByLabelText("API Key"), {
+    target: { value: "draft-key" },
+  });
+  fireEvent.change(screen.getByLabelText("Base URL"), {
+    target: { value: "https://other.example/v1" },
+  });
+  expect(screen.getByLabelText("API Key")).toHaveProperty("value", "");
+  expect(screen.queryByLabelText("Remove the saved API key")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(saveManagedModel).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(saveManagedModel).mock.calls[0]![0]).toMatchObject({
+    config: {
+      name: existing.name,
+      model: existing.model,
+      base_url: "https://other.example/v1",
+    },
+    expected_revision: existing.revision,
+  });
+  expect(
+    rs.mocked(saveManagedModel).mock.calls[0]![0].config,
+  ).not.toHaveProperty("api_key");
 });

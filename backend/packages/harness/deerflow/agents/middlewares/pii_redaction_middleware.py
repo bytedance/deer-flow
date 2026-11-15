@@ -59,7 +59,7 @@ import hashlib
 import hmac
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
@@ -155,9 +155,51 @@ class _Detector:
     name: str
     pattern: re.Pattern[str]
     validator: Callable[[str], bool] | None = None
+    # Replaces ``pattern.finditer`` when the pattern alone is too slow to scan
+    # with; it must yield exactly the matches ``pattern.sub`` would replace.
+    finditer: Callable[[str], Iterator[re.Match[str]]] | None = None
+
+    def sub(self, repl: Callable[[re.Match[str]], str], text: str) -> str:
+        if self.finditer is None:
+            return self.pattern.sub(repl, text)
+        pieces: list[str] = []
+        last = 0
+        for match in self.finditer(text):
+            pieces.append(text[last : match.start()])
+            pieces.append(repl(match))
+            last = match.end()
+        if not pieces:
+            return text
+        pieces.append(text[last:])
+        return "".join(pieces)
 
 
-_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+_EMAIL_LOCAL_CHARS = "A-Za-z0-9._%+-"
+_EMAIL_PATTERN = re.compile(rf"[{_EMAIL_LOCAL_CHARS}]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{{2,}}")
+# Scanning with _EMAIL_PATTERN is quadratic in the longest local-part run: each
+# start inside a whitespace-free run (a hex dump, a long token) consumes the
+# rest of the run before failing to find "@" (100 KB took ~6 s, on the event
+# loop, on every model call). The local part must reach the run's end, so a
+# match exists anywhere in a run only if it exists at the run's start, which is
+# all this spelling tries.
+# The group keeps the lookbehind on every alternative should the pattern grow one.
+_EMAIL_RUN_START_PATTERN = re.compile(rf"(?<![{_EMAIL_LOCAL_CHARS}])(?:{_EMAIL_PATTERN.pattern})")
+
+
+def _iter_email_matches(text: str) -> Iterator[re.Match[str]]:
+    """Yield the matches ``_EMAIL_PATTERN.sub`` replaces, in linear time."""
+    pos = 0
+    while match := _EMAIL_RUN_START_PATTERN.search(text, pos):
+        yield match
+        pos = match.end()
+        # ``sub`` also resumes where the previous match ended, which can be
+        # inside a run ("a@b.cc+c@d.org" holds two matches). The run-start
+        # lookbehind rejects that position, so match there anchored, after
+        # every match. A failure there fails for the rest of that run too.
+        while glued := _EMAIL_PATTERN.match(text, pos):
+            yield glued
+            pos = glued.end()
+
 
 _API_KEY_PATTERN = re.compile(
     r"\b(?:"
@@ -189,7 +231,7 @@ _NATIONAL_ID_PATTERN = re.compile(
 )
 
 _DETECTORS: tuple[_Detector, ...] = (
-    _Detector("email", _EMAIL_PATTERN),
+    _Detector("email", _EMAIL_PATTERN, finditer=_iter_email_matches),
     _Detector("api_key", _API_KEY_PATTERN),
     _Detector("national_id", _NATIONAL_ID_PATTERN, _national_id_valid),
     _Detector("credit_card", _CREDIT_CARD_PATTERN, _luhn_valid),
@@ -284,7 +326,7 @@ class _Redactor:
 
     def redact(self, text: str) -> str:
         for detector in self._detectors:
-            text = detector.pattern.sub(self._replacer(detector), text)
+            text = detector.sub(self._replacer(detector), text)
         return text
 
     def _replacer(self, detector: _Detector) -> Callable[[re.Match[str]], str]:

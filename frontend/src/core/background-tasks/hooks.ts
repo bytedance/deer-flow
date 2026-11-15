@@ -55,7 +55,14 @@ export function useCancelBackgroundTask(threadId: string) {
   const { t } = useI18n();
   return useMutation({
     mutationFn: (taskId: string) => cancelBackgroundTask(threadId, taskId),
-    onSuccess: (task) => {
+    onSuccess: async (task) => {
+      // This thread's task list and detail reads poll the same caches the
+      // confirmation is about to seed. A read that started before the cancel
+      // answered must not land afterwards and put the card back to "working"
+      // (#7177); same ordering contract as the memory mutations (#6959).
+      await queryClient.cancelQueries({
+        queryKey: backgroundTasksQueryKey(threadId),
+      });
       queryClient.setQueryData(
         backgroundTaskQueryKey(threadId, task.task_id),
         task,
