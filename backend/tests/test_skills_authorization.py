@@ -2601,6 +2601,58 @@ def test_lead_chain_prefers_injected_skill_storage_over_user_scoped_storage():
     assert activation._storage() is injected
 
 
+def test_tool_error_handling_prefers_injected_skill_storage():
+    """Skill-read canonicalization must use the same request-scoped tree."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+
+    injected = object()
+    middleware = ToolErrorHandlingMiddleware(
+        app_config=_make_app_config(),
+        user_id="user-123",
+        skill_storage=injected,
+    )
+
+    assert middleware._storage() is injected
+
+
+def test_subagent_chain_accepts_injected_skill_storage():
+    """Direct subagent-chain builders can keep the same request-scoped tree."""
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
+
+    injected = object()
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=_make_app_config(),
+        user_id="user-456",
+        skill_storage=injected,
+    )
+
+    activation = next(m for m in middlewares if isinstance(m, SkillActivationMiddleware))
+    assert activation._storage() is injected
+
+
+def test_skills_prompt_section_uses_injected_skill_storage():
+    """Prompt-side skill discovery must read the same request-scoped tree."""
+    from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
+
+    calls: list[bool] = []
+
+    def _load_skills(*, enabled_only: bool):
+        calls.append(enabled_only)
+        return []
+
+    storage = SimpleNamespace(load_skills=_load_skills)
+
+    section = get_skills_prompt_section(
+        app_config=_make_app_config(),
+        user_id="user-123",
+        skill_storage=storage,
+    )
+
+    assert section == ""
+    assert calls == [False, True]
+
+
 def test_subagent_chain_wires_durable_render_filter():
     """Same wiring contract for the subagent builder's DurableContextMiddleware."""
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware

@@ -520,9 +520,10 @@ def build_middlewares(
             thread's physical skill projection. Prompt-only bootstrap agents do
             not; their narrow skill set must not replace the thread view.
         app_config: Explicit AppConfig; falls back to ``get_app_config()`` when omitted.
-        skill_storage: Optional storage instance for slash-skill activation.
-            Embedding hosts that manage request-scoped skill storage can pass it
-            here instead of relying on the user-scoped default.
+        skill_storage: Optional storage instance for skill resolution. It is
+            shared by slash activation, skill-read canonicalization, and prompt
+            skill discovery; embedding hosts that manage request-scoped skill
+            storage can pass it instead of relying on the user-scoped default.
         deferred_setup: Optional deferred-MCP-tool setup that attaches
             ``DeferredToolFilterMiddleware`` when ``tool_search`` is enabled.
         mcp_routing_middleware: Compatibility middleware for advisory MCP
@@ -563,9 +564,13 @@ def build_middlewares(
         # skill-file-load stamp on the same skill:activate decision the
         # activation middleware enforces for slash commands).
         runtime_middleware_kwargs["skill_authorization"] = skill_authorization
-    if user_id is not None:
+    if skill_storage is not None:
         # ToolErrorHandlingMiddleware canonicalizes skill-read paths through
-        # the same user-scoped registry the activation/policy middlewares use.
+        # the same storage the activation middleware resolves slash skills from.
+        runtime_middleware_kwargs["skill_storage"] = skill_storage
+    if user_id is not None:
+        # User-scoped fallback for hosts that do not inject a request-scoped
+        # storage instance.
         runtime_middleware_kwargs["user_id"] = user_id
     if authorization_provider is not None and deferred_setup is not None:
         runtime_middleware_kwargs["deferred_setup"] = deferred_setup
@@ -857,11 +862,17 @@ def _insert_hitl_approval_middleware(middlewares: list, final_tools: list, app_c
     middlewares.insert(index, ToolApprovalMiddleware(hitl_config, app_config=app_config, supports_resume=supports_resume, model_name=model_name))
 
 
-def _load_enabled_available_skills(available_skills: set[str] | None, *, app_config: AppConfig, user_id: str | None = None) -> list[Skill]:
+def _load_enabled_available_skills(
+    available_skills: set[str] | None,
+    *,
+    app_config: AppConfig,
+    user_id: str | None = None,
+    skill_storage: SkillStorage | None = None,
+) -> list[Skill]:
     try:
         from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-        skills = get_enabled_skills_for_config(app_config, user_id=user_id)
+        skills = get_enabled_skills_for_config(app_config, user_id=user_id, skill_storage=skill_storage)
     except Exception:
         logger.exception("Failed to load enabled skills")
         raise
@@ -890,7 +901,8 @@ def assemble_lead_agent(
     graph-only LangGraph Server ABI declared in ``langgraph.json``.
 
     ``skill_storage`` lets an embedding host supply request-scoped skill
-    storage for slash activation; omitting it keeps the user-scoped default.
+    storage for slash activation, skill-read canonicalization, and prompt skill
+    discovery; omitting it keeps the user-scoped default.
     """
     runtime_config = _get_runtime_config(config)
     runtime_app_config = app_config or runtime_config.get("app_config")
@@ -918,8 +930,6 @@ def assemble_lead_agent(
     # configurable key must not recompile the channel table either).
     freeze_checkpoint_snapshot_frequency(runtime_app_config.database.checkpoint_delta.snapshot_frequency)
     inject_checkpoint_mode(config, mode)
-    if skill_storage is None:
-        return _assemble_lead_agent(config, app_config=runtime_app_config)
     return _assemble_lead_agent(config, app_config=runtime_app_config, skill_storage=skill_storage)
 
 
@@ -1083,7 +1093,14 @@ def _assemble_lead_agent(
         try:
             from deerflow.agents.lead_agent.prompt import get_enabled_skills_for_config
 
-            candidate_skill_names = [s.name for s in get_enabled_skills_for_config(resolved_app_config, user_id=resolved_user_id)]
+            candidate_skill_names = [
+                s.name
+                for s in get_enabled_skills_for_config(
+                    resolved_app_config,
+                    user_id=resolved_user_id,
+                    skill_storage=skill_storage,
+                )
+            ]
         except Exception:
             logger.warning("Failed to pre-load enabled skills for authorization candidates", exc_info=True)
             # Leave None: the filter resolves candidates itself and applies
@@ -1197,7 +1214,12 @@ def _assemble_lead_agent(
             existing = list(existing)
         config["callbacks"] = [*existing, *tracing_callbacks]
 
-    enabled_skills = _load_enabled_available_skills(available_skills, app_config=resolved_app_config, user_id=resolved_user_id)
+    enabled_skills = _load_enabled_available_skills(
+        available_skills,
+        app_config=resolved_app_config,
+        user_id=resolved_user_id,
+        skill_storage=skill_storage,
+    )
 
     # Build skill search setup (deferred skill discovery).
     # Controlled by skills.deferred_discovery — independent from tool_search.enabled.
@@ -1281,6 +1303,7 @@ def _assemble_lead_agent(
             # the full-metadata rendering advertise a policy-denied skill.
             available_skills=available_skills,
             app_config=resolved_app_config,
+            skill_storage=skill_storage,
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
             # Preserve the (possibly empty) index when deferred discovery is
@@ -1444,6 +1467,7 @@ def _assemble_lead_agent(
         agent_name=agent_name,
         available_skills=available_skills,
         app_config=resolved_app_config,
+        skill_storage=skill_storage,
         deferred_names=setup.deferred_names,
         mcp_routing_hints_section=mcp_routing_hints_section,
         user_id=resolved_user_id,
