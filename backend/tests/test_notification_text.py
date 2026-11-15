@@ -282,6 +282,11 @@ def test_redact_egress_text_leaves_a_url_without_credentials_alone():
         ("Authorization: Bearer 1234567890abcdef", "1234567890abcdef"),
         ("authorization=Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
         ("Cookie: session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # Every pair of a canonical multi-cookie header, not only the first one.
+        ("Cookie: theme=dark; session=8f14e45fceea167a5a36dedd4bea2543", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A quoted value keeps the scheme outside the quotes.
+        ('Authorization: "Bearer 8f14e45fceea167a5a36dedd4bea2543"', "8f14e45fceea167a5a36dedd4bea2543"),
+        ("Authorization: 'Bearer 8f14e45fceea167a5a36dedd4bea2543'", "8f14e45fceea167a5a36dedd4bea2543"),
     ],
 )
 def test_redact_egress_text_scrubs_header_credentials(header: str, secret: str):

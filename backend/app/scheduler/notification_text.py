@@ -62,7 +62,12 @@ _EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 # verbatim. Only the credential itself is replaced, so the scheme and the rest
 # of the line keep reading normally.
 _URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
-_AUTH_HEADER_RE = re.compile(r"(?i)(\b(?:authorization|cookie)\b\s*[:=]\s*)(?:(bearer|basic|token|digest)\s+)?[\"']?([^\s\"',;]+)")
+# The value may be quoted with the scheme outside the quotes, so both
+# ``Authorization: Bearer x`` and ``Authorization: "Bearer x"`` are covered.
+_AUTH_HEADER_RE = re.compile(r"(?i)(\bauthorization\b\s*[:=]\s*)(?:[\"']?(?:(bearer|basic|token|digest)\s+)?[\"']?)([^\s\"',;]+)[\"']?")
+# A cookie header carries one ``name=value`` pair per ``;``-separated segment,
+# and only the first pair follows the header name, so the whole value goes.
+_COOKIE_HEADER_RE = re.compile(r"(?i)(\bcookie\b\s*[:=]\s*)([^\n]+)")
 
 
 def _redact_url_userinfo(match: re.Match[str]) -> str:
@@ -75,12 +80,17 @@ def _redact_auth_header(match: re.Match[str]) -> str:
     return f"{prefix}{_EGRESS_REDACTION}"
 
 
+def _redact_cookie_header(match: re.Match[str]) -> str:
+    return f"{match.group(1)}{_EGRESS_REDACTION}"
+
+
 def redact_egress_text(text: str) -> str:
     """Scrub likely secrets from text before it is pushed to external IM."""
     if not text:
         return text
     redacted = _URL_USERINFO_RE.sub(_redact_url_userinfo, text)
     redacted = _AUTH_HEADER_RE.sub(_redact_auth_header, redacted)
+    redacted = _COOKIE_HEADER_RE.sub(_redact_cookie_header, redacted)
     for pattern in _EGRESS_SECRET_PATTERNS:
         if pattern.groups:
             redacted = pattern.sub(lambda match: f"{match.group(1)}={_EGRESS_REDACTION}", redacted)
