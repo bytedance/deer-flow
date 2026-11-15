@@ -115,9 +115,20 @@ message list. System messages, framework injections, reasoning fields, artifacts
 images and binary blocks are excluded. Visible attachment references stay as text;
 this feature does not copy attachment bytes. A source ID includes its content and
 message identity, so changing a message produces a different source version.
-Text includes plain string content and mixed lists of strings and `type: text`
-blocks, in their original order. Other typed blocks remain excluded even if they
-carry a `text` field. The same extraction is used for active-history search.
+Text includes plain string content, `type: text` blocks and direct plaintext
+native `type: document` blocks, in their original order. A document source may be
+`type: text` with string `data`, or `type: content` with a string or immediate
+strings/text blocks. A nonempty supported body is required. Its source text starts
+with `Document:`, followed by nonempty string `title:` / `context:` metadata and
+the body, separated by newlines. Opaque URL, file and base64 sources, nested
+documents, reasoning and other typed blocks remain excluded even if they carry
+a `text` field. Nothing is fetched or decoded. The same extraction and source
+identity are used for active-history search and archive capture, with the existing
+record caps and read pagination.
+
+Existing archived sources and their IDs remain readable. Text-only message IDs
+are unchanged; a message that now exposes document text receives a new source
+version. Previously omitted document bodies are not backfilled from old archives.
 Valid user answers from clarification cards are included even when their
 `HumanMessage` is hidden from the UI; hidden framework injections remain excluded.
 

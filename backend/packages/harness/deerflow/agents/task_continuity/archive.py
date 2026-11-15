@@ -50,6 +50,25 @@ def scope(runtime) -> tuple[Path, str]:
     return path, digest([user_id, thread_id])
 
 
+def _document_text(block: dict) -> str | None:
+    """Read direct plaintext only; metadata alone never admits opaque sources."""
+    source = block.get("source")
+    body = None
+    if isinstance(source, dict):
+        if source.get("type") == "text":
+            body = source.get("data")
+        elif source.get("type") == "content":
+            content = source.get("content")
+            if isinstance(content, str):
+                body = content
+            elif isinstance(content, (list, tuple)):
+                body = message_content_to_text([part for part in content if isinstance(part, str) or (isinstance(part, dict) and part.get("type") == "text")])
+    if not isinstance(body, str) or not body:
+        return None
+    metadata = [f"{key}: {value}" for key in ("title", "context") if isinstance(value := block.get(key), str) and value]
+    return "\n".join(["Document:", *metadata, body])
+
+
 def records(messages, cap: int = 16000) -> list[dict]:
     result = []
     for message in messages:
@@ -60,11 +79,17 @@ def records(messages, cap: int = 16000) -> list[dict]:
         if hidden_injection or any(message.additional_kwargs.get(key) for key in ("deerflow_content_kind", "dynamic_context_reminder")) or (message.name or "").startswith("__"):
             continue
         content = message.content
-        # Mixed LangChain content may contain plain strings. Filter typed blocks
-        # before normalization so a reasoning/image/unknown block's text field
-        # cannot enter the archive through the broader shared text extractor.
+        # Filter typed blocks before normalization so a reasoning/image/unknown
+        # block's text field cannot enter through the broader shared extractor.
         if isinstance(content, list):
-            content = [block for block in content if isinstance(block, str) or (isinstance(block, dict) and block.get("type") == "text")]
+            visible = []
+            for block in content:
+                if isinstance(block, str) or (isinstance(block, dict) and block.get("type") == "text"):
+                    visible.append(block)
+                elif isinstance(block, dict) and block.get("type") == "document":
+                    if (text := _document_text(block)) is not None:
+                        visible.append(text)
+            content = visible
         text = message_content_to_text(content)
         calls = getattr(message, "tool_calls", None)
         if calls:

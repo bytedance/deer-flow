@@ -1,11 +1,8 @@
-"""Offline feature-gap probe, not a claim that native documents are supported.
-
-Current documentation excludes non-text typed blocks from task-history sources.
-The native-document cases ask whether that boundary should gain plaintext-only
-support. They are expected to fail on the unmodified implementation.
-"""
+"""Offline graph checks for original document recall after context compaction."""
 
 import json
+from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 from langchain.agents import create_agent
@@ -68,6 +65,121 @@ def content(shape):
         "document-content-blocks": {"type": "content", "content": [{"type": "text", "text": BODY}]},
     }[shape]
     return [{"type": "document", "title": "Retention contract", "source": source}]
+
+
+@pytest.fixture
+def scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "get_paths", lambda: Paths(base_dir=tmp_path))
+    return SimpleNamespace(context={"user_id": "alice", "thread_id": "thread-a"}, state={}, tool_call_id="recall")
+
+
+@pytest.mark.parametrize("shape", ["document-text", "document-content-string", "document-content-blocks"])
+@pytest.mark.parametrize("message_type", [HumanMessage, AIMessage, ToolMessage])
+def test_documents_retain_order_and_source_identity_in_active_and_archived_tools(scoped, shape, message_type):
+    document = content(shape)[0]
+    document["context"] = "Keep the original retention code"
+    message = message_type(content=["Before", document, {"type": "text", "text": "After"}], id="source", **({"tool_call_id": "tool"} if message_type is ToolMessage else {}))
+    original = deepcopy(message.content)
+    expected = "Before\nDocument:\ntitle: Retention contract\ncontext: Keep the original retention code\n" + BODY + "\nAfter"
+    scoped.state = {"messages": [message]}
+    role = {"human": "user", "ai": "assistant", "tool": "tool"}[message.type]
+    active = json.loads(history_search.func(scoped, "Wisteria", role=role))["results"]
+    assert len(active) == 1
+    source_id = active[0]["id"]
+    assert json.loads(history_read.func(scoped, source_id))["text"] == expected
+    assert not json.loads(history_search.func(scoped, "Wisteria", role="tool" if message.type != "tool" else "user"))["results"]
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True))}
+    archived = json.loads(history_search.func(scoped, "Wisteria", role=role))["results"]
+    assert [row["id"] for row in archived] == [source_id]
+    assert not json.loads(history_search.func(scoped, "Wisteria", role="tool" if role != "tool" else "user"))["results"]
+    assert json.loads(history_read.func(scoped, source_id))["text"] == expected
+    assert message.content == original
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None,
+        "malformed",
+        {},
+        {"type": "text", "data": 123},
+        {"type": "text", "data": ""},
+        {"type": "url", "url": "https://invalid.example/secret", "data": "secret"},
+        {"type": "base64", "data": "secret"},
+        {"type": "file", "file_id": "secret"},
+        {"type": "content", "content": {"text": "secret"}},
+        {"type": "content", "content": [123, {"type": "reasoning", "text": "secret"}, {"type": "document", "title": "secret", "source": {"type": "text", "data": "secret"}}]},
+    ],
+)
+def test_opaque_malformed_and_nested_sources_do_not_enter_history(scoped, source):
+    message = HumanMessage(content=[{"type": "document", "title": "secret-title", "context": "secret-context", "text": "secret", "source": source}], id="opaque")
+    scoped.state = {"messages": [message]}
+    assert not json.loads(history_search.func(scoped, "secret"))["results"]
+    history = archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+    assert not json.loads(history_search.func(scoped, "secret"))["results"]
+
+
+def test_document_body_only_admits_immediate_plaintext(scoped):
+    parts = ["first", {"type": "text", "text": "second"}, {"type": "text", "text": 123}, {"type": "image", "text": "secret"}, {"type": "document", "source": {"type": "text", "data": "secret"}}]
+    message = HumanMessage(content=[{"type": "document", "title": {"text": "secret"}, "context": ["secret"], "source": {"type": "content", "content": parts}}], id="mixed")
+    history = archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+    source_id = json.loads(history_search.func(scoped, "second"))["results"][0]["id"]
+    assert json.loads(history_read.func(scoped, source_id))["text"] == "Document:\nfirst\nsecond"
+    assert not json.loads(history_search.func(scoped, "secret"))["results"]
+
+
+@pytest.mark.parametrize("metadata", [{"hide_from_ui": True}, {"deerflow_content_kind": "internal"}])
+def test_framework_document_sources_remain_excluded(scoped, metadata):
+    message = HumanMessage(content=content("document-text"), additional_kwargs=metadata, id="internal")
+    history = archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [message], "task_history": history}
+    assert not json.loads(history_search.func(scoped, "Wisteria"))["results"]
+
+
+def test_document_extension_preserves_old_citations_and_text_only_ids(scoped):
+    legacy = HumanMessage(content="Existing visible reference", id="same-message")
+    expected = {"role": "human", "message_id": "same-message", "name": None, "text": legacy.content}
+    old_id = "r" + archive.digest(expected)[:32]
+    assert archive.records([legacy])[0]["id"] == old_id
+    history = archive.capture({}, scoped, [legacy], TaskContinuityConfig(enabled=True))
+    expanded = legacy.model_copy(update={"content": [legacy.content, *content("document-text")]})
+    scoped.state = {"messages": [expanded], "task_history": history}
+    assert json.loads(history_read.func(scoped, old_id))["text"] == legacy.content
+    new_id = json.loads(history_search.func(scoped, "Wisteria"))["results"][0]["id"]
+    assert new_id != old_id
+    assert BODY in json.loads(history_read.func(scoped, new_id))["text"]
+
+
+def test_document_sources_follow_checkpoint_reachability_and_user_scope(scoped):
+    config = TaskContinuityConfig(enabled=True)
+    old_history = archive.capture({}, scoped, [HumanMessage(content="Earlier plain message", id="old")], config)
+    new_history = archive.capture({"task_history": old_history}, scoped, [HumanMessage(content=content("document-text"), id="new")], config)
+    scoped.state = {"messages": [], "task_history": old_history}
+    assert not json.loads(history_search.func(scoped, "Wisteria"))["results"]
+    scoped.state["task_history"] = new_history
+    source_id = json.loads(history_search.func(scoped, "Wisteria"))["results"][0]["id"]
+    for context in ({"user_id": "bob", "thread_id": "thread-a"}, {"user_id": "alice", "thread_id": "thread-b"}):
+        foreign = SimpleNamespace(context=context, state=scoped.state, tool_call_id="foreign")
+        assert not json.loads(history_search.func(foreign, "Wisteria"))["results"]
+        assert json.loads(history_read.func(foreign, source_id)) == {"error": "source_unavailable", "status": "scope_unavailable"}
+
+
+def test_document_caps_and_read_offsets_share_the_visible_source(scoped):
+    body = "Wisteria " + "ü中" * 3500 + " OMITTEDTAIL"
+    message = HumanMessage(content=[{"type": "document", "source": {"type": "text", "data": body}}], id="long")
+    history = archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True, max_record_chars=5000))
+    scoped.state = {"messages": [], "task_history": history}
+    hit = json.loads(history_search.func(scoped, "Wisteria"))["results"][0]
+    first = json.loads(history_read.func(scoped, hit["id"]))
+    second = json.loads(history_read.func(scoped, hit["id"], first["next_offset"]))
+    readable = first["text"] + second["text"]
+    assert readable == ("Document:\n" + body)[:5000]
+    assert first["truncated"] and second["truncated"]
+    assert readable[hit["excerpt_start"] : hit["excerpt_end"]] == hit["excerpt"]
+    assert second["next_offset"] is None
+    assert not json.loads(history_search.func(scoped, "OMITTEDTAIL"))["results"]
 
 
 @pytest.mark.asyncio
