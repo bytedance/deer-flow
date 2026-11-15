@@ -105,6 +105,7 @@ import {
   findSubtaskResultMessage,
 } from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
+import { LOCAL_HUMAN_MESSAGE_ID_PREFIX } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -571,24 +572,33 @@ export function MessageList({
   // scroll-to-bottom button re-locks the follow.
   //
   // "Freshly sent" is identified by the optimistic message identity
-  // (`local-human-<uuid>`, minted once per turn in the thread hooks and
-  // shared with the server echo), not by comparing group tails: the
+  // (LOCAL_HUMAN_MESSAGE_ID_PREFIX, minted once per turn in the thread hooks
+  // and shared with the server echo), not by comparing group tails: the
   // optimistic append can render before `isLoading` flips, and a regenerate
   // masks the superseded assistant messages first, which exposes an existing
   // human turn as the last group mid-run. Identity also excludes history
   // loads (prepend), thread switches and restoring a mid-run thread.
   const [pinGroupKey, setPinGroupKey] = useState<string | null>(null);
   const lastSeenThreadIdRef = useRef(threadId);
-  const firstPinEffectRunRef = useRef(true);
   const pinnedKeysRef = useRef<Set<string>>(new Set());
+  // Captured during the first render, not inside the effect: React StrictMode
+  // (the dev default) runs effects mount → cleanup → mount with refs
+  // preserved, so a run-once flag mutated in the effect would let the second
+  // pass fall through and pin a restored mid-run thread. The mount-time tail
+  // absorbs idempotently on every pass.
+  const mountTailKeyRef = useRef<string | null | undefined>(undefined);
+  if (mountTailKeyRef.current === undefined) {
+    const firstGroup = groupedMessages.at(-1);
+    mountTailKeyRef.current =
+      firstGroup?.id ?? firstGroup?.messages[0]?.id ?? null;
+  }
   useEffect(() => {
     const lastGroup = groupedMessages.at(-1);
     const lastGroupKey = lastGroup?.id ?? lastGroup?.messages[0]?.id;
-    if (firstPinEffectRunRef.current) {
-      // Mount with whatever tail exists (restoring a mid-run thread): absorb.
-      firstPinEffectRunRef.current = false;
-      if (lastGroupKey) pinnedKeysRef.current.add(lastGroupKey);
-      return;
+    if (lastGroupKey != null && lastGroupKey === mountTailKeyRef.current) {
+      // The tail that already existed at mount (restoring a mid-run thread)
+      // is never a fresh send.
+      pinnedKeysRef.current.add(lastGroupKey);
     }
     if (lastSeenThreadIdRef.current !== threadId) {
       lastSeenThreadIdRef.current = threadId;
@@ -604,7 +614,7 @@ export function MessageList({
     }
     if (
       lastGroup?.type === "human" &&
-      lastGroupKey?.startsWith("local-human-") &&
+      lastGroupKey?.startsWith(LOCAL_HUMAN_MESSAGE_ID_PREFIX) &&
       !pinnedKeysRef.current.has(lastGroupKey)
     ) {
       pinnedKeysRef.current.add(lastGroupKey);
@@ -1863,6 +1873,10 @@ export function MessageList({
         <ConversationScrollButton
           aria-label={t.common.scrollToBottom}
           className="z-10"
+          // The jump button is explicit user intent that originates outside
+          // the scroll element, so its input events cannot cancel a running
+          // send-pin chain; do it here.
+          onPointerDown={() => virtualMessageListRef.current?.cancelPinFollow()}
         />
       </Conversation>
       {conversationOutlineEnabled && (

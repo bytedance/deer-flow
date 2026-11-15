@@ -245,4 +245,82 @@ test.describe("Scroll on send", () => {
   }) => {
     await expectSendPinned(page, 12, { progressive: true });
   });
+
+  // The send-pin chain (escape + re-align ticks for ~2s after a send) must
+  // hand scroll control back on the first genuine user input. A wheel over
+  // the list inside the chain window cancels it; without the cancel, a later
+  // tick would revert the user's position back to the pinned offset.
+  test("hands scroll control back when the user wheels inside the chain window", async ({
+    page,
+  }) => {
+    const streamServer = await startHeldRunStream();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Scroll on send",
+          updated_at: "2026-11-14T12:00:00Z",
+          messages: fillerMessages(12),
+        },
+      ],
+      runStreamHandler: (route) => route.continue({ url: streamServer.url }),
+    });
+
+    try {
+      await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+      await expect(
+        page.getByText("Filler question 11", { exact: false }).first(),
+      ).toBeVisible({ timeout: 15_000 });
+
+      const scroller = page.getByRole("log").locator("> div");
+      await expect
+        .poll(() =>
+          scroller.evaluate(
+            (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+          ),
+        )
+        .toBeLessThanOrEqual(1);
+
+      const textarea = page.getByPlaceholder(/how can i assist you/i);
+      await expect(textarea).toBeVisible({ timeout: 15_000 });
+      await textarea.fill(SENT_TEXT);
+      await textarea.press("Enter");
+
+      const sentMessage = page.getByText(SENT_TEXT, { exact: true });
+      await expect(sentMessage).toBeVisible({ timeout: 15_000 });
+      const scrollerHandle = await scroller.elementHandle();
+      const sentTopInViewport = () =>
+        sentMessage.evaluate(
+          (el, scrollerEl) =>
+            el.getBoundingClientRect().top -
+            scrollerEl.getBoundingClientRect().top,
+          scrollerHandle,
+        );
+      // The pin landed; still well inside the 2s chain window.
+      await expect.poll(sentTopInViewport).toBeLessThanOrEqual(64);
+
+      const box = await scroller.boundingBox();
+      if (!box) {
+        throw new Error("scroll container is not visible");
+      }
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.wheel(0, -240);
+
+      // The wheel-up moves the viewport up, pushing the pinned message down
+      // by the same amount (~240px past its pinned offset). Past several
+      // would-be chain ticks (350/500/700/900/1100ms) the user's position
+      // must hold instead of snapping back to the pin offset.
+      await page.waitForTimeout(1_500);
+      await expect.poll(sentTopInViewport).toBeGreaterThan(200);
+      await page.waitForTimeout(400);
+      await expect.poll(sentTopInViewport).toBeGreaterThan(200);
+
+      // The user is now free of the follow; the jump button shows.
+      await expect(
+        page.getByRole("button", { name: "Scroll to bottom" }),
+      ).toBeVisible();
+    } finally {
+      await streamServer.close();
+    }
+  });
 });

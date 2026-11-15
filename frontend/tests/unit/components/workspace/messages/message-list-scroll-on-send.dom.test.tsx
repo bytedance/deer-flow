@@ -1,7 +1,12 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, render } from "@testing-library/react";
-import { forwardRef, useImperativeHandle, type ReactNode } from "react";
+import {
+  forwardRef,
+  StrictMode,
+  useImperativeHandle,
+  type ReactNode,
+} from "react";
 
 import { MessageList } from "@/components/workspace/messages/message-list";
 import type { VirtualMessageListHandle } from "@/components/workspace/messages/virtual-message-list";
@@ -39,6 +44,7 @@ rs.mock("@/components/workspace/messages/virtual-message-list", () => ({
     mocks.pinnedGroups.push(pinGroupKey ?? null);
     useImperativeHandle(ref, () => ({
       scrollToGroup: () => undefined,
+      cancelPinFollow: () => undefined,
     }));
     return (
       <div>
@@ -140,6 +146,35 @@ describe("MessageList scroll-on-send", () => {
     expect(lastPinnedGroup()).toBe("local-human-2");
   });
 
+  it("re-pins on a second send while the first run is still active", () => {
+    const { rerender } = render(idle());
+    rerender(
+      view({
+        threadId: "thread-1",
+        messages: [HUMAN_1, AI_1, HUMAN_2] as Message[],
+        isLoading: true,
+      }),
+    );
+    expect(lastPinnedGroup()).toBe("local-human-2");
+
+    // A queued second send appends another optimistic human turn; the pin
+    // moves to the newest one.
+    const HUMAN_3 = {
+      id: "local-human-3",
+      type: "human",
+      content: "Third question",
+    };
+    rerender(
+      view({
+        threadId: "thread-1",
+        messages: [HUMAN_1, AI_1, HUMAN_2, HUMAN_3] as Message[],
+        isLoading: true,
+      }),
+    );
+
+    expect(lastPinnedGroup()).toBe("local-human-3");
+  });
+
   it("keeps pinning the same turn while its reply streams in", () => {
     const { rerender } = render(idle());
     rerender(
@@ -228,6 +263,23 @@ describe("MessageList scroll-on-send", () => {
         messages: [HUMAN_1, AI_1, HUMAN_2] as Message[],
         isLoading: true,
       }),
+    );
+
+    expect(lastPinnedGroup()).toBeNull();
+  });
+
+  it("does not pin when StrictMode double-runs the mount with a mid-run thread", () => {
+    // React StrictMode (the App Router dev default) runs effects
+    // mount → cleanup → mount with refs preserved. The mount absorption must
+    // survive the second pass instead of falling through to the pin path.
+    render(
+      <StrictMode>
+        {view({
+          threadId: "thread-1",
+          messages: [HUMAN_1, AI_1, HUMAN_2] as Message[],
+          isLoading: true,
+        })}
+      </StrictMode>,
     );
 
     expect(lastPinnedGroup()).toBeNull();

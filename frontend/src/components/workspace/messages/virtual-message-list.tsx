@@ -59,6 +59,13 @@ type VirtualMessageListProps = {
 
 export type VirtualMessageListHandle = {
   scrollToGroup: (groupIndex: number, options?: ScrollToGroupOptions) => void;
+  /**
+   * Hands scroll control back to the user immediately: cancels a running
+   * send-pin chain (escape ticks and settle frames) without clearing the
+   * pin itself. Wired to explicit user intents that do not originate as
+   * input on the scroll element, e.g. the scroll-to-bottom button.
+   */
+  cancelPinFollow: () => void;
 };
 
 function groupKey(group: MessageGroup | undefined, index: number): Key {
@@ -215,6 +222,12 @@ export const VirtualMessageList = forwardRef<
   const pinChainKeyRef = useRef<string | null>(null);
   const pinFramesRef = useRef<number[]>([]);
   const pinEscapeTimersRef = useRef<number[]>([]);
+  // User-intent listeners, attached for the chain's lifetime: `wheel`,
+  // `touchstart` and `pointerdown` never fire for programmatic `scrollTo`, so
+  // they distinguish real scrolling (wheel/trackpad/touch, scrollbar and
+  // selection drags) from the resize-animation churn the chain defends
+  // against. The first genuine input hands scroll control back to the user.
+  const pinUserIntentBoundRef = useRef(false);
   const cancelPinChain = useCallback(() => {
     for (const frame of pinFramesRef.current) {
       cancelAnimationFrame(frame);
@@ -224,7 +237,33 @@ export const VirtualMessageList = forwardRef<
       clearTimeout(timer);
     }
     pinEscapeTimersRef.current = [];
-  }, []);
+    if (pinUserIntentBoundRef.current) {
+      pinUserIntentBoundRef.current = false;
+      const viewport = scrollRef.current;
+      if (viewport) {
+        viewport.removeEventListener("wheel", cancelPinChain);
+        viewport.removeEventListener("touchstart", cancelPinChain);
+        viewport.removeEventListener("pointerdown", cancelPinChain);
+      }
+    }
+  }, [scrollRef]);
+  const armPinUserIntent = useCallback(() => {
+    if (pinUserIntentBoundRef.current) {
+      return;
+    }
+    const viewport = scrollRef.current;
+    if (!viewport) {
+      return;
+    }
+    pinUserIntentBoundRef.current = true;
+    viewport.addEventListener("wheel", cancelPinChain, { passive: true });
+    viewport.addEventListener("touchstart", cancelPinChain, {
+      passive: true,
+    });
+    viewport.addEventListener("pointerdown", cancelPinChain, {
+      passive: true,
+    });
+  }, [cancelPinChain, scrollRef]);
   useLayoutEffect(() => {
     if (pinnedIndex == null) {
       pinChainKeyRef.current = null;
@@ -241,6 +280,12 @@ export const VirtualMessageList = forwardRef<
       return;
     }
     pinChainKeyRef.current = pinGroupKey ?? null;
+    // A second send within the first chain's 2s window starts a new chain;
+    // without this cancel the old chain's pending ticks keep aligning the
+    // previous pin (and its timer array is overwritten, orphaning them so
+    // they can never be cancelled).
+    cancelPinChain();
+    armPinUserIntent();
     const trackFrame = (callback: FrameRequestCallback) => {
       const frame = requestAnimationFrame((time) => {
         pinFramesRef.current = pinFramesRef.current.filter(
@@ -298,6 +343,7 @@ export const VirtualMessageList = forwardRef<
     });
   }, [
     alignGroupToViewport,
+    armPinUserIntent,
     cancelPinChain,
     groups,
     pinGroupKey,
@@ -314,6 +360,9 @@ export const VirtualMessageList = forwardRef<
         if (groupIndex < 0 || groupIndex >= groups.length) {
           return;
         }
+        // Outline chapter navigation is explicit user intent: a running
+        // send-pin chain must not revert it on its next tick.
+        cancelPinChain();
         stopScroll();
         const behavior = options?.behavior ?? "auto";
         const align = options?.align ?? "start";
@@ -340,9 +389,13 @@ export const VirtualMessageList = forwardRef<
         };
         requestAnimationFrame(settleOnExactGroup);
       },
+      cancelPinFollow() {
+        cancelPinChain();
+      },
     }),
     [
       alignGroupToViewport,
+      cancelPinChain,
       groups.length,
       shouldVirtualize,
       stopScroll,
