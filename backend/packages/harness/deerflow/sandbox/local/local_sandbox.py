@@ -1333,6 +1333,16 @@ class LocalSandbox(Sandbox):
                 data = f.read(max_download_size + 1)
             if len(data) > max_download_size:
                 raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+            # Mirror read_file: reverse-resolve host paths back to virtual paths
+            # for agent-written text files, so the downloaded bytes match what
+            # the agent verified via read_file and no host path leaks (#8259).
+            # Binary content fails the UTF-8 decode and stays byte-identical.
+            if resolved_path in self._agent_written_paths:
+                try:
+                    text = data.decode("utf-8")
+                except UnicodeDecodeError:
+                    return data
+                return self._reverse_resolve_paths_in_output(text).encode("utf-8")
             return data
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths

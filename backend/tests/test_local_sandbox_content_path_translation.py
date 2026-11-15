@@ -204,3 +204,44 @@ def test_append_to_a_named_pipe_does_not_block_while_classifying(tmp_path, name)
     assert errors == []
     reader_thread.join(5)
     assert received == ["ready\n"]
+
+
+def test_download_file_reverse_resolves_paths_for_agent_written_script(tmp_path):
+    """Issue #8259 — download_file must mirror read_file for agent-written scripts.
+
+    ``write_file`` stores host paths on disk so the script runs; ``read_file``
+    reverse-resolves them back to virtual paths. ``download_file`` returned the
+    raw on-disk bytes, leaking the host absolute path (DEER_FLOW_HOME, username,
+    thread id) and disagreeing with what the agent verified via ``read_file``.
+    """
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/workspace/run.sh"
+    content = "#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n"
+
+    sandbox.write_file(virtual, content)
+
+    stored = (tmp_path / "workspace" / "run.sh").read_text(encoding="utf-8")
+    assert "/mnt/user-data" not in stored  # host paths live on disk
+    assert sandbox.read_file(virtual) == content
+    assert sandbox.download_file(virtual) == content.encode("utf-8")
+
+
+def test_download_file_leaves_binary_bytes_identical(tmp_path):
+    """Binary downloads stay byte-identical even for agent-written paths."""
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/workspace/model.bin"
+    sandbox.write_file(virtual, "placeholder\n")
+    raw = b"\x89PNG\r\n\x1a\n\x00\xff\xfe binary \x80\x81"
+    (tmp_path / "workspace" / "model.bin").write_bytes(raw)
+
+    assert sandbox.download_file(virtual) == raw
+
+
+def test_download_file_does_not_reverse_resolve_non_agent_file(tmp_path):
+    """Only agent-written files get reverse-resolved, mirroring read_file."""
+    sandbox = _sandbox(tmp_path)
+    host_path = str(tmp_path / "outputs" / "data.csv")
+    content = f"see {host_path}\n"
+    (tmp_path / "outputs" / "report.txt").write_text(content, encoding="utf-8")
+
+    assert sandbox.download_file("/mnt/user-data/outputs/report.txt") == content.encode("utf-8")
