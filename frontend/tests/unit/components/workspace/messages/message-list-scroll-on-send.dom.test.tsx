@@ -4,10 +4,10 @@ import { cleanup, render } from "@testing-library/react";
 import { forwardRef, useImperativeHandle, type ReactNode } from "react";
 
 import { MessageList } from "@/components/workspace/messages/message-list";
+import type { VirtualMessageListHandle } from "@/components/workspace/messages/virtual-message-list";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type { MessageGroup } from "@/core/messages/utils";
-import type { VirtualMessageListHandle } from "@/components/workspace/messages/virtual-message-list";
 
 const mocks = rs.hoisted(() => ({
   pinnedGroups: [] as (string | null)[],
@@ -76,7 +76,11 @@ afterEach(() => {
 
 const HUMAN_1 = { id: "human-1", type: "human", content: "First question" };
 const AI_1 = { id: "ai-1", type: "ai", content: "First answer" };
-const HUMAN_2 = { id: "local-human-2", type: "human", content: "Second question" };
+const HUMAN_2 = {
+  id: "local-human-2",
+  type: "human",
+  content: "Second question",
+};
 
 function view({
   threadId,
