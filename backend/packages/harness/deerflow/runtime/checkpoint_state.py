@@ -43,7 +43,7 @@ def validate_state_mutation_node(as_node: str) -> str:
     task separator (``:``). Callers that take the name from a client check it
     here first, so a bad name is an input error and not a failed compile.
     The reserved set is private to LangGraph; recheck this import when
-    upgrading LangGraph (verified against 1.2.14).
+    upgrading LangGraph (verified against 1.2.9 and 1.2.14).
     """
     from langgraph._internal._constants import NS_END, NS_SEP, RESERVED
     from langgraph.constants import END, START
