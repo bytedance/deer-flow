@@ -12,6 +12,7 @@ from jsonschema import Draft202012Validator
 
 from deerflow.skills.review import LocalDirectoryReader, analyze_skill_package, stable_json_dumps
 from deerflow.skills.review.cli import main as review_cli_main
+from deerflow.skills.review.eval_schema import analyze_eval_manifests
 from deerflow.skills.review.models import PackageLimits, normalize_relative_path
 from deerflow.skills.review.readers import ArchivePackageReader, parse_skill_uri
 from deerflow.skills.review.renderer import build_static_report, render_report_markdown
@@ -810,3 +811,32 @@ def test_cli_fail_on_incomplete_package(tmp_path, capsys):
     assert exit_code == 1
     assert "Summary: 0 blocker(s), 0 error(s)" in output
     assert "Completeness: truncated=True, not_assessed=full_package" in output
+
+
+def test_eval_manifests_ignore_fixture_json_payloads():
+    """evals/fixtures/** holds eval *data* (e.g. tool-response JSON arrays),
+    not manifests: its length must not join case_count and its schema must
+    not flip the aggregate verdict to "mixed"."""
+    manifest = {
+        "schema_version": "1",
+        "cases": [
+            {"prompt": "a", "should_trigger": True},
+            {"prompt": "b", "should_trigger": True},
+            {"prompt": "c", "should_trigger": False},
+        ],
+    }
+    fixture = [{"id": i, "payload": {"ok": True}} for i in range(5)]
+    snapshot = {
+        "files": [
+            {"path": "SKILL.md", "kind": "text", "content": "# demo\n"},
+            {"path": "evals/evals.json", "kind": "text", "content": json.dumps(manifest)},
+            {"path": "evals/fixtures/tool_response.json", "kind": "text", "content": json.dumps(fixture)},
+        ]
+    }
+
+    aggregate, findings = analyze_eval_manifests(snapshot)
+
+    assert [m["path"] for m in aggregate["manifests"]] == ["evals/evals.json"]
+    assert aggregate["case_count"] == 3
+    assert aggregate["schema"] == "versioned"
+    assert not findings
