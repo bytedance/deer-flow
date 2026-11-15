@@ -226,6 +226,41 @@ def test_pr_area_labels_cover_backend_packages():
             area = specific_areas.get(directory.name, "area:backend")
             cases.append(([f"{path}/example.py"], {area}))
 
+    for (paths, expected), labels in zip(cases, replay_area_labels([paths for paths, _ in cases]), strict=True):
+        assert sorted(labels) == sorted(expected), paths
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Workflow replay requires Node.js")
+def test_pr_area_labels_cover_the_helm_chart():
+    """A chart-only change is release/deploy tooling, so it must carry an area.
+
+    ``deploy/`` holds the Helm chart and nothing else: ``scripts/bump_version.sh``
+    rewrites its versions, and ``scripts/verify_versions.sh`` plus the chart
+    workflow gate its rendering. A PR that touches the chart and its
+    ``backend/tests/test_helm_*.py`` proves nothing about the product areas, so
+    before this rule it matched no entry at all and arrived with no area label
+    (for example #8123, which reached merge with only its size and risk labels).
+    """
+    cases = [
+        (
+            ["deploy/helm/deer-flow/templates/nginx-deployment.yaml", "backend/tests/test_helm_image_pull_secrets.py"],
+            {"area:ci"},
+        ),
+        (["deploy/helm/deer-flow/Chart.yaml"], {"area:ci"}),
+        (["deploy/helm/deer-flow/README.md", "deploy/helm/deer-flow/values.yaml"], {"area:ci", "area:docs"}),
+    ]
+
+    for (paths, expected), labels in zip(cases, replay_area_labels([paths for paths, _ in cases]), strict=True):
+        assert sorted(labels) == sorted(expected), paths
+
+
+def replay_area_labels(changes: list[list[str]]) -> list[list[str]]:
+    """Run the workflow's own ``AREA_RULES`` over each path list, using Node.
+
+    The area labels are produced by JavaScript inside the workflow, so a Python
+    copy of the rules would only prove itself. The workflow body is evaluated
+    with a stub client that records the ``addLabels`` batches instead.
+    """
     scripts = checker.workflow_scripts(checker.TRIAGE_WORKFLOW.read_text(encoding="utf-8"))
     (script,) = (source for source in scripts if "const AREA_RULES =" in source)
     result = subprocess.run(
@@ -258,12 +293,11 @@ async function replay(paths) {
 Promise.all(changes.map(replay)).then(labels => console.log(JSON.stringify(labels)));
 """,
         ],
-        input=json.dumps({"script": script, "changes": [paths for paths, _ in cases]}),
+        input=json.dumps({"script": script, "changes": changes}),
         capture_output=True,
         encoding="utf-8",
         check=False,
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    for (paths, expected), labels in zip(cases, json.loads(result.stdout), strict=True):
-        assert sorted(labels) == sorted(expected), paths
+    return json.loads(result.stdout)
