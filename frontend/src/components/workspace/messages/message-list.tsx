@@ -563,6 +563,55 @@ export function MessageList({
     prevIsLoading.current = thread.isLoading;
   }, [groupedMessages, thread.error, thread.isLoading, threadId]);
 
+  // Pin a freshly sent user turn to the top of the viewport, ChatGPT-style:
+  // the reply then grows downward below the reading position instead of the
+  // viewport chasing the bottom. The list escapes the stick lock and grows a
+  // flexible end spacer so the last row can actually reach the top (see
+  // `pinGroupKey` in VirtualMessageList); scrolling down or the
+  // scroll-to-bottom button re-locks the follow.
+  //
+  // "Freshly sent" is identified by the optimistic message identity
+  // (`local-human-<uuid>`, minted once per turn in the thread hooks and
+  // shared with the server echo), not by comparing group tails: the
+  // optimistic append can render before `isLoading` flips, and a regenerate
+  // masks the superseded assistant messages first, which exposes an existing
+  // human turn as the last group mid-run. Identity also excludes history
+  // loads (prepend), thread switches and restoring a mid-run thread.
+  const [pinGroupKey, setPinGroupKey] = useState<string | null>(null);
+  const lastSeenThreadIdRef = useRef(threadId);
+  const firstPinEffectRunRef = useRef(true);
+  const pinnedKeysRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const lastGroup = groupedMessages.at(-1);
+    const lastGroupKey = lastGroup?.id ?? lastGroup?.messages[0]?.id;
+    if (firstPinEffectRunRef.current) {
+      // Mount with whatever tail exists (restoring a mid-run thread): absorb.
+      firstPinEffectRunRef.current = false;
+      if (lastGroupKey) pinnedKeysRef.current.add(lastGroupKey);
+      return;
+    }
+    if (lastSeenThreadIdRef.current !== threadId) {
+      lastSeenThreadIdRef.current = threadId;
+      setPinGroupKey(null);
+      if (lastGroupKey) pinnedKeysRef.current.add(lastGroupKey);
+      return;
+    }
+    if (!thread.isLoading) {
+      // The run finished (or never started): drop the pin so the end spacer
+      // collapses with it.
+      setPinGroupKey(null);
+      return;
+    }
+    if (
+      lastGroup?.type === "human" &&
+      lastGroupKey?.startsWith("local-human-") &&
+      !pinnedKeysRef.current.has(lastGroupKey)
+    ) {
+      pinnedKeysRef.current.add(lastGroupKey);
+      setPinGroupKey(lastGroupKey);
+    }
+  }, [groupedMessages, thread.isLoading, threadId]);
+
   useEffect(() => {
     const startTime = turnStartTimeRef.current;
     if (
@@ -1309,6 +1358,7 @@ export function MessageList({
             ref={virtualMessageListRef}
             groups={groupedMessages}
             isLoading={thread.isLoading}
+            pinGroupKey={pinGroupKey}
             onActiveGroupChange={
               conversationOutlineEnabled ? handleActiveGroupChange : undefined
             }
