@@ -248,6 +248,11 @@ external boundaries. Ordinary `type`/`value` fields remain compatible.
 `goal: null` retains its existing semantics: it clears a state update's goal,
 but does not replace a goal through run input.
 
+A state update's optional `as_node` names the graph node recorded as the
+writer, and defaults to `manual_state_update`. It must be a name LangGraph can
+register as a node: `__start__`, `__end__`, LangGraph's other reserved names and
+names containing `:` or `|` are rejected with 422 before anything is written.
+
 Replaying messages from an earlier root checkpoint, including response regeneration, preserves
 the thread's current goal and continuation budget. A cleared or achieved goal
 is not restored from history. A valid goal explicitly supplied in run input
