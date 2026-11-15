@@ -343,6 +343,54 @@ test("a regular send while a rewrite is pending stays a question", async ({
   await expect(page.getByTestId("artifact-rewrite-review")).toBeHidden();
 });
 
+test("a rewrite can start when crypto.randomUUID is unavailable", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // Match the Web Crypto API surface on non-loopback HTTP origins.
+    Object.defineProperty(Crypto.prototype, "randomUUID", { value: undefined });
+  });
+  await setup(page);
+  expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe("undefined");
+  await select(page, selected);
+  await page
+    .getByTestId("artifact-selection-toolbar")
+    .getByRole("button", { name: "Rewrite selection" })
+    .click();
+  await expect(page.getByTestId("artifact-rewrite-review")).toContainText(
+    `${filepath}:L5-L5`,
+  );
+});
+
+test("clearing the target quote cancels the pending rewrite", async ({
+  page,
+}) => {
+  await setup(page);
+  let submitted: unknown;
+  await page.route("**/api/langgraph/threads/*/runs/stream", (route) => {
+    submitted = route.request().postDataJSON();
+    return handleRunStream(route);
+  });
+  await select(page, selected);
+  await page
+    .getByTestId("artifact-selection-toolbar")
+    .getByRole("button", { name: "Rewrite selection" })
+    .click();
+  const panel = page.getByTestId("sidecar-panel");
+  await panel
+    .getByRole("button", { name: "Clear selected references" })
+    .click();
+  await expect(panel.getByTestId("sidecar-reference-attachment")).toBeHidden();
+  await expect(panel.getByTestId("artifact-rewrite-review")).toBeHidden();
+  await expect(
+    panel.getByRole("button", { name: "Rewrite selection" }),
+  ).toBeHidden();
+  await expect(
+    panel.getByRole("button", { name: "Submit", exact: true }),
+  ).toBeDisabled();
+  expect(submitted).toBeUndefined();
+});
+
 for (const discard of ["close draft", "delete thread"] as const) {
   test(`ordinary side-chat questions omit a discarded rewrite after ${discard}`, async ({
     page,

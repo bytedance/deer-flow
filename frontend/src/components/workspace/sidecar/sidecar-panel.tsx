@@ -544,12 +544,16 @@ export function SidecarPanel({ className }: { className?: string }) {
     ],
   );
 
-  const discardDraftAndClose = useCallback(() => {
+  const clearSelectedReferences = useCallback(() => {
     sidecar.clearArtifactEdit();
     sidecar.clearActiveReferences();
+  }, [sidecar]);
+
+  const discardDraftAndClose = useCallback(() => {
+    clearSelectedReferences();
     sidecar.setSidecarThreadId(null);
     sidecar.close();
-  }, [sidecar]);
+  }, [clearSelectedReferences, sidecar]);
 
   const handleDelete = useCallback(async () => {
     const threadId = sidecar.sidecarThreadId;
@@ -696,7 +700,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <ReferenceAttachmentSummary
                   references={sidecar.activeReferences}
                   testId="sidecar-reference-attachment"
-                  onClear={() => sidecar.clearActiveReferences()}
+                  onClear={clearSelectedReferences}
                 />
               )}
             </PromptInputHeader>

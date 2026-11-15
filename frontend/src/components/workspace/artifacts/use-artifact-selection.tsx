@@ -19,6 +19,7 @@ import {
 } from "@/core/artifacts/selection";
 import { readArtifactSelection } from "@/core/artifacts/selection-dom";
 import { useI18n } from "@/core/i18n/hooks";
+import { uuid } from "@/core/utils/uuid";
 
 import { useMaybeSidecar } from "../sidecar/context";
 
@@ -106,7 +107,7 @@ export function useArtifactSelection(options: {
     )
       return;
     sidecar.beginArtifactEdit({
-      id: crypto.randomUUID(),
+      id: uuid(),
       context,
       filepath: options.filepath,
       threadId: options.threadId,

@@ -39,8 +39,9 @@ check. Everything before and after the selected range stays unchanged.
 
 The edit survives switching from the artifact panel to side chat. Changing
 the draft, changing its saved revision, or starting a run prevents stale edits
-from being applied or saved. Edits stay in memory for the current conversation;
-switching conversations or discarding the side chat clears the pending rewrite.
+from being applied or saved. Edits stay in memory for the current conversation.
+Switching conversations, discarding the side chat, or clearing its selected
+references cancels the pending rewrite.
 Nothing writes to the file until you explicitly save it.
 
 Selections support up to 12,000 characters. Markdown may hide formatting markers,
