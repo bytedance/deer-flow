@@ -115,6 +115,8 @@ def test_priority_is_independent_of_routing(scorer, transport, issue, facts, rou
     [
         ({"trigger_quote": ["a paraphrase"]}, "连续原文子串"),
         ({"impact_quote": []}, "缺少实际后果"),
+        ({"impact_quote": ["\n"]}, "非空白"),
+        ({"impact_quote": ["失败\n切换模型"]}, "连续原文子串"),
         ({"impact_quote": ["x" * 161]}, "1–160"),
         ({"impact_quote": ["工具调用失败"] * 3}, "最多两段"),
         ({"trigger_quote": "切换模型后"}, "最多两段"),
@@ -225,6 +227,16 @@ def test_report_keeps_quotes_but_escapes_issue_markup(scorer, transport, issue, 
     assert report.splitlines()[-1].count("|") == 12
 
 
+def test_evidence_accepts_a_multiline_quote_within_the_body(scorer, transport, issue, facts):
+    issue["body"] = "切换模型后\n已有任务无法继续"
+    facts["trigger_quote"] = ["工具调用失败"]
+    facts["impact_quote"] = [issue["body"]]
+    transport(response(facts))
+    result = scorer.evaluate_issue(issue, api_key="test-key")
+    assert not result["scoring"]["needs_review"]
+    assert result["llm"]["impact_quote"] == [issue["body"]]
+
+
 def test_report_links_only_validated_issue_numbers_and_escapes_free_text(scorer, transport, issue, facts):
     issue["number"] = "42]|![badge](https://example.com/badge)"
     facts["reason_zh"] = "说明 | ![badge](https://example.com/badge)"
@@ -290,6 +302,67 @@ def test_missing_key_requires_explicit_offline_preview(scorer, monkeypatch, caps
     monkeypatch.delenv("TRIAGE_LLM_API_KEY", raising=False)
     assert scorer.main([]) == 1
     assert "Missing API key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("all_fail", [True, False])
+def test_report_exit_status_distinguishes_total_provider_failure(scorer, monkeypatch, tmp_path, issue, facts, capsys, all_fail):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    other = {**issue, "number": 43, "title": "另一条 Issue"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    calls = []
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        calls.append(title)
+        if all_fail or title == other["title"]:
+            raise urllib.error.HTTPError(request.full_url, 401, "private-provider-error", {}, None)
+        return io.BytesIO(json.dumps(response(facts)).encode())
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    status = scorer.main(["--input-json", str(source), "--output-json", str(output), "--output-md", str(report), "--api-key", "test-key", "--workers", "1"])
+    assert status == (1 if all_fail else 0)
+    assert calls == [issue["title"], other["title"]]
+    rows = {row["number"]: row["scoring"] for row in json.loads(output.read_text(encoding="utf-8"))}
+    assert rows[42]["needs_review"] is all_fail
+    assert rows[43]["needs_review"]
+    assert rows[43]["suggested_labels"] == []
+    assert "HTTP 401" in report.read_text(encoding="utf-8")
+    error = capsys.readouterr().err
+    if all_fail:
+        assert "#42" in error and "#43" in error
+    assert "private-provider-error" not in error
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        (None, "JSON object"),
+        ({"number": "43"}, "positive integer"),
+        ({"number": True}, "positive integer"),
+        ({"number": 0}, "positive integer"),
+        ({"title": 123}, "title"),
+        ({"body": {}}, "body"),
+        ({"url": []}, "url"),
+        ({"labels": [None]}, "labels"),
+        ({"labels": [{}]}, "labels"),
+    ],
+)
+def test_report_mode_rejects_invalid_records_before_model_calls(scorer, monkeypatch, tmp_path, issue, capsys, changes, error):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    second = None if changes is None else {**issue, "number": 43, **changes}
+    source.write_text(json.dumps([issue, second]), encoding="utf-8")
+    calls = []
+
+    def urlopen(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("must validate the batch first")
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    assert scorer.main(["--input-json", str(source), "--output-json", str(output), "--output-md", str(report), "--api-key", "test-key"]) == 1
+    assert "record 2" in (stderr := capsys.readouterr().err)
+    assert error in stderr
+    assert calls == []
+    assert not output.exists() and not report.exists()
 
 
 @pytest.mark.parametrize("failure_first", [True, False])

@@ -43,7 +43,8 @@ a deprecation notice; all issue types now use the same policy.
 
 The model returns `trigger_quote`, `impact_quote`, `kind`, `area`,
 `extension_hook`, `priority`, `route` and `reason_zh`. Each quote field holds up
-to two exact source spans, each at most 160 characters. JSON preserves those
+to two exact source spans within a single title or body, each at most 160
+characters and containing non-whitespace text. JSON preserves those
 quotes unchanged; Markdown escapes markup and displays line breaks.
 
 Priorities are `P0` through `P3`, `Needs-Info` (impact cannot be assessed), and
@@ -61,10 +62,14 @@ consistency, and unmerged-PR and unknown-request routing. Failures remain in the
 report with **需人工复核**, `scoring.needs_review: true`, and specific
 `scoring.validation_errors`. Returned facts remain under `llm`, including
 invalid quotes, so a maintainer can inspect what went wrong. Failed or
-incomplete API responses are also visible as unassessed entries.
-An unexpected per-issue exception also retains that issue and all completed
-results in both reports. The CLI lists affected issue numbers on stderr and
-exits with status 1 after writing the reports; it never labels those entries.
+incomplete API responses are also visible as unassessed entries with
+`scoring.evaluation_failed: true`. Both reports retain failed and completed
+rows. If every model evaluation fails, or a worker raises an unexpected
+exception, the CLI lists the affected issue numbers on stderr and exits with
+status 1 after writing the reports.
+
+Each JSON record must be an object with a positive integer issue number.
+Invalid records are reported by their input position before evaluation starts.
 
 Passing these checks establishes source provenance and structural consistency.
 It does not establish that the priority is correct or that a named extension

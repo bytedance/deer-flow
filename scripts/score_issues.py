@@ -187,16 +187,16 @@ def validate_assessment(facts: Any, issue: dict[str, Any]) -> list[str]:
     for key, values in ENUMS.items():
         if not isinstance(facts.get(key), str) or facts[key] not in values:
             errors.append(f"{key}: 无效枚举值")
-    source = (issue.get("title") or "") + "\n" + (issue.get("body") or "")
+    title, body = (issue.get(field) or "" for field in ("title", "body"))
     for key in ("trigger_quote", "impact_quote"):
         quotes = facts.get(key)
         if not isinstance(quotes, list) or len(quotes) > 2:
             errors.append(f"{key}: 应为最多两段原文引用")
             continue
         for quote in quotes:
-            if not isinstance(quote, str) or not quote or len(quote) > 160:
-                errors.append(f"{key}: 引用必须为 1–160 字符的字符串")
-            elif quote not in source:
+            if not isinstance(quote, str) or not quote.strip() or len(quote) > 160:
+                errors.append(f"{key}: 引用必须为 1–160 字符的非空白字符串")
+            elif quote not in title and quote not in body:
                 errors.append(f"{key}: 引用不是标题或正文的连续原文子串")
     if facts.get("priority") not in ("Needs-Info", "Not-Applicable") and not facts.get(
         "impact_quote"
@@ -337,6 +337,7 @@ def evaluate_issue(
 ) -> dict[str, Any]:
     raw: dict[str, Any] = {}
     facts: Any = {}
+    evaluation_failed = not offline
     if offline:
         errors = ["离线预览：未调用模型，尚未评估优先级"]
     elif not api_key:
@@ -353,6 +354,7 @@ def evaluate_issue(
             )
             facts = parse_assessment(raw, api_format)
             errors = validate_assessment(facts, issue)
+            evaluation_failed = False
         except urllib.error.HTTPError as err:
             errors = [f"模型调用失败（HTTP {err.code}），请检查接口、凭据或模型配置"]
         except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
@@ -401,6 +403,7 @@ def evaluate_issue(
             **decision,
             "action_zh": ROUTE_LABELS_ZH[decision["route"]],
             "needs_review": bool(errors),
+            "evaluation_failed": evaluation_failed,
             "validation_errors": errors,
             "suggested_labels": candidates,
         },
@@ -431,6 +434,7 @@ def failed_evaluation_result(issue: dict[str, Any], error: Exception) -> dict[st
             "route": "needs_info",
             "action_zh": ROUTE_LABELS_ZH["needs_info"],
             "needs_review": True,
+            "evaluation_failed": True,
             "validation_errors": [
                 f"评估异常（{type(error).__name__}），请重新评估此条 issue"
             ],
@@ -527,17 +531,34 @@ def fetch_issues_via_gh(
     return json.loads(res.stdout)
 
 
+def validate_issue_records(issues: list[Any]) -> None:
+    for index, issue in enumerate(issues, start=1):
+        if not isinstance(issue, dict):
+            raise ValueError(f"Issue record {index} must be a JSON object")
+        number = issue.get("number")
+        if type(number) is not int or number <= 0:
+            raise ValueError(f"Issue record {index} must have a positive integer number")
+        for field in ("title", "body", "url"):
+            value = issue.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"Issue record {index} field '{field}' must be text or null")
+        labels = issue.get("labels", [])
+        if not isinstance(labels, list) or not all(
+            isinstance(label, str)
+            or isinstance(label, dict) and isinstance(label.get("name"), str)
+            for label in labels
+        ):
+            raise ValueError(f"Issue record {index} labels must be a list of names")
+
+
 def validate_label_targets(issues: list[dict[str, Any]], repo: str | None) -> None:
     target = REPO_RE.fullmatch(repo) if repo else None
     if repo and not target:
         raise ValueError("--repo must be [HOST/]OWNER/REPO")
     for issue in issues:
-        if not isinstance(issue, dict):
-            raise ValueError("Each issue must be a JSON object")
-        number = issue.get("number")
-        url = issue.get("url")
-        match = ISSUE_URL_RE.fullmatch(url) if isinstance(url, str) else None
-        if type(number) is not int or not match or match["number"] != str(number):
+        number = issue["number"]
+        match = ISSUE_URL_RE.fullmatch(issue.get("url") or "")
+        if not match or match["number"] != str(number):
             raise ValueError(f"Issue #{number} must have a matching HTTPS issue URL")
         if target:
             host = target["host"] or os.environ.get("GH_HOST") or "github.com"
@@ -694,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
             issues = raw_data if isinstance(raw_data, list) else [raw_data]
         else:
             issues = fetch_issues_via_gh(args.repo, args.issue, args.limit, args.label)
+        validate_issue_records(issues)
         if label_issues:
             validate_label_targets(issues, args.repo)
     except Exception as err:
@@ -702,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
 
     declared = load_declared_labels(LABELS_FILE)
     results: list[dict[str, Any]] = []
-    failed_numbers: list[Any] = []
+    failed_numbers: list[int] = []
 
     try:
         with concurrent.futures.ThreadPoolExecutor(
@@ -727,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
                     results.append(fut.result())
                 except Exception as err:
                     issue = futures[fut]
-                    failed_numbers.append(issue.get("number"))
+                    failed_numbers.append(issue["number"])
                     results.append(failed_evaluation_result(issue, err))
     except Exception as err:
         print(f"Error scoring issues: {err}", file=sys.stderr)
@@ -757,6 +779,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.output_md:
         args.output_md.write_text(md_report, encoding="utf-8")
     print(md_report, end="")
+    if results and all(row["scoring"]["evaluation_failed"] for row in results):
+        failed_numbers = [row["number"] for row in results]
     if failed_numbers:
         print(
             "Error evaluating issues: "
