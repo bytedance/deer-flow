@@ -68,6 +68,19 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **runtime:** A run that created or modified files under
+  `/mnt/user-data/outputs` without presenting one is stored as `error`
+  (`Artifact delivery incomplete: no produced output artifact was presented`),
+  but the stream used to end as a normal turn: the delivery check runs in the
+  completion branch, and only the exception branch published an `error` frame.
+  The web UI raises its run-failure toast and streaming IM channels mark a turn
+  failed only on that frame, so the user saw a successful-looking answer while
+  `/wait` reported the failure. The delivery check now publishes
+  `{"message": ..., "name": "RunError"}` before `end` — the shape `/wait` uses
+  for a terminal error — and defers the frame to the finalizer while the
+  terminal status is not yet durable, so a delivery receipt that could not be
+  persisted is reported the same way. ([#8252])
+
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
   `0 24 * * *` stays a custom schedule and keeps its original text. Previously,
@@ -16441,3 +16454,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#8139]: https://github.com/bytedance/deer-flow/pull/8139
 [#8151]: https://github.com/bytedance/deer-flow/pull/8151
 [#8174]: https://github.com/bytedance/deer-flow/pull/8174
+[#8252]: https://github.com/bytedance/deer-flow/pull/8252

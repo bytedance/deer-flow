@@ -1874,6 +1874,12 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
