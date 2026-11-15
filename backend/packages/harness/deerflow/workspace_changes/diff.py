@@ -109,6 +109,11 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     return changed
 
 
+#: Virtual prefix of the outputs workspace root. Shared with ``recorder.py`` so
+#: the delivery filter below cannot silently drift from the scanner's paths.
+OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs"
+
+
 def _is_hidden_output_path(path: str) -> bool:
     """Whether any segment below the outputs root starts with a dot.
 
@@ -116,10 +121,10 @@ def _is_hidden_output_path(path: str) -> bool:
     state JSON, a ``.work/`` scratch tree). Those files are not deliverables, so
     they must not make an otherwise finished run fail delivery verification.
     """
-    _prefix, separator, relative = path.partition("/outputs/")
-    if not separator:
+    prefix = f"{OUTPUTS_VIRTUAL_PREFIX}/"
+    if not path.startswith(prefix):
         return False
-    return any(segment.startswith(".") for segment in relative.split("/") if segment)
+    return any(segment.startswith(".") for segment in path[len(prefix) :].split("/") if segment)
 
 
 def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
