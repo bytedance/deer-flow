@@ -403,6 +403,21 @@ async def _shutdown_startup_trash_sweep(app: FastAPI) -> None:
         logger.exception("Startup trash sweep failed during shutdown")
 
 
+async def _shutdown_incognito_sweep(app: FastAPI) -> None:
+    """Stop the incognito lifetime sweep before the runtime is torn down.
+
+    A purge interrupted mid-flight leaves its tombstone and past deadline in
+    place, so the next Gateway start retries it; cancellation never resurrects
+    a thread or leaves one readable.
+    """
+    task = getattr(app.state, "incognito_sweep_task", None)
+    if task is None or task.done():
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
 async def _shutdown_scheduled_task_service(app: FastAPI) -> None:
     """Bound scheduler stop so a stuck poll cannot block Gateway exit.
 
@@ -774,6 +789,14 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # already-started file worker drains before the runtime is torn down.
         app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
+        # Incognito lifetime: tombstone then purge each thread whose deadline
+        # passed. Started regardless of ``incognito.enabled`` — the switch only
+        # stops new incognito threads, and threads created before an operator
+        # flipped it must still disappear on schedule.
+        from app.gateway.incognito import run_incognito_sweep_loop
+
+        app.state.incognito_sweep_task = asyncio.create_task(run_incognito_sweep_loop(app))
+
         # Best-effort per-document summary generation.
         # Workers start only when projects.summaries_enabled is true; the
         # write routes' enqueue is a no-op otherwise. Needs the session
@@ -970,6 +993,7 @@ async def _gateway_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await workers.close()
 
         await _shutdown_startup_trash_sweep(app)
+        await _shutdown_incognito_sweep(app)
         try:
             from deerflow.projects.summaries import get_summary_generator, reset_summary_generator
 

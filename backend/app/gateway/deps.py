@@ -23,6 +23,7 @@ import os
 import tempfile
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
@@ -37,6 +38,7 @@ from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, CREDENTIALS
 from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
 from deerflow.utils.file_io import await_drained
@@ -1349,10 +1351,29 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
-def _run_admission_hook(*, checkpointer: Any):
-    """Prune metadata leaves inside the run's durable admission fence."""
+def _run_admission_hook(*, checkpointer: Any, thread_store: Any | None = None, app_config: Any | None = None):
+    """Prune metadata leaves and pin the incognito marker inside the admission fence."""
 
     async def handle(record: Any, config: dict[str, Any]) -> None:
+        # Admission is activity: renew the idle deadline while this run holds
+        # its durable same-thread reservation, so the sweep cannot delete it
+        # mid-turn and a blocked/uncallable thread store cannot stall run
+        # admission before the worker starts. This is best-effort by design:
+        # a failed renewal leaves the old deadline, never the run unprotected
+        # from the normal completion renewal.
+        if thread_store is not None and app_config is not None:
+            try:
+                thread = await thread_store.get(record.thread_id, user_id=None)
+                if thread is not None and thread.get("incognito") is True:
+                    config.setdefault("context", {})[INCOGNITO_CONTEXT_KEY] = True
+                    await thread_store.renew_incognito(
+                        record.thread_id,
+                        idle_ttl=timedelta(seconds=app_config.incognito.idle_ttl_seconds),
+                        max_lifetime=timedelta(seconds=app_config.incognito.max_lifetime_seconds),
+                        user_id=None,
+                    )
+            except Exception:
+                logger.warning("Incognito admission renewal failed for thread %s (non-fatal)", record.thread_id, exc_info=True)
         try:
             from app.gateway.checkpoint_retention import enforce_completed_run_retention
 
@@ -1385,7 +1406,7 @@ def _selected_checkpoint_ids(config: dict[str, Any]) -> frozenset[str]:
     return frozenset(selected)
 
 
-def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuations: Any | None = None):
+def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuations: Any | None = None, thread_store: Any | None = None, app_config: Any | None = None):
     """Notify the scheduler after ordinary run finalization."""
 
     async def handle(record: Any) -> None:
@@ -1397,6 +1418,19 @@ def _run_completion_hook(*, scheduled_task_service: Any | None, batch_continuati
                 await scheduled_task_service.handle_run_completion(record)
         except Exception:
             logger.warning("Scheduled task completion hook failed for run %s (non-fatal)", record.run_id, exc_info=True)
+        # Finishing a turn is activity: an incognito thread's idle deadline is
+        # measured from it. The store no-ops for every other thread and for an
+        # incognito thread the owner already ended.
+        if thread_store is not None and app_config is not None and getattr(record, "thread_id", None):
+            try:
+                await thread_store.renew_incognito(
+                    record.thread_id,
+                    idle_ttl=timedelta(seconds=app_config.incognito.idle_ttl_seconds),
+                    max_lifetime=timedelta(seconds=app_config.incognito.max_lifetime_seconds),
+                    user_id=getattr(record, "user_id", None),
+                )
+            except Exception:
+                logger.warning("Incognito renewal failed for thread %s (non-fatal)", record.thread_id, exc_info=True)
         if batch_continuations is not None:
             await batch_continuations.source_finished(record)
 
@@ -1427,6 +1461,8 @@ def get_run_context(request: Request) -> RunContext:
     agent_runs = get_agent_runs(request)
     checkpointer = get_checkpointer(request)
     scheduled_task_service = getattr(request.app.state, "scheduled_task_service", None)
+    thread_store = get_thread_store(request)
+    app_config = get_config()
     return RunContext(
         agent_runs=agent_runs,
         checkpointer=checkpointer,
@@ -1435,15 +1471,17 @@ def get_run_context(request: Request) -> RunContext:
         run_events_config=getattr(request.app.state, "run_events_config", None),
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
-        thread_store=get_thread_store(request),
+        thread_store=thread_store,
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         approval_store=getattr(request.app.state, "approval_store", None),
-        app_config=get_config(),
+        app_config=app_config,
         extensions=getattr(request.app.state, "extensions", None),
-        on_run_admitted=_run_admission_hook(checkpointer=checkpointer),
+        on_run_admitted=_run_admission_hook(checkpointer=checkpointer, thread_store=thread_store, app_config=app_config),
         on_run_completed=_run_completion_hook(
             scheduled_task_service=scheduled_task_service,
             batch_continuations=getattr(request.app.state, "batch_continuations", None),
+            thread_store=thread_store,
+            app_config=app_config,
         ),
     )
 
