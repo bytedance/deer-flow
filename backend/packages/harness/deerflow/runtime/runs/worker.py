@@ -67,6 +67,7 @@ from deerflow.runtime.context_keys import (
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
+    INCOGNITO_CONTEXT_KEY,
     MCP_BROWSER_USER_CONTEXT_KEY,
     PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
@@ -708,6 +709,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             # admission (spec §7.1); a caller-supplied value in
             # ``config['context']`` must never be merged (§12).
             PROJECT_CONTEXT_KEY,
+            # Admission stamps this only for an incognito thread; a caller
+            # must never opt a normal run out of durable writes.
+            INCOGNITO_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
@@ -780,21 +784,26 @@ def _build_runtime_context(
     return runtime_ctx
 
 
-def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
-    """Re-inject the admission-pinned project snapshot into the runtime context.
+def _pin_admission_server_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject admission-pinned server context into the runtime context.
 
     The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
-    after stripping client-supplied values at admission (``build_run_config``
-    drops ``__``-prefixed context keys; the services pop-set covers both
-    sections), so a value surviving to this point is server-authoritative.
+    and ``config['context'][INCOGNITO_CONTEXT_KEY]`` after stripping
+    client-supplied values at admission (``build_run_config`` drops
+    ``__``-prefixed context keys; the services pop-set covers both sections),
+    so a value surviving to this point is server-authoritative.
     ``_build_runtime_context`` refuses server-owned keys from the caller
     merge, and ``_install_runtime_context`` treats the runtime context as the
     authoritative view — hoisting here is what lets middleware and tools read
-    exactly the snapshot admission pinned.
+    exactly what admission pinned.
     """
     caller_context = config.get("context")
-    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+    if not isinstance(caller_context, dict):
+        return
+    if PROJECT_CONTEXT_KEY in caller_context:
         runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
+    if caller_context.get(INCOGNITO_CONTEXT_KEY) is True:
+        runtime_context[INCOGNITO_CONTEXT_KEY] = True
 
 
 @dataclass(frozen=True)
@@ -1499,7 +1508,7 @@ async def run_agent(
 
         if (record.metadata or {}).get(RUN_GRANT_METADATA):
             checkpoint_metadata[WORKER_CHECKPOINT_RUN] = run_id
-        _pin_admission_project_context(config, runtime_ctx)
+        _pin_admission_server_context(config, runtime_ctx)
         if knowledge_scope is not None:
             runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)

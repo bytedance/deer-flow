@@ -38,6 +38,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
+from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -75,14 +76,18 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     authenticated context and skips its own re-authentication path.
     """
 
-    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False) -> None:
+    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False, auth_source: str = AUTH_SOURCE_SESSION) -> None:
         super().__init__(app)
         self._user_factory = user_factory
         self._bind_current_user = bind_current_user
+        self._auth_source = auth_source
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
         request.state.user = user
+        # Production always stamps an auth source; routes that gate on it (e.g.
+        # incognito thread creation) need the same value here.
+        request.state.auth_source = self._auth_source
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
         if not self._bind_current_user:
             return await call_next(request)
@@ -98,6 +103,7 @@ def make_authed_test_app(
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
     bind_current_user: bool = False,
+    auth_source: str = AUTH_SOURCE_SESSION,
 ) -> FastAPI:
     """Build a FastAPI test app with stub auth + permissive thread_store.
 
@@ -119,7 +125,7 @@ def make_authed_test_app(
     """
     factory = user_factory or _make_stub_user
     app = FastAPI()
-    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user)
+    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user, auth_source=auth_source)
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)

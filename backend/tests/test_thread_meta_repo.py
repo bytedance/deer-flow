@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -376,6 +377,54 @@ class TestThreadMetaRepository:
 
         results = await repo.search(limit=10)
         assert len(results) == 2
+
+    @pytest.mark.anyio
+    async def test_create_incognito_persists_flag_and_expiry(self, repo):
+        expires = datetime.now(UTC) + timedelta(hours=2)
+
+        record = await repo.create("secret", incognito=True, expires_at=expires)
+        assert record["incognito"] is True
+        assert datetime.fromisoformat(record["expires_at"]) == expires
+
+        fetched = await repo.get("secret")
+        assert fetched is not None
+        assert fetched["incognito"] is True
+        assert datetime.fromisoformat(fetched["expires_at"]) == expires
+
+    @pytest.mark.anyio
+    async def test_search_excludes_incognito_threads(self, repo):
+        await repo.create("visible", display_name="visible")
+        await repo.create("secret", display_name="secret", incognito=True)
+
+        results = await repo.search(limit=10)
+
+        assert [row["thread_id"] for row in results] == ["visible"]
+
+    @pytest.mark.anyio
+    async def test_search_query_does_not_expose_incognito_titles(self, repo):
+        await repo.create("visible", display_name="shared title")
+        await repo.create("secret", display_name="shared title", incognito=True)
+
+        results = await repo.search(query="shared", limit=10)
+
+        assert [row["thread_id"] for row in results] == ["visible"]
+
+    @pytest.mark.anyio
+    async def test_search_legacy_row_without_incognito_flag_stays_listed(self, repo):
+        from sqlalchemy import update
+
+        from deerflow.persistence.engine import get_session_factory
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+        await repo.create("legacy")
+        async with get_session_factory()() as session:
+            # Pre-migration rows read NULL for the new column.
+            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == "legacy").values(incognito=None))
+            await session.commit()
+
+        results = await repo.search(limit=10)
+
+        assert [row["thread_id"] for row in results] == ["legacy"]
 
     @pytest.mark.anyio
     async def test_search_metadata_missing_key_no_match(self, repo):

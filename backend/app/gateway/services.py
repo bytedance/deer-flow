@@ -94,7 +94,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, INCOGNITO_CONTEXT_KEY, MCP_BROWSER_USER_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -1249,6 +1249,9 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             AGENT_AUTH_CONTEXT_KEY,
             # Obsolete run field. Discard it even on internal requests.
             "github_token",
+            # Server-stamped only: a client-supplied flag must never let a
+            # normal run opt out of durable writes.
+            INCOGNITO_CONTEXT_KEY,
             MCP_BROWSER_USER_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
@@ -2898,6 +2901,13 @@ async def start_run(
         )
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
+
+        # The incognito marker and its deadline renewal are stamped by the
+        # durable admission hook (``deps._run_admission_hook``), which runs
+        # after the run holds its same-thread reservation. Reading the thread
+        # row here would add a second, pre-admission store call to every run
+        # and makes tests/operators whose store blocks at admission hang
+        # before the worker can start.
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(

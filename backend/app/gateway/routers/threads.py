@@ -17,15 +17,18 @@ import inspect
 import logging
 import shutil
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
+from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_SESSION
 from app.gateway.authz import _is_internal_caller, authorize_model_use, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
@@ -67,7 +70,15 @@ from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
-from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
+from deerflow.persistence.thread_meta import (
+    PROJECT_FILTER_UNSET,
+    THREAD_ARCHIVED_METADATA_KEY,
+    THREAD_INCOGNITO_ENDED_METADATA_KEY,
+    THREAD_PINNED_METADATA_KEY,
+    THREAD_PROJECT_METADATA_KEY,
+    ThreadOwnershipConflictError,
+    is_incognito_expired,
+)
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
@@ -132,8 +143,9 @@ def _optional_run_event_store(request: Request) -> Any:
 # the auth contextvar; this list closes the metadata-blob echo gap.
 # ``deerflow_origin`` marks a thread the server created for a schedule or an
 # extension; only the server sets it (``create_thread`` below, run admission).
-# The share-import keys decide whether run admission rewrites a copy's history.
-_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY})
+# The share-import keys decide whether run admission rewrites a copy's history;
+# the incognito key marks a thread the user ended explicitly.
+_SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id", THREAD_PROJECT_METADATA_KEY, DEERFLOW_ORIGIN_KEY, SHARE_IMPORT_COMPLETE_KEY, SHARE_IMPORT_HISTORY_MARKED_KEY, THREAD_INCOGNITO_ENDED_METADATA_KEY})
 # Checkpoint metadata the server writes and later reads back as trusted:
 # LangGraph's lineage keys and delta counters (``step`` drives the next turn,
 # ``parents`` the history walk, and ``counters_since_delta_snapshot`` is read
@@ -488,6 +500,7 @@ class ThreadResponse(_MetadataRedactingResponse):
     values: dict[str, Any] = Field(default_factory=dict, description="Current state channel values")
     interrupts: dict[str, Any] = Field(default_factory=dict, description="Pending interrupts")
     unread: bool | None = Field(default=None, description="Thread search only: a server-originated run of the caller changed since the caller last opened the thread; null when unknown")
+    incognito: bool = Field(default=False, description="Temporary chat: hidden from every list, search, project and share surface and deleted on expiry")
 
 
 class ThreadReadResponse(BaseModel):
@@ -504,6 +517,7 @@ class ThreadCreateRequest(BaseModel):
     assistant_id: str | None = Field(default=None, description="Associate thread with an assistant")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Initial metadata")
     project_id: str | None = Field(default=None, description="Assign the new thread to this project (validated server-side)")
+    incognito: bool = Field(default=False, description="Create a temporary chat: hidden from every list, search, project and share surface and deleted on expiry")
 
     _strip_reserved = field_validator("metadata")(classmethod(lambda cls, v: _strip_reserved_metadata(v)))
 
@@ -836,12 +850,29 @@ def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str,
 
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
+    return await purge_thread_data(thread_id, app_state=request.app.state, user_id=get_effective_user_id())
+
+
+async def purge_thread_data(
+    thread_id: str,
+    *,
+    app_state: Any,
+    user_id: str | None,
+    delete_meta_row: bool = True,
+) -> ThreadDeleteResponse:
+    """Delete a thread's data while its durable exclusive reservation is held.
+
+    ``app_state`` rather than a Request lets the incognito sweep reuse this
+    orchestration; every accessor below reads ``app.state`` and nothing else
+    from the request. ``delete_meta_row=False`` keeps the row for the sweep's
+    tombstone, which must survive the purge.
+    """
     from app.gateway.deps import get_thread_store
 
+    request = SimpleNamespace(app=SimpleNamespace(state=app_state))
     # One owner identity for every cleanup step below: the filesystem bucket, the
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
-    user_id = get_effective_user_id()
     run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     approval_store = getattr(request.app.state, "approval_store", None)
@@ -921,12 +952,14 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
         logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove thread_meta row (best-effort) — required for sqlite backend
-    # so the deleted thread no longer appears in /threads/search.
-    try:
-        thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id, user_id=user_id)
-    except Exception:
-        logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
+    # so the deleted thread no longer appears in /threads/search. The
+    # incognito sweep keeps the row as its tombstone.
+    if delete_meta_row:
+        try:
+            thread_store = get_thread_store(request)
+            await thread_store.delete(thread_id, user_id=user_id)
+        except Exception:
+            logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove the chat's scheduled-task lifecycle lines (best-effort). They are
     # display-only history of this chat; the tasks themselves are untouched.
@@ -1009,7 +1042,66 @@ def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
+        incognito=record.get("incognito") is True,
     )
+
+
+def _existing_thread_or_conflict(thread_id: str, record: dict, *, incognito: bool) -> ThreadResponse:
+    """Idempotent create keeps the stored visibility; it never converts a thread."""
+    if is_incognito_expired(record):
+        # The tombstone row still owns the id: answering with it would hand
+        # back a dead thread, and creating it anew would resurrect it.
+        raise HTTPException(status_code=410, detail="This incognito thread has expired")
+    if (record.get("incognito") is True) != incognito:
+        raise HTTPException(status_code=409, detail="Thread already exists with a different visibility mode")
+    return _existing_thread_response(thread_id, record)
+
+
+_INCOGNITO_CREATE_SOURCES = frozenset({AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED})
+
+
+def _require_incognito_creation_allowed(request: Request, *, enabled: bool) -> None:
+    """Incognito threads belong to a browser session, not to IM or extensions.
+
+    The restriction is server-enforced: a PAT, an internal caller or an
+    extension-launched request cannot mint a thread that the owner's other
+    surfaces will never see.
+    """
+    if not enabled:
+        raise HTTPException(status_code=403, detail="Incognito threads are disabled by the operator")
+    if getattr(request.state, "run_origin", None) is not None:
+        raise HTTPException(status_code=403, detail="Incognito threads can only be created from a browser session")
+    if getattr(request.state, "auth_source", None) not in _INCOGNITO_CREATE_SOURCES:
+        raise HTTPException(status_code=403, detail="Incognito threads can only be created from a browser session")
+
+
+@router.post("/{thread_id}/incognito/end", status_code=204)
+@require_permission("threads", "write", owner_check=True, require_existing=True)
+async def end_incognito_thread(thread_id: ThreadId, request: Request) -> Response:
+    """End an incognito thread: its data is purged after the grace period.
+
+    The browser exits locally without waiting for this call, so it is
+    best-effort; a failed request still ends the thread through the idle TTL.
+    During the grace window in-flight work may finish, but further activity no
+    longer renews the deadline.
+    """
+    from app.gateway.deps import get_thread_store
+
+    thread_store = get_thread_store(request)
+    record = await thread_store.get(thread_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    if record.get("incognito") is not True:
+        raise HTTPException(status_code=409, detail="Thread is not an incognito thread")
+    if is_incognito_expired(record):
+        raise HTTPException(status_code=410, detail="This incognito thread has expired")
+    ended = await thread_store.end_incognito(
+        thread_id,
+        grace=timedelta(seconds=get_config().incognito.end_grace_seconds),
+    )
+    if not ended:
+        raise HTTPException(status_code=410, detail="This incognito thread has expired")
+    return Response(status_code=204)
 
 
 @router.post("", response_model=ThreadResponse)
@@ -1032,7 +1124,12 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
+    app_config = get_config()
     now = now_iso()
+    if body.incognito:
+        _require_incognito_creation_allowed(request, enabled=app_config.incognito.enabled)
+        if body.project_id is not None:
+            raise HTTPException(status_code=400, detail="An incognito thread cannot belong to a project")
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
@@ -1046,10 +1143,12 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     # Idempotency: return existing record when already present
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
     if existing_record is not None:
-        return _existing_thread_response(thread_id, existing_record)
+        return _existing_thread_or_conflict(thread_id, existing_record, incognito=body.incognito)
 
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
+
+    expires_at = datetime.now(UTC) + timedelta(seconds=app_config.incognito.idle_ttl_seconds) if body.incognito else None
 
     try:
         created_record = await thread_store.create(
@@ -1058,6 +1157,8 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
             **thread_owner_kwargs,
             metadata=metadata,
             project_id=body.project_id,
+            incognito=body.incognito,
+            expires_at=expires_at,
         )
     except ProjectNotAssignableError:
         # Fail closed: missing, foreign, or archived projects are
@@ -1077,7 +1178,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         # historical overwrite behavior for direct callers.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
-            return _existing_thread_response(thread_id, existing_record)
+            return _existing_thread_or_conflict(thread_id, existing_record, incognito=body.incognito)
         # The same-owner reconciliation above found nothing, yet the insert hit
         # a duplicate primary key — so the surviving row belongs to *another*
         # user. That is the ownership-conflict case, which the route already
@@ -1152,6 +1253,10 @@ async def _branch_thread_with_reservation(
     source_record = await thread_store.get(thread_id)
     if source_record is None:
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+    if source_record.get("incognito") is True:
+        # A branch is a new ordinary thread carrying this conversation's
+        # content; allowing it would turn a temporary chat into a lasting one.
+        raise HTTPException(status_code=409, detail="An incognito thread cannot be branched")
 
     source_metadata = source_record.get("metadata") or {}
     if source_metadata.get(_SIDECAR_METADATA_KEY) is True:
@@ -1406,6 +1511,7 @@ async def search_threads(body: ThreadSearchRequest, request: Request) -> list[Th
             values={"title": r["display_name"]} if r.get("display_name") else {},
             interrupts={},
             unread=(r["thread_id"] in unread_ids) if unread_ids is not None else None,
+            incognito=r.get("incognito") is True,
         )
         for r in rows
     ]
@@ -1475,6 +1581,7 @@ async def patch_thread(thread_id: ThreadId, body: ThreadPatchRequest, request: R
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
+        incognito=record.get("incognito") is True,
     )
 
 
@@ -1492,6 +1599,13 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+    existing = await thread_store.get(thread_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Thread or project not found")
+    if existing.get("incognito") is True:
+        # Project membership is a listing surface; an incognito thread must
+        # never enter one.
+        raise HTTPException(status_code=409, detail="An incognito thread cannot be moved into a project")
     moved = await thread_store.set_project(thread_id, body.project_id)
     if not moved:
         raise HTTPException(status_code=404, detail="Thread or project not found")
@@ -1506,6 +1620,7 @@ async def move_thread(thread_id: ThreadId, body: ThreadMoveRequest, request: Req
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
+        incognito=record.get("incognito") is True,
     )
 
 
@@ -1558,6 +1673,7 @@ async def get_thread(thread_id: ThreadId, request: Request) -> ThreadResponse:
         created_at=coerce_iso(record.get("created_at", "")),
         updated_at=coerce_iso(record.get("updated_at", "")),
         metadata=record.get("metadata", {}),
+        incognito=record.get("incognito") is True,
         values=serialize_channel_values_for_api(snapshot.values),
         interrupts={task_id: [serialize_lc_object(interrupt) for interrupt in interrupts] for task_id, interrupts in (await find_pending_interrupts(request, thread_id, accessor=accessor, read_config=config, snapshot=snapshot)).items()},
     )

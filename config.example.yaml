@@ -3917,3 +3917,21 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+
+# ============================================================================
+# Incognito (Temporary) Chats
+# ============================================================================
+# An incognito thread is invisible to every list, search result, project,
+# share and archive surface. Its owner can still reach it by exact thread id
+# while it is alive. The Gateway deletes the thread, its checkpoint history
+# and its per-thread files after the idle window or the absolute lifetime,
+# whichever comes first; an explicit end shortens the idle window to the
+# grace period.
+#
+# incognito:
+#   enabled: true
+#   idle_ttl_seconds: 86400        # 24 hours after the last activity
+#   end_grace_seconds: 3600        # 1 hour after an explicit end
+#   max_lifetime_seconds: 604800   # 7 days from creation, regardless of activity
+#   sweep_interval_seconds: 60     # how often the Gateway scans for expired threads
+#   sweep_batch_size: 100

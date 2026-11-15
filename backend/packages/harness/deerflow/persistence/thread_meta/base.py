@@ -15,6 +15,8 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
@@ -24,6 +26,49 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 # ``frontend/tests/e2e/utils/mock-api.ts``.
 THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
 THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived"
+
+# Server-only metadata key: set when the owner explicitly ends an incognito
+# thread, so the activity renewal that run completion performs cannot extend a
+# thread the user has already closed. Clients cannot write it (the Gateway
+# strips server-reserved keys from every request body).
+THREAD_INCOGNITO_ENDED_METADATA_KEY = "deerflow_incognito_ended"
+
+# ``status`` value of an incognito row whose data has been (or is being)
+# purged. The row itself stays as a tombstone: deleting it would let the same
+# thread id be created again as an ordinary thread, and read routes would
+# answer a 200 with empty content instead of reporting the thread as gone.
+THREAD_INCOGNITO_EXPIRED_STATUS = "expired"
+
+
+def _as_utc(value: object) -> datetime | None:
+    """Parse a stored timestamp (datetime or ISO string) as UTC."""
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    if isinstance(value, str) and value:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+    return None
+
+
+def is_incognito_expired(record: Mapping[str, Any], *, now: datetime | None = None) -> bool:
+    """Return whether *record* is an incognito thread past its lifetime.
+
+    Two states count as expired: the tombstone the sweep writes before it
+    purges data (``status == "expired"``), and a live row whose ``expires_at``
+    deadline already passed but which the sweep has not reached yet. From the
+    owner's point of view an incognito thread disappears the moment its
+    deadline passes, not at the next sweep.
+    """
+    if record.get("incognito") is not True:
+        return False
+    if record.get("status") == THREAD_INCOGNITO_EXPIRED_STATUS:
+        return True
+    deadline = _as_utc(record.get("expires_at"))
+    return deadline is not None and deadline <= (now or datetime.now(UTC))
+
 
 # Cross-component metadata key. Keep in sync with
 # ``frontend/src/core/threads/utils.ts`` and
@@ -67,10 +112,18 @@ class ThreadMetaStore(abc.ABC):
         display_name: str | None = None,
         metadata: dict | None = None,
         project_id: str | None = None,
+        incognito: bool = False,
+        expires_at: datetime | None = None,
     ) -> dict:
         """Create a thread row; when ``project_id`` is set, validate the
         project inside the insert transaction and raise
-        ``ProjectNotAssignableError`` on failure (no partial row)."""
+        ``ProjectNotAssignableError`` on failure (no partial row).
+
+        ``incognito`` marks a thread that must never appear in a thread list,
+        search result, project, archive view or share; ``expires_at`` is the
+        absolute deadline its lifetime sweep uses. Ordinary mutators never
+        touch either field: only the lifecycle methods below move the deadline
+        and the tombstone."""
 
     @abc.abstractmethod
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
@@ -106,6 +159,9 @@ class ThreadMetaStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
         """Search threads.
+
+        Incognito threads are never returned, regardless of filters: the only
+        way to reach one is by its exact thread id through :meth:`get`.
 
         ``archived=None`` includes all threads; False includes legacy rows
         without a true archive flag. Filtering precedes pagination.
@@ -163,3 +219,67 @@ class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def delete(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
         pass
+
+    # ------------------------------------------------------------------
+    # Incognito lifetime
+    #
+    # These have no-op defaults rather than ``@abc.abstractmethod`` so a
+    # third-party store written before incognito existed keeps instantiating.
+    # Such a store simply never expires a thread; both stores shipped with
+    # DeerFlow implement the full lifecycle.
+    # ------------------------------------------------------------------
+
+    async def list_due_incognito(self, *, now: datetime | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Return incognito rows whose deadline passed, oldest deadline first.
+
+        The lifetime sweep calls this with no owner scope: expiry is a
+        server-side lifecycle, not a user action.
+        """
+        return []
+
+    async def renew_incognito(
+        self,
+        thread_id: str,
+        *,
+        idle_ttl: timedelta,
+        max_lifetime: timedelta,
+        now: datetime | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        """Push the deadline to ``min(now + idle_ttl, created_at + max_lifetime)``.
+
+        Called on run admission and run completion, i.e. exactly when the
+        thread is active. Moving to an earlier deadline is allowed (the
+        absolute ceiling wins) but never extends a thread beyond it. Returns
+        ``False`` for missing/non-incognito/tombstoned rows and for a thread
+        the owner already ended, whose grace deadline must not grow back into
+        a full idle window.
+        """
+        return False
+
+    async def end_incognito(self, thread_id: str, *, grace: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        """Schedule an owner-requested end: deadline ``now + grace``.
+
+        Records the end in metadata so activity renewal stops. Returns
+        ``False`` for missing/non-incognito/tombstoned rows or a foreign owner.
+        """
+        return False
+
+    async def begin_incognito_expiry(self, thread_id: str) -> bool:
+        """Write the tombstone before any data is purged.
+
+        Clears the thread's content from the row (display name, metadata,
+        project membership) and marks it ``expired`` so reads stop resolving
+        it even if the purge below fails halfway. Idempotent; returns ``False``
+        only when the row is missing or not incognito.
+        """
+        return False
+
+    async def finish_incognito_expiry(self, thread_id: str) -> None:
+        """Mark a tombstoned row as purged by clearing ``expires_at``.
+
+        The sweep selects rows by a non-NULL past ``expires_at``, so this is
+        what stops a completed purge from being retried. It runs only after
+        every other store has been cleaned.
+        """
+        return None

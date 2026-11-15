@@ -3,6 +3,7 @@ import logging
 import re
 import threading
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,6 +32,7 @@ from deerflow.persistence.thread_meta import (
     ThreadMetaRepository,
     ThreadOwnershipConflictError,
 )
+from deerflow.persistence.thread_meta.base import THREAD_INCOGNITO_EXPIRED_STATUS, _as_utc
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
@@ -64,10 +66,17 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
         item = await self._store.aget(THREADS_NS, thread_id)
         if item is None:
             return not require_existing
+        # Keep the production expiry rule: an expired incognito thread is
+        # unreadable even for its owner.
+        value = item.value
+        if value.get("incognito") is True:
+            deadline = _as_utc(value.get("expires_at"))
+            if value.get("status") == THREAD_INCOGNITO_EXPIRED_STATUS or (deadline is not None and deadline <= datetime.now(UTC)):
+                return False
         return True
 
-    async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
-        return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata, project_id=project_id)
+    async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None, incognito=False, expires_at=None):  # type: ignore[override]
+        return await super().create(thread_id, assistant_id=assistant_id, user_id=None, display_name=display_name, metadata=metadata, project_id=project_id, incognito=incognito, expires_at=expires_at)
 
     async def search(self, *, metadata=None, status=None, limit=100, offset=0, user_id=None, archived=None, project_id=PROJECT_FILTER_UNSET):  # type: ignore[override]
         return await super().search(metadata=metadata, status=status, limit=limit, offset=offset, user_id=None, archived=archived, project_id=project_id)
@@ -1137,7 +1146,7 @@ def test_create_thread_returns_existing_when_insert_loses_race() -> None:
             super().__init__(backing)
             self._raised = False
 
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None, incognito=False, expires_at=None):  # type: ignore[override]
             if not self._raised:
                 self._raised = True
                 await super().create(
@@ -1199,7 +1208,7 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
         """Our insert loses to a competing create that already wrote an
         unscoped row, exactly the interleaving the recovery path exists for."""
 
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None, incognito=False, expires_at=None):  # type: ignore[override]
             # The competing request commits its (owner-less) row here, then our
             # insert loses the primary-key race.
             await super().create(thread_id, user_id=None, metadata=metadata, project_id=project_id)
@@ -1314,7 +1323,7 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> N
             self._create_lock = asyncio.Lock()
             self._legacy_row_committed = asyncio.Event()
 
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None, incognito=False, expires_at=None):  # type: ignore[override]
             async with self._create_lock:
                 self._create_arrivals += 1
                 if self._create_arrivals == 2:
@@ -1391,7 +1400,7 @@ def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
     app, store, _checkpointer = _build_thread_app()
 
     class _BrokenAfterWriteStore(_PermissiveThreadMetaStore):
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, incognito=False, expires_at=None):  # type: ignore[override]
             # A row exists after this call, but the insert failed for a reason
             # unrelated to the idempotency race.
             await super().create(thread_id, metadata=metadata)
@@ -1420,7 +1429,7 @@ def test_create_thread_keeps_real_integrity_failure_as_500() -> None:
     app, store, _checkpointer = _build_thread_app()
 
     class _IntegrityFailureNoSurvivingRowStore(_PermissiveThreadMetaStore):
-        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None, incognito=False, expires_at=None):  # type: ignore[override]
             raise IntegrityError(
                 "INSERT INTO threads_meta",
                 {},

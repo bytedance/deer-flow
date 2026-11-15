@@ -279,3 +279,16 @@ def test_start_run_installs_fresh_capability_without_persisting_it(monkeypatch):
     finally:
         reset_current_user(user_token)
         reset_app_config()
+
+
+def test_incognito_source_is_never_readable_through_a_reference():
+    async def exercise():
+        prepare, events, threads, _, _ = _setup()
+        await threads.create("secret", user_id="alice", incognito=True)
+        events.list_messages = AsyncMock(side_effect=AssertionError("content was accessed"))
+        reader, _ = prepare(["secret"])
+        result = json.loads(await reader(thread_id="secret", cursor=None, limit=10))
+        assert result["status"] == "unavailable"
+        events.list_messages.assert_not_awaited()
+
+    asyncio.run(exercise())

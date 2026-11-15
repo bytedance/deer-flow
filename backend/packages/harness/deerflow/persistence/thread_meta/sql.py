@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import case, column, select, table, text, update
@@ -12,7 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore, _ProjectFilterUnset
+from deerflow.persistence.thread_meta.base import (
+    PROJECT_FILTER_UNSET,
+    THREAD_ARCHIVED_METADATA_KEY,
+    THREAD_INCOGNITO_ENDED_METADATA_KEY,
+    THREAD_INCOGNITO_EXPIRED_STATUS,
+    THREAD_PINNED_METADATA_KEY,
+    THREAD_PROJECT_METADATA_KEY,
+    InvalidMetadataFilterError,
+    ThreadMetaStore,
+    _as_utc,
+    _ProjectFilterUnset,
+)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -31,12 +42,14 @@ class ThreadMetaRepository(ThreadMetaStore):
         project_id = d.pop("project_id", None)
         if project_id is not None:
             d["metadata"][THREAD_PROJECT_METADATA_KEY] = project_id
-        for key in ("created_at", "updated_at"):
+        for key in ("created_at", "updated_at", "expires_at"):
             val = d.get(key)
             if isinstance(val, datetime):
                 # SQLite drops tzinfo despite ``DateTime(timezone=True)``;
                 # ``coerce_iso`` normalizes naive values as UTC so the wire format always carries tz.
                 d[key] = coerce_iso(val)
+        # Normalize the nullable column for callers: pre-migration rows read NULL.
+        d["incognito"] = d.get("incognito") is True
         return d
 
     async def create(
@@ -48,6 +61,8 @@ class ThreadMetaRepository(ThreadMetaStore):
         display_name: str | None = None,
         metadata: dict | None = None,
         project_id: str | None = None,
+        incognito: bool = False,
+        expires_at: datetime | None = None,
     ) -> dict:
         # Auto-resolve user_id from contextvar when AUTO; explicit None
         # creates an orphan row (used by migration scripts).
@@ -86,6 +101,8 @@ class ThreadMetaRepository(ThreadMetaStore):
                 status="idle",
                 metadata_json=metadata or {},
                 project_id=project_id,
+                incognito=incognito,
+                expires_at=expires_at,
                 created_at=now,
                 updated_at=now,
             )
@@ -207,6 +224,11 @@ class ThreadMetaRepository(ThreadMetaStore):
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
                 return not require_existing
+            # An expired incognito thread resolves for nobody: the owner's
+            # view of it ends when its deadline passes, even before the sweep
+            # has purged its data.
+            if row.incognito is True and (row.status == THREAD_INCOGNITO_EXPIRED_STATUS or (deadline := _as_utc(row.expires_at)) is not None and deadline <= datetime.now(UTC)):
+                return False
             if row.user_id is None:
                 return True
             return row.user_id == user_id
@@ -238,6 +260,9 @@ class ThreadMetaRepository(ThreadMetaStore):
             ThreadMetaRow.updated_at.desc(),
             ThreadMetaRow.thread_id.desc(),
         )
+        # Incognito threads never surface in a list or search result. ``isnot``
+        # (not ``== False``) keeps pre-migration NULL rows visible.
+        stmt = stmt.where(ThreadMetaRow.incognito.isnot(True))
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         if status:
@@ -425,4 +450,105 @@ class ThreadMetaRepository(ThreadMetaStore):
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
             await session.delete(row)
+            await session.commit()
+
+    async def _locked_row(self, session: AsyncSession, thread_id: str) -> ThreadMetaRow | None:
+        """Fetch a row under the write lock this repository uses elsewhere."""
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(text("BEGIN IMMEDIATE"))
+            return await session.get(ThreadMetaRow, thread_id)
+        return (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Incognito lifetime
+    # ------------------------------------------------------------------
+
+    async def list_due_incognito(self, *, now: datetime | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Return incognito rows past their deadline, oldest deadline first.
+
+        ``expires_at`` doubles as the purge-retry marker: the sweep clears it
+        only after every other store has been cleaned, so a row it failed to
+        purge is selected again on the next pass.
+        """
+        deadline = now or datetime.now(UTC)
+        stmt = (
+            select(ThreadMetaRow)
+            .where(
+                ThreadMetaRow.incognito.is_(True),
+                ThreadMetaRow.expires_at.isnot(None),
+                ThreadMetaRow.expires_at <= deadline,
+            )
+            .order_by(ThreadMetaRow.expires_at)
+            .limit(limit)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def renew_incognito(
+        self,
+        thread_id: str,
+        *,
+        idle_ttl: timedelta,
+        max_lifetime: timedelta,
+        now: datetime | None = None,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> bool:
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.renew_incognito")
+        moment = now or datetime.now(UTC)
+        async with self._sf() as session:
+            row = await self._locked_row(session, thread_id)
+            if row is None or row.incognito is not True or row.status == THREAD_INCOGNITO_EXPIRED_STATUS:
+                await session.rollback()
+                return False
+            if resolved_user_id is not None and row.user_id != resolved_user_id:
+                await session.rollback()
+                return False
+            if (row.metadata_json or {}).get(THREAD_INCOGNITO_ENDED_METADATA_KEY) is True:
+                await session.rollback()
+                return False
+            created = _as_utc(row.created_at) or moment
+            # The absolute ceiling wins even when it shortens the deadline.
+            row.expires_at = min(moment + idle_ttl, created + max_lifetime)
+            await session.commit()
+            return True
+
+    async def end_incognito(self, thread_id: str, *, grace: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.end_incognito")
+        moment = now or datetime.now(UTC)
+        async with self._sf() as session:
+            row = await self._locked_row(session, thread_id)
+            if row is None or row.incognito is not True or row.status == THREAD_INCOGNITO_EXPIRED_STATUS:
+                await session.rollback()
+                return False
+            if resolved_user_id is not None and row.user_id != resolved_user_id:
+                await session.rollback()
+                return False
+            metadata = dict(row.metadata_json or {})
+            metadata[THREAD_INCOGNITO_ENDED_METADATA_KEY] = True
+            row.metadata_json = metadata
+            row.expires_at = moment + grace
+            await session.commit()
+            return True
+
+    async def begin_incognito_expiry(self, thread_id: str) -> bool:
+        async with self._sf() as session:
+            row = await self._locked_row(session, thread_id)
+            if row is None or row.incognito is not True:
+                await session.rollback()
+                return False
+            row.status = THREAD_INCOGNITO_EXPIRED_STATUS
+            row.display_name = None
+            row.metadata_json = {}
+            row.project_id = None
+            await session.commit()
+            return True
+
+    async def finish_incognito_expiry(self, thread_id: str) -> None:
+        async with self._sf() as session:
+            row = await self._locked_row(session, thread_id)
+            if row is None:
+                await session.rollback()
+                return
+            row.expires_at = None
             await session.commit()

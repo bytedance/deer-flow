@@ -29,6 +29,7 @@ from deerflow.config.file_signature import read_config_with_signature as _read_c
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.harness_guard_config import HarnessGuardConfig
 from deerflow.config.hitl_approval_config import HitlApprovalConfig
+from deerflow.config.incognito_config import IncognitoThreadsConfig
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -344,6 +345,7 @@ class AppConfig(BaseModel):
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     harness_guard: HarnessGuardConfig = Field(default_factory=HarnessGuardConfig, description="HarnessGuard tool-loop interceptor middleware configuration")
     projects: ProjectsConfig = Field(default_factory=ProjectsConfig, description="User projects configuration (instructions injection, shelf index, trash retention)")
+    incognito: IncognitoThreadsConfig = Field(default_factory=IncognitoThreadsConfig, description="Incognito (temporary) chat threads lifetime and sweep configuration")
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")

@@ -49,6 +49,13 @@ def share_repository() -> ThreadShareRepository:
 @require_permission("runs", "read")
 async def create_share(thread_id: ThreadId, body: ShareCreateRequest, request: Request):
     async def create():
+        from app.gateway.deps import get_thread_store
+
+        thread = await get_thread_store(request).get(thread_id)
+        if thread is not None and thread.get("incognito") is True:
+            # A share is a frozen copy readable without the owner's session;
+            # it would outlive the incognito thread and defeat its deletion.
+            raise HTTPException(409, "An incognito thread cannot be shared")
         repo = share_repository()
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
             if await repo.count_active(thread_id, get_effective_user_id()) >= 10:

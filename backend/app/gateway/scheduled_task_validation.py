@@ -226,6 +226,11 @@ async def validate_scheduled_task_create(
             raise scheduler_error(422, "reuse_thread_requires_thread", "reuse_thread requires thread_id")
         if not await thread_store.check_access(body.thread_id, user_id, require_existing=True):
             raise scheduler_error(404, "thread_not_found", "Thread not found")
+        thread = await thread_store.get(body.thread_id, user_id=user_id)
+        if thread is not None and thread.get("incognito") is True:
+            # A scheduled task outlives the thread and would pin its transcript
+            # in a durable, listable surface.
+            raise scheduler_error(422, "incognito_thread_not_schedulable", "An incognito thread cannot be reused by a scheduled task")
     if body.schedule_type not in SCHEDULE_TYPES:
         raise scheduler_error(422, "invalid_schedule_type", "Unsupported schedule_type")
     schedule_spec, upcoming = await asyncio.to_thread(_validate_schedule, body.schedule_type, body.schedule_spec, body.timezone, scheduler_config=scheduler_config, now=reference)

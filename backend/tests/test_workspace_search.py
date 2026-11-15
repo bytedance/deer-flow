@@ -341,3 +341,27 @@ async def test_route_filters_and_permission_boundary(monkeypatch, index):
         assert (await client.get("/api/threads/project/messages/around?message_id=m")).status_code == 403
         monkeypatch.setattr(auth_helpers, "_STUB_PERMISSIONS", [])
         assert (await client.post("/api/search", json={"query": "报告"})).status_code == 403
+
+
+@pytest.mark.anyio
+async def test_search_corpus_never_exposes_an_incognito_thread(threads):
+    from deerflow_extension_api.search import SearchThread
+
+    from app.gateway.search_corpus import GatewaySearchCorpus
+
+    events = MemoryRunEventStore()
+    manager = AsyncMock()
+    manager.list_successful_regenerate_sources.return_value = set()
+    manager.list_edit_replay_visibility.return_value = EditReplayVisibility()
+    await threads.create("secret", user_id="alice", display_name="secret", incognito=True)
+    await events.put(thread_id="secret", run_id="r", event_type="message", category="message", content={"id": "a", "type": "ai", "content": "secret answer"})
+    corpus = GatewaySearchCorpus(threads, events, manager, "alice")
+
+    assert await corpus.threads() == ()
+    assert await corpus.thread("secret") is None
+    assert await corpus.around("secret", "a") is None
+
+    row = await threads.get("secret", user_id="alice")
+    forged = SearchThread(thread_id="secret", incarnation=row["incarnation"], title="secret", updated_at=row["updated_at"], agent_name=None, project_id=None, archived=False)
+    assert await corpus.owns(forged) is False
+    assert (await corpus.messages(forged, before_seq=None)).items == ()

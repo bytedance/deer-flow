@@ -241,15 +241,17 @@ def _prepare_owner_bound_conversation_reader(
     async def owned_scan(thread_id: str, **scan: Any) -> tuple[list[dict], bool] | None:
         """Scan the visible rows of an owned source; ``None`` when it is unavailable."""
         try:
-            # Strict ownership deliberately excludes legacy shared/unowned rows.
+            # Strict ownership deliberately excludes legacy shared/unowned rows,
+            # and an incognito source is never referencable: its transcript must
+            # not be copied into another thread's context.
             source = await thread_store.get(thread_id, user_id=user_id)
-            if source is None or source.get("user_id") != user_id:
+            if source is None or source.get("user_id") != user_id or source.get("incognito") is True:
                 return None
             rows, has_more = await read_visible_message_page(event_store=event_store, run_manager=run_manager, thread_id=thread_id, user_id=user_id, **scan)
             # Recheck ownership after storage yields (including deletion during
             # a read); a stale local event feed must not reopen a deleted source.
             source = await thread_store.get(thread_id, user_id=user_id)
-            if source is None or source.get("user_id") != user_id:
+            if source is None or source.get("user_id") != user_id or source.get("incognito") is True:
                 return None
         except Exception:
             logger.warning("Unable to read referenced conversation history", exc_info=True)

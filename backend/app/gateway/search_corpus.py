@@ -69,7 +69,7 @@ class GatewaySearchCorpus:
 
     async def thread(self, thread_id: str) -> SearchThread | None:
         row = await self.thread_store.get(thread_id, user_id=self.user_id)
-        if row is None or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
+        if row is None or row.get("incognito") is True or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
             return None
         return self.project_thread(row)
 
@@ -85,7 +85,7 @@ class GatewaySearchCorpus:
 
     async def owns(self, thread: SearchThread) -> bool:
         row = await self.thread_store.get(thread.thread_id, user_id=self.user_id)
-        return bool(row and str(row.get("incarnation") or row.get("created_at") or "") == thread.incarnation and (row.get("metadata") or {}).get("deerflow_sidecar") is not True)
+        return bool(row and row.get("incognito") is not True and str(row.get("incarnation") or row.get("created_at") or "") == thread.incarnation and (row.get("metadata") or {}).get("deerflow_sidecar") is not True)
 
     async def revision(self, thread: SearchThread) -> str | None:
         if not await self.owns(thread):
@@ -126,7 +126,7 @@ class GatewaySearchCorpus:
 
     async def around(self, thread_id: str, message_id: str, *, limit: int = 20, seq: int | None = None) -> dict | None:
         row = await self.thread_store.get(thread_id, user_id=self.user_id)
-        if row is None or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
+        if row is None or row.get("incognito") is True or (row.get("metadata") or {}).get("deerflow_sidecar") is True:
             return None
         await self.seed_legacy_history(self.project_thread(row))
         # Walk backward from the head so later versions win even when they

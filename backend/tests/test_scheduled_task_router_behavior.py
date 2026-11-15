@@ -193,7 +193,7 @@ async def test_create_scheduled_task_uses_repo():
     )
 
     user = SimpleNamespace(id="user-1")
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
     config = _Config()
 
     old_repo = scheduled_tasks.get_scheduled_task_repo
@@ -238,7 +238,7 @@ async def test_create_fresh_thread_task_does_not_require_thread_id():
     )
 
     user = SimpleNamespace(id="user-1")
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
     config = _Config()
 
     old_repo = scheduled_tasks.get_scheduled_task_repo
@@ -371,7 +371,7 @@ async def test_update_scheduled_task_writes_repo():
     request = SimpleNamespace()
     user = SimpleNamespace(id="user-1")
     config = _Config()
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
 
     old_repo = scheduled_tasks.get_scheduled_task_repo
     old_thread_store = scheduled_tasks.get_thread_store
@@ -438,7 +438,7 @@ async def test_update_rechecks_atomic_mutability_after_router_precheck(tmp_path)
             next_run_at=None,
         )
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
-        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True))
+        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
         scheduled_tasks.get_config = lambda: _Config()
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
 
@@ -510,7 +510,7 @@ async def test_update_interval_task_metadata_through_the_sql_repository(tmp_path
         )
         assert isinstance(task["next_run_at"], str)  # the serialized form the router reuses
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
-        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True))
+        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
         scheduled_tasks.get_config = lambda: _Config()
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
 
@@ -757,7 +757,7 @@ async def test_update_rejects_running_task():
     request = SimpleNamespace()
     user = SimpleNamespace(id="user-1")
     config = _Config()
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
 
     old_repo = scheduled_tasks.get_scheduled_task_repo
     old_thread_store = scheduled_tasks.get_thread_store
@@ -948,7 +948,7 @@ async def test_create_once_task_enforces_minimum_delay():
         timezone="UTC",
     )
     user = SimpleNamespace(id="user-1")
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
     config = _Config(min_once_delay_seconds=60)
 
     old_repo = scheduled_tasks.get_scheduled_task_repo
@@ -1038,7 +1038,7 @@ def _interval_create_request(**overrides):
 async def _call_create(body, repo=None, config=None):
     repo = repo or _Repo()
     user = SimpleNamespace(id="user-1")
-    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True))
+    thread_store = SimpleNamespace(check_access=AsyncMock(return_value=True), get=AsyncMock(return_value={"incognito": False}))
     old_repo = scheduled_tasks.get_scheduled_task_repo
     old_thread_store = scheduled_tasks.get_thread_store
     old_config = scheduled_tasks.get_config
@@ -1491,6 +1491,7 @@ async def http(tmp_path, monkeypatch):
 
     app.state.scheduled_task_repo = repo
     app.state.scheduled_task_run_repo = run_repo
+    app.state.thread_store.get = AsyncMock(return_value={"incognito": False})
     app.state.scheduled_task_service = ScheduledTaskService(task_repo=repo, task_run_repo=run_repo, launch_run=launch, poll_interval_seconds=60, lease_seconds=120, max_concurrent_runs=3)
     app.include_router(scheduled_tasks.router)
     monkeypatch.setattr(scheduled_tasks, "get_config", lambda: _Config())

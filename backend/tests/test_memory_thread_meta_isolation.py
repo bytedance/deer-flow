@@ -437,3 +437,37 @@ async def test_create_with_project_id_fails_closed(store):
 
         # Membership moves report rejection (never a silent unassign).
         assert await store.set_project("t-plain", "p1") is False
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_incognito_threads_are_hidden_from_search(store):
+    from datetime import UTC, datetime, timedelta
+
+    with _as_user(USER_A):
+        await store.create("visible", display_name="visible")
+        await store.create("secret", display_name="secret", incognito=True, expires_at=datetime.now(UTC) + timedelta(hours=2))
+
+        assert [r["thread_id"] for r in await store.search()] == ["visible"]
+        assert [r["thread_id"] for r in await store.search(query="visible")] == ["visible"]
+        assert [r["thread_id"] for r in await store.search(query="secret")] == []
+
+        fetched = await store.get("secret")
+        assert fetched is not None
+        assert fetched["incognito"] is True
+        assert fetched["expires_at"] is not None
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_legacy_memory_record_without_incognito_flag_stays_listed(store):
+    with _as_user(USER_A):
+        await store.create("legacy")
+
+        # Records written before the flag existed simply omit the key.
+        item = await store._store.aget(("threads",), "legacy")
+        record = dict(item.value)
+        record.pop("incognito", None)
+        await store._store.aput(("threads",), "legacy", record)
+
+        assert [r["thread_id"] for r in await store.search()] == ["legacy"]
