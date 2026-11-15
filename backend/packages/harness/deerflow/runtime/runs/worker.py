@@ -395,8 +395,15 @@ def _delivery_content_with_outputs(
     produced_paths: list[str],
     *,
     pre_run_snapshot: WorkspaceSnapshot | None = None,
+    required: bool = False,
 ) -> dict[str, Any]:
-    """Attach a delivery verdict or explain why a truncated scan skipped it."""
+    """Attach a delivery verdict or explain why a truncated scan skipped it.
+
+    ``required`` marks a goal run, where clearing the goal depends on a presented
+    deliverable. An ordinary run still records the verdict (``enforcement:
+    "advisory"``) but does not fail on it: working files and a local copy of a
+    result written to an external system are not deliverables.
+    """
     if not produced_paths:
         if pre_run_snapshot is not None and pre_run_snapshot.truncated:
             return {**content, "verification_skipped": "truncated_pre_run_snapshot"}
@@ -417,11 +424,14 @@ def _delivery_content_with_outputs(
         "matched_paths": matched_paths,
         "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
         "satisfied": satisfied,
+        "enforcement": "required" if required else "advisory",
     }
 
 
 def _delivery_error(content: dict[str, Any]) -> str | None:
-    """Return the terminal error when no changed output was presented."""
+    """Return the terminal error when a required delivery is missing."""
+    if content.get("enforcement") != "required":
+        return None
     if not content.get("produced_paths") or content.get("satisfied") is True:
         return None
     return _DELIVERY_INCOMPLETE_ERROR
@@ -1925,6 +1935,10 @@ async def run_agent(
                     journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
                     produced_output_paths,
                     pre_run_snapshot=pre_run_workspace_snapshot,
+                    # A goal run's completion depends on the presented deliverable;
+                    # an ordinary run that leaves working files or a local copy of
+                    # an external write is still finished (issue #8239).
+                    required=record.goal_verdict is not None,
                 )
                 delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(

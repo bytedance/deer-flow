@@ -110,8 +110,9 @@ async def test_vanished_scratch_file_does_not_discard_run_file_changes(tmp_path,
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert delivery[0]["content"]["produced_paths"] == ["/mnt/user-data/outputs/report.md"]
     assert delivery[0]["content"]["satisfied"] is False
-    assert record.status == RunStatus.error
-    assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+    assert delivery[0]["content"]["enforcement"] == "advisory"
+    assert record.status == RunStatus.success
+    assert record.error is None
 
 
 @pytest.mark.anyio
@@ -234,12 +235,13 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "matched_paths": ["/mnt/user-data/outputs/report.md"],
         "stage": "presented",
         "satisfied": True,
+        "enforcement": "advisory",
     }
     assert record.status == RunStatus.success
 
 
 @pytest.mark.anyio
-async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
+async def test_changed_outputs_are_advisory_when_not_presented(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     store = MemoryRunEventStore()
@@ -276,10 +278,54 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
         "matched_paths": [],
         "stage": "not_started",
         "satisfied": False,
+        "enforcement": "advisory",
     }
+    assert record.status == RunStatus.success
+    assert record.error is None
+    assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_goal_run_delivery_stays_required_when_not_presented(monkeypatch):
+    """A goal run's missing deliverable still fails the run.
+
+    The evaluator's verdict marks the run as a goal run, so delivery keeps its
+    strict verdict instead of the ordinary advisory one.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    async def prepare_continuation(**kwargs):
+        kwargs["verdict_callback"]({"continuation_count": 1}, {"satisfied": True}, None)
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    assert delivery[0]["content"]["enforcement"] == "required"
+    assert delivery[0]["content"]["satisfied"] is False
+    assert record.goal_verdict["satisfied"] is True
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
-    assert record.stop_reason is None
 
 
 @pytest.mark.anyio
@@ -347,8 +393,8 @@ async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, 
     elif terminal_outcome == "cancelled":
         assert record.status == RunStatus.interrupted
     elif modify_existing:
-        assert record.status == RunStatus.error
-        assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
+        assert record.status == RunStatus.success
+        assert record.error is None
     else:
         assert record.status == RunStatus.success
         assert record.error is None
@@ -520,7 +566,7 @@ async def test_changed_outputs_succeed_when_one_of_multiple_outputs_is_presented
 
 
 @pytest.mark.anyio
-async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelated_file(monkeypatch):
+async def test_changed_outputs_are_advisory_when_present_files_only_presents_an_unrelated_file(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     store = MemoryRunEventStore()
@@ -562,7 +608,9 @@ async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelate
     assert delivery["presented_paths"] == ["/mnt/user-data/outputs/old-report.md"]
     assert delivery["matched_paths"] == []
     assert delivery["satisfied"] is False
-    assert record.status == RunStatus.error
+    assert delivery["enforcement"] == "advisory"
+    assert record.status == RunStatus.success
+    assert record.error is None
 
 
 @pytest.mark.anyio
