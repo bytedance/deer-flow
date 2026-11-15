@@ -24,6 +24,7 @@ import {
   Conversation,
   ConversationContent,
   type ConversationProps,
+  ConversationScrollButton,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { KnowledgeSourcesProvider } from "@/components/workspace/citations/knowledge-source";
@@ -1809,6 +1810,10 @@ export function MessageList({
           )}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
+        <ConversationScrollButton
+          aria-label={t.common.scrollToBottom}
+          className="z-10"
+        />
       </Conversation>
       {conversationOutlineEnabled && (
         <ConversationOutline

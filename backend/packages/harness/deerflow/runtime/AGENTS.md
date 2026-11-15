@@ -74,6 +74,16 @@ make test-blocking-io
 - **An evidence receipt needs the worker's own final acknowledgement.** An
   unknown or cancelled write outcome yields no receipt.
 
+## Goals
+
+- **Goal synthesis is read-only.** `runtime/goal_synthesis.py` composes the
+  `/goal from-chat` objective from the recent agreement; the Gateway route owns
+  the save. It treats the conversation as data, applies the evaluator's PII
+  redaction and oneshot-LLM path, excludes evidence tool results, keeps the
+  newest turn within its own 12,000-character budget even when a single paste
+  exceeds it, and caps the compaction summary at half so recent constraints
+  retain room.
+
 ## Server-installed capabilities
 
 - **Capabilities exist for one request.** The scheduler capability, the

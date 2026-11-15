@@ -78,3 +78,8 @@ pnpm catalog:sync   # after a change to the capability catalog
   a large file.
 - **The parser is told the record separator explicitly.** Auto-detection is
   corrupted by a newline inside an incomplete quoted field of a truncated sample.
+
+## Conversation search
+
+Keep historical message windows separate from live stream history. After
+the composer accepts a new turn, return to the live conversation.

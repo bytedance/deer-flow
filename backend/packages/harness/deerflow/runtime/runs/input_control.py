@@ -9,6 +9,8 @@ from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME
+
 from .inputs import RunInputs
 from .schemas import GOAL_RUN_HARD_STOP_REASONS
 
@@ -223,7 +225,7 @@ class RunInputControl:
         self.receipts.append(
             HumanMessage(
                 content=json.dumps({"source": "subagent", "task_call_id": call_id, "result": message.content}, ensure_ascii=False),
-                name="subagent-result",
+                name=SUBAGENT_RESULT_MESSAGE_NAME,
                 id="run-input-result-" + self.inputs.run_id + "-" + call_id,
                 additional_kwargs={"hide_from_ui": True, "untrusted_input": True, "origin_task_id": call_id, "run_id": self.inputs.run_id},
             )
