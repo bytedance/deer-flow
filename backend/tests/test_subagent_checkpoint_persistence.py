@@ -12,6 +12,7 @@ import importlib.util
 import sys
 import threading
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -127,6 +128,47 @@ def _config(tmp_path, *, enabled=True, mode="full"):
 def test_checkpoint_persistence_is_opt_in():
     assert SubagentRuntimeConfig().checkpoint_enabled is False
     assert SubagentRuntimeConfig(checkpoint_enabled=True).checkpoint_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_peer_factory_recovers_after_import_under_temporary_gateway_patch(tmp_path, monkeypatch):
+    from deerflow.runtime.checkpointer import async_provider
+
+    @asynccontextmanager
+    async def temporary_factory(_config):
+        yield object()
+
+    # Load an isolated copy of the production module while the Gateway's
+    # resource factory is patched, without replacing its live registry.
+    path = Path(__file__).parents[1] / "packages/harness/deerflow/subagents/checkpoints.py"
+    spec = importlib.util.spec_from_file_location("_checkpoint_factory_import_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, module)
+    with monkeypatch.context() as importing:
+        importing.setattr(async_provider, "make_checkpointer", temporary_factory)
+        spec.loader.exec_module(module)
+
+    config = _config(tmp_path)
+    invocation = {"configurable": {"thread_id": "restored-factory-thread"}}
+    async with make_checkpointer(config) as parent_saver:
+        runtime = module.SubagentCheckpointRuntime(config, parent_saver)
+        try:
+            await runtime.start()
+            builder = StateGraph(MessagesState)
+            builder.add_node("reply", lambda _state: {"messages": [AIMessage(content="RESTORED_FACTORY")]})
+            builder.add_edge(START, "reply")
+            builder.add_edge("reply", END)
+            graph = builder.compile(checkpointer=runtime.saver)
+            state = await graph.ainvoke({"messages": [HumanMessage(content="Record evidence")]}, invocation)
+            assert state["messages"][-1].content == "RESTORED_FACTORY"
+        finally:
+            await runtime.stop()
+
+    # A fresh reader must find real SQLite history after both writers close.
+    async with make_checkpointer(config) as reader:
+        saved = await reader.aget_tuple(invocation)
+        assert saved is not None
+        assert saved.checkpoint["channel_values"]["messages"][-1].content == "RESTORED_FACTORY"
 
 
 @pytest.mark.asyncio

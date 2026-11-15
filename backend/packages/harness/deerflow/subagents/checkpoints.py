@@ -19,7 +19,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.config.app_config import AppConfig
-from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+from deerflow.runtime.checkpointer import async_provider
 from deerflow.utils.file_io import await_drained
 
 _runtimes: dict[int, SubagentCheckpointRuntime] = {}
@@ -83,7 +83,7 @@ class SubagentCheckpointRuntime:
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         self._stack = AsyncExitStack()
-        self.saver = await self._stack.enter_async_context(make_checkpointer(self.config))
+        self.saver = await self._stack.enter_async_context(async_provider.make_checkpointer(self.config))
 
     async def stop(self) -> None:
         if self.closed:
