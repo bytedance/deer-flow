@@ -140,8 +140,9 @@ def test_framework_document_sources_remain_excluded(scoped, metadata):
 
 def test_document_extension_preserves_old_citations_and_text_only_ids(scoped):
     legacy = HumanMessage(content="Existing visible reference", id="same-message")
-    expected = {"role": "human", "message_id": "same-message", "name": None, "text": legacy.content}
-    old_id = "r" + archive.digest(expected)[:32]
+    # Freeze the old text-only source ID rather than recomputing it through the
+    # candidate's digest implementation, so a hashing change cannot pass unnoticed.
+    old_id = "r999441079d2ff7aa479535226450faaf"
     assert archive.records([legacy])[0]["id"] == old_id
     history = archive.capture({}, scoped, [legacy], TaskContinuityConfig(enabled=True))
     expanded = legacy.model_copy(update={"content": [legacy.content, *content("document-text")]})
