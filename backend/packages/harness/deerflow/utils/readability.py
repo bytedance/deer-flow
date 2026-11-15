@@ -195,6 +195,10 @@ class _DestinationRewriter(HTMLParser):
 
 
 class ReadabilityExtractor:
+    def extract_markdown(self, html: str, *, url: str | None = None) -> str:
+        """Extract and render an article in one synchronous operation."""
+        return self.extract_article(html, url=url).to_markdown()
+
     def extract_article(self, html: str, *, url: str | None = None) -> Article:
         global _readability_js_launch_failed
 

@@ -116,8 +116,8 @@ async def web_fetch_tool(url: str) -> str:
     result = await client.fetch(url)
     if result.startswith("Error: "):
         return result
-    article = await asyncio.to_thread(readability_extractor.extract_article, result, url=url)
-    return article.to_markdown()[:4096]
+    markdown = await asyncio.to_thread(readability_extractor.extract_markdown, result, url=url)
+    return markdown[:4096]
 
 
 @tool("image_search", parse_docstring=True)
