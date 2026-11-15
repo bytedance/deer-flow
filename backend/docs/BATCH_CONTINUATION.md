@@ -41,8 +41,13 @@ retry operation. Inspect the external system before arranging further work.
 Migration `0053_batch_recovery` adds nullable policy, attempt and dispatch fields;
 legacy batches retain `retry`. Upgrade all batch workers before enabling this
 policy. Downgrade is refused while conservative work or unknown outcomes remain
-outstanding. There is no guarantee of exactly-once external effects: the
-regression establishes that this crash recovery path does not repeat the write.
+outstanding. To roll back from `0056_merge_batch_recovery` to the upstream
+`0055_thread_shares` schema, use the Alembic downgrade target
+`0053_batch_recovery@0052_batch_continuation`. This removes the batch recovery
+columns and keeps the sharing tables.
+
+There is no guarantee of exactly-once external effects: the regression
+establishes that this crash recovery path does not repeat the write.
 
 `tests/test_batch_gateway_crash_recovery.py` runs an offline scripted model and
 fixed local tool through actual Gateway subprocesses and native batch execution.

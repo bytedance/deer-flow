@@ -54,6 +54,10 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 
 Middlewares execute in strict order, each handling a specific concern:
 
+Starting a new graph invocation resets tool-progress tracking. Results and model
+retries still finishing from an earlier invocation cannot block its tools or
+restore obsolete progress hints, including same-run goal continuations.
+
 | # | Middleware | Purpose |
 |---|-----------|---------|
 | 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |
@@ -110,6 +114,10 @@ queued claims use conditional database writes, so competing workers cannot claim
 the same item or undo a pause/cancellation observed after their initial read.
 
 ### Memory System
+
+If the local retrieval index is busy, read-only, or temporarily unavailable,
+DeerMem falls back to substring search without deleting it. Automatic index
+recreation is reserved for SQLite-confirmed corruption or a non-database file.
 
 LLM-powered persistent context retention across conversations:
 

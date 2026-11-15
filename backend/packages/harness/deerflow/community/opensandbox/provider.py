@@ -114,8 +114,16 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
     def _load_config(self) -> dict[str, Any]:
         sandbox_config = get_app_config().sandbox
 
-        def option(name: str, default: Any = None) -> Any:
-            return getattr(sandbox_config, name, default)
+        def option(name: str) -> Any:
+            return getattr(sandbox_config, name, None)
+
+        def bool_option(name: str) -> bool:
+            value = option(name)
+            if value is None:
+                return False
+            if not isinstance(value, bool):
+                raise ValueError(f"sandbox.{name} must be true or false")
+            return value
 
         api_key = option("api_key")
         domain = option("domain")
@@ -143,7 +151,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "domain": domain,
             "protocol": protocol,
             "request_timeout": self._positive_float("request_timeout", option("request_timeout"), DEFAULT_REQUEST_TIMEOUT),
-            "use_server_proxy": bool(option("use_server_proxy", False)),
+            "use_server_proxy": bool_option("use_server_proxy"),
+            "secure_access": bool_option("secure_access"),
             "image": option("image") or DEFAULT_IMAGE,
             "ready_timeout": self._positive_float("ready_timeout", option("ready_timeout"), DEFAULT_READY_TIMEOUT),
             "sandbox_timeout": None if sandbox_timeout == 0 else sandbox_timeout,
@@ -310,6 +319,7 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             env=self._config["environment"] or None,
             metadata=metadata,
             connection_config=connection_config,
+            secure_access=self._config["secure_access"],
         )
         try:
             bootstrap = remote.commands.run(

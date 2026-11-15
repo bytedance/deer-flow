@@ -513,6 +513,68 @@ async def test_evidence_persistence_failure_prevents_execution(runtime, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_peer_takeover_during_assembly_is_not_undone_by_evidence(runtime, monkeypatch, tmp_path):
+    """A peer reclaims the run while this worker assembles; evidence must not revive the row."""
+    import asyncio
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import update
+    from test_run_repository import _cleanup, _make_repo
+
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+    from deerflow.persistence.run.model import RunRow
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.assembly_evidence import EVIDENCE_KEY
+
+    runs, state, _, _, handles = runtime
+    repository = await _make_repo(tmp_path)
+    state.run_store = repository
+    await state.run_manager.shutdown()
+    ownership = RunOwnershipConfig(heartbeat_enabled=True, lease_seconds=30, grace_seconds=1)
+    state.run_manager = RunManager(store=repository, run_ownership_config=ownership, worker_id="worker-a")
+    peer = RunManager(store=repository, run_ownership_config=ownership, worker_id="worker-b")
+    loop = asyncio.get_running_loop()
+    taken_over = []
+
+    async def peer_takeover():
+        # The peer sees an expired lease (clock skew or a stalled owner) that
+        # the owning worker still believes is live.
+        async with repository._sf() as session:
+            await session.execute(update(RunRow).where(RunRow.thread_id == thread).values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1)))
+            await session.commit()
+        taken_over.extend(await peer.reconcile_orphaned_inflight_runs(error="reclaimed by worker-b", stop_reason="orphan_recovered"))
+
+    import app.gateway.services as services
+
+    assemble = services.resolve_agent_factory("lead_agent")
+
+    def factory_with_takeover(*, config):
+        asyncio.run_coroutine_threadsafe(peer_takeover(), loop).result(timeout=5)
+        return assemble(config=config)
+
+    monkeypatch.setattr("app.gateway.services.resolve_agent_factory", lambda _: factory_with_takeover)
+    try:
+        thread = await runs.create_thread(thread_id="takeover-during-assembly")
+        run = await runs.start(thread_id=thread, input={"messages": [{"role": "user", "content": "must not run"}]})
+        record = await state.run_manager.get(run.run_id)
+        await asyncio.wait({record.task}, timeout=5)
+        assert [record.run_id for record in taken_over] == [run.run_id]
+        row = await repository.get(run.run_id, user_id=None)
+        assert row["status"] == "error"
+        assert row["error"] == "reclaimed by worker-b"
+        assert row["stop_reason"] == "orphan_recovered"
+        assert EVIDENCE_KEY not in row["metadata"]
+        assert record.ownership_lost
+        assert not handles
+        # The owner's renewal stays rejected, so the peer's outcome is final.
+        await state.run_manager._renew_leases()
+        assert (await repository.get(run.run_id, user_id=None))["status"] == "error"
+    finally:
+        await state.run_manager.shutdown()
+        await _cleanup()
+
+
+@pytest.mark.asyncio
 async def test_durable_configuration_revision_survives_host_replacement_and_rotation(host, monkeypatch):
     control, request, load_user = host
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: SimpleNamespace(model_dump=lambda **kw: {"model": "test"}))

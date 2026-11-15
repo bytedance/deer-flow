@@ -955,9 +955,11 @@ class SubagentExecutor:
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
         tool_progress_recorder: Any | None = None,
+        approval_runtime: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
+        agent_mcp_authority: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -1038,6 +1040,7 @@ class SubagentExecutor:
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
         self.context_snapshot = context_snapshot
         self.input_gate = input_gate
+        self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
@@ -1075,6 +1078,7 @@ class SubagentExecutor:
         self.loop_detection_recorder = loop_detection_recorder
         self.tool_promotion_recorder = tool_promotion_recorder
         self.tool_progress_recorder = tool_progress_recorder
+        self.approval_runtime = approval_runtime
 
         self._base_tools = _filter_tools(
             tools,
@@ -1114,6 +1118,9 @@ class SubagentExecutor:
         self.assembly_descriptor: Any | None = None
         self._assembled_system_prompt = self.config.system_prompt or ""
         self._assembled_skills: list[Any] = []
+        # Only these exact, build-generated instances receive the discovery
+        # exemption in the final name-policy audit; names alone are insufficient.
+        self._policy_discovery_tools: tuple[BaseTool, ...] = ()
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -1265,7 +1272,15 @@ class SubagentExecutor:
         # bypassing approval; disabled configuration remains a no-op.
         from deerflow.agents.lead_agent.agent import _insert_hitl_approval_middleware
 
-        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False)
+        _insert_hitl_approval_middleware(middlewares, bound_tools, app_config, supports_resume=False, model_name=self.model_name)
+        # Extensions can add tools through middleware after the inherited list
+        # was filtered. Apply the same subagent policy to those declarations,
+        # independently of global authorization, without changing shared stacks
+        # or re-filtering generated discovery helpers in bound_tools.
+        from deerflow.agents.middlewares.tool_declarations import ToolPolicyNameResolver, apply_declared_tool_policy, verify_subagent_tool_policy
+
+        policy_names = ToolPolicyNameResolver()
+        middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1278,6 +1293,14 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
+        verify_subagent_tool_policy(
+            bound_tools,
+            middlewares,
+            allowed=self.config.tools,
+            disallowed=self.config.disallowed_tools,
+            discovery_tools=getattr(self, "_policy_discovery_tools", ()),
+            name_resolver=policy_names,
+        )
         agent = create_agent(
             model=model,
             tools=bound_tools,
@@ -1605,6 +1628,7 @@ class SubagentExecutor:
             enabled=resolved_app_config.tool_search.enabled,
         )
         final_tools.extend(late_tools)
+        self._policy_discovery_tools = tuple(helper for helper in (deferred_setup.tool_search_tool, skill_setup.describe_skill_tool) if helper is not None and any(helper is tool for tool in final_tools))
 
         # Combine the system prompt and skill discovery metadata into a single
         # SystemMessage. Full SKILL.md bodies are loaded only when activated.
@@ -1910,6 +1934,10 @@ class SubagentExecutor:
             # audit). user_id reuses the resolved tracing id; on every
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
+            if self.agent_mcp_authority is not None:
+                from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY
+
+                context[AGENT_AUTH_CONTEXT_KEY] = self.agent_mcp_authority
             context["user_role"] = self.user_role
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
@@ -1928,6 +1956,9 @@ class SubagentExecutor:
             if self.knowledge_scope is not None:
                 context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
+            if self.approval_runtime is not None:
+                context["__tool_approval_runtime"] = self.approval_runtime
+                context["tool_approval_mode"] = self.approval_runtime.mode
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context

@@ -1,38 +1,41 @@
-# WeKnora read-only extension
+# WeKnora read-only example
 
-Keep provider-specific code in this independently packaged extension. Use
-`registry.knowledge_provider` and the public `deerflow.knowledge` contracts;
-core owns scope admission, formatting, budgets and citation evidence.
+Provider code stays in this separately packaged extension. It registers through
+`registry.knowledge_provider` and the public `deerflow.knowledge` contracts.
+Core owns scope admission, formatting, budgets and citation evidence. Version
+references, configuration and the authorization model are in `README.md`.
 
-API reference: WeKnora v0.8.3 at `3e22822c1d2397be730c458c7539d0eb8c113a24`.
-Preserve per-request operator bindings and upstream authorization. Never turn
-missing bindings, invalid selections, empty allowlists, or upstream failures
-into an unrestricted search. Use KB-bound `hybrid-search` with optional
-`knowledge_ids` and disabled context enrichment. The global search endpoint
-rejects document targets for KB-restricted keys and unions base/document target
-lists. Never broaden credentials to work around that. Verify result membership.
-Default `access_mode: users` requires exact user IDs. Explicit `authenticated`
-mode omits user_ids and requires nonempty host authenticated_user_id == user_id;
-never infer login from a default/storage ID or serialized context. Retain Agent,
-base and upstream checks. Shared retrieval grants no management permissions.
-Reject malformed document totals and detail shapes as provider errors; reserve
-permission errors for resource identity, membership and searchability failures.
-Dataset IDs derive from endpoint/tenant/native base, not credentials or labels.
+```bash
+cd backend && python -m pytest tests -q -k "weknora"
+```
 
-Tests live in `backend/tests/test_weknora_extension*.py`; live tests require
-explicit opt-in and an already indexed instance. Do not fabricate a live result.
-See README for version references, configuration and the authorization model.
+Live tests need explicit opt-in and an instance that is already indexed. Do not
+fabricate a live result.
 
-Optional entries_search uses KB-bound Wiki search and published pages only.
-Check capabilities.wiki and returned base membership; reject document filters
-before HTTP. Wiki responses use a separate pages envelope. Never advertise
-entity relations based on the Wiki page-link graph.
+## Scope and authorization
 
-Wiki lexical search retries only successful empty pages with up to four distinct
-whitespace-separated keywords of at least two characters. Keep retries in the
-same authorized base, validate every response, deduplicate title/excerpt pairs,
-and never retry provider/auth/schema errors. Nonempty phrase results stay intact.
+- **A missing binding, an invalid selection, an empty allowlist or an upstream
+  failure never becomes an unrestricted search.**
+- **Search goes through the KB-bound endpoint.** The global search endpoint
+  rejects document targets for a KB-restricted key and unions base and document
+  targets. Do not broaden credentials to work around that. Verify that each
+  result belongs to the requested base.
+- **`access_mode: users` needs exact user IDs.** `authenticated` mode needs a
+  non-empty host authenticated user that equals the user ID. Do not infer a login
+  from a default or storage ID or from serialized context.
+- **Shared retrieval grants no management permission.**
+- **Dataset IDs derive from endpoint, tenant and native base**, not from
+  credentials or labels.
+- **A malformed total or detail shape is a provider error.** Permission errors
+  are for resource identity, membership and searchability failures.
 
-Batch document checks at four per search; retain dataset/ID request-local keys
-and hit order. Drain sibling tasks on errors/cancellation. Validate selected
-documents before search, and only the consumed hit prefix before returning it.
+## Wiki search and document checks
+
+- **Wiki search covers published pages only.** Check the Wiki capability and the
+  base of each returned page, and reject document filters before HTTP. The Wiki
+  page-link graph is not a source of entity relations.
+- **Only a successful empty page is retried with keywords**, in the same
+  authorized base. Provider, auth and schema errors are not retried, and a
+  non-empty phrase result stays as it is.
+- **Validate selected documents before the search**, and after it validate only
+  the hits that are returned. Drain sibling tasks on an error or a cancellation.

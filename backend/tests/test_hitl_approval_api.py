@@ -103,6 +103,84 @@ def _fake_two_target_model(*args, **kwargs):
     return _StateAwareModel(responses=[], call_count=2)
 
 
+def test_live_child_approval_endpoint_fences_owner_run_and_answer(isolated_app):
+    _enable_approval()
+    release = threading.Event()
+
+    class WaitingModel(_StateAwareModel):
+        def _generate(self, *args, **kwargs):
+            if not release.wait(20):
+                raise TimeoutError("model was not released")
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="done"))])
+
+    with patch(_MODEL_PATCH, new=lambda *args, **kwargs: WaitingModel(responses=[])), TestClient(isolated_app) as client:
+        csrf = _register_user(client)
+        tid = _create_thread(client, csrf)
+        rid = _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "work"}]})).json()["run_id"]
+        try:
+            assert _wait_run_status(client, tid, rid, "running")["status"] == "running"
+            store = isolated_app.state.approval_store
+
+            async def seed():
+                from app.gateway.deps import get_run_manager, get_thread_store
+
+                request = SimpleNamespace(app=isolated_app)
+                record = await get_run_manager(request).get(rid)
+                thread = await get_thread_store(request).get(tid, user_id=record.user_id)
+                scope = (record.user_id, tid, thread["incarnation"])
+                payload = {
+                    "version": 2,
+                    "kind": "hitl_approval",
+                    "request_id": "child-review",
+                    "transport": "live",
+                    "run_id": rid,
+                    "allowed_decisions": ["approve", "reject", "edit"],
+                    "pending_tool_call_ids": ["call"],
+                    "actions": [
+                        {"request_id": "child-review", "tool_call_id": "call", "tool_name": "write", "args": {"value": "before"}, "args_schema": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}
+                    ],
+                }
+                await store.create(
+                    {
+                        "request_id": "child-review",
+                        "user_id": scope[0],
+                        "thread_id": tid,
+                        "incarnation": scope[2],
+                        "run_id": rid,
+                        "fingerprint": "binding",
+                        "kind": "live",
+                        "status": "pending",
+                        "decision": None,
+                        "response": None,
+                        "payload": payload,
+                        "created_at": time.time(),
+                        "expires_at": time.time() + 60,
+                    }
+                )
+                return scope
+
+            scope = client.portal.call(seed)
+            base = f"/api/threads/{tid}"
+            assert client.get(base + "/tool-approvals").json()["requests"][0]["run_id"] == rid
+            endpoint = base + f"/runs/{rid}/tool-approvals/child-review"
+            headers = {"X-CSRF-Token": csrf}
+            answer = {"responses": [{"request_id": "child-review", "tool_call_id": "call", "option_id": "edit", "args": {"value": "after"}}]}
+            malformed = {"responses": [{**answer["responses"][0], "args": {"value": 9}}]}
+            assert client.post(endpoint, json=malformed, headers=headers).status_code == 422
+            assert client.post(endpoint.replace(rid, "another-run"), json=answer, headers=headers).status_code == 404
+            assert client.post(endpoint, json=answer, headers=headers).status_code == 200
+            assert client.post(endpoint, json=answer, headers=headers).status_code == 200
+            conflict = {"responses": [{**answer["responses"][0], "option_id": "reject"}]}
+            assert client.post(endpoint, json=conflict, headers=headers).status_code == 409
+
+            async def read():
+                return await store.get("child-review", scope=scope)
+
+            assert client.portal.call(read)["response"] == answer
+        finally:
+            release.set()
+
+
 @pytest.fixture(params=["full", "delta"])
 def isolated_app(request, isolated_deer_flow_home, monkeypatch):  # noqa: F811
     if request.param == "delta":
@@ -174,8 +252,7 @@ def _wait_run_terminal(client, tid, rid, timeout=20.0):
 
 def _approval_request_id(client, tid, tool_call_id):
     state = _wait_for_approval(client, tid)
-    payload = next(item for group in state["interrupts"].values() for item in group)["value"]
-    return next(action["request_id"] for action in payload["actions"] if action["tool_call_id"] == tool_call_id)
+    return next(action["request_id"] for group in state["interrupts"].values() for item in group for action in item["value"]["actions"] if action["tool_call_id"] == tool_call_id)
 
 
 def _resume(client, csrf, tid, option_id, value=None, *, tool_call_id="call_hitl_1", request_id=None):
@@ -187,6 +264,17 @@ def _resume(client, csrf, tid, option_id, value=None, *, tool_call_id="call_hitl
     if value is not None:
         response["value"] = value
     return _run(client, csrf, tid, {"command": {"resume": {"responses": [response]}}})
+
+
+def _feed_tool_result_ids(client, tid):
+    rows = client.get(f"/api/threads/{tid}/messages").json()
+    return [row["content"]["id"] for row in rows if row.get("event_type") == "llm.tool.result"]
+
+
+def _run_tool_result_call_ids(client, tid, run_id):
+    rows = client.get(f"/api/threads/{tid}/runs/{run_id}/messages").json()
+    rows = rows["data"] if isinstance(rows, dict) else rows
+    return [row["content"]["tool_call_id"] for row in rows if row.get("event_type") == "llm.tool.result"]
 
 
 def test_approval_pause_then_approve_executes(isolated_app):
@@ -221,6 +309,26 @@ def test_approval_pause_then_approve_executes(isolated_app):
         duplicate = _resume(client, csrf, tid, "approve", request_id=payloads[0]["value"]["request_id"])
         assert duplicate.status_code == 409
         assert duplicate.json()["detail"]["code"] == "no_pending_approval"
+
+
+def test_checkpointed_approval_survives_gateway_restart(isolated_app):
+    _enable_approval()
+    with patch(_MODEL_PATCH, new=_fake_model):
+        with TestClient(isolated_app) as client:
+            csrf = _register_user(client)
+            tid = _create_thread(client, csrf)
+            _run(client, csrf, tid, _run_body(input={"messages": [{"role": "user", "content": "write"}]}))
+            request_id = _approval_request_id(client, tid, "call_hitl_1")
+            cookies = dict(client.cookies)
+        with TestClient(isolated_app) as restarted:
+            restarted.cookies.update(cookies)
+            assert _approval_request_id(restarted, tid, "call_hitl_1") == request_id
+            approved = _resume(restarted, csrf, tid, "approve", request_id=request_id)
+            assert approved.status_code == 200, approved.text
+            assert _wait_run_terminal(restarted, tid, approved.json()["run_id"])["status"] == "success"
+            state = restarted.get(f"/api/threads/{tid}").json()
+            written = [message for message in state["values"]["messages"] if message.get("type") == "tool" and message.get("content") == "OK"]
+            assert len(written) == 1
 
 
 def test_fresh_run_rechecks_pending_approval_at_durable_admission(isolated_app):
@@ -428,9 +536,13 @@ def test_disabled_resume_409_and_all_reject_escape(isolated_app):
         terminal = _wait_run_terminal(client, tid, escape.json()["run_id"])
         assert terminal["status"] == "success"
         assert _wait_for_status(client, tid, "idle")["status"] == "idle"
-        contents = [m.get("content") for m in client.get(f"/api/threads/{tid}").json()["values"]["messages"] if m.get("type") == "tool"]
+        state_tools = [m for m in client.get(f"/api/threads/{tid}").json()["values"]["messages"] if m.get("type") == "tool"]
+        contents = [m.get("content") for m in state_tools]
         assert "OK" not in contents
         assert len(contents) == 2
+        # The escape run adopts the paused call, so its denial reaches the history feed.
+        assert _feed_tool_result_ids(client, tid) == [m["id"] for m in state_tools]
+        assert "call_hitl_1" in _run_tool_result_call_ids(client, tid, escape.json()["run_id"])
 
 
 @pytest.mark.parametrize("current_tools", [["bash"], []], ids=["changed", "cleared"])
@@ -456,6 +568,7 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert tool_messages[0]["tool_call_id"] == "call_hitl_1"
         assert tool_messages[0]["status"] == "error"
         assert "OK" not in [message.get("content") for message in tool_messages]
+        assert _run_tool_result_call_ids(client, tid, second_run_id) == ["call_hitl_1"]
 
         second_escape = _resume(client, csrf, tid, "reject", tool_call_id="call_hitl_2")
         assert second_escape.status_code == 200, second_escape.text
@@ -466,6 +579,8 @@ def test_changed_tools_all_reject_escape_preserves_later_gate(isolated_app, curr
         assert len(tool_messages) == 2
         assert all(message.get("status") == "error" for message in tool_messages)
         assert "OK" not in [message.get("content") for message in tool_messages]
+        assert _feed_tool_result_ids(client, tid) == [message["id"] for message in tool_messages]
+        assert _run_tool_result_call_ids(client, tid, second_escape.json()["run_id"]) == ["call_hitl_2"]
 
 
 def test_stale_all_reject_cannot_dismiss_newer_pause(isolated_app):

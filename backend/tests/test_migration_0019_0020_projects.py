@@ -34,6 +34,7 @@ async def test_0019_creates_projects_table(tmp_path):
                     "user_id",
                     "name",
                     "instructions",
+                    "memory",
                     "presentation",
                     "status",
                     "created_at",

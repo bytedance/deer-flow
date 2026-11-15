@@ -285,9 +285,6 @@ function ProjectDocumentShelf({
             </EmptyMedia>
             <EmptyTitle>{t.projects.documentsEmptyTitle}</EmptyTitle>
             <EmptyDescription>{t.projects.documentsEmptyHint}</EmptyDescription>
-            <EmptyDescription>
-              {t.projects.interimMemoryNotice}
-            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (

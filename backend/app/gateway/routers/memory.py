@@ -11,7 +11,7 @@ from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.persistent_writes import run_drained_write
 from app.gateway.secret_masking import mask_secret_values, normalize_config_key
-from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryDuplicateFactIdError, MemoryManager, get_memory_manager
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
@@ -118,6 +118,12 @@ class MemoryResponse(BaseModel):
     user: UserContext = Field(default_factory=UserContext)
     history: HistoryContext = Field(default_factory=HistoryContext)
     facts: list[Fact] = Field(default_factory=list)
+
+
+class MemoryImportRequest(MemoryResponse):
+    """Replacement imports must explicitly supply the facts to restore."""
+
+    facts: list[Fact] = Field(description="Facts to restore. An empty list explicitly clears the selected fact bucket.")
 
 
 def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
@@ -566,10 +572,13 @@ async def export_memory(request: Request, agent_name: str | None = None) -> Memo
     response_model=MemoryResponse,
     response_model_exclude_none=True,
     summary="Import Memory Data",
-    description="Import the default memory document, or replace only one selected agent's facts while preserving shared summaries.",
+    description=(
+        "Import the default memory document, or replace only one selected agent's facts while preserving shared summaries. "
+        "The request requires an explicit `facts` array. Omitting it returns HTTP 422, and an empty array clears the selected fact bucket."
+    ),
 )
 @require_permission("memory", "write")
-async def import_memory(body: MemoryResponse, request: Request, agent_name: str | None = None) -> MemoryResponse:
+async def import_memory(body: MemoryImportRequest, request: Request, agent_name: str | None = None) -> MemoryResponse:
     """Import memory data, preserving shared summaries for a selected agent."""
     manager = await asyncio.to_thread(get_memory_manager)
     selected_agent = _management_agent_name_or_501(manager, agent_name, for_creation=True)
@@ -587,6 +596,8 @@ async def import_memory(body: MemoryResponse, request: Request, agent_name: str 
         raise _unsupported_501(manager, "import memory") from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
         raise _map_memory_manager_error(exc) from exc
+    except MemoryDuplicateFactIdError as exc:
+        raise HTTPException(status_code=400, detail="Invalid memory import: fact IDs must be unique.") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid memory import: facts must be a list of objects with non-empty content.") from exc
     except OSError as exc:

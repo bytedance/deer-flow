@@ -1,6 +1,28 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* File-format identity colors; keep semantic tokens for the surrounding UI. */
+.file-type-icon {
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.file-type-icon[data-file-kind="sheet"] {
+  background: light-dark(#e7f5ec, #17392c);
+  color: light-dark(#187442, #70d6a1);
+}
+.file-type-icon[data-file-kind="document"] {
+  background: light-dark(#eaf1fd, #1d304d);
+  color: light-dark(#2864c5, #8bb7ff);
+}
+.file-type-icon[data-file-kind="slides"] {
+  background: light-dark(#fff0e8, #472b23);
+  color: light-dark(#bb4b28, #ffa17f);
+}
+.file-type-icon[data-file-kind="data"] {
+  background: light-dark(#f1edfb, #32284a);
+  color: light-dark(#7751b5, #c4a5ee);
+}
+
 @source "../../node_modules/streamdown/dist/index.js";
 @source "../../node_modules/@streamdown/code/dist/*.js";
 @source "../../node_modules/@streamdown/mermaid/dist/*.js";

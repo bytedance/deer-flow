@@ -16,14 +16,11 @@ Every contract runs against InMemorySaver, AsyncSqliteSaver, and - when
 ``TEST_POSTGRES_URI`` is set - AsyncPostgresSaver, because each backend
 implements blob/version handling slightly differently.
 
-Two further tests pin currently-unfixed upstream defects (langgraph #8382
-parallel-superstep replay order, #8448 Postgres paginated delta walk). They
-assert the correct contract and trip - skip, naming the issue - while the
-defect is present, becoming live gates once a dependency bump lands a fix. The
-#8448 trip is scoped to the Postgres parameter, the only backend that pages its
-stage-1 scan: on memory/sqlite it stays a live differential assertion against
-``InMemorySaver``, so a regression there fails instead of blaming the
-Postgres-only upstream issue.
+Two further tests pin parallel-superstep replay order and Postgres paginated
+delta walks. The dependency floors carry the upstream fixes, so these are live
+regression gates rather than defect-triggered skips. The pagination contract
+uses Postgres for its paged stage-1 scan and retains a live differential
+assertion against ``InMemorySaver`` on the other backends.
 """
 
 from __future__ import annotations
@@ -331,16 +328,12 @@ async def test_non_delta_writers_preserve_delta_messages_and_markers(saver_env: 
 
 
 # ---------------------------------------------------------------------------
-# Known-unfixed upstream DeltaChannel defects.
+# DeltaChannel replay ordering and pagination regression gates.
 #
-# langgraph #8382 (parallel-superstep delta replay order) and #8448 (Postgres
-# paginated delta-walk cursor) are both still open against the pinned
-# langgraph-checkpoint 4.2.0 / langgraph-checkpoint-postgres 3.1.2, with fixes
-# (PR #8544 / PR #8556) unmerged and no released version carrying them. Each
-# test below asserts the CORRECT contract; while the defect is present it trips
-# (skips, naming the upstream issue) instead of failing, so a later dependency
-# bump that lands the fix flips it into a live gate. The contract is never
-# asserted as buggy behaviour.
+# langgraph-checkpoint 4.3.0 and the matching saver releases preserve live
+# task-path write order and keep the Postgres paged ancestor-walk cursor valid.
+# The dependency floors exclude older implementations, so any regression must
+# fail these tests rather than being converted into a skip.
 # ---------------------------------------------------------------------------
 
 _PARALLEL_LABELS = tuple("abcdefgh")
@@ -399,10 +392,7 @@ async def _long_chain_history(saver: Any, thread_id: str, steps: int) -> list[tu
 @pytest.mark.anyio
 async def test_long_chain_history_survives_pagination(saver_env: _SaverEnv, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every checkpoint of a long delta chain must materialize its own ancestor
-    prefix. Postgres resolves the history through a stage-1 scan paged
-    newest-first; when the target checkpoint is not on the first page the
-    unpatched cursor is derived from a not-yet-loaded parent and parks at
-    ``None`` for good, so old checkpoints hydrate empty (upstream #8448)."""
+    prefix, including when Postgres has to page beyond the first stage-1 scan."""
     if saver_env.kind == "postgres":
         pg_aio = pytest.importorskip("langgraph.checkpoint.postgres.aio", reason="postgres extra not installed")
         monkeypatch.setattr(pg_aio, "_DELTA_PAGE_SIZE", _PAGINATION_PAGE_SIZE)
@@ -415,8 +405,6 @@ async def test_long_chain_history_survives_pagination(saver_env: _SaverEnv, monk
     assert oracle[0] == (_expected_long_chain(_PAGINATION_STEPS), ())
     assert all(digest for digest, next_key in oracle if next_key != ("__start__",))
 
-    if saver_env.kind == "postgres" and got != oracle:
-        pytest.skip("upstream langgraph#8448 unfixed in langgraph-checkpoint-postgres 3.1.2: the paged delta walk poisons the channel cursor for a target past the first stage-1 page, hydrating old checkpoints empty")
     assert got == oracle
 
 
@@ -438,11 +426,8 @@ def _build_fanout_graph(saver: Any) -> Any:
 
 @pytest.mark.anyio
 async def test_parallel_superstep_replay_matches_live_write_order(saver_env: _SaverEnv) -> None:
-    """When several parallel tasks write the same delta channel in one
-    superstep, the live ``apply_writes`` order is path-sorted, but the delta
-    history replay sorts by the hashed ``(task_id, idx)`` - an unrelated order
-    (upstream #8382). ``get_state`` on the same thread must report the order the
-    run actually produced."""
+    """Parallel delta writes must replay in the path order used by the live
+    ``apply_writes`` pass, not in an unrelated hashed ``task_id`` order."""
     graph = _build_fanout_graph(saver_env.saver)
     config = _config(_thread_id())
     live = await graph.ainvoke({"messages": []}, config)
@@ -455,6 +440,4 @@ async def test_parallel_superstep_replay_matches_live_write_order(saver_env: _Sa
     replayed = await graph.aget_state(config)
     replayed_order = [m.content for m in replayed.values["messages"]]
 
-    if replayed_order != live_order:
-        pytest.skip("upstream langgraph#8382 unfixed in langgraph-checkpoint 4.2.0: delta replay orders writes by hashed (task_id, idx) instead of the path order apply_writes used live, so get_state/resume reorders same-superstep writes")
     assert replayed_order == live_order

@@ -9,7 +9,7 @@ from uuid import NAMESPACE_URL, uuid5
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.gateway.deps import get_current_user, get_run_context, get_run_manager
+from app.gateway.deps import get_agent_runs, get_current_user, get_run_manager
 from deerflow.runtime.runs.inputs import InputCancelled, InputConflict, RunInputs
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def submit_run_input(thread_id: str, run_id: str, body: RunInputRequest, r
     run = await manager.get(run_id, user_id=user_id)
     if run is None or run.thread_id != thread_id:
         raise HTTPException(404, "Run not found")
-    if get_run_context(request).agent_runs is None:
+    if get_agent_runs(request) is None:
         raise HTTPException(503, "Run inputs require an authenticated session")
     row = await _store(request).get(run_id, user_id=user_id)
     if row is None or row.get("run_inputs") is None:
@@ -178,7 +178,7 @@ async def change_run_input(thread_id: str, run_id: str, input_id: str, request: 
     inputs = RunInputs(_store(request), run_id, user_id)
     try:
         if retry:
-            handle = get_run_context(request).agent_runs
+            handle = get_agent_runs(request)
             if handle is None:
                 raise HTTPException(503, "Run inputs require an authenticated session")
             from deerflow.runtime.run_origin import admit_origin

@@ -862,6 +862,239 @@ def test_normalize_input_rejects_malformed_message_with_400():
 
 
 @pytest.mark.parametrize(
+    "tool_artifacts",
+    [
+        "oops",
+        ["oops"],
+        [{"display_name": "report.md"}],
+        [{"handle": 3}],
+        [{"handle": ["h"]}],
+        {"type": "__overwrite__", "value": []},
+    ],
+    ids=["non-list", "non-object-entry", "missing-handle", "non-string-handle", "unhashable-handle", "overwrite-shaped"],
+)
+def test_normalize_input_rejects_unusable_tool_artifacts_with_400(tool_artifacts):
+    """An entry the registry reducer cannot key must be a 400 here.
+
+    ``merge_tool_artifacts`` keys each entry by ``handle``; a missing or
+    unhashable handle raised while the state update merged, and the state route
+    persists reducer values with ``Overwrite``, so the thread stayed broken for
+    every later artifact capture.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"tool_artifacts": tool_artifacts})
+
+    assert excinfo.value.status_code == 400
+    assert "input.tool_artifacts" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_tool_artifacts():
+    from app.gateway.services import normalize_input
+
+    entry = {"handle": "art_00000001", "display_name": "report.md", "artifact_type": "file"}
+
+    assert normalize_input({"tool_artifacts": [entry]})["tool_artifacts"] == [entry]
+
+
+def test_state_values_reject_unusable_tool_artifacts_with_400():
+    """The thread-state update route shares the artifact-registry boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"tool_artifacts": [{"handle": ["h"]}]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.tool_artifacts" in excinfo.value.detail
+
+
+def test_state_values_strip_server_owned_metadata_from_tool_artifacts():
+    """The registry branch keeps the per-entry strip the generic list branch applied."""
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    entry = {"handle": "art_1", "additional_kwargs": {"original_user_content": "forged", "title": "kept"}}
+
+    stripped = strip_server_owned_state_metadata({"tool_artifacts": [entry]})["tool_artifacts"][0]
+
+    assert stripped["additional_kwargs"] == {"title": "kept"}
+
+
+@pytest.mark.parametrize(
+    "skill_context",
+    [
+        "oops",
+        ["oops"],
+        [{"name": "pdf"}],
+        [{"path": 3}],
+        [{"path": ""}],
+    ],
+    ids=["string-channel", "non-object-entry", "missing-path", "non-string-path", "empty-path"],
+)
+def test_normalize_input_rejects_unusable_skill_context_with_400(skill_context):
+    """A skill reference the durable-context reducer cannot read must be a 400,
+    not an ``AttributeError``/``KeyError`` while the state update merges.
+
+    ``merge_skill_context`` normalizes entries with ``entry.get(...)`` and
+    ``str(entry["path"])``; both crash on the shapes below.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"skill_context": skill_context})
+
+    assert excinfo.value.status_code == 400
+    assert "input.skill_context" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_skill_context_entries():
+    from app.gateway.services import normalize_input
+
+    entry = {"name": "pdf", "path": "/mnt/skills/pdf/SKILL.md", "description": "PDF tooling", "loaded_at": 3}
+
+    assert normalize_input({"skill_context": [entry]})["skill_context"] == [entry]
+
+
+def test_state_values_reject_unusable_skill_context_with_400():
+    """The thread-state update path shares the skill-reference boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"skill_context": ["oops"]})
+
+    assert excinfo.value.status_code == 400
+    assert "values.skill_context" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "promoted",
+    [
+        "oops",
+        ["oops"],
+        {"names": ["search"]},
+        {"catalog_hash": "abc"},
+        {"catalog_hash": "", "names": []},
+        {"catalog_hash": "abc", "names": "search"},
+        {"catalog_hash": "abc", "names": [1]},
+        {"catalog_hash": "abc", "names": [], "turn_id": 3},
+        {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"},
+        {"catalog_hash": "abc", "names": [], "__overwrite__": "oops"},
+    ],
+    ids=[
+        "string-channel",
+        "list-channel",
+        "missing-catalog-hash",
+        "missing-names",
+        "empty-catalog-hash",
+        "names-not-a-list",
+        "names-not-strings",
+        "turn-id-not-a-string",
+        "erased-overwrite-marker",
+        "sentinel-overwrite-marker",
+    ],
+)
+def test_normalize_input_rejects_unusable_promoted_with_400(promoted):
+    """A promotion record the deferred-tool reducer cannot merge must be a 400.
+
+    ``merge_promoted`` calls ``new.get(...)`` and indexes ``new["catalog_hash"]``
+    and ``new["names"]``, so each shape below raises ``AttributeError``,
+    ``KeyError`` or ``TypeError`` while the state update merges — a 500 for the
+    caller instead of a refusal at the boundary.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import normalize_input
+
+    with pytest.raises(HTTPException) as excinfo:
+        normalize_input({"promoted": promoted})
+
+    assert excinfo.value.status_code == 400
+    assert "input.promoted" in excinfo.value.detail
+
+
+def test_normalize_input_keeps_usable_promoted_record():
+    from app.gateway.services import normalize_input
+
+    record = {"catalog_hash": "abc", "names": ["search", "fetch"], "turn_id": "user-1"}
+
+    assert normalize_input({"promoted": record})["promoted"] == record
+    assert normalize_input({"promoted": None})["promoted"] is None
+
+
+def test_state_values_reject_unusable_promoted_with_400():
+    """The thread-state update path persists this channel, so it shares the boundary."""
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": "oops"})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+
+
+def test_state_values_reject_an_overwrite_marker_in_promoted():
+    """An ``Overwrite`` written as a plain dict bypasses the channel reducer.
+
+    LangGraph accepts the dataclass-erased form ``{"type": "__overwrite__",
+    "value": ...}`` on an initialized channel and stores the value directly, so
+    a record that carries it alongside valid fields would persist a non-object
+    promotion value that the shape checks above cannot see.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    with pytest.raises(HTTPException) as excinfo:
+        strip_server_owned_state_metadata({"promoted": {"catalog_hash": "abc", "names": [], "type": "__overwrite__", "value": "oops"}})
+
+    assert excinfo.value.status_code == 400
+    assert "values.promoted" in excinfo.value.detail
+    assert "Overwrite" in excinfo.value.detail
+
+
+def test_state_values_keep_usable_promoted_record():
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    record = {"catalog_hash": "abc", "names": ["search"], "turn_id": "user-1"}
+
+    assert strip_server_owned_state_metadata({"promoted": record})["promoted"] == record
+
+
+def test_state_values_strip_forged_metadata_from_promoted_record():
+    """The dedicated ``promoted`` branch must not bypass the generic metadata strip.
+
+    A caller-supplied record reaches the checkpoint through this branch, so a
+    preserved ``additional_kwargs`` would seed server-owned provenance
+    (``origin_task_id``) that only the server may write. The sibling
+    implementation of this boundary returns the accepted record untouched, so
+    this case pins the difference and fails on that shape.
+    """
+    from app.gateway.services import strip_server_owned_state_metadata
+
+    stripped = strip_server_owned_state_metadata(
+        {
+            "promoted": {
+                "catalog_hash": "abc",
+                "names": [],
+                "additional_kwargs": {"origin_task_id": "forged", "keep": "me"},
+            }
+        }
+    )
+
+    assert stripped["promoted"]["additional_kwargs"] == {"keep": "me"}
+
+
+@pytest.mark.parametrize(
     "message",
     [
         {"role": "ai", "content": "", "tool_calls": "x"},
@@ -4046,6 +4279,7 @@ def test_start_run_pins_the_resolved_project_context(_stub_app_config):
         "project_id": "p-1",
         "name": "Roadmap",
         "instructions": "Prefer boring solutions.",
+        "memory": {"enabled": True, "revision": 0, "facts": []},
     }
 
 

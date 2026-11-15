@@ -992,6 +992,29 @@ class RunRepository(RunStore):
                 cancel_action=cancel_action,
             )
 
+    async def merge_owned_metadata(self, run_id: str, metadata: dict[str, Any], *, owner_worker_id: str) -> bool:
+        """Merge metadata keys only while this owner holds a live lease on an active row."""
+        async with self._sf() as session:
+            change_seq = await self._next_change_seq(session)
+            await self._lock_owned_row(session, run_id)
+            current = await session.scalar(select(RunRow.metadata_json).where(RunRow.run_id == run_id))
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                    self._live_lease_predicate(session),
+                )
+                .values(
+                    metadata_json={**(current or {}), **(self._safe_json(metadata) or {})},
+                    updated_at=datetime.now(UTC),
+                    change_seq=change_seq,
+                )
+            )
+            await session.commit()
+            return result.rowcount != 0
+
     async def claim_for_takeover(
         self,
         run_id: str,

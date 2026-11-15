@@ -1347,14 +1347,21 @@ class FileMemoryStorage(MemoryStorage):
 
         scope = _scope_dict(user_id, agent_name)
         prepared: dict[str, tuple[dict[str, Any], dict[str, Any] | None, Path]] = {}
+        seen_ids: set[str] = set()
         for incoming in upserts:
             if not isinstance(incoming, dict):
                 raise ValueError("change_set.upserts must contain fact objects")
             candidate = copy.deepcopy(incoming)
             candidate["id"] = str(candidate.get("id") or f"fact_{uuid.uuid4().hex}")
             fact_id = candidate["id"]
-            if fact_id in prepared:
+            # Duplicate detection must consider every incoming id, not just the
+            # ones scheduled for a write: an unchanged entry (existing equals the
+            # normalized candidate) is skipped from `prepared`, so a duplicate
+            # after it would otherwise pass and the import outcome would depend
+            # on the order of the two entries.
+            if fact_id in seen_ids:
                 raise ValueError(f"Duplicate fact id {fact_id!r} in upserts")
+            seen_ids.add(fact_id)
             if agent_name is None:  # guarded above
                 raise ValueError("agent_name is required for fact repository changes")
             existing, fact_path = self._read_fact(path, fact_id, user_id=user_id, agent_name=agent_name)

@@ -23,7 +23,7 @@ import json
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, cast
 
 import openai
@@ -31,12 +31,15 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
+    BaseMessage,
     BaseMessageChunk,
     ChatMessageChunk,
     FunctionMessageChunk,
     HumanMessageChunk,
+    MessageLikeRepresentation,
     SystemMessageChunk,
     ToolMessageChunk,
+    convert_to_messages,
 )
 from langchain_core.messages.ai import UsageMetadata, subtract_usage
 from langchain_core.messages.tool import tool_call_chunk
@@ -110,6 +113,24 @@ def _pick_reasoning(fields: Mapping[str, Any]) -> Any:
     """Prefer non-null ``reasoning`` (including empty strings) over the legacy field."""
     reasoning = fields.get("reasoning")
     return fields.get("reasoning_content") if reasoning is None else reasoning
+
+
+def count_tokens_with_replayed_reasoning(
+    messages: Iterable[MessageLikeRepresentation],
+    *,
+    token_counter: Callable[[Iterable[MessageLikeRepresentation]], int],
+) -> int:
+    counted: list[BaseMessage] = []
+    for message in convert_to_messages(messages):
+        if isinstance(message, AIMessage):
+            reasoning = _pick_reasoning(message.additional_kwargs)
+            text = _reasoning_to_text(reasoning) if reasoning is not None else ""
+            if text:
+                content = message.content + text if isinstance(message.content, str) else [*message.content, text]
+                message = message.model_copy(update={"content": content})
+                # Count replayed reasoning on a copy.
+        counted.append(message)
+    return token_counter(counted)
 
 
 def _convert_delta_to_message_chunk_with_reasoning(_dict: Mapping[str, Any], default_class: type[BaseMessageChunk]) -> BaseMessageChunk:
@@ -203,6 +224,9 @@ class VllmChatModel(GuardedChatOpenAI):
     @property
     def _llm_type(self) -> str:
         return "vllm-openai-compatible"
+
+    def replays_reasoning(self) -> bool:
+        return not self._use_responses_api(self._default_params)  # Chat Completions only.
 
     def _usage_delta(self, completion_id: str, usage: UsageMetadata, *, terminal: bool) -> UsageMetadata:
         """Convert a completion's cumulative usage snapshot into a delta."""
