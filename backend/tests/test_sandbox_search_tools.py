@@ -11,7 +11,7 @@ from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
-from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool
+from deerflow.sandbox.tools import glob_tool, grep_tool, ls_tool, str_replace_tool
 
 
 def _make_runtime(tmp_path):
@@ -137,14 +137,23 @@ def _remote_search_runtime():
         (glob_tool, {"pattern": "**/*.py"}),
         (grep_tool, {"pattern": "needle"}),
     ],
+    ids=["ls", "glob", "grep"],
 )
-def test_search_tools_report_the_requested_path_when_sandbox_setup_fails(monkeypatch, tool, arguments) -> None:
+@pytest.mark.parametrize(
+    ("exception", "expected_prefix"),
+    [
+        (FileNotFoundError, "Error: Directory not found: "),
+        (PermissionError, "Error: Permission denied: "),
+    ],
+    ids=["file-not-found", "permission-denied"],
+)
+def test_search_tools_report_the_requested_path_when_sandbox_setup_fails(monkeypatch, tool, arguments, exception, expected_prefix) -> None:
     """A sandbox setup failure must not be masked by an unbound ``requested_path``."""
 
-    def _raise_file_not_found(runtime):
-        raise FileNotFoundError("sandbox root is unavailable")
+    def _raise(runtime):
+        raise exception("sandbox root is unavailable")
 
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", _raise_file_not_found)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", _raise)
 
     result = tool.func(
         runtime=_remote_search_runtime(),
@@ -153,7 +162,34 @@ def test_search_tools_report_the_requested_path_when_sandbox_setup_fails(monkeyp
         **arguments,
     )
 
-    assert result == "Error: Directory not found: /mnt/user-data/workspace"
+    assert result == expected_prefix + "/mnt/user-data/workspace"
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        (FileNotFoundError, "Error: File not found: /mnt/user-data/workspace/report.txt"),
+        (PermissionError, "Error: Permission denied accessing file: /mnt/user-data/workspace/report.txt"),
+    ],
+    ids=["file-not-found", "permission-denied"],
+)
+def test_str_replace_tool_reports_the_requested_path_when_sandbox_setup_fails(monkeypatch, exception, expected) -> None:
+    """``str_replace`` must keep the same guard as the search tools."""
+
+    def _raise(runtime):
+        raise exception("sandbox root is unavailable")
+
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", _raise)
+
+    result = str_replace_tool.func(
+        runtime=_remote_search_runtime(),
+        description="edit file",
+        path="/mnt/user-data/workspace/report.txt",
+        old_str="a",
+        new_str="b",
+    )
+
+    assert result == expected
 
 
 @pytest.mark.parametrize(
