@@ -154,6 +154,20 @@ def test_retention_is_explicit_and_duplicate_capture_is_idempotent(scoped):
     assert archive.lookup(old, scoped, query="Citrine") == {"results": [], "status": "partially_expired"}
 
 
+def test_recaptured_batch_remains_readable_after_the_next_capture(scoped):
+    config = TaskContinuityConfig(enabled=True, max_batches=2)
+    state = {}
+    for word in ("alpha", "beta", "alpha", "gamma"):
+        message = HumanMessage(content=word, id=word)
+        state["task_history"] = archive.capture(state, scoped, [message], config)
+
+    for word in ("alpha", "gamma"):
+        result = archive.lookup(state, scoped, query=word)
+        assert result["status"] == "available"
+        assert [row["message_id"] for row in result["results"]] == [word]
+    assert not archive.lookup(state, scoped, query="beta")["results"]
+
+
 def test_serialization_allowlist_omits_reasoning_and_binary():
     source = AIMessage(
         content=[

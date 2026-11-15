@@ -165,7 +165,10 @@ def capture(state: dict, runtime, messages, config) -> dict:
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
-            if not exists:
+            if exists:
+                # The checkpoint moves a recaptured batch to the end. Keep eviction in that order too.
+                db.execute("UPDATE batches SET created=? WHERE id=? AND created < ?", (created, batch, created - 1))
+            else:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
         batches = [*[previous for previous in old if previous != batch], batch][-config.max_batches :]

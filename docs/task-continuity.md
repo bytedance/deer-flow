@@ -149,8 +149,8 @@ be re-verified. `omitted_records` describes the latest capture's record limit,
 and each shortened source carries `truncated: true`.
 Eviction happens before replacement insertion in one write transaction.
 Competing captures serialize retention decisions; if insertion still exceeds
-capacity, rollback preserves the previous batches. Duplicate capture protects
-the current batch even when the configured retention limit is reduced.
+capacity, rollback preserves the previous batches. Recapturing an existing batch refreshes its retention order without duplicating
+its sources. The current batch is kept even when the retention limit is reduced.
 Storage failure preserves
 ordinary compaction and marks history unavailable; it does not undo a successful
 summary. Async writes are offloaded and drained before cancellation returns.
