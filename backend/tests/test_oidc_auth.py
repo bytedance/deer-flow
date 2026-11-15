@@ -820,7 +820,7 @@ async def test_oidc_callback_falls_back_to_id_token_when_userinfo_body_is_malfor
 
 # Each case carries the reason the Gateway logs, so an operator can tell an
 # absent ``sub`` from a malformed one.
-_NO_SUB_CASES = [
+_UNUSABLE_SUB_CASES = [
     pytest.param({}, "UserInfo response has no sub claim", id="missing"),
     pytest.param({"sub": ""}, "UserInfo response has no sub claim", id="empty"),
     pytest.param({"sub": None}, "UserInfo response has no sub claim", id="null"),
@@ -833,7 +833,7 @@ _NO_SUB_CASES = [
 @pytest.mark.parametrize(
     ("sub_field", "message"),
     [
-        *_NO_SUB_CASES,
+        *_UNUSABLE_SUB_CASES,
         pytest.param({"sub": "s2"}, "does not match", id="other-subject"),
         pytest.param({"sub": "S1"}, "does not match", id="other-case"),
     ],
@@ -858,8 +858,8 @@ async def test_oidc_fetch_userinfo_returns_a_response_for_the_same_subject():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("sub_field", "reason"), _NO_SUB_CASES)
-async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_sub(sub_field, reason, caplog):
+@pytest.mark.parametrize(("sub_field", "reason"), _UNUSABLE_SUB_CASES)
+async def test_oidc_callback_keeps_id_token_claims_when_userinfo_has_no_usable_sub(sub_field, reason, caplog):
     id_token, jwks = _signed_provider(email="user@example.com", email_verified=False, name="ID Token User")
     userinfo = {**sub_field, "email": "admin@example.com", "email_verified": True, "name": "Someone Else"}
     service = _service_answering({"/token": {"id_token": id_token, "access_token": "access"}, "/jwks": jwks, "/userinfo": userinfo})
