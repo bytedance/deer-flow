@@ -68,10 +68,6 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
-- **slack:** Replies rejected with HTTP 429 now honor `Retry-After`, capped at
-  60 seconds per attempt, while preserving the existing backoff and retry limit.
-  ([#8266](https://github.com/bytedance/deer-flow/pull/8266))
-
 - **gateway:** Creating a thread with checkpoint-owned keys such as `step`,
   `parents` or `counters_since_delta_snapshot` in its metadata no longer
   leaves the thread broken. Those keys used to land on the thread's first
