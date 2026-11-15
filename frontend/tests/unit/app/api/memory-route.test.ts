@@ -55,4 +55,39 @@ describe("memory API proxy", () => {
       "http://127.0.0.1:8001/api/memory/import?agent_name=Research-Agent&mode=facts%2Bmetadata",
     );
   });
+
+  it("proxies to the Gateway configured for the /api rewrites", async () => {
+    const saved = process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
+    process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL = "http://gateway:8001/";
+    rs.resetModules();
+    try {
+      const { GET: getMemory } = await import("@/app/api/memory/route");
+      const { GET: getMemoryPath } =
+        await import("@/app/api/memory/[...path]/route");
+      const fetchMock = rs
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => new Response("{}", { status: 200 }));
+
+      await getMemory(new NextRequest("http://deer-flow.test/api/memory"));
+      await getMemoryPath(
+        new NextRequest("http://deer-flow.test/api/memory/export"),
+        { params: Promise.resolve({ path: ["export"] }) },
+      );
+
+      const targets = fetchMock.mock.calls.map(([target]) =>
+        target instanceof URL ? target.href : target,
+      );
+      expect(targets).toEqual([
+        "http://gateway:8001/api/memory",
+        "http://gateway:8001/api/memory/export",
+      ]);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
+      } else {
+        process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL = saved;
+      }
+      rs.resetModules();
+    }
+  });
 });

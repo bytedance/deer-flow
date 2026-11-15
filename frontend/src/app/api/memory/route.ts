@@ -1,10 +1,15 @@
 import type { NextRequest } from "next/server";
 
-const BACKEND_BASE_URL =
-  process.env.NEXT_PUBLIC_BACKEND_BASE_URL ?? "http://127.0.0.1:8001";
+import { getGatewayConfig } from "@/core/auth/gateway-config";
 
 function buildBackendUrl(request: NextRequest, pathname: string) {
-  const url = new URL(pathname, BACKEND_BASE_URL);
+  // This route shadows the /api/* rewrite in next.config.js, so it must reach
+  // the same Gateway: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL, not a fixed port.
+  const url = new URL(
+    pathname,
+    process.env.NEXT_PUBLIC_BACKEND_BASE_URL ??
+      getGatewayConfig().internalGatewayUrl,
+  );
   url.search = request.nextUrl.search;
   return url;
 }
