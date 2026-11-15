@@ -257,8 +257,9 @@ async def test_no_verdict_once_is_failed_and_receipt_backfill_preserves_unmet(tm
         assert (await tasks.get("task", user_id="owner"))["run_count"] == 1
 
 
+@pytest.mark.parametrize("newer_status", ["running", "queued"])
 @pytest.mark.asyncio
-async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_path, database_backend):
+async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_path, database_backend, newer_status):
     async with database(tmp_path, backend=database_backend) as (_sf, tasks, runs):
         await task(tasks)
         await runs.create(
@@ -278,7 +279,7 @@ async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_
             thread_id="thread-new",
             scheduled_for=NOW + timedelta(minutes=1),
             trigger="manual",
-            status="running",
+            status=newer_status,
         )
 
         assert await runs.reconcile_launched_run("occ-old", task_id="task", run_id="run-late", started_at=NOW + timedelta(seconds=1)) is True
@@ -287,8 +288,9 @@ async def test_reconcile_keeps_terminal_run_when_newer_occurrence_is_active(tmp_
         assert rows["occ-old"]["status"] == "failed"
         assert rows["occ-old"]["error"] == "queue timeout"
         assert datetime.fromisoformat(rows["occ-old"]["finished_at"]) == NOW
+        assert rows["occ-old"]["started_at"] is None
         assert rows["occ-old"]["run_id"] == "run-late"
-        assert rows["occ-new"]["status"] == "running"
+        assert rows["occ-new"]["status"] == newer_status
 
 
 @pytest.mark.asyncio

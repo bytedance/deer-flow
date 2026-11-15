@@ -892,8 +892,10 @@ class ScheduledTaskRunRepository:
                         .limit(1)
                     )
                     if newer_active is not None:
+                        # The terminal occurrence never started; its durable
+                        # run row carries the real start. Backfilling
+                        # started_at here would place it after finished_at.
                         row.run_id = run_id
-                        row.started_at = row.started_at or started_at
                         await session.commit()
                         logger.warning(
                             "Scheduled task-run %s launched durable run %s while occurrence %s holds the active slot; keeping the terminal status",
