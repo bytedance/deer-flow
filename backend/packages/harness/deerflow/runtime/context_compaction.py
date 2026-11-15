@@ -13,8 +13,11 @@ from langgraph.types import Overwrite
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummaryGenerationError, create_summarization_middleware
 from deerflow.config.agents_config import validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
+from deerflow.runtime.checkpoint_history import recent_checkpoint_history
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
+from deerflow.runtime.goal import _call_checkpointer_method
+from deerflow.utils.assembly_io import run_assembly
 
 logger = logging.getLogger(__name__)
 _AGENT_CONFIG_NOT_LOADED = object()
@@ -155,19 +158,43 @@ async def compact_thread_context(
     app_config: AppConfig | None = None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
-    resolved_app_config = app_config or get_app_config()
+    # Off the event loop (see utils/AGENTS.md): reading the live config stats
+    # and hashes config.yaml. The route passes no app_config.
+    resolved_app_config = app_config or await run_assembly(get_app_config)
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
     snapshot_config = snapshot.config or {}
     checkpoint_id = snapshot_config.get("configurable", {}).get("checkpoint_id")
     if not checkpoint_id:
         raise LookupError(f"Thread {thread_id} checkpoint not found")
-    checkpoint_tuple = await accessor.aget_tuple(read_config)
+    checkpoint_tuple = await _call_checkpointer_method(accessor, "aget_tuple", "get_tuple", read_config)
     if checkpoint_tuple is None:
         raise ContextCompactionPendingWork("Thread checkpoint is unavailable. Cannot verify pending execution before compacting.")
     pending_sends = (checkpoint_tuple.checkpoint.get("channel_values") or {}).get("__pregel_tasks")
-    if pending_sends:
-        raise ContextCompactionPendingWork("Thread has pending execution. Resume the interrupted run before compacting.")
+    # Static breakpoints retain pending sends. A dynamic/HITL pause is instead
+    # durable as a task's __interrupt__ write; the production state-mutation
+    # accessor does not know the agent nodes and therefore can return empty
+    # snapshot.next/tasks even while that write is genuinely resumable. Walk
+    # recent history because a head-moving state write can hide the pause. The
+    # newest checkpoint carrying either marker wins, so an answered pause is
+    # not revived by its older interrupt write.
+    pending_writes = getattr(checkpoint_tuple, "pending_writes", ()) or ()
+    interrupted_task_ids = {write[0] for write in pending_writes if isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__interrupt__"}
+    resumed_task_ids = {write[0] for write in pending_writes if isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__"}
+    history_checked = False
+    history_pending = False
+    async for historical_tuple in recent_checkpoint_history(getattr(accessor, "checkpointer", None), read_config):
+        history_checked = True
+        writes = list(getattr(historical_tuple, "pending_writes", ()) or ())
+        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__resume__" for write in writes):
+            break
+        if any(isinstance(write, (list, tuple)) and len(write) >= 2 and write[1] == "__interrupt__" for write in writes):
+            history_pending = True
+            break
+    pending_next = getattr(snapshot, "next", None) or ()
+    snapshot_interrupts = bool(pending_next) and any(getattr(task, "interrupts", None) or () for task in (getattr(snapshot, "tasks", None) or ()))
+    if pending_sends or snapshot_interrupts or history_pending or (not history_checked and interrupted_task_ids - resumed_task_ids):
+        raise ContextCompactionPendingWork("Thread has resumable pending execution. Resume the paused run before compacting.")
 
     binding_known, checkpoint_agent_name = _checkpoint_agent_binding(getattr(snapshot, "metadata", None))
     # The body hint may still select a compatible summarization model for
@@ -182,7 +209,10 @@ async def compact_thread_context(
         agent_config=agent_config,
     )
     memory_enabled = binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
-    middleware = _create_compaction_middleware(
+    # Building the middleware constructs its summarization models, and provider
+    # construction can read local credentials; keep it off the loop too.
+    middleware = await run_assembly(
+        _create_compaction_middleware,
         app_config=resolved_app_config,
         keep=keep,
         run_model_name=run_model_name,

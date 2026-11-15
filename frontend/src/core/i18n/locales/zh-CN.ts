@@ -9,9 +9,54 @@ import {
   VideoIcon,
 } from "lucide-react";
 
+import { bundledCopy } from "@/core/extensions/documentation";
+
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
+  sharing: {
+    title: "分享会话",
+    description: "任何持有链接的人都可以免登录查看此快照。",
+    scope:
+      "包含可见对话、工具执行结果和已展示的产物文件。后续修改不会同步到快照。撤销可停止后续访问，已下载或复制的内容仍由接收方保留。",
+    expiry: "链接有效期",
+    hour: "1 小时",
+    day: "1 天",
+    week: "7 天",
+    month: "30 天",
+    create: "创建快照链接",
+    working: "正在处理…",
+    link: "分享链接",
+    copy: "复制链接",
+    copied: "已复制",
+    links: "已创建的链接",
+    noLinks: "尚未创建分享链接。",
+    revoke: "撤销",
+    revoked: "已撤销",
+    expired: "已过期",
+    expires: "到期时间",
+    loading: "加载中…",
+    failed: "操作未完成，请重试。",
+    unavailable: "此服务器暂不支持分享。",
+    conflict:
+      "请在当前任务结束后分享。如果任务已经结束，请刷新页面或撤销旧链接后重试。",
+    tooLarge: "此会话或其产物超过分享大小限制。",
+    readOnly: "只读快照",
+    fork: "复制到我的工作区继续",
+    forking: "正在复制…",
+    missing: "此分享链接已过期、被撤销或无法访问。",
+    retry: "重试",
+    artifacts: "产物",
+    download: "下载",
+    preview: "预览",
+    close: "关闭预览",
+    you: "用户",
+    assistant: "助手",
+    tool: "工具执行结果",
+    noPreview: "请下载后打开此文件。",
+    previewNote: "静态预览。交互内容可能需要下载文件后查看。",
+    previewLimited: "预览仅显示前 512 KiB，下载可查看完整文件。",
+  },
   usage: {
     title: "Token 用量",
     description: "查看输入、输出及缓存命中 Token 用量。",
@@ -92,75 +137,60 @@ export const zhCN: Translations = {
     catalogHint:
       "此条目来自仓库扩展目录；实际安装和启用状态请由部署管理员确认。",
     installationGuide: "查看安装说明",
+    detail: {
+      guide: "阅读使用说明",
+      gettingStarted: "开始使用",
+      requirements: "使用前准备",
+      loaded: "已加载",
+      loadedHint: "此扩展已加载，使用方式见本页说明。",
+      tools: "已注册工具",
+      pages: "工作区入口",
+      management: "使用与管理",
+      readyHint: "此扩展已由管理员启用，可以直接使用。",
+      disabledHint: "此扩展已停用。请联系管理员启用后再使用。",
+      failedHint: "扩展页面未能加载，请刷新扩展后重试。",
+      noPageHint:
+        "此扩展没有独立工作页面。请查看使用说明，了解它在对话或任务中的使用方式。",
+      guideHint: "通过使用说明，了解此扩展提供的功能和使用方式。",
+      technicalDetails: "技术信息",
+      package: "安装包",
+      namespace: "扩展标识",
+      refresh: "刷新扩展",
+      refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
+    },
     catalog: {
-      workflows: {
-        title: "脚本工作流",
-        description:
-          "保存版本化 Agent 工作流，在同一 Gateway 进程内恢复，并确认确切的保留输出版本。不支持重启回放或硬金额预算。",
+      officePreview: bundledCopy("deerflow-extension-office-preview", "zh-CN"),
+      workspaceSearch: {
+        title: "会话全文搜索",
+        description: "检索历史消息正文，并跳转到命中的对话轮次。",
       },
-      reportSections: {
-        title: "分段长文写作",
-        description: "逐段撰写长报告，并将各章节汇总为可下载的 Markdown 文档。",
-      },
-      agentTeams: {
-        title: "Agent 团队",
-        description: "让完整 Custom Agent 通过 @成员、共享记录与任务交接协作。",
-      },
-      bookmarks: {
-        title: "会话书签",
-        description: "收藏有用的回答，在独立页面查找与整理自己的书签。",
-      },
-      context: {
-        title: "上下文裁剪",
-        description: "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
-      },
-      classify: {
-        title: "文本分类",
-        description: "按给定类别为文本列表打标签，使用部署方配置的分类服务。",
-      },
-      screening: {
-        title: "内容风险提示",
-        description:
-          "检查获取的外部内容，为可疑工具结果添加提示，不阻断工具执行。",
-      },
-      example: {
-        title: "扩展开发示例",
-        description:
-          "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
-      },
-      retrieval: {
-        title: "本地检索示例",
-        description:
-          "使用固定示例文档演示只读检索与结构化工具结果，不连接外部知识库。",
-      },
-      lightrag: {
-        title: "LightRAG",
-        description: "从 LightRAG 检索文档与实体关系，并使用统一的来源引用。",
-      },
-      knowledgePlatform: {
-        title: "知识空间与连接",
-        description:
-          "在管理员明确授权后管理多层级空间、资源共享与继承策略。需要安装和配置，不包含管理页面，也不改变全局检索权限。",
-      },
-      knowledgeCenter: {
-        title: "知识中心",
-        description:
-          "浏览授权空间，导入文件、网址和文本，并查询文档处理状态。需要单独配置知识平台与知识管理扩展。",
-      },
-      knowledgeManagement: {
-        title: "知识入库与处理",
-        description:
-          "通过 WeKnora 导入文件、网址和文本，并在管理员明确授权后管理处理任务。需要安装和配置，不包含管理页面。",
-      },
-      weknora: {
-        title: "WeKnora 知识检索",
-        description:
-          "检索 WeKnora 知识库和所选文档，并展示来源引用。需要管理员安装并配置访问权限。",
-      },
-      knowledge: {
-        title: "知识范围选择示例",
-        description: "用示例文档演示知识库和文件范围选择、检索及来源引用。",
-      },
+      agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
+      bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
+      context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
+      classify: bundledCopy("deerflow-extension-jev-classify", "zh-CN"),
+      screening: bundledCopy("deerflow-extension-jev-screening", "zh-CN"),
+      workflows: bundledCopy("deerflow-extension-workflows", "zh-CN"),
+      reportSections: bundledCopy(
+        "deerflow-extension-report-sections",
+        "zh-CN",
+      ),
+      retrieval: bundledCopy("deerflow-extension-retrieval", "zh-CN"),
+      knowledge: bundledCopy("deerflow-extension-knowledge", "zh-CN"),
+      knowledgeManagement: bundledCopy(
+        "deerflow-extension-knowledge-management",
+        "zh-CN",
+      ),
+      knowledgePlatform: bundledCopy(
+        "deerflow-extension-knowledge-platform",
+        "zh-CN",
+      ),
+      knowledgeCenter: bundledCopy(
+        "deerflow-extension-knowledge-center",
+        "zh-CN",
+      ),
+      lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
+      weknora: bundledCopy("deerflow-extension-weknora", "zh-CN"),
+      example: bundledCopy("deerflow-extension-example", "zh-CN"),
     },
     pageUnavailable: "扩展页面不可用",
     pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
@@ -271,6 +301,7 @@ export const zhCN: Translations = {
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
+    scrollToBottom: "滚动到底部",
     showingOf: (loaded, total) => `已显示 ${loaded} / 共 ${total}`,
     download: "下载",
     thinking: "思考",
@@ -383,6 +414,12 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "正在准备下载…",
+    retryDownload: "重试下载",
+    downloadFailed: "下载失败，请重试。",
+    downloadRequested: "已交给浏览器下载",
+    retry: "重新预览",
+    unavailable: "当前格式暂无可用预览，可下载原始文件查看。",
     loadingPreview: "正在准备预览...",
     resourcesUnavailable:
       "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
@@ -585,6 +622,7 @@ export const zhCN: Translations = {
       waitingForYou: "等你回复",
       waiting: "等待中",
       paused: "已暂停",
+      waitingApproval: "等待审批",
       autoContinuedOnce: "自动续跑了 1 次",
       autoContinuedMany: "自动续跑了 {count} 次",
       details: "详情",
@@ -614,6 +652,9 @@ export const zhCN: Translations = {
           "目标检查：这次运行没有完成任务。先看看回复里的错误，再发送消息重试。",
         needsInputCard: "回答上面的问题即可继续。",
         needsInputReply: "回复补充缺少的信息即可继续。",
+        needsApproval: "查看并处理上面的工具审批即可继续。",
+        needsApprovalReload:
+          "审批详情加载失败，请使用上方的重新加载错误面板重试。",
         external: "目标检查：正在等待外部条件，就绪后发送消息即可继续。",
         unchecked: "{reason}。下次发消息后会重新检查。",
         unknown: "发送消息即可继续。",
@@ -821,8 +862,16 @@ export const zhCN: Translations = {
     viewTrash: "回收站",
     documentsLoadFailed: "无法加载项目文档",
     threadFilesLoadFailed: "无法加载对话文件",
-    interimMemoryNotice:
-      "记忆目前仍为全局：在第三阶段之前，项目中讨论的内容仍可能进入你的全局记忆。",
+    memoryTitle: "项目记忆",
+    memoryAutoExtract: "自动提取",
+    memoryDescription:
+      "从项目对话中提炼长期有效的事实，仅用于本项目。关闭自动提取会保留已有记忆；不再需要的内容可直接删除。自动提取需开启全局记忆功能。",
+    memoryEmpty: "还没有项目记忆。项目对话中形成的约定和经验会显示在这里。",
+    memoryPromote: "转入指令",
+    memoryPromoted: "已转入项目指令",
+    memorySaveFirst: "请先保存上方的指令修改，再转入记忆。",
+    memoryLoadFailed: "无法加载项目记忆。",
+    memoryActionFailed: "项目记忆更新失败，请刷新后重试。",
   },
 
   trash: {
@@ -1534,6 +1583,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    streamServerError: (status) =>
+      `服务暂时不可用（HTTP ${status}），请稍后重试。`,
     outlineLabel: "对话章节",
     outlineAttachmentFallback: "图片或文件消息",
   },
@@ -1821,9 +1872,58 @@ export const zhCN: Translations = {
     requiredA11yLabel: "必填",
     selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
+    approval: {
+      modeLabel: "工具权限",
+      modeAsk: "请求批准",
+      modeAuto: "自动审批",
+      modeFull: "完全访问",
+      askDescription: "需要审批的操作，由你批准后执行。",
+      autoDescription: "逐次审核操作；风险或授权需要你决定时，再请求批准。",
+      fullDescription: "跳过逐次审批，仍受部署规则和工具账户权限限制。",
+      approveThread: "本会话允许",
+      grantScope: "仅限此工具和完全相同的参数，可在“工具权限”中撤销。",
+      editArguments: "修改参数",
+      fullArguments: "完整参数",
+      invalidArguments: "请输入有效的 JSON 对象，服务端还会校验工具参数格式。",
+      revokeGrants: "撤销会话授权",
+      grantsRevoked: "已撤销会话授权",
+      childApproval: "子代理正在等待你的批准。",
+      title: "工具调用需要审批",
+      description:
+        "继续前请检查每个操作。较长的值可能在显示时被截断，但省略的内容仍会完整参与执行。批准后将尝试执行工具，其他执行检查仍然有效。",
+      waiting: "等待审批",
+      loading: "正在加载审批详情...",
+      loadFailed:
+        "无法加载审批详情。此对话仍在等待审批，请重新加载详情后再继续。",
+      reload: "重新加载审批详情",
+      approve: "批准",
+      reject: "拒绝",
+      approveAll: "全部批准",
+      rejectAll: "全部拒绝并结束",
+      submitDecisions: "提交所选决定",
+      reasonLabel: "拒绝理由（可选）",
+      reasonPlaceholder: "告诉智能体不应执行这些工具的原因……",
+      submitFailed: "审批提交失败。请检查所选决定后重试。",
+      submitTimeout: "审批提交超时，已停止本次提交。请检查所选决定后重试。",
+      featureDisabled: "工具审批现已关闭，仍可安全地全部拒绝并结束。",
+      noPending: "该审批已不再挂起，请重新加载对话后重试。",
+    },
   },
 
   uploads: {
+    status: {
+      pending: "待发送",
+      uploading: "上传中…",
+      uploaded: "上传成功",
+      failed: "上传失败",
+      cancelled: "已取消",
+    },
+    cancelUpload: "取消上传",
+    retryUpload: "重试上传",
+    notReady: "附件尚未就绪。请重试失败项或将其移除，然后重新发送。",
+    attachment: "附件",
+    image: "图片",
+    removeAttachment: (filename) => `移除附件：${filename}`,
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
@@ -1887,6 +1987,37 @@ export const zhCN: Translations = {
   },
 
   // Shortcuts
+  workspaceSearch: {
+    title: "搜索对话",
+    description: "查找历史对话和消息，或执行快捷操作。",
+    placeholder: "搜索标题和消息内容…",
+    open: "搜索",
+    all: "全部",
+    threads: "对话",
+    messages: "消息",
+    includeArchived: "包含已归档",
+    archived: "已归档",
+    recent: "最近对话",
+    searching: "正在搜索…",
+    indexing: "正在准备历史消息搜索，结果将自动显示。",
+    unavailable: "当前部署尚未启用消息搜索，可以搜索对话标题。",
+    unsupported: "当前视图暂不支持搜索。",
+    error: "搜索未能完成，请重试。",
+    empty: "没有找到匹配内容，试试其他关键词或包含已归档对话。",
+    more: "显示更多结果",
+    retry: "重试",
+    hint: "↑ ↓ 选择 · Enter 打开 · 输入 > 查找操作",
+    user: "你",
+    assistant: "助手",
+    context: "消息上下文",
+    returnToLatest: "返回最新消息",
+    loadingContext: "正在加载消息上下文…",
+    messageUnavailable: "这条消息已不可用，可返回对话查看当前历史。",
+    matchedMessage: "已定位消息",
+    earlier: "更早的消息",
+    later: "后续消息",
+    untitled: "未命名对话",
+  },
   shortcuts: {
     searchActions: "搜索操作...",
     noResults: "未找到结果。",

@@ -365,6 +365,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 provisioner_url=provisioner_url,
                 api_key=api_key,
                 max_shell_sessions=self._config.get("max_shell_sessions"),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 required_shell_sessions=self._config.get("required_shell_sessions", 0),
             )
 
@@ -405,6 +406,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             AioSandbox._DEFAULT_HARD_TIMEOUT,
         )
         max_running_subagents = int(getattr(getattr(config, "subagent_runtime", None), "max_running", 3))
+        try:
+            max_bash_sessions = int(environment.get("AIO_BASH_MAX_SESSIONS", "50"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("sandbox.environment.AIO_BASH_MAX_SESSIONS must be a positive integer") from exc
+        if max_bash_sessions <= 0:
+            raise ValueError("sandbox.environment.AIO_BASH_MAX_SESSIONS must be a positive integer")
+        # Explicitly configure the same budget used by client admission. Bash
+        # and persistent Shell have independent server-side session pools.
+        environment["AIO_BASH_MAX_SESSIONS"] = str(max_bash_sessions)
         required_shell_sessions = max_running_subagents + _SHELL_SESSION_HEADROOM
         configured_shell_sessions = environment.get("MAX_SHELL_SESSIONS")
         if configured_shell_sessions is None:
@@ -430,6 +440,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
             "environment": environment,
             "max_shell_sessions": max_shell_sessions,
+            "max_bash_sessions": max_bash_sessions,
             "required_shell_sessions": required_shell_sessions,
             "network": sandbox_config.network.model_dump(),
             "ownership": getattr(sandbox_config, "ownership", None),
@@ -1910,6 +1921,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 base_url=info.sandbox_url,
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 lark_cli_broker=info.lark_cli_broker,
             )
             self._sandboxes[sandbox_id] = sandbox
@@ -1963,6 +1975,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             base_url=info.sandbox_url,
             request_headers=info.request_headers,
             default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+            max_bash_sessions=self._config.get("max_bash_sessions", 50),
             lark_cli_broker=info.lark_cli_broker,
         )
         # Ownership first, so a failure cannot leave a tracked-but-unowned sandbox.
@@ -2024,6 +2037,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 base_url=info.sandbox_url,
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
+                max_bash_sessions=self._config.get("max_bash_sessions", 50),
                 lark_cli_broker=info.lark_cli_broker,
             )
             key = self._thread_key(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else None

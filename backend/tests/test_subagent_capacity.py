@@ -97,3 +97,67 @@ async def test_repeated_cancellation_cannot_leak_running_slot(monkeypatch):
     async with asyncio.timeout(0.5):
         async with capacity.slot():
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_released", [False, True])
+@pytest.mark.parametrize("abandonment", ["cancel", "timeout"])
+async def test_abandoned_waiter_drains_cleanup_after_repeated_cancellation(monkeypatch, owner_released, abandonment):
+    """Once cleanup starts, more cancellations cannot orphan a transferred slot."""
+    waiter_ready = asyncio.Event()
+    expire_waiter = asyncio.Event()
+    cleanup_started = asyncio.Event()
+
+    class ObservedLock(asyncio.Lock):
+        async def acquire(self):
+            if self.locked():
+                cleanup_started.set()
+            return await super().acquire()
+
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1, max_queued=1))
+    capacity._lock = ObservedLock()
+    real_wait_for = asyncio.wait_for
+
+    async def wait_for_slot(awaitable, timeout):
+        if capacity._waiters and awaitable is capacity._waiters[0]:
+            waiter_ready.set()
+            if abandonment == "timeout":
+                # Exercise asyncio's timeout only once cleanup will contend for the lock.
+                await expire_waiter.wait()
+                timeout = 0
+        return await real_wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", wait_for_slot)
+    await capacity._acquire()
+    queued = asyncio.create_task(capacity._acquire())
+    try:
+        await real_wait_for(waiter_ready.wait(), 3)
+        async with capacity._lock:
+            if abandonment == "cancel":
+                if owner_released:
+                    capacity._release_locked()
+                queued.cancel()
+            else:
+                expire_waiter.set()
+            await real_wait_for(cleanup_started.wait(), 3)
+            if owner_released and abandonment == "timeout":
+                # A timed-out waiter's future is cancelled, so release skips it.
+                capacity._release_locked()
+            queued.cancel("cancelled while draining")
+            await asyncio.sleep(0)
+            queued.cancel("cancelled again")
+
+        async with asyncio.timeout(3):
+            with pytest.raises(asyncio.CancelledError, match="cancelled while draining"):
+                await queued
+    finally:
+        if not queued.done():
+            queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
+    if not owner_released:
+        await capacity._release()
+    snapshot = capacity.snapshot()
+    assert (snapshot.running, snapshot.queued) == (0, 0)
+    async with asyncio.timeout(0.5):
+        async with capacity.slot():
+            pass

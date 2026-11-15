@@ -19,6 +19,7 @@ from langchain_deepseek import ChatDeepSeek
 
 from deerflow.config.managed_model_providers import MOONSHOT_K31_MODELS
 from deerflow.models.assistant_payload_replay import restore_assistant_payloads, restore_reasoning_content
+from deerflow.models.openai_response import OpenAIEmptyChoicesMixin
 
 
 def _is_moonshot_k31_request(api_base: str | None, payload: dict[str, Any]) -> bool:
@@ -78,7 +79,11 @@ def _restore_deepseek_assistant_payload(
         payload_msg["reasoning_content"] = ""
 
 
-class PatchedChatDeepSeek(ChatDeepSeek):
+class GuardedChatDeepSeek(OpenAIEmptyChoicesMixin, ChatDeepSeek):
+    """DeepSeek provider base with typed handling for empty response choices."""
+
+
+class PatchedChatDeepSeek(GuardedChatDeepSeek):
     """ChatDeepSeek with proper reasoning_content preservation.
 
     When using thinking/reasoning enabled models, the API expects reasoning_content

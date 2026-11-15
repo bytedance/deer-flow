@@ -94,3 +94,42 @@ def test_drops_only_the_invalid_tool_in_a_mixed_batch():
     tools, _ = _load([_tool("srv_ok"), _tool("srv_bad name with spaces"), _tool("srv_also_ok")])
 
     assert {t.name for t in tools} == {"srv_ok", "srv_also_ok"}
+
+
+def test_publishes_one_declaration_per_bound_name_across_servers():
+    """End to end: server 'a' exposing 'b_x' and server 'a_b' exposing 'x' both
+    bind 'a_b_x'; get_mcp_tools() must publish exactly one declaration."""
+    tools_a = [_tool("a_b_x")]
+    tools_ab = [_tool("a_b_x")]
+    mock_client = MagicMock()
+
+    async def get_tools(*, server_name=None):
+        return tools_a if server_name == "a" else tools_ab
+
+    mock_client.get_tools = get_tools
+    extensions_config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "a": {"type": "sse", "url": "https://a.example/mcp"},
+                "a_b": {"type": "sse", "url": "https://ab.example/mcp"},
+            }
+        }
+    )
+
+    with (
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", return_value=mock_client),
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions_config),
+        patch(
+            "deerflow.mcp.tools.build_servers_config",
+            return_value={
+                "a": {"transport": "sse"},
+                "a_b": {"transport": "sse"},
+            },
+        ),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+    ):
+        tools = asyncio.run(get_mcp_tools())
+
+    assert [t.name for t in tools] == ["a_b_x"]
+    assert tools[0] is tools_a[0]

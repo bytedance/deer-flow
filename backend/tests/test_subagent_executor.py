@@ -4954,6 +4954,24 @@ class TestCooperativeCancellation:
             "checkpoint_ns": "parent:task",
         }
 
+    def test_authenticated_identity_crosses_isolated_loop_without_user_leakage(self, executor_module):
+        from deerflow.runtime.user_context import bind_authenticated_user, get_authenticated_user_id
+
+        ready = threading.Event()
+
+        async def read_identity():
+            await asyncio.to_thread(ready.wait)
+            return get_authenticated_user_id()
+
+        with bind_authenticated_user("alice"):
+            alice = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+        with bind_authenticated_user("bob"):
+            bob = executor_module._submit_to_isolated_loop_in_context(executor_module._copy_isolated_subagent_context(), read_identity)
+        assert get_authenticated_user_id() is None
+        ready.set()
+        assert alice.result(timeout=10) == "alice"
+        assert bob.result(timeout=10) == "bob"
+
     def test_isolated_context_filters_callback_manager_without_mutating_parent(self, executor_module):
         from langchain_core.callbacks.manager import AsyncCallbackManager
         from langchain_core.runnables.config import var_child_runnable_config

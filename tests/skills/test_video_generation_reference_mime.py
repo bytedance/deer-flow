@@ -17,6 +17,8 @@ def _mock_provider(monkeypatch, provider):
     monkeypatch.setenv("GEMINI_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_KEY", "offline-test-key")
     monkeypatch.setenv("MINIMAX_API_HOST", "https://api.example.test")
+    monkeypatch.delenv("MINIMAX_VIDEO_RESOLUTION", raising=False)
+    monkeypatch.delenv("MINIMAX_VIDEO_DURATION", raising=False)
     captured = {"posts": [], "gets": []}
 
     def fake_post(url, *, json, **kwargs):

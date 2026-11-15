@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 _OPENAI = "langchain_openai:ChatOpenAI"
 _DEEPSEEK = "deerflow.models.patched_deepseek:PatchedChatDeepSeek"
 _MINIMAX = "deerflow.models.patched_minimax:PatchedChatMiniMax"
+_STEPFUN = "deerflow.models.patched_stepfun:PatchedChatStepFun"
 MOONSHOT_K31_MODELS = frozenset({"kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"})
 OPENAI_GPT6_MODELS = frozenset({"gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"})
 
@@ -45,6 +46,7 @@ PROVIDERS = (
     ManagedModelProvider("zai", "Z.AI (International, API)", "https://api.z.ai/api/paas/v4", _DEEPSEEK, endpoint_parameter="api_base"),
     ManagedModelProvider("minimax", "MiniMax (International, API)", "https://api.minimax.io/v1", _MINIMAX, defaults={"temperature": 1.0}),
     ManagedModelProvider("minimax-cn", "MiniMax (China, API)", "https://api.minimaxi.com/v1", _MINIMAX, defaults={"temperature": 1.0}),
+    ManagedModelProvider("stepfun", "StepFun", "https://api.stepfun.com/v1", _STEPFUN),
     ManagedModelProvider("openai-compatible", "Custom OpenAI-compatible", None),
 )
 _PROVIDER_BY_ID = {provider.id: provider for provider in PROVIDERS}

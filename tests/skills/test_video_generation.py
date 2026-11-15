@@ -12,9 +12,16 @@ vid = load("video-generation")
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for k in ["GEMINI_API_KEY", "MINIMAX_API_KEY", "VIDEO_GENERATION_PROVIDER",
-              "MINIMAX_API_HOST", "MINIMAX_VIDEO_MODEL"]:
-        monkeypatch.delenv(k, raising=False)
+    for key in (
+        "GEMINI_API_KEY",
+        "MINIMAX_API_KEY",
+        "VIDEO_GENERATION_PROVIDER",
+        "MINIMAX_API_HOST",
+        "MINIMAX_VIDEO_MODEL",
+        "MINIMAX_VIDEO_RESOLUTION",
+        "MINIMAX_VIDEO_DURATION",
+    ):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(vid.time, "sleep", lambda *_: None)
 
 
@@ -41,8 +48,15 @@ def test_unknown_provider_raises(monkeypatch, tmp_path):
         vid.generate_video(str(pf), [], str(tmp_path / "v.mp4"), "16:9")
 
 
-def test_minimax_full_flow(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "video_settings",
+    [{}, {"resolution": "1080P", "duration": 6}],
+    ids=["defaults", "overrides"],
+)
+def test_minimax_full_flow(monkeypatch, tmp_path, video_settings):
     monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    for field, value in video_settings.items():
+        monkeypatch.setenv(f"MINIMAX_VIDEO_{field.upper()}", str(value))
     posts = {}
 
     def fake_post(url, headers=None, json=None, **kw):
@@ -74,8 +88,28 @@ def test_minimax_full_flow(monkeypatch, tmp_path):
 
     assert out.read_bytes() == b"MP4DATA"
     assert posts["url"].endswith("/v1/video_generation")
-    assert posts["json"]["model"] == "MiniMax-Hailuo-2.3"
+    assert posts["json"] == {"model": "MiniMax-Hailuo-2.3", "prompt": "a cat runs", **video_settings}
+    if "duration" in video_settings:
+        assert type(posts["json"]["duration"]) is int
     assert "successfully" in msg.lower()
+
+
+@pytest.mark.parametrize("duration", ["abc", "2.5", "²"])
+def test_minimax_rejects_invalid_duration(monkeypatch, tmp_path, duration):
+    monkeypatch.setenv("MINIMAX_API_KEY", "m")
+    monkeypatch.setenv("MINIMAX_VIDEO_DURATION", duration)
+
+    def fail_if_called(*args, **kwargs):
+        pytest.fail("Invalid duration should be rejected before submission")
+
+    monkeypatch.setattr(vid.requests, "post", fail_if_called)
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text("a cat runs", encoding="utf-8")
+
+    with pytest.raises(
+        ValueError, match="MINIMAX_VIDEO_DURATION must be an integer number of seconds"
+    ):
+        vid.generate_video(str(prompt), [], str(tmp_path / "v.mp4"))
 
 
 def test_minimax_reference_first_frame(monkeypatch, tmp_path):

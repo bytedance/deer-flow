@@ -181,9 +181,15 @@ async def test_public_invocation_waits_for_http_date_retry_after(monkeypatch, fi
         }
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=f"data: {json.dumps(event)}\n\n")
 
-    client_class = httpx.Client
-    monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=httpx.MockTransport(respond), trust_env=False, **kwargs))
+    client_name = "AsyncClient" if mode == "async" else "Client"
+    client_class = getattr(httpx, client_name)
+    monkeypatch.setattr(provider.httpx, client_name, lambda **kwargs: client_class(transport=httpx.MockTransport(respond), trust_env=False, **kwargs))
     monkeypatch.setattr(provider.time, "sleep", sleeps.append)
+
+    async def async_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(provider.asyncio, "sleep", async_sleep)
 
     result = model.invoke("hi") if mode == "sync" else await model.ainvoke("hi")
 

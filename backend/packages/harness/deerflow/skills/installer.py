@@ -25,6 +25,7 @@ from deerflow.skills.security_static_scanner import (
     scan_archive_preflight,
     skill_scan_enabled,
 )
+from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +129,9 @@ def safe_extract_skill_archive(
       a huge number of tiny/empty members can be cheap to store yet still
       slow to extract, independent of total size).
     - Reject executable binaries (ELF/PE/Mach-O) by magic bytes.
+    - Reject member path segments that cannot be created on every host (Windows
+      reserved device names, trailing dots or spaces), so an unusable member
+      name fails the install instead of leaving a partially installed skill.
 
     Raises:
         ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
@@ -154,6 +158,13 @@ def safe_extract_skill_archive(
             continue
 
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
+        for segment in PurePosixPath(normalized_name).parts:
+            reason = windows_incompatible_segment(segment)
+            if reason is not None:
+                # Extraction creates one host path component per segment; a
+                # Windows device name cannot become one, and the same names are
+                # already refused for support-file writes and skill names.
+                raise ValueError(f"Archive member path is not portable to Windows: {info.filename!r} ({reason})")
         member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")

@@ -8,13 +8,13 @@ Every tool result that passes through ToolErrorHandlingMiddleware gets a
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from typing import Literal, get_args
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform, read_tool_transforms
 from deerflow.utils.bash_exit import BASH_TOOL_NAMES, bash_exit_status
 
 TOOL_META_KEY = "deerflow_tool_meta"
@@ -26,17 +26,6 @@ TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
 TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
 _ERROR_PREFIX = "Error:"
-_PARTIAL_MARKERS = (
-    "partial results",
-    "limited results",
-    "truncated",
-    "results may be incomplete",
-    # Tools that return status="success" with a no-results body (instead of status="error")
-    # must still be caught by stagnation detection so the model is prompted to try a different query.
-    "no results found",
-    "no content found",
-    "no images found",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,99 +37,80 @@ class ToolResultMeta:
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
 
 
-_ERROR_RULES: list[tuple[list[str], dict[str, object]]] = [
-    (
-        ["401", "403", "unauthorized", "authentication", "invalid api key"],
-        {"error_type": "auth", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-    (
-        ["rate limit", "rate limited", "rate_limit"],
-        {"error_type": "rate_limited", "recoverable_by_model": False, "recommended_next_action": "summarize"},
-    ),
-    (
-        ["timeout", "timed out", "connection", "network error", "temporarily unavailable"],
-        {"error_type": "transient", "recoverable_by_model": False, "recommended_next_action": "try_alternative"},
-    ),
-    (
-        ["not configured", "not installed", "missing required", "disabled", "no api key"],
-        {"error_type": "config", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-    (
-        ["permission denied", "access denied", "path traversal", "forbidden"],
-        {"error_type": "permission", "recoverable_by_model": True, "recommended_next_action": "try_alternative"},
-    ),
-    (
-        ["no results found", "no content found", "no images found", "no results"],
-        {"error_type": "no_results", "recoverable_by_model": True, "recommended_next_action": "rewrite_query"},
-    ),
-    (
-        ["not found", "no such file", "does not exist", "404"],
-        {"error_type": "not_found", "recoverable_by_model": True, "recommended_next_action": "rewrite_query"},
-    ),
-    (
-        ["unexpected error", "internal error", "500"],
-        {"error_type": "internal", "recoverable_by_model": False, "recommended_next_action": "stop"},
-    ),
-]
-
 _UNKNOWN_ERROR: dict[str, object] = {
     "error_type": "unknown",
     "recoverable_by_model": True,
     "recommended_next_action": "try_alternative",
 }
-
-# Tool names whose result content is a *rendered remote page* rather than a tool's
-# own message. Name-based, mirroring ToolResultSanitizationMiddleware's
-# _REMOTE_CONTENT_TOOL_NAMES: the first-party fetch providers all normalize to
-# ``web_fetch`` (see community/*/tools.py), so the gate stays provider-agnostic.
-# The gate is required because normalize_tool_message() runs for *every* tool —
-# a short "not found" line is legitimate output from many of them.
-# ``web_capture`` is deliberately absent: its result is a tool message about an
-# artifact ("Captured screenshot: <path> (warning: ...)"), not a rendered page, so
-# a title rule cannot apply. A dead-target capture still yields the artifact plus a
-# model-visible warning; stamping it belongs to the provider boundary (#4239).
-_PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
-
-# Category attributes reused by the error-shell path, indexed by the error_type
-# _ERROR_RULES already declares. Derived rather than duplicated so a shell can
-# never drift from the recoverable/next-action contract of its own category.
-_ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
-TOOL_RESULT_ERROR_TYPES = frozenset(_ATTRS_BY_ERROR_TYPE) | {"unknown", PROGRESS_GUARD_ERROR_TYPE}
-
-# Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
-# error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
-# actually lands on as a rendered page. The 5xx split mirrors _ERROR_RULES' own:
-# 500/501 sit with its "500"/"internal error" keywords (internal → stop), while
-# 502/503/504 sit with its "timeout"/"temporarily unavailable" keywords (transient
-# → try_alternative) — a gateway error is the try-a-different-source case, and the
-# same words must not classify differently here than through _classify_error_text.
-_ERROR_SHELL_PHRASES: dict[str, str] = {
-    "unauthorized": "auth",
-    "proxy authentication required": "auth",
-    "forbidden": "permission",
-    "access denied": "permission",
-    "permission denied": "permission",
-    "not found": "not_found",
-    "too many requests": "rate_limited",
-    "internal server error": "internal",
-    "not implemented": "internal",
-    "bad gateway": "transient",
-    "service unavailable": "transient",
-    "service temporarily unavailable": "transient",
-    "gateway timeout": "transient",
-}
-
-# Generic subject nouns a server may prefix onto the reason phrase ("Page not found",
-# IIS's "404 - File or directory not found."). Stripped from the *front* only, so any
-# word left over after the phrase still rejects the title.
-_STATUS_TITLE_FILLER: frozenset[str] = frozenset({"http", "error", "page", "the", "file", "or", "directory", "url", "resource"})
+TOOL_RESULT_ERROR_TYPES = frozenset({"auth", "rate_limited", "transient", "config", "permission", "no_results", "not_found", "internal", "unknown", PROGRESS_GUARD_ERROR_TYPE})
 
 
-# Pre-compiled at module load from _ERROR_RULES. Anchoring bare numeric codes (401, 403, 404,
-# 500) to word boundaries prevents substring hits on unrelated numbers like "took 500ms".
-# Computed here (after _ERROR_RULES) so the set is authoritative and thread-safe — no lazy
-# writes on the hot classification path.
-_NUMERIC_KW_RE: dict[str, re.Pattern[str]] = {kw: re.compile(rf"\b{kw}\b") for rule_keywords, _ in _ERROR_RULES for kw in rule_keywords if kw.isdigit()}
+class _ModelToolResultText(str):
+    """Request-local encoding marker; copied or persisted text is never trusted."""
+
+
+def tool_result_for_model(message: ToolMessage) -> ToolMessage:
+    """Expose reported execution status separately from textual result data.
+
+    Provider serializers drop additional_kwargs (and often ToolMessage.status).
+    Project only validated status/source fields, never arbitrary metadata or
+    artifacts. Keep the original message for checkpoints, UI and receipt hashes.
+    Legacy content-analysis stamps and native multimodal blocks pass through.
+    """
+    if not isinstance(message.content, str) or isinstance(message.content, _ModelToolResultText):
+        return message
+    meta = (message.additional_kwargs or {}).get(TOOL_META_KEY)
+    if not isinstance(meta, dict):
+        return message
+    status, source = meta.get("status"), meta.get("source")
+    if not isinstance(status, str) or status not in get_args(ToolResultStatus):
+        return message
+    if not isinstance(source, str) or source not in {"tool_return", "exception", "progress_middleware"}:
+        return message
+    envelope = {TOOL_META_KEY: {"status": status, "source": source}, "content": message.content}
+    # A successful invocation can subsequently have its visible text shortened
+    # by a budget wrapper. Expose that fact separately from execution status.
+    transforms = [entry["kind"] for entry in read_tool_transforms(message) if entry["kind"] in {"truncated", "externalized"}]
+    if transforms:
+        envelope["content_transforms"] = list(dict.fromkeys(transforms))
+    content = _ModelToolResultText(json.dumps(envelope, ensure_ascii=False))
+    kwargs = dict(message.additional_kwargs or {})
+    append_tool_transform(kwargs, "structured_tool_result", by="ToolErrorHandlingMiddleware")
+    return message.model_copy(update={"content": content, "additional_kwargs": kwargs})
+
+
+def _http_error_category(status: object) -> str | None:
+    if not isinstance(status, int) or isinstance(status, bool) or not 400 <= status <= 599:
+        return None
+    if status in (401, 403):
+        return "auth"
+    if status == 429:
+        return "rate_limited"
+    if status in (408, 502, 503, 504):
+        return "transient"
+    if status == 404:
+        return "not_found"
+    if status >= 500:
+        return "internal"
+    return "unknown"
+
+
+def classify_exception(exc: BaseException | str) -> dict[str, object]:
+    """Classify actual exception types and HTTP status attributes, never prose."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    category = _http_error_category(status)
+    if category is None:
+        if isinstance(exc, (TimeoutError, ConnectionError)):
+            category = "transient"
+        elif isinstance(exc, PermissionError):
+            category = "permission"
+        elif isinstance(exc, FileNotFoundError):
+            category = "not_found"
+    # A failed request does not establish permanent tool unavailability.
+    return {**_UNKNOWN_ERROR, "error_type": category or "unknown"}
+
 
 _SEMANTIC_ZERO_ERROR_STRINGS: frozenset[str] = frozenset({"none", "null", "false", "no", "ok", "success", "n/a", ""})
 
@@ -163,69 +133,9 @@ def _extract_json_error_text(content: str) -> str | None:
         return None
     if isinstance(error, str) and error.lower().strip() in _SEMANTIC_ZERO_ERROR_STRINGS:
         return None
-    # Serialize non-string values to JSON so _classify_error_text sees a predictable
-    # format (e.g. {"error": 404} → "404", {"error": [...]} → "[...]") instead of
-    # Python repr which can spuriously match keyword rules like "missing required".
+    # Preserve the error payload in a predictable JSON representation. Its prose
+    # is diagnostic context, not evidence for a category or recovery decision.
     return error if isinstance(error, str) else json.dumps(error)
-
-
-def _match_keyword(kw: str, lower: str) -> bool:
-    """Match a keyword against lowercased text, using word boundaries for numeric codes."""
-    if kw.isdigit():
-        return bool(_NUMERIC_KW_RE[kw].search(lower))
-    return kw in lower
-
-
-def _classify_error_text(text: str) -> dict[str, object]:
-    lower = text.lower()
-    for keywords, attrs in _ERROR_RULES:
-        if any(_match_keyword(kw, lower) for kw in keywords):
-            return {**attrs}
-    return {**_UNKNOWN_ERROR}
-
-
-def _classify_error_shell(msg: ToolMessage, content: str) -> dict[str, object] | None:
-    """Return category attributes when a fetched page is an HTTP error page.
-
-    A fetch of a missing URL succeeds at the transport layer, so none of the branches
-    above apply and the server's error page reaches the model stamped
-    ``status="success"`` — counted as evidence it never contained (issue #4273).
-
-    The signal is the *extracted title*: error pages from nginx / Apache / IIS /
-    Cloudflare all render with the status line as their heading and only server
-    boilerplate as the body ("# 404 Not Found" over "nginx/1.24.0"). Matching is by
-    equality after normalization, never substring, so a document merely *about* a
-    status keeps its title's other words and is rejected: "404 Ways to Cook Rice" and
-    "Not Found: a short history of the 404" both survive as successes.
-
-    Content length deliberately plays no part — measured against real error pages it
-    does not separate (an IIS 404 renders to 193 chars, a genuine article to 202).
-
-    This is the provider-agnostic fallback only. The authoritative signal is the
-    provider's own status code, which stays at the web_fetch boundary (Browserless
-    surfaces ``X-Response-Code`` per #4239); a page whose title is not a status line
-    remains that layer's job.
-    """
-    if msg.name not in _PAGE_CONTENT_TOOL_NAMES:
-        return None
-    title = next((line for line in content.splitlines() if line.strip()), "")
-    phrase = _as_status_line(title.lstrip("#").strip())
-    error_type = _ERROR_SHELL_PHRASES.get(phrase) if phrase else None
-    return {**_ATTRS_BY_ERROR_TYPE[error_type]} if error_type else None
-
-
-def _as_status_line(title: str) -> str | None:
-    """Reduce a page title to its bare reason phrase, or None if it carries content.
-
-    "404 Not Found" -> "not found"; "404 - File or directory not found." -> "not found";
-    "404 Ways to Cook Rice" -> "ways to cook rice" (words survive, so it is a document).
-    """
-    words = re.sub(r"[^0-9a-z]+", " ", title.lower()).split()
-    # Strip leading status codes and generic nouns in either order — servers write both
-    # "404 - File or directory not found" and "HTTP Error 404 - Not Found".
-    while words and (words[0] in _STATUS_TITLE_FILLER or (len(words[0]) == 3 and words[0].isdigit() and 400 <= int(words[0]) <= 599)):
-        words = words[1:]
-    return " ".join(words) or None
 
 
 def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
@@ -238,14 +148,14 @@ def _make_meta(*, status: str, source: str, error_type: str | None = None, recov
     }
 
 
-def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
+def stamp_exception_meta(msg: ToolMessage, exc_info: BaseException | str) -> ToolMessage:
     """Stamp deerflow_tool_meta with source='exception' onto an exception-derived ToolMessage.
 
     Unlike normalize_tool_message (which preserves existing stamps), this function always
     overwrites any pre-existing TOOL_META_KEY entry.  Exception-derived classification is
     more authoritative than a tool's own return-time stamp.
     """
-    attrs = _classify_error_text(exc_info)
+    attrs = classify_exception(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
     msg.additional_kwargs = updated_kwargs
@@ -274,72 +184,29 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
 
     kwargs = msg.additional_kwargs or {}
     subagent_status = kwargs.get("subagent_status")
-    if subagent_status in _SUBAGENT_FAILURE_STATUSES:
-        error_text = kwargs.get("subagent_error")
-        if not isinstance(error_text, str) or not error_text:
-            error_text = msg.content if isinstance(msg.content, str) else ""
-        attrs = _classify_error_text(str(error_text))
+    artifact = msg.artifact if isinstance(msg.artifact, dict) else {}
+    response = artifact.get("deerflow_http_response")
+    category = _http_error_category(response.get("status_code")) if isinstance(response, dict) else None
+    # Producer status and native exit markers describe execution. Documents do not.
+    if isinstance(subagent_status, str) and subagent_status in _SUBAGENT_FAILURE_STATUSES:
+        attrs = {**_UNKNOWN_ERROR}
+        if subagent_status in {"timed_out", "polling_timed_out"}:
+            attrs["error_type"] = "transient"
         meta = _make_meta(status="error", source="tool_return", **attrs)
-        updated_kwargs = dict(kwargs)
-        updated_kwargs[TOOL_META_KEY] = meta
-        msg.additional_kwargs = updated_kwargs
-        return msg
-
-    # Pre-compute once; reused by the partial-success marker check below to avoid calling
-    # content.lower() once per _PARTIAL_MARKERS entry inside the generator.
-    content_lower = content.lower()
-
-    # Non-standard error: tool returned status="error" without the "Error:" prefix convention.
-    # (Actual exceptions from ToolErrorHandlingMiddleware are pre-stamped by stamp_exception_meta
-    # and exit early above — they never reach this branch.)
-    # Try JSON extraction first so classification uses only the "error" field value, not
-    # keywords that appear incidentally in other JSON fields (e.g. "query").
-    if msg.status == "error" and not content.startswith(_ERROR_PREFIX):
-        json_error = _extract_json_error_text(content)
-        if json_error is not None:
-            attrs = _classify_error_text(json_error)
-        else:
-            # Determine whether content is a JSON object that simply has no 'error' key.
-            # If so, do NOT classify from the raw JSON string — incidental field values
-            # (e.g. {"user_id": 401}) would spuriously match keyword rules and hard-block
-            # the tool.  Classify raw text only when the content is not valid JSON.
-            try:
-                is_json_dict = isinstance(json.loads(content), dict)
-            except RecursionError:
-                # Depth-limited analysis cannot establish an error category.
-                # Do not infer auth/stop from incidental fields in the raw JSON.
-                attrs = {**_UNKNOWN_ERROR}
-            except (json.JSONDecodeError, ValueError):
-                attrs = _classify_error_text(content)
-            else:
-                attrs = {**_UNKNOWN_ERROR} if is_json_dict else _classify_error_text(content)
-        meta = _make_meta(status="error", source="tool_return", **attrs)
+    elif category is not None:
+        meta = _make_meta(status="error", source="tool_return", **{**_UNKNOWN_ERROR, "error_type": category})
+    elif msg.status == "error":
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
     elif content.startswith(_ERROR_PREFIX):
-        attrs = _classify_error_text(content[len(_ERROR_PREFIX) :])
-        meta = _make_meta(status="error", source="tool_return", **attrs)
-    elif (json_error := _extract_json_error_text(content)) is not None:
-        if msg.name == "read_file":
-            # Native reads return document text, not a tool error envelope.
-            # Explicit failures above still take precedence over file content.
-            meta = _make_meta(status="success", source="content_analysis")
-        else:
-            attrs = _classify_error_text(json_error)
-            meta = _make_meta(status="error", source="tool_return", **attrs)
+        # Legacy tool envelopes, including unstamped read_file checkpoints, use
+        # this prefix. Producer-stamped successful file contents return above.
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
+    elif msg.name != "read_file" and _extract_json_error_text(content) is not None:
+        meta = _make_meta(status="error", source="tool_return", **_UNKNOWN_ERROR)
     elif failed_bash:
-        # A nonzero shell exit does not raise a Python exception. Keep it
-        # recoverable: grep/diff and diagnostic probes can legitimately use 1.
-        # Do not derive auth/stop categories from arbitrary stdout numbers.
         meta = _make_meta(status="error", source="content_analysis", **_UNKNOWN_ERROR)
-    elif (shell_attrs := _classify_error_shell(msg, content)) is not None:
-        meta = _make_meta(status="error", source="content_analysis", **shell_attrs)
-    elif any(m in content_lower for m in _PARTIAL_MARKERS):
-        meta = _make_meta(
-            status="partial_success",
-            source="content_analysis",
-            recommended_next_action="rewrite_query",
-        )
     else:
-        meta = _make_meta(status="success", source="content_analysis")
+        meta = _make_meta(status="success", source="tool_return")
 
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = meta

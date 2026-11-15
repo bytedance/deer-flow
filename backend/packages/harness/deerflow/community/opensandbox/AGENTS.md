@@ -1,35 +1,37 @@
-### Command deadline reporting
+# OpenSandbox provider (`deerflow/community/opensandbox/`)
 
-Normalize only `CommandExecError` / `context deadline exceeded` with no numeric
-exit code to `Exit Code: 124`, preserving partial output. Keep transport errors,
-other missing-code errors and numeric exits unchanged. A signal-only `-1` does
-not prove a deadline. Tests must use execution results, not a fake-only raised
-`TimeoutError`, for the deadline contract.
+General sandbox rules are in the [sandbox guide](../../sandbox/AGENTS.md).
 
-### OpenSandbox output synchronization
+```bash
+cd backend && python -m pytest tests -q -k "opensandbox"
+```
 
-Release mirrors scoped regular output files to `Paths.sandbox_outputs_dir()`
-before parking the client. Hold the same scope serializer as acquire and retain
-the active entry during transfer so reuse and warm reaping cannot overlap it.
-Never repool a client invalidated or untracked during synchronization.
+Validate `use_server_proxy` and `secure_access` at provider startup. Accept
+booleans, default missing or null values to `false`, and reject strings and
+other types before creating an SDK connection.
 
-The bounded listing uses base64-encoded NUL frames to survive line-oriented SSE
-events. POSIX pipelines must report every stage's exit status explicitly.
-`find` exit 1 permits complete records with a warning only after size/framing
-validation; failed head/encoder stages and truncated listings still fail closed.
-Native downloads enforce the remaining byte budget and cooperative deadline,
-closing the stream on failure. Publish via an exclusively created temporary file and
-atomic replacement; reject traversal and existing linked host destinations.
-Preflight the entire accepted listing for case-folded, NFC-equivalent component
-aliases before any download, including records beyond the transfer cap. Skip all
-paths under ambiguous components. Reject differently spelled local aliases both
-before transfer and before publication; preserve previous complete copies.
-Keep failed synchronization best effort, preserve prior complete copies, and
-do not remove remotely deleted files. Cover the real listing shell and release
-to Gateway artifact reader with offline transports in
-`tests/test_opensandbox_provider.py`.
-Decode each NUL-framed filename separately; invalid UTF-8 records consume the
-candidate budget but must not prevent valid outputs from being mirrored.
-Portable reserved-name checks include COM/LPT superscript digits and console
-device names without `PureWindowsPath.is_reserved`. Catch only the serializer's
-typed closure exception after verifying the client has been untracked.
+## Command deadlines
+
+- **Only a `CommandExecError` with `context deadline exceeded` and no numeric
+  exit code becomes exit code 124.** Partial output is kept. Transport errors and
+  numeric exits stay unchanged, and a signal-only `-1` does not prove a deadline.
+- **Deadline tests use execution results.** A `TimeoutError` that only a fake
+  raises does not test the contract.
+
+## Output synchronization
+
+- **Release mirrors the output files to the host before it parks the client.**
+  It holds the same scope serializer as acquire and keeps the active entry during
+  the transfer, so reuse and warm reaping cannot overlap it. A client that was
+  invalidated or untracked during synchronization is never returned to the pool.
+- **The listing is NUL-framed and base64-encoded**, because the event stream is
+  line-oriented. The pipeline reports the exit status of every stage, and a
+  truncated listing fails closed. Decode each file name on its own, so one
+  invalid name does not block the valid ones.
+- **Check the whole listing for alias names before any download.** Two names
+  that differ only by case or Unicode normalization collide on some hosts. Skip
+  every path below an ambiguous component.
+- **Publish through an exclusively created temporary file and an atomic
+  replace.** Reject path traversal and an existing linked destination.
+- **Synchronization is best effort.** A failure keeps the previous complete
+  copy, and a file deleted in the sandbox stays on the host.

@@ -210,6 +210,10 @@ class ExtensionRegistry(Protocol):
         """
         return False
 
+    def workspace_search(self, provider: Any) -> bool:
+        """Register one WorkspaceSearchProvider; False on hosts without search."""
+        return False
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         return None
 

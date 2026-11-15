@@ -514,8 +514,7 @@ class TestSignalClassification:
         assert updater.update_memory(_conversation(), thread_id="thread-1", user_id="user-1") is True
 
         prompt_text = "\n".join(str(getattr(message, "content", message)) for message in llm.prompts[0])
-        assert "Positive reinforcement signals were detected" in prompt_text
-        assert "Explicit correction signals were detected" not in prompt_text, "negation stayed below the threshold"
+        assert "They are not evidence of user intent" in prompt_text
         assert recorded[0]["signal_classification"]["labels"] == [LABEL_REINFORCEMENT]
 
     def test_a_failed_direction_keeps_the_other_one(self):
@@ -981,9 +980,9 @@ class TestMutationsAccepted:
 
         result = updater._apply_updates(updater.get_memory_data(user_id="user-1"), json.loads(llm.payload), metrics=metrics, signals=frozenset({"reinforcement"}), user_id="user-1")
 
-        assert result["facts"][0]["confirmationCount"] == 1
+        assert "confirmationCount" not in result["facts"][0]
         assert "fact_b" not in {fact["id"] for fact in result["facts"]}
-        assert metrics["mutations_accepted"] == 2
+        assert metrics["mutations_accepted"] == 1
 
     def test_a_capacity_evicted_new_fact_is_not_an_accepted_mutation(self):
         """A proposal that passes the confidence gate but is evicted leaves the facts unchanged.
@@ -1168,16 +1167,16 @@ class TestMutationsAccepted:
         assert metrics["mutations_accepted"] == 1, "the merge into the id-less target persisted a change"
 
     def test_an_upload_event_fact_discarded_at_finalization_does_not_count(self):
-        """A fact accepted by the apply but scrubbed before persistence has not landed.
+        """A fact accepted by the apply but rejected by the structured scope gate has not landed.
 
-        Upload events are session-scoped and scrubbed on the way to storage, so the
+        Upload events are session-scoped and rejected by their explicit scope labels, so the
         shadow evaluation must not read the rejected proposal as a lost memory.
         """
         payload = json.dumps(
             {
                 "user": {},
                 "history": {},
-                "newFacts": [{"content": "User uploaded a test file for verification purposes", "category": "context", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}],
+                "newFacts": [{"content": "User uploaded a test file for verification purposes", "category": "context", "confidence": 0.9, "scope": "thread", "durability": "transient", "authority": "descriptive"}],
                 "factsToRemove": [],
             }
         )
@@ -1186,7 +1185,7 @@ class TestMutationsAccepted:
 
         result = updater._apply_updates(updater.get_memory_data(user_id="user-1"), json.loads(payload), metrics=metrics, user_id="user-1")
 
-        assert result["facts"] == [], "the upload-event fact is scrubbed before persistence"
+        assert result["facts"] == [], "the upload-event fact is rejected by the structured scope gate"
         assert metrics["mutations_accepted"] == 0, "a proposal removed before persistence did not land"
 
 
@@ -1425,7 +1424,7 @@ class TestConfirmationInvariant:
         assert self._confirmation(with_hints) is None, "a model hint is not confirmation evidence"
         assert self._confirmation(without_judge) is None, "and the baseline confirms nothing either"
 
-    def test_the_deterministic_channel_still_confirms(self, tmp_path):
+    def test_regex_channel_cannot_confirm(self, tmp_path):
         """Teeth: the gate is live -- it just reads the other channel.
 
         A custom pattern set makes the feed's re-detected reinforcement signal
@@ -1433,7 +1432,7 @@ class TestConfirmationInvariant:
         """
         patterns = _patterns_dir(tmp_path, reinforcement="- pattern: 'release candidate'\n")
 
-        assert self._confirmation(self._updater_with_fact(patterns_dir=str(patterns))) == 1
+        assert self._confirmation(self._updater_with_fact(patterns_dir=str(patterns))) is None
 
 
 class TestThroughTheQueue:

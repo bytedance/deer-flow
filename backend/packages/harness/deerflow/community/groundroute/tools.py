@@ -24,6 +24,7 @@ import os
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
@@ -56,11 +57,9 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object]:
     if tool_config is not None:
         extra = tool_config.model_extra or {}
         max_results = extra.get("max_results")
-        candidate = extra.get("api_key")
-        if isinstance(candidate, str) and candidate.strip():
-            api_key = candidate.strip()
+        api_key = resolve_api_key(extra.get("api_key"))
     if api_key is None:
-        api_key = os.getenv("GROUNDROUTE_API_KEY")
+        api_key = resolve_api_key(os.getenv("GROUNDROUTE_API_KEY"))
     return api_key, max_results
 
 

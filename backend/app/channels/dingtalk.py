@@ -438,6 +438,24 @@ class DingTalkChannel(Channel):
                         },
                     )
                 response.raise_for_status()
+                data = response.json()
+                process_key = data.get("processQueryKey") if isinstance(data, dict) else None
+                if not isinstance(process_key, str) or not process_key.strip():
+                    logger.warning(
+                        "[DingTalk] file send response missing processQueryKey for %s; treating as not delivered",
+                        attachment.filename,
+                    )
+                    return False
+                if conversation_type != _CONVERSATION_TYPE_GROUP:
+                    target = sender_staff_id
+                    for field in ("invalidStaffIdList", "flowControlledStaffIdList"):
+                        failed = data.get(field, [])
+                        if not isinstance(failed, list):
+                            logger.warning("[DingTalk] unexpected %s in file send response for %s", field, attachment.filename)
+                            return False
+                        if target in failed:
+                            logger.warning("[DingTalk] file not delivered for %s (%s)", attachment.filename, field)
+                            return False
 
             logger.info("[DingTalk] file sent: %s", attachment.filename)
             return True

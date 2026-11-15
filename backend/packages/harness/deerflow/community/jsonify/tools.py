@@ -31,6 +31,7 @@ from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, ValidationError, 
 from deerflow.community.provider_credentials import redact_secret, reject_url_userinfo
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,27 @@ def _build_params(
     return params
 
 
+async def _open_client(timeout: float) -> httpx.AsyncClient:
+    # HTTPX loads TLS trust synchronously. Own the construction task so a
+    # cancellation can still close the client that the worker returns.
+    construction = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, timeout=timeout))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_after_construction() -> None:
+            try:
+                client = await construction
+                await client.aclose()
+            except Exception as exc:
+                logger.error("Jsonify HTTP client cleanup after cancellation failed (%s)", type(exc).__name__)
+
+        # Report failures inside the owned task before a repeated cancellation
+        # makes await_drained discard its outcome.
+        await await_drained(close_after_construction())
+        raise
+
+
 async def _read_rows(settings: _JsonifySettings, args: _RowsArgs) -> dict[str, Any]:
     serve_url = str(settings.datasets[args.dataset])
     url_error = await asyncio.to_thread(validate_public_http_url, serve_url, action="read")
@@ -113,7 +135,7 @@ async def _read_rows(settings: _JsonifySettings, args: _RowsArgs) -> dict[str, A
     offset = 0
     version: int | None = None
     truncated = False
-    async with httpx.AsyncClient(timeout=settings.timeout) as client:
+    async with await _open_client(settings.timeout) as client:
         while True:
             limit = min(_PAGE_SIZE, max_rows - len(rows))
             response = await client.get(

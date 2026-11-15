@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "id": "catalog/example",
+  "locales": {
+    "zh-CN": {
+      "title": "扩展开发示例",
+      "description": "演示中间件、任务生命周期、模型观察器、服务和 HTTP 路由的扩展方式。",
+      "usage": [
+        {
+          "title": "安装到开发环境",
+          "description": "参考包内文档安装示例，配置并重启 Gateway。它用于演示扩展开发接口。"
+        },
+        {
+          "title": "运行任务并检查统计",
+          "description": "执行包含工具调用的任务，再通过示例统计 API 查看调用次数、结果类型与耗时。"
+        }
+      ]
+    },
+    "en-US": {
+      "title": "Extension development example",
+      "description": "Explore middleware, task lifecycle, model observers, services and HTTP route contributions.",
+      "usage": [
+        {
+          "title": "Install in a development environment",
+          "description": "Follow the package guide to install, configure and restart Gateway. This package demonstrates extension development contracts."
+        },
+        {
+          "title": "Run a task and inspect statistics",
+          "description": "Run a task that uses tools, then inspect call counts, outcome types and durations through the example statistics API."
+        }
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-example#readme"
+}

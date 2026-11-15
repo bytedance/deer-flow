@@ -39,6 +39,7 @@ def _new_aio_sandbox_with_session_state():
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _SessionCreationState
 
     sbx = AioSandbox.__new__(AioSandbox)
+    sbx._bash_slots = threading.BoundedSemaphore(50)
     sbx._session_creation_state_lock = threading.Lock()
     sbx._shell_session_creation_state = _SessionCreationState()
     sbx._bash_session_creation_state = _SessionCreationState()
