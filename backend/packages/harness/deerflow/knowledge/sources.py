@@ -68,6 +68,7 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
     """Budget text and its evidence together; never cut a citation in half."""
     entries: list[str] = []
     sources: list[KnowledgeSource] = []
+    retained_evidence: set[int] = set()
     used_chars = 0
     budget = max(0, max_total_chars)
     truncated = False
@@ -75,21 +76,30 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
         if index > 100:
             truncated = True
             break  # Match the bounded artifact readers and delegation ledger.
-        content = truncate(hit.content.strip(), max_chars_per_chunk)
-        if not content:
+        if not retained_evidence.issuperset(hit.depends_on):
+            truncated = True
+            continue
+        evidence_line = ""
+        if hit.depends_on:
+            references = ", ".join(f"result [{position}]" for position in hit.depends_on)
+            evidence_line = f"Evidence: {references}.\n"
+        raw_content = hit.content.strip()
+        content = truncate(raw_content, max_chars_per_chunk - len(evidence_line))
+        if not content or (evidence_line and content == "…"):
+            truncated |= bool(evidence_line)
             continue
         source = hit.source
         # Evidence must be from this hit. Adapters cannot attach unrelated text.
-        if source is not None and source.excerpt != hit.content.strip():
+        if source is not None and source.excerpt != raw_content:
             source = None
-        if content == "…" and len(hit.content.strip()) > len(content):
+        if content == "…" and len(raw_content) > len(content):
             source = None  # A truncation marker alone is not retrieved evidence.
         if source is not None:
             source = KnowledgeSource.model_validate({**source.model_dump(exclude={"id"}), "excerpt": content})
         header = f"[{index}] {citation(source) if source else 'Unattributed content'}\n"
         separator = "\n\n" if entries else ""
         remaining = budget - used_chars - len(separator)
-        entry = header + content
+        entry = header + evidence_line + content
         if len(entry) > remaining:
             # Skip this hit without changing its excerpt or source identity;
             # a later, shorter entry may still fit the remaining budget.
@@ -99,6 +109,7 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
         used_chars += len(separator) + len(entry)
         if source is not None:
             sources.append(source)
+            retained_evidence.add(index)
     text = "".join(entries)
     if truncated:
         remaining = budget - len(text)

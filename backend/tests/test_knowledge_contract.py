@@ -63,6 +63,65 @@ def test_sources_require_real_evidence_and_optional_locators() -> None:
     assert source.page is None and source.url is None
 
 
+@pytest.mark.parametrize("positions", [[0], [-1], [True], [1.0], ["1"], [1, 1], [2], [3]])
+def test_retrieval_result_rejects_invalid_evidence_dependencies(positions):
+    with pytest.raises(ValidationError):
+        RetrievalResult.model_validate({"hits": [{"content": "Evidence"}, {"content": "Relation", "depends_on": positions}]})
+
+
+def test_evidence_dependencies_round_trip_without_changing_legacy_hit_shape():
+    legacy_payload = {"hits": [{"content": "Evidence", "source": None, "score": None}]}
+    result = RetrievalResult.model_validate(legacy_payload)
+    assert result.hits[0].depends_on == []
+    assert result.model_dump() == json.loads(result.model_dump_json()) == legacy_payload
+
+    with_relation = RetrievalResult(hits=[*result.hits, RetrievalHit(content="Relation", depends_on=[1])])
+    assert RetrievalResult.model_validate(with_relation.model_dump()) == with_relation
+    assert RetrievalResult.model_validate_json(with_relation.model_dump_json()) == with_relation
+
+
+@pytest.mark.parametrize("has_unrelated_source", [False, True])
+def test_visible_text_without_a_valid_source_cannot_satisfy_a_dependency(has_unrelated_source):
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="Unrelated excerpt") if has_unrelated_source else None
+    result = RetrievalResult(
+        hits=[
+            RetrievalHit(content="Evidence text", source=source),
+            RetrievalHit(content="Dependent relation", depends_on=[1]),
+            RetrievalHit(content="Independent text mentions result [10]."),
+        ]
+    )
+
+    text, artifact = format_result(result)
+
+    assert "Evidence text" in text
+    assert "Dependent relation" not in text
+    assert "Independent text mentions result [10]." in text
+    assert artifact["knowledge_sources"] == []
+
+
+def test_budget_reserves_space_for_the_complete_evidence_line_and_relation_body():
+    source = KnowledgeSource(provider="demo", title="Guide", excerpt="Evidence")
+    evidence = RetrievalHit(content=source.excerpt, source=source)
+    result = RetrievalResult(hits=[evidence, RetrievalHit(content="abcdefghijk", depends_on=[1])])
+    base, _ = format_result(RetrievalResult(hits=[evidence]))
+    reference = "Evidence: result [1].\n"
+    expected = f"{base}\n\n[2] Unattributed content\n{reference}abcdefg…"
+    chunk_budget = len(reference) + 8
+
+    text, artifact = format_result(result, max_chars_per_chunk=chunk_budget, max_total_chars=len(expected))
+    assert text == expected
+    assert sources_from_messages([{"type": "tool", "content": text, "artifact": artifact}]) == [source]
+
+    text, _ = format_result(result, max_chars_per_chunk=chunk_budget, max_total_chars=len(expected) - 1)
+    assert text.startswith(base)
+    assert "[2]" not in text
+
+    for limit in (len(reference) - 1, len(reference), len(reference) + 1):
+        text, _ = format_result(result, max_chars_per_chunk=limit)
+        assert text.startswith(base)
+        assert "[2]" not in text
+
+
 def test_budget_never_leaves_citations_without_visible_evidence() -> None:
     result = RetrievalResult(hits=[RetrievalHit(content="x" * 500, source=KnowledgeSource(provider="demo", title="Guide", excerpt="x" * 500))])
     for budget in (0, 1, 20, 80, 200, 800):

@@ -128,14 +128,75 @@ async def test_edges_reference_only_their_own_chunks_and_reuse_shared_positions(
         {"src_id": "C", "tgt_id": "D", "source_id": "missing"},
     ]
     result = await provider.relations_search("q", context=KnowledgeRequestContext("alice"))
-    assert result.hits[1].content.startswith("Evidence: result [1].")
-    assert result.hits[3].content.startswith("Evidence: result [3], result [1].")
+    assert result.hits[1].depends_on == [1]
+    assert result.hits[3].depends_on == [3, 1]
+    assert result.hits[4].depends_on == []
     assert "No retrieved document evidence" in result.hits[4].content
     assert len([hit for hit in result.hits if hit.source]) == 2
+    content, _ = format_result(result)
+    assert "Evidence: result [1].\nUpstream relation (one edge): A — B" in content
+    assert "Evidence: result [3], result [1].\nUpstream relation (one edge): B — C" in content
     for budget in [0, 50, 200, 500, 8000]:
         content, _ = format_result(result, max_total_chars=budget)
         for ref in re.findall(r"result \[(\d+)\]", content):
             assert f"[{ref}] [citation:" in content
+
+
+@pytest.mark.asyncio
+async def test_relation_keeps_inline_references_on_hosts_without_dependency_metadata(graph, monkeypatch):
+    from deerflow.knowledge import RetrievalHit
+
+    monkeypatch.delitem(RetrievalHit.model_fields, "depends_on")
+    provider, _, _ = graph
+    result = await provider.relations_search("forest", context=KnowledgeRequestContext("alice"))
+    assert result.hits[1].content.startswith("Evidence: result [1].\n")
+    assert "depends_on" not in result.hits[1].model_dump()
+
+
+@pytest.mark.asyncio
+async def test_agent_budget_preserves_only_relations_with_retained_evidence(graph):
+    from langchain_core.messages import AIMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.config.tool_config import ToolConfig
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY, ExtensionRegistry
+    from deerflow.knowledge.tools import entity_relations_search_tool
+
+    provider, calls, state = graph
+    state["chunks"] = [{"chunk_id": f"c{i}", "file_path": f"source-{i}.md", "content": f"Evidence {i}. " + "x" * 755} for i in range(1, 11)]
+    state["relationships"] = [
+        {"src_id": "Cedar", "tgt_id": "Forest", "source_id": "<SEP>".join(chunk["chunk_id"] for chunk in state["chunks"])},
+        {"src_id": "Oak", "tgt_id": "Grove", "source_id": "c1"},
+    ]
+    registry = ExtensionRegistry()
+    with registry.attributed_to("lightrag-test:install"):
+        registry.knowledge_provider("lightrag-relations", provider)
+    name = "entity_relations_search"
+    config = AppConfig(
+        sandbox=SandboxConfig(use="example:Sandbox"),
+        tools=[ToolConfig(name=name, group="knowledge", use=f"deerflow.knowledge.tools:{name}_tool", provider="lightrag-relations")],
+    )
+    builder = StateGraph(MessagesState, context_schema=dict)
+    builder.add_node("tools", ToolNode([entity_relations_search_tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+
+    result = await builder.compile().ainvoke(
+        {"messages": [AIMessage(content="", tool_calls=[{"id": "relations", "name": name, "args": {"query": "forest"}}])]},
+        context={"app_config": config, "user_id": "alice", "agent_name": "researcher", EXTENSION_SNAPSHOT_CONTEXT_KEY: registry.build()},
+    )
+    message = result["messages"][-1]
+    assert len(calls) == 1
+    assert len(message.content) <= 8000
+    assert len(message.artifact["knowledge_sources"]) == 9
+    assert [source.title for source in sources_from_messages([message])] == [f"source-{i}.md" for i in range(1, 10)]
+    assert "Cedar — Forest" not in message.content
+    assert "result [10]" not in message.content
+    assert "Evidence: result [1].\nUpstream relation (one edge): Oak — Grove" in message.content
+    assert "Upstream entity: Cedar" in message.content
 
 
 @pytest.mark.asyncio
