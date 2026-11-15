@@ -287,12 +287,26 @@ def test_redact_egress_text_leaves_a_url_without_credentials_alone():
         # A quoted value keeps the scheme outside the quotes.
         ('Authorization: "Bearer 8f14e45fceea167a5a36dedd4bea2543"', "8f14e45fceea167a5a36dedd4bea2543"),
         ("Authorization: 'Bearer 8f14e45fceea167a5a36dedd4bea2543'", "8f14e45fceea167a5a36dedd4bea2543"),
+        # A comma joins several tokens into one header value.
+        ("Authorization: Bearer aaa111,bbb222", "bbb222"),
     ],
 )
 def test_redact_egress_text_scrubs_header_credentials(header: str, secret: str):
     redacted = redact_egress_text(f"sent the request with {header} to the service")
 
     assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_the_aws_signature_field():
+    # SigV4 keeps the signature as a `name=value` field after the scheme, so the
+    # header rule alone only redacts the scheme token.
+    signature = "8f14e45fceea167a5a36dedd4bea2543f7a1b2c3d4e5f60718293a4b5c6d7e8"
+    header = f"Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261115/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature={signature}"
+
+    redacted = redact_egress_text(f"sent the request with {header} to the bucket")
+
+    assert signature not in redacted
     assert "[redacted]" in redacted
 
 

@@ -52,7 +52,7 @@ _EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
+    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential|signature)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
 )
 # The patterns above only reach a value that follows a secret-like key. Two
 # credential carriers have no such key: a URL's user info
@@ -64,7 +64,7 @@ _EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
 _URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
 # The value may be quoted with the scheme outside the quotes, so both
 # ``Authorization: Bearer x`` and ``Authorization: "Bearer x"`` are covered.
-_AUTH_HEADER_RE = re.compile(r"(?i)(\bauthorization\b\s*[:=]\s*)(?:[\"']?(?:(bearer|basic|token|digest)\s+)?[\"']?)([^\s\"',;]+)[\"']?")
+_AUTH_HEADER_RE = re.compile(r"(?i)(\bauthorization\b\s*[:=]\s*)(?:[\"']?(?:(bearer|basic|token|digest)\s+)?[\"']?)([^\s\"';]+)[\"']?")
 # A cookie header carries one ``name=value`` pair per ``;``-separated segment,
 # and only the first pair follows the header name, so the whole value goes.
 _COOKIE_HEADER_RE = re.compile(r"(?i)(\bcookie\b\s*[:=]\s*)([^\n]+)")
