@@ -1,9 +1,8 @@
 """Read-through delta-history cache wrapper for a canonical BaseCheckpointSaver.
 
-The inner saver must return delta history in ascending ``(task_id, idx)``
-order per checkpoint, with each task's ``pending_writes`` in ``idx`` order.
-The in-repo memory, sqlite, and postgres backends satisfy this contract;
-the base saver's default history walk alone does not guarantee it.
+The inner saver must return each checkpoint's ``pending_writes`` in the
+same order used by its delta history walk. The supported memory, SQLite,
+and PostgreSQL savers use ``writes_sort_key(task_path, task_id, idx)``.
 
 Correctness argument (spec §3): a checkpoint's delta history is a pure
 function of its sealed ancestor chain — the LangGraph contract excludes the
@@ -53,24 +52,11 @@ def _checkpoint_ref(tup: CheckpointTuple) -> tuple[str, str, str]:
 def _channel_writes(tup: CheckpointTuple, channel: str) -> list[PendingWrite]:
     """Writes for one channel in the inner saver's canonical delta order.
 
-    ``get_tuple`` returns ``pending_writes`` already in the canonical
-    ``writes_sort_key`` order — ``(task_path, task_id, idx)`` per checkpoint
-    (``InMemorySaver`` sorts its storage by that key; sqlite applies the same
-    key in Python inside ``load_pending_writes`` — its ``pending_writes_sql``
-    has no ``ORDER BY`` — and postgres does exactly the same in
-    ``_load_writes``, sorting in Python by that key after an unordered
-    ``array_agg(...)`` in ``SELECT_SQL``). The inner
-    ``get_delta_channel_history`` walks use the same order, so simply
-    filtering by channel keeps the cached composition in agreement with the
-    authoritative walk. Re-sorting by ``task_id`` was therefore not a no-op
-    on sqlite or postgres either: it broke them exactly the way it broke
-    ``InMemorySaver``.
-
-    Re-sorting by ``task_id`` alone would *break* that agreement on fan-out
-    supersteps (several parallel tasks writing one channel): tasks are
-    canonically ordered by ``task_path`` first, so a stable ``task_id`` sort
-    reorders writes whenever the two orders differ, and an order-sensitive
-    reducer rebuilds a different value from cache than from the inner saver.
+    ``InMemorySaver`` sorts stored writes with ``writes_sort_key``. SQLite's
+    ``load_pending_writes`` and PostgreSQL's ``_load_writes`` apply the same
+    key to writes returned by the database. Filtering preserves the delta
+    walk's replay order. Sorting by ``task_id`` alone can reorder parallel
+    writes whose task paths sort differently and change the reducer's result.
     """
     return [w for w in (tup.pending_writes or []) if w[1] == channel]
 

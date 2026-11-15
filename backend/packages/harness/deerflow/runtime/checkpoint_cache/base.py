@@ -23,8 +23,8 @@ from typing import Any, Protocol
 # v2: delta-history composition now keeps the inner saver's canonical
 # ``writes_sort_key`` order instead of re-sorting by ``task_id``. Entries
 # cached under v1 may hold mis-ordered histories yet still pass
-# ``valid_history_entry`` (a shape-only check), so the versioned default
-# prefix orphans them on upgrade instead of serving them until TTL expiry.
+# ``valid_history_entry`` (a shape-only check), so upgraded readers skip
+# them by using a new default prefix.
 CACHE_FORMAT_VERSION = 2
 
 

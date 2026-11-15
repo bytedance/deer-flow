@@ -3,15 +3,17 @@
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deerflow.config.app_config import AppConfig
-from deerflow.runtime.checkpoint_cache.base import CACHE_FORMAT_VERSION
+from deerflow.runtime.checkpoint_cache.base import CACHE_FORMAT_VERSION, make_history_key
 from deerflow.runtime.checkpoint_cache.provider import (
     checkpoint_cache_db_hash,
     checkpoint_cache_key_prefix,
     make_checkpoint_cache,
 )
+from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 
 
 class _FakeEncoder:
@@ -241,6 +243,41 @@ async def test_adelete_thread_outage_degrades_without_raising(monkeypatch: pytes
     with caplog.at_level("WARNING"):
         await cache.adelete_thread("p", "t1")  # must not raise
     assert "thread purge failed" in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("key_prefix", ["", "tenant-history"])
+async def test_thread_delete_after_redis_cache_upgrade(monkeypatch: pytest.MonkeyPatch, key_prefix: str) -> None:
+    config = _app_config(
+        {
+            "checkpoint_channel_mode": "delta",
+            "checkpoint_cache": {"type": "redis", "ttl_seconds": 0, "key_prefix": key_prefix},
+        }
+    )
+    fake = _FakeRedis()
+    cache = _make_cache(monkeypatch, fake, ttl_seconds=0)
+
+    async with make_checkpointer(config) as saver:
+        thread = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+        checkpoint = empty_checkpoint()
+        saved = await saver.aput(thread, checkpoint, {}, {})
+        assert await saver.aget_tuple(saved) is not None
+
+        legacy_prefix = f"ckpt-hist:v1:{checkpoint_cache_db_hash(config.database)}"
+        active_key = make_history_key(checkpoint_cache_key_prefix(config), "t1", "", checkpoint["id"], "messages")
+        legacy_key = make_history_key(legacy_prefix, "t1", "", checkpoint["id"], "messages")
+        sibling_key = make_history_key(legacy_prefix, "t10", "", checkpoint["id"], "messages")
+        other_db_key = make_history_key("ckpt-hist:v1:other-db", "t1", "", checkpoint["id"], "messages")
+        await cache.aset_many({key: _entry(1) for key in (active_key, legacy_key, sibling_key, other_db_key)})
+        assert fake.ttls[legacy_key] is None
+
+        await saver.adelete_thread("t1")
+
+        assert await saver.aget_tuple(saved) is None
+        expected = {sibling_key, other_db_key}
+        if key_prefix:
+            expected.add(legacy_key)
+        assert set(fake.store) == expected
 
 
 @pytest.mark.anyio
