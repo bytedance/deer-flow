@@ -8,7 +8,7 @@ import os
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from contextvars import Context, copy_context
@@ -33,6 +33,7 @@ from deerflow.agents.middlewares.audit_context import (
 )
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
+from deerflow.authz.provider import Principal
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
@@ -960,6 +961,7 @@ class SubagentExecutor:
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
         input_gate: Any | None = None,
         agent_mcp_authority: Any | None = None,
+        principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
     ):
         """Initialize the executor.
 
@@ -1048,6 +1050,7 @@ class SubagentExecutor:
         self.user_id = user_id
         # Guardrail attribution propagated from the parent runtime context.
         self.user_role = user_role
+        self._principal_resolver = principal_resolver
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
@@ -1737,6 +1740,24 @@ class SubagentExecutor:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
                 async with slot:
+                    if self._principal_resolver is not None:
+                        # Durable work can wait behind ordinary subagents after
+                        # its worker-side check. Revalidate before marking it
+                        # running or entering any task lifecycle hooks.
+                        try:
+                            principal = await self._principal_resolver()
+                            if not isinstance(principal, Principal) or principal.user_id != self.user_id:
+                                raise PermissionError("Subagent principal does not match its owner")
+                            self.user_role = principal.role
+                            self.oauth_provider = principal.oauth_provider
+                            self.oauth_id = principal.oauth_id
+                            self.channel_user_id = principal.channel_user_id
+                            self.is_internal = principal.is_internal
+                            self.authz_attributes = normalize_authz_attributes(principal.attributes)
+                            self._skill_authorization = None
+                        except Exception as exc:
+                            result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+                            return result
                     with result._state_lock:
                         if result.status.is_terminal:
                             return result
