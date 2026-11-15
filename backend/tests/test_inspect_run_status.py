@@ -116,7 +116,7 @@ def test_tool_reads_live_graph_state_without_exposing_message_content():
     graph = create_agent(model=model, tools=[build_inspect_run_status_tool(context_window=100)], state_schema=ThreadState)
     result = asyncio.run(
         graph.ainvoke(
-            {"messages": [HumanMessage(content="secret request")]},
+            {"messages": [HumanMessage(content="secret request")], "todos": [{"content": "private task"}]},
             {"configurable": {"thread_id": "status-test"}},
             context={CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: frozenset()},
         )
@@ -127,6 +127,8 @@ def test_tool_reads_live_graph_state_without_exposing_message_content():
     assert snapshot["tool_calls_this_run"] == 1
     assert snapshot["scope"] == "current_run_visible"
     assert snapshot["token_usage"] == {"input": 25, "output": 5, "total": 30}
+    assert snapshot["todos"]["pending"] == 1
+    assert "private task" not in tool_output
     assert "secret request" not in tool_output
 
 
