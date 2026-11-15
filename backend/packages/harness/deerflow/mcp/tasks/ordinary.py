@@ -48,6 +48,7 @@ class McpTaskToolCaller(Protocol):
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
+        agent_auth: dict[str, Any] | None = None,
     ) -> Any: ...
 
 
@@ -188,6 +189,7 @@ class OrdinaryMcpTaskDriver:
             # credentials; status and cancel run after that run ended.
             request_scoped_headers=True,
             connection_scope=_connection_scope(request.driver_data),
+            **({"agent_auth": request.driver_data["agent_auth"]} if "agent_auth" in request.driver_data else {}),
         )
         payload = _parse(
             _SubmitPayload,
@@ -211,6 +213,7 @@ class OrdinaryMcpTaskDriver:
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
             connection_scope=_connection_scope(task.driver_data),
+            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
         )
         payload = _parse(
             _StatusPayload,
@@ -231,6 +234,7 @@ class OrdinaryMcpTaskDriver:
             thread_id=task.thread_id,
             thread_incarnation=task.thread_incarnation,
             connection_scope=_connection_scope(task.driver_data),
+            **({"agent_auth": task.driver_data["agent_auth"]} if "agent_auth" in task.driver_data else {}),
         )
         payload = _parse(
             _CancelPayload,

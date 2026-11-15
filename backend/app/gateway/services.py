@@ -92,7 +92,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.client_context import sanitize_client_context
-from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+from deerflow.runtime.context_keys import AGENT_AUTH_CONTEXT_KEY, PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -1152,6 +1152,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             # at admission from threads_meta; a client-supplied value must
             # never survive in either run-config section.
             PROJECT_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
@@ -2695,6 +2696,20 @@ async def start_run(
             internal_owner_user=internal_owner_user,
             request_context=getattr(body, "context", None),
         )
+
+        if agent_config is not None and getattr(run_ctx.app_config, "mcp_agent_auth", None):
+            from deerflow.mcp.agent_auth import McpAgentAuthorizationError, capture_agent_authority
+
+            try:
+                agent_authority = await run_assembly(
+                    capture_agent_authority,
+                    run_ctx.app_config,
+                    user_id=owner_user_id or str(user.id),
+                    agent_config=agent_config,
+                )
+            except McpAgentAuthorizationError as exc:
+                raise HTTPException(status_code=403, detail=str(exc)) from None
+            run_ctx = replace(run_ctx, agent_mcp_authority=agent_authority)
 
         if scheduled_task_runtime is not None:
             run_ctx = replace(run_ctx, scheduled_task_runtime=dict(scheduled_task_runtime))
