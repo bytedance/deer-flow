@@ -14,8 +14,7 @@ subagent_runtime:
   checkpoint_enabled: true
 ```
 
-Restart the Gateway for the change to take effect. Subagent checkpoints are
-saved in the existing `deerflow.db` file under `database.sqlite_dir`.
+Restart the Gateway for the change to take effect. Parent and child checkpoints are saved in the same SQLite database selected by the host. When the host uses the default `database:` configuration, this is `deerflow.db` under `database.sqlite_dir`.
 
 This option currently supports SQLite; PostgreSQL and memory storage are not
 supported. Both `full` and `delta` checkpoint channel modes are supported. Keep
@@ -32,7 +31,10 @@ the parent transcript and its root message stream.
 The normal `task` delegation flow supplies the required parent graph context.
 Calling the executor directly from a parent graph node can also save history
 when it inherits that context and uses the installed checkpoint runtime.
-Checkpoint history for items executed through `batch_task` is not included.
+This option covers direct delegation from the parent graph. If a subagent
+dispatches another subagent, the nested execution runs with checkpoint history
+disabled. Tool calls and results within a recorded subagent can still be
+retained in its checkpoint history. Checkpoint history for items executed through `batch_task` is not included.
 
 Child checkpoint metadata includes `deerflow_subagent_execution_id` and
 `deerflow_subagent_name`, plus `deerflow_parent_run_id` and
@@ -48,6 +50,12 @@ usage. It does not add a history UI or automatic subagent recovery. Standalone
 embedded clients and direct factories retain their existing checkpoint-disabled
 behavior unless they explicitly install the matching checkpoint resource
 lifetime around a persistent parent graph.
+
+Child checkpoint history is not automatically pruned by the existing checkpoint
+retention policies. Each child execution has its own namespace, whose latest
+checkpoint and ancestor chain are protected. Deleting the entire thread is
+currently the only supported way to reclaim this history. Storage usage grows
+with retained child executions.
 
 The Gateway closes admission and drains child execution, stream cleanup and
 checkpoint writes before closing the child saver. The parent saver remains open
