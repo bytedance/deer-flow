@@ -256,8 +256,22 @@ def fetch_latest():
                 okta_tries += 1
                 if okta_tries > 3:
                     break
+                fp = page.get_by_text("Sign in with Okta FastPass")
                 btn = page.get_by_text("Open Okta Verify", exact=True)
-                if btn.count():
+                pw = page.locator('input[type="password"], input[name="credentials.passcode"]')
+                body = page.inner_text("body") if page.locator("body").count() else ""
+                # 2026-11-12 (after Okta password change): Okta now asks for the password, then a
+                # security method, before FastPass. Each step is handled here; then loop again.
+                if pw.count() and pw.first.is_visible():
+                    pw.first.fill(zr.OKTA_PASSWORD)
+                    page.locator('input[type="submit"], button[type="submit"]').first.click()
+                    okta_tries -= 1; page.wait_for_timeout(3000); continue
+                if "security method" in body:
+                    zr._select_mfa_option(page); okta_tries -= 1; continue
+                if fp.count() and fp.first.is_visible():
+                    fp.first.click()
+                    zr._handle_open_okta_verify_button(page)
+                elif btn.count():
                     zr._handle_open_okta_verify_button(page)
                 else:
                     zr._handle_okta_flow(page)
@@ -353,6 +367,13 @@ def hidden_rows(path, sheet):
     return hid
 
 
+_WALLET_RE = re.compile(r'\b(0x[0-9a-fA-F]{30,}|[13][a-km-zA-HJ-NP-Z1-9]{25,40}|T[1-9A-HJ-NP-Za-km-z]{30,40}|bc1[0-9a-z]{25,60}|[1-9A-HJ-NP-Za-km-z]{32,44})\b')
+
+def _mask_wallets(s):
+    """Shalom 2026-11-14: mask wallet addresses to their first 10 characters."""
+    return _WALLET_RE.sub(lambda m: m.group(0)[:10] + '...', s) if s else s
+
+
 def build(FILE):
     wb = openpyxl.load_workbook(FILE, read_only=True, data_only=True)
     ws = wb["Bank balances"]
@@ -396,6 +417,8 @@ def build(FILE):
         if nb < r < nb_end and not any(txt):
             t2 = [str(x).strip() for x in row[:ci_ccy + 3] if isinstance(x, str) and x.strip()]
             txt = (t2 + ["", "", "", ""])[:4]
+        # 2026-11-14 (Shalom): never print full crypto wallet addresses - show first 10 chars only.
+        txt = [_mask_wallets(x) for x in txt]
         section = next((str(x) for x in row[:ci_country + 1] if isinstance(x, str) and x.strip() and x.strip() != "x"), "")
         if r in RENAME: section, txt = RENAME[r], ['', '', '', '']
         if not any(txt) and not section: continue
