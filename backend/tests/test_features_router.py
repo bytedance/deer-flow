@@ -79,6 +79,7 @@ def test_features_reports_agents_api_enabled() -> None:
         "agents_api": {"enabled": True},
         "tool_approval": {"enabled": False, "default_mode": "ask", "allowed_modes": []},
         "run_inputs": False,
+        "voice_input": {"enabled": False, "max_audio_bytes": 0, "max_duration_seconds": 0},
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
         "subagent_batches": {
@@ -104,6 +105,7 @@ def test_features_reports_agents_api_disabled() -> None:
         "agents_api": {"enabled": False},
         "tool_approval": {"enabled": False, "default_mode": "ask", "allowed_modes": []},
         "run_inputs": False,
+        "voice_input": {"enabled": False, "max_audio_bytes": 0, "max_duration_seconds": 0},
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
         "subagent_batches": {
