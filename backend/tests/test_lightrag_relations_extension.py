@@ -144,9 +144,9 @@ async def test_edges_reference_only_their_own_chunks_and_reuse_shared_positions(
 
 @pytest.mark.asyncio
 async def test_relation_keeps_inline_references_on_hosts_without_dependency_metadata(graph, monkeypatch):
-    from deerflow.knowledge import RetrievalHit
+    from deerflow_extension_lightrag import provider as lightrag_provider
 
-    monkeypatch.delitem(RetrievalHit.model_fields, "depends_on")
+    monkeypatch.setattr(lightrag_provider, "_SUPPORTS_EVIDENCE_DEPENDENCIES", False)
     provider, _, _ = graph
     result = await provider.relations_search("forest", context=KnowledgeRequestContext("alice"))
     assert result.hits[1].content.startswith("Evidence: result [1].\n")

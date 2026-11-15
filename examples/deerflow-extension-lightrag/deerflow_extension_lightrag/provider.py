@@ -14,6 +14,8 @@ from deerflow.knowledge.providers import validate_scope_capabilities
 from deerflow.knowledge.sources import redact_strings
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, field_validator
 
+_SUPPORTS_EVIDENCE_DEPENDENCIES = "depends_on" in RetrievalHit.model_fields
+
 
 class Settings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -80,7 +82,7 @@ def normalize_relations(data: dict) -> RetrievalResult:
                 evidence_positions[key] = len(hits)
             positions.append(evidence_positions[key])
         if positions:
-            if "depends_on" in RetrievalHit.model_fields:
+            if _SUPPORTS_EVIDENCE_DEPENDENCIES:
                 hits.append(RetrievalHit(content=path, depends_on=positions))
             else:
                 # Older hosts still expect the references in the hit text.

@@ -62,6 +62,7 @@ class RetrievalHit(BaseModel):
     content: str
     source: KnowledgeSource | None = None
     score: float | None = Field(default=None, allow_inf_nan=False)
+    # One-based positions in the original RetrievalResult.hits before truncation.
     depends_on: list[Annotated[int, Field(strict=True, gt=0)]] = Field(default_factory=list, exclude_if=lambda positions: not positions)
 
 
