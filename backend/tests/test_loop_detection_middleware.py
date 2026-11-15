@@ -1,5 +1,6 @@
 """Tests for LoopDetectionMiddleware."""
 
+import asyncio
 import copy
 from collections import OrderedDict
 from pathlib import Path
@@ -13,15 +14,21 @@ from langchain_core.language_models.fake_chat_models import FakeMessagesListChat
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares import loop_detection_middleware as loop_detection_module
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
     _MAX_PENDING_WARNINGS_PER_RUN,
+    LOOP_CAP_STATE_KEY,
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
+from deerflow.approvals.middleware import ToolApprovalMiddleware
+from deerflow.config.app_config import AppConfig
+from deerflow.config.hitl_approval_config import HitlApprovalConfig
 
 
 def _make_runtime(thread_id="test-thread", run_id="test-run"):
@@ -96,15 +103,19 @@ class _CapturingFakeMessagesListChatModel(FakeMessagesListChatModel):
         )
 
 
-def _make_state(tool_calls=None, content=""):
+def _make_state(tool_calls=None, content="", loop_cap=None):
     """Build a minimal AgentState dict with an AIMessage.
 
     Deep-copies *content* when it is mutable (e.g. list) so that
-    successive calls never share the same object reference.
+    successive calls never share the same object reference. ``loop_cap`` is the
+    checkpointed cap record a real graph would carry between hooks.
     """
     safe_content = copy.deepcopy(content) if isinstance(content, list) else content
     msg = AIMessage(content=safe_content, tool_calls=tool_calls or [])
-    return {"messages": [msg]}
+    state = {"messages": [msg]}
+    if loop_cap is not None:
+        state[LOOP_CAP_STATE_KEY] = loop_cap
+    return state
 
 
 def _bash_call(cmd="ls"):
@@ -2067,28 +2078,71 @@ class TestToolCallBatchDecisions:
             args = {"value": value}
         return {"name": name, "id": f"call_{name}_{value}", "args": args}
 
-    def test_single_batch_crossing_both_thresholds_hard_stops(self):
+    def test_single_batch_crossing_hard_limit_runs_only_calls_within_limit(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
         runtime = _make_runtime()
         journal = MagicMock()
         runtime.context["__run_journal"] = journal
-        calls = [self._call("read_file", i) for i in range(3)]
+        calls = [self._call("read_file", i) for i in range(4)]
 
         result = mw.after_model(_make_state(tool_calls=calls), runtime)
 
         assert result is not None
-        assert result["messages"][0].tool_calls == []
+        kept = result["messages"][0]
+        assert [tc["id"] for tc in kept.tool_calls] == ["call_read_file_0", "call_read_file_1"]
+        assert kept.content == ""
+        # Only the calls that will run count toward the window.
+        assert dict(mw._tool_name_counter[_scope_key()]) == {"read_file": 2}
+        # The cap and its explanation are checkpointed, not queued in memory.
+        assert result[LOOP_CAP_STATE_KEY] == {
+            "run_id": "test-run",
+            "tools": {"read_file": 3},
+            "notice": {"total": 4, "skipped": 2, "tools": ["read_file"]},
+        }
+        assert not mw._pending_warnings.get(_pending_key())
+        # A run that dropped calls at a limit is capped, even though it goes on.
+        assert runtime.context["stop_reason"] == "loop_capped"
         assert mw.consume_stop_reason("test-run") == "loop_capped"
-        assert not mw._pending_warnings
-        assert not mw._tool_freq_warned.get(_scope_key())
         journal.record_middleware.assert_called_once()
         recorded = journal.record_middleware.call_args.kwargs
-        assert recorded["action"] == "hard_stop"
+        assert recorded["action"] == "reject_excess"
         assert recorded["changes"]["detection_layer"] == "tool_frequency"
+        assert recorded["changes"]["tool_names"] == ["read_file"]
         assert recorded["changes"]["count"] == 3
+        assert recorded["changes"]["threshold"] == 3
+
+    def test_batch_with_no_room_left_still_hard_stops(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        mw.after_model(_make_state(tool_calls=[self._call("read_file", i) for i in range(4)]), runtime)
+
+        result = mw.after_model(_make_state(tool_calls=[self._call("read_file", 9), self._call("read_file", 10)]), runtime)
+
+        assert result is not None
+        assert result["messages"][0].tool_calls == []
+        assert "[FORCED STOP] Tool read_file called 3 times" in result["messages"][0].content
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    @pytest.mark.parametrize(("batch_size", "expected_kept"), [(49, None), (50, 49), (60, 49)])
+    def test_default_limit_keeps_the_calls_that_fit_in_one_large_batch(self, batch_size, expected_kept):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        calls = [{"name": "write_file", "id": f"call_{i}", "args": {"path": f"/mnt/user-data/outputs/f{i:02d}.txt", "content": str(i**3)}} for i in range(1, batch_size + 1)]
+
+        result = mw.after_model(_make_state(tool_calls=calls), runtime)
+
+        if expected_kept is None:
+            assert result is None
+            assert mw.consume_stop_reason("test-run") is None
+            return
+        kept = result["messages"][0]
+        assert [tc["id"] for tc in kept.tool_calls] == [f"call_{i}" for i in range(1, expected_kept + 1)]
+        assert "FORCED STOP" not in str(kept.content)
+        assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": batch_size, "skipped": batch_size - expected_kept, "tools": ["write_file"]}
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
 
     @pytest.mark.parametrize("hard_stop_first", [False, True])
-    def test_one_tools_warning_cannot_mask_another_tools_hard_stop(self, hard_stop_first):
+    def test_one_tools_warning_cannot_admit_another_tools_excess_call(self, hard_stop_first):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
         runtime = _make_runtime()
         mw._apply(_make_state(tool_calls=[self._call("bash", 0)]), runtime)
@@ -2099,10 +2153,11 @@ class TestToolCallBatchDecisions:
 
         decision = mw._track_and_check(_make_state(tool_calls=calls), runtime)
 
-        assert decision is not None and decision.hard_stop
+        assert decision is not None and decision.action == "reject_excess"
         assert decision.tool_names == ("bash",)
         assert decision.count == 3
-        assert "read_file" not in mw._tool_freq_warned[_scope_key()]
+        assert [calls[i]["id"] for i in decision.rejected_indices] == ["call_bash_2"]
+        assert mw._tool_name_counter[_scope_key()]["bash"] == 2
 
     def test_identical_call_warning_cannot_mask_frequency_hard_stop(self):
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=5, tool_freq_warn=2, tool_freq_hard_limit=3)
@@ -2216,7 +2271,7 @@ class TestToolCallBatchDecisions:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("use_async", [False, True])
-    async def test_batch_hard_stop_prevents_tool_execution_in_real_agent_graph(self, use_async):
+    async def test_batch_crossing_hard_limit_runs_only_calls_within_limit_in_real_agent_graph(self, use_async):
         executed = []
 
         @as_tool
@@ -2225,21 +2280,446 @@ class TestToolCallBatchDecisions:
             executed.append(path)
             return path
 
-        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(3)]
+        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
         model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
+        graph = create_agent(model=model, tools=[read_file], middleware=[mw], checkpointer=InMemorySaver())
+        inputs = {"messages": [("user", "inspect these files")]}
+        config = {"configurable": {"thread_id": "batch-thread"}, "recursion_limit": 10}
+        context = {"thread_id": "batch-thread", "run_id": "batch-run"}
+
+        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
+
+        # The tool node runs a batch in parallel, so completion order varies.
+        assert sorted(executed) == ["/0.py", "/1.py"]
+        assert len(model.seen_messages) == 2
+        warnings = [m for m in model.seen_messages[1] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
+        assert len(warnings) == 1
+        # Admission is reported, not execution: the tool results say what ran.
+        assert "skipped 2 of the 4 tool calls" in warnings[0].content
+        assert "The other 2 were passed on" in warnings[0].content
+        assert "read_file (limit 3)" in warnings[0].content
+        assert loop_detection_module._WRAP_UP_INSTRUCTIONS in warnings[0].content
+        assert result["messages"][-1].content == "done"
+        # The record is private to the graph, and the delivered notice is gone.
+        assert LOOP_CAP_STATE_KEY not in result
+        assert graph.get_state(config).values[LOOP_CAP_STATE_KEY] == {"run_id": "batch-run", "tools": {"read_file": 3}}
+        assert context["stop_reason"] == "loop_capped"
+        assert mw.consume_stop_reason("batch-run") == "loop_capped"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_batch_with_no_room_left_executes_nothing_in_real_agent_graph(self, use_async):
+        executed = []
+
+        @as_tool
+        def read_file(path: str) -> str:
+            """Read a fake file without touching the filesystem."""
+            executed.append(path)
+            return path
+
+        first = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
+        second = [{"name": "read_file", "id": "read_again", "args": {"path": "/again.py"}}]
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=first), AIMessage(content="", tool_calls=second), AIMessage(content="done")])
         graph = create_agent(model=model, tools=[read_file], middleware=[mw])
         inputs = {"messages": [("user", "inspect these files")]}
         kwargs = {"context": {"thread_id": "batch-thread", "run_id": "batch-run"}, "config": {"recursion_limit": 10}}
 
         result = await graph.ainvoke(inputs, **kwargs) if use_async else graph.invoke(inputs, **kwargs)
 
-        assert executed == []
-        assert len(model.seen_messages) == 1
+        # The tool node runs a batch in parallel, so completion order varies.
+        assert sorted(executed) == ["/0.py", "/1.py"]
+        assert len(model.seen_messages) == 2
         assert result["messages"][-1].tool_calls == []
         assert "FORCED STOP" in result["messages"][-1].content
         assert mw.consume_stop_reason("batch-run") == "loop_capped"
-        assert not mw._pending_warnings
+
+
+class TestPerToolCapState:
+    """A tool that reached its limit stays blocked for the rest of the execution."""
+
+    CAP = {"run_id": "test-run", "tools": {"a": 3}}
+
+    @staticmethod
+    def _call(name, value):
+        return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
+
+    def test_capped_tool_stays_blocked_after_other_calls_evict_it_from_the_window(self):
+        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        capped = mw.after_model(_make_state(tool_calls=[self._call("a", i) for i in range(4)]), runtime)
+        cap = capped[LOOP_CAP_STATE_KEY]
+        assert cap["tools"] == {"a": 3}
+        # Three calls to other tools push every "a" entry out of the window.
+        mw.after_model(_make_state(tool_calls=[self._call("b", 0), self._call("c", 0), self._call("d", 0)], loop_cap=cap), runtime)
+        assert "a" not in mw._tool_name_counter[_scope_key()]
+        calls = [self._call("a", 9), self._call("b", 1)]
+
+        # The window alone would let the tool run again.
+        assert mw._track_and_check(_make_state(tool_calls=calls), _make_runtime(run_id="window-only")) is None
+        result = mw.after_model(_make_state(tool_calls=calls, loop_cap=cap), runtime)
+
+        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["call_b_1"]
+        assert result[LOOP_CAP_STATE_KEY] == {"run_id": "test-run", "tools": {"a": 3}, "notice": {"total": 2, "skipped": 1, "tools": ["a"]}}
+        # The rejected call is not counted either.
+        assert "a" not in mw._tool_name_counter[_scope_key()]
+
+    def test_response_with_only_capped_calls_hard_stops(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+
+        result = mw.after_model(_make_state(tool_calls=[self._call("a", 9)], loop_cap=self.CAP), runtime)
+
+        stopped = result["messages"][0]
+        assert stopped.tool_calls == []
+        assert "[FORCED STOP] Tool a reached its per-tool safety limit of 3 calls earlier in this run" in stopped.content
+        assert runtime.context["stop_reason"] == "loop_capped"
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    def test_only_the_first_rejection_of_a_tool_is_audited(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        journal = MagicMock()
+        runtime.context["__run_journal"] = journal
+
+        mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=self.CAP), runtime)
+
+        journal.record_middleware.assert_not_called()
+
+    def test_model_answer_clears_the_delivered_notice(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        pending = {**self.CAP, "notice": {"total": 4, "skipped": 2, "tools": ["a"]}}
+
+        assert mw.after_model(_make_state(content="done", loop_cap=pending), runtime) == {LOOP_CAP_STATE_KEY: self.CAP}
+        assert mw.after_model(_make_state(content="done", loop_cap=self.CAP), runtime) is None
+
+    def test_notice_is_read_from_state_on_every_model_call(self):
+        """It does not depend on the trimmed AIMessage, which compaction may remove, and a retry gets it again."""
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime(run_id="resumed-run")
+        request = _make_request([HumanMessage(content="summary of earlier work", name="summary")], runtime)
+        request.state = {LOOP_CAP_STATE_KEY: {"run_id": "paused-run", "tools": {"a": 3}, "notice": {"total": 4, "skipped": 2, "tools": ["a"]}}}
+        captured, handler = _capture_handler()
+
+        mw.wrap_model_call(request, handler)
+        mw.wrap_model_call(request, handler)
+
+        for sent in captured:
+            assert [m.name for m in sent.messages] == ["summary", "loop_warning"]
+            assert "skipped 2 of the 4 tool calls" in sent.messages[-1].content
+        # The resumed run is capped before any of its own responses is checked.
+        assert runtime.context["stop_reason"] == "loop_capped"
+        assert mw.consume_stop_reason("resumed-run") == "loop_capped"
+
+    def test_carried_cap_does_not_replace_another_guards_stop_reason(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = "token_capped"
+        request = _make_request([HumanMessage(content="hi")], runtime)
+        request.state = {LOOP_CAP_STATE_KEY: self.CAP}
+
+        mw.wrap_model_call(request, _capture_handler()[1])
+        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: self.CAP}, runtime)
+
+        assert runtime.context["stop_reason"] == "token_capped"
+
+    @pytest.mark.parametrize(
+        ("run_id", "stored", "expected"),
+        [
+            ("test-run", {"run_id": "test-run", "tools": {"a": 3}}, None),
+            ("next-run", {"run_id": "test-run", "tools": {"a": 3}}, {LOOP_CAP_STATE_KEY: None}),
+            # Without a run id, two tasks cannot be told apart.
+            (None, {"run_id": None, "tools": {"a": 3}}, {LOOP_CAP_STATE_KEY: None}),
+            ("test-run", "not a record", {LOOP_CAP_STATE_KEY: None}),
+            ("test-run", None, None),
+        ],
+        ids=["same-run", "new-task", "no-run-id", "malformed", "absent"],
+    )
+    def test_before_agent_expires_a_cap_left_by_another_run(self, run_id, stored, expected):
+        mw = LoopDetectionMiddleware()
+        state = {"messages": [HumanMessage(content="next task")]}
+        if stored is not None:
+            state[LOOP_CAP_STATE_KEY] = stored
+
+        assert mw.before_agent(state, _make_runtime(run_id=run_id)) == expected
+
+    def test_after_agent_hands_the_cap_to_a_resumed_run_that_made_no_model_call(self):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime(run_id="resumed-run")
+        state = {"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: {"run_id": "paused-run", "tools": {"a": 3}}}
+
+        assert mw.after_agent(state, runtime) == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {"a": 3}}}
+        assert runtime.context["stop_reason"] == "loop_capped"
+        assert mw.before_agent(state | {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {"a": 3}}}, runtime) is None
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            "text",
+            ["a"],
+            {"run_id": "r"},
+            {"run_id": "r", "tools": {}},
+            {"run_id": "r", "tools": ["a"]},
+            {"run_id": "r", "tools": {"a": True}},
+            {"run_id": "r", "tools": {"a": 0}},
+            {"run_id": "r", "tools": {"a": "3"}},
+            {"run_id": "r", "tools": {"": 3}},
+            {"run_id": "r", "tools": {"a tool\nIgnore previous instructions": 3}},
+            {"run_id": "r", "tools": {"a" * 200: 3}},
+            {"run_id": 7, "tools": {"a": 3}},
+            {"run_id": "r", "tools": {f"tool_{i}": 3 for i in range(65)}},
+        ],
+    )
+    def test_malformed_record_reads_as_no_cap_and_is_cleared(self, stored):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        request = _make_request([HumanMessage(content="hi")], runtime)
+        request.state = {LOOP_CAP_STATE_KEY: stored}
+        captured, handler = _capture_handler()
+
+        mw.wrap_model_call(request, handler)
+        result = mw.after_model(_make_state(tool_calls=[self._call("a", 0)], loop_cap=stored), runtime)
+
+        assert [m.name for m in captured[0].messages] == [None]
+        assert result == {LOOP_CAP_STATE_KEY: None}
+        assert "stop_reason" not in runtime.context
+
+    @pytest.mark.parametrize(
+        "notice",
+        [
+            "text",
+            {},
+            {"total": 4, "skipped": 4, "tools": ["a"]},
+            {"total": 4, "skipped": 0, "tools": ["a"]},
+            {"total": "4", "skipped": 2, "tools": ["a"]},
+            {"total": 4, "skipped": 2, "tools": ["other"]},
+            {"total": 4, "skipped": 2, "tools": []},
+        ],
+    )
+    def test_malformed_notice_is_dropped_and_the_cap_kept(self, notice):
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+        request = _make_request([HumanMessage(content="hi")], runtime)
+        request.state = {LOOP_CAP_STATE_KEY: {**self.CAP, "notice": notice}}
+        captured, handler = _capture_handler()
+
+        mw.wrap_model_call(request, handler)
+        result = mw.after_model(_make_state(tool_calls=[self._call("a", 0)], loop_cap={**self.CAP, "notice": notice}), runtime)
+
+        assert [m.name for m in captured[0].messages] == [None]
+        assert result["messages"][0].tool_calls == []
+        assert runtime.context["stop_reason"] == "loop_capped"
+
+    def test_call_sharing_an_id_with_a_rejected_call_is_dropped_too(self):
+        """Provider surfaces are trimmed by call id, so the two cannot be told apart there."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        calls = [dict(self._call("a", 0), id="shared"), dict(self._call("a", 1), id="own"), dict(self._call("a", 2), id="shared")]
+
+        result = mw.after_model(_make_state(tool_calls=calls), _make_runtime())
+
+        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["own"]
+        assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": 3, "skipped": 2, "tools": ["a"]}
+
+    def test_response_left_without_calls_by_a_shared_id_stops_the_run(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        calls = [dict(self._call("a", i), id="shared") for i in range(3)]
+
+        result = mw.after_model(_make_state(tool_calls=calls), runtime)
+
+        stopped = result["messages"][0]
+        assert stopped.tool_calls == []
+        assert "[FORCED STOP] Tool a called 3 times" in stopped.content
+        assert result[LOOP_CAP_STATE_KEY] == {"run_id": "test-run", "tools": {"a": 3}}
+        assert mw.consume_stop_reason("test-run") == "loop_capped"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_mixed_tool_sequence_cannot_restart_a_capped_tool_in_real_agent_graph(self, use_async):
+        executed = []
+
+        @as_tool
+        def read_file(path: str) -> str:
+            """Read a fake file without touching the filesystem."""
+            executed.append(("read_file", path))
+            return path
+
+        @as_tool
+        def ls(path: str) -> str:
+            """List a fake directory."""
+            executed.append(("ls", path))
+            return path
+
+        @as_tool
+        def glob(pattern: str) -> str:
+            """Match fake paths."""
+            executed.append(("glob", pattern))
+            return pattern
+
+        reads = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
+        others = [{"name": "ls", "id": f"ls_{i}", "args": {"path": f"/d{i}"}} for i in range(2)] + [{"name": "glob", "id": f"glob_{i}", "args": {"pattern": f"*.{i}"}} for i in range(2)]
+        again = [{"name": "read_file", "id": "read_again", "args": {"path": "/again.py"}}, {"name": "ls", "id": "ls_again", "args": {"path": "/again"}}]
+        mw = LoopDetectionMiddleware(window_size=3, tool_freq_warn=2, tool_freq_hard_limit=3)
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=reads), AIMessage(content="", tool_calls=others), AIMessage(content="", tool_calls=again), AIMessage(content="done")])
+        graph = create_agent(model=model, tools=[read_file, ls, glob], middleware=[mw], checkpointer=InMemorySaver())
+        inputs = {"messages": [("user", "inspect these files")]}
+        config = {"configurable": {"thread_id": "mixed-thread"}, "recursion_limit": 14}
+        context = {"thread_id": "mixed-thread", "run_id": "mixed-run"}
+
+        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
+
+        # The four other calls pushed read_file out of the three-entry window.
+        assert "read_file" not in mw._tool_name_counter[("mixed-thread", "mixed-run")]
+        assert sorted(path for name, path in executed if name == "read_file") == ["/0.py", "/1.py"]
+        assert ("ls", "/again") in executed
+        last_request = [m for m in model.seen_messages[3] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
+        assert len(last_request) == 1 and "skipped 1 of the 2 tool calls" in last_request[0].content
+        assert result["messages"][-1].content == "done"
+        assert context["stop_reason"] == "loop_capped"
+
+    @pytest.mark.parametrize("mode", ["full", "delta"])
+    def test_cap_record_is_checkpointed_under_the_thread_state_schema(self, mode):
+        """Delta mode rewrites each middleware's state schema; the private channel must survive that."""
+        from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+        @as_tool
+        def read_file(path: str) -> str:
+            """Read a fake file without touching the filesystem."""
+            return path
+
+        calls = [{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/{i}.py"}} for i in range(4)]
+        middleware = normalize_middleware_state_schemas([LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)], mode)
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=calls), AIMessage(content="done")])
+        graph = create_agent(model=model, tools=[read_file], middleware=middleware, state_schema=get_thread_state_schema(mode), checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": f"schema-{mode}"}, "recursion_limit": 10}
+
+        result = graph.invoke({"messages": [("user", "inspect these files")]}, config, context={"thread_id": f"schema-{mode}", "run_id": "schema-run"})
+
+        assert LOOP_CAP_STATE_KEY not in result
+        assert graph.get_state(config).values[LOOP_CAP_STATE_KEY] == {"run_id": "schema-run", "tools": {"read_file": 3}}
+
+    @pytest.mark.asyncio
+    async def test_files_are_presented_after_calls_were_dropped_at_a_limit(self):
+        written, presented = [], []
+
+        @as_tool
+        def write_file(path: str) -> str:
+            """Write a fake file."""
+            written.append(path)
+            return "ok"
+
+        @as_tool
+        def present_files(filepaths: list[str]) -> str:
+            """Record the files presented to the user."""
+            presented.extend(filepaths)
+            return "presented"
+
+        writes = [{"name": "write_file", "id": f"write_{i}", "args": {"path": f"/mnt/user-data/outputs/f{i}.txt"}} for i in range(4)]
+        present = {"name": "present_files", "id": "present", "args": {"filepaths": ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]}}
+        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        model = _CapturingFakeMessagesListChatModel(responses=[AIMessage(content="", tool_calls=writes), AIMessage(content="", tool_calls=[present]), AIMessage(content="Two of the four files were written.")])
+        graph = create_agent(model=model, tools=[write_file, present_files], middleware=[loop])
+
+        result = await graph.ainvoke({"messages": [("user", "Write four files.")]}, context={"thread_id": "present-thread", "run_id": "present-run"}, config={"recursion_limit": 12})
+
+        notice = [m for m in model.seen_messages[1] if isinstance(m, HumanMessage) and m.name == "loop_warning"]
+        assert len(notice) == 1 and "present_files call before answering" in notice[0].content
+        assert sorted(written) == ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]
+        assert presented == ["/mnt/user-data/outputs/f0.txt", "/mnt/user-data/outputs/f1.txt"]
+        assert result["messages"][-1].content == "Two of the four files were written."
+        assert loop.consume_stop_reason("present-run") == "loop_capped"
+
+
+class TestCapSurvivesApprovalPauseAndRestart:
+    """Drive a real approval pause and checkpoint resume; each step builds a new graph and new middleware."""
+
+    THREAD = "cap-thread"
+
+    @staticmethod
+    def _build(saver, responses, executed):
+        @as_tool
+        def external_write(value: str) -> str:
+            """Write externally."""
+            executed.append(("external_write", value))
+            return "written"
+
+        @as_tool
+        def note(text: str) -> str:
+            """Keep a note."""
+            executed.append(("note", text))
+            return "noted"
+
+        policy = HitlApprovalConfig(enabled=True, tools=["external_write"], allow_tools=["note"], default_mode="ask", allowed_modes=["ask", "auto", "full"])
+        approval = ToolApprovalMiddleware(policy, app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"}, hitl_approval=policy))
+        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=2)
+        model = _CapturingFakeMessagesListChatModel(responses=responses)
+        graph = create_agent(model, tools=[external_write, note], middleware=[approval, loop], checkpointer=saver)
+        return graph, model, loop
+
+    @staticmethod
+    def _pending_call_ids(paused):
+        return [action["tool_call_id"] for pending in paused["__interrupt__"] for action in pending.value["actions"]]
+
+    @staticmethod
+    def _approve(paused):
+        action = paused["__interrupt__"][0].value["actions"][0]
+        return Command(resume={"responses": [{"tool_call_id": action["tool_call_id"], "request_id": action["request_id"], "option_id": "approve"}]})
+
+    @staticmethod
+    def _notices(messages):
+        return [m.content for m in messages if isinstance(m, HumanMessage) and m.name == "loop_warning"]
+
+    @pytest.mark.parametrize("use_async", [False, True])
+    def test_cap_notice_and_stop_reason_survive_and_a_new_task_starts_fresh(self, use_async):
+        def run(graph, payload, context):
+            config = {"configurable": {"thread_id": self.THREAD}, "recursion_limit": 12}
+            return asyncio.run(graph.ainvoke(payload, config, context=context)) if use_async else graph.invoke(payload, config, context=context)
+
+        def cap_record(graph):
+            return graph.get_state({"configurable": {"thread_id": self.THREAD}}).values.get(LOOP_CAP_STATE_KEY)
+
+        saver = InMemorySaver()
+        executed = []
+
+        # 1. Three writes against a limit that admits one. The admitted call pauses for approval.
+        writes = [{"name": "external_write", "id": f"w{i}", "args": {"value": f"v{i}"}} for i in range(3)]
+        graph, _, _ = self._build(saver, [AIMessage(content="", tool_calls=writes)], executed)
+        paused_context = {"thread_id": self.THREAD, "run_id": "paused-run"}
+        paused = run(graph, {"messages": [("user", "write three values")]}, paused_context)
+
+        assert not executed
+        assert self._pending_call_ids(paused) == ["w0"]
+        assert cap_record(graph) == {"run_id": "paused-run", "tools": {"external_write": 2}, "notice": {"total": 3, "skipped": 2, "tools": ["external_write"]}}
+        assert paused_context["stop_reason"] == "loop_capped"
+
+        # 2. Restart, then resume under a new run id. The model retries the capped tool next to another call.
+        retry = [{"name": "external_write", "id": "w9", "args": {"value": "v9"}}, {"name": "note", "id": "n0", "args": {"text": "kept"}}]
+        graph, model, loop = self._build(saver, [AIMessage(content="", tool_calls=retry), AIMessage(content="done")], executed)
+        resumed_context = {"thread_id": self.THREAD, "run_id": "resumed-run"}
+        result = run(graph, self._approve(paused), resumed_context)
+
+        # This run's own window is empty, so only the checkpointed cap can reject w9.
+        assert sorted(executed) == [("external_write", "v0"), ("note", "kept")]
+        after_resume, after_retry = (self._notices(messages) for messages in model.seen_messages)
+        assert len(after_resume) == 1 and "skipped 2 of the 3 tool calls" in after_resume[0]
+        assert len(after_retry) == 1 and "skipped 1 of the 2 tool calls" in after_retry[0]
+        assert result["messages"][-1].content == "done"
+        assert cap_record(graph) == {"run_id": "resumed-run", "tools": {"external_write": 2}}
+        assert resumed_context["stop_reason"] == "loop_capped"
+        assert loop.consume_stop_reason("resumed-run") == "loop_capped"
+
+        # 3. A later task on the same thread gets a fresh budget: its write reaches approval.
+        later = [{"name": "external_write", "id": "w10", "args": {"value": "v10"}}]
+        graph, _, loop = self._build(saver, [AIMessage(content="", tool_calls=later)], executed)
+        later_context = {"thread_id": self.THREAD, "run_id": "later-run"}
+        paused = run(graph, {"messages": [("user", "write one more value")]}, later_context)
+
+        assert self._pending_call_ids(paused) == ["w10"]
+        assert cap_record(graph) is None
+        assert "stop_reason" not in later_context
+        assert loop.consume_stop_reason("later-run") is None
 
 
 class TestFromConfig:
