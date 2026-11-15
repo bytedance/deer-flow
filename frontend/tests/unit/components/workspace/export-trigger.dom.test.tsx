@@ -50,8 +50,11 @@ function page(messages: (typeof latest)[], start: number, next: number | null) {
     next_before_seq: next,
   });
 }
-async function selectExport(format = enUS.common.exportAsJSON) {
-  render(<ExportTrigger threadId="chat" />);
+async function selectExport(
+  format = enUS.common.exportAsJSON,
+  createdAt?: string,
+) {
+  render(<ExportTrigger threadId="chat" createdAt={createdAt} />);
   fireEvent.keyDown(screen.getByRole("button", { name: enUS.common.export }), {
     key: "Enter",
   });
@@ -93,6 +96,19 @@ test.each([enUS.common.exportAsJSON, enUS.common.exportAsMarkdown])(
         "200",
       );
     }
+  },
+);
+
+test.each([enUS.common.exportAsJSON, enUS.common.exportAsMarkdown])(
+  "passes the thread creation time to the %s export",
+  async (format) => {
+    mocks.fetch.mockResolvedValueOnce(page([latest], 1, null));
+    await selectExport(format, "2026-01-02T03:04:05Z");
+    await waitFor(() => expect(mocks.exportThread).toHaveBeenCalledTimes(1));
+    expect(mocks.exportThread.mock.calls[0]?.[0]).toMatchObject({
+      thread_id: "chat",
+      created_at: "2026-01-02T03:04:05Z",
+    });
   },
 );
 

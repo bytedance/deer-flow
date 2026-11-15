@@ -675,7 +675,10 @@ export default function ChatPage() {
                 )}
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
-                <ExportTrigger threadId={threadId} />
+                <ExportTrigger
+                  threadId={threadId}
+                  createdAt={threadMetadata.data?.created_at}
+                />
                 <ThreadExtensionActions threadId={threadId} />
                 <ArtifactTrigger />
               </div>
