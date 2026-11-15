@@ -7,6 +7,8 @@ import httpx
 import pytest
 from deerflow_extension_api.auth import ExtensionPrincipal
 
+pytestmark = pytest.mark.bundled_extension
+
 
 @pytest.fixture
 def management(monkeypatch):

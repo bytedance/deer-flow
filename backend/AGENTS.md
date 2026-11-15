@@ -14,6 +14,7 @@ Read the guide for an area before you change it.
 | --- | --- |
 | Run streaming, checkpoints, run ownership | [runtime](packages/harness/deerflow/runtime/AGENTS.md) |
 | Repositories, leases, scheduled tasks, schema changes | [persistence](packages/harness/deerflow/persistence/AGENTS.md), [migrations](packages/harness/deerflow/persistence/migrations/AGENTS.md) |
+| Scheduler failure isolation | [design conventions](app/scheduler/guide/failure-isolation.md) |
 | `config.yaml`, `extensions_config.json` | [config](packages/harness/deerflow/config/AGENTS.md) |
 | Lead agent, prompt, thread state, middleware chain | [agents](packages/harness/deerflow/agents/AGENTS.md), [middlewares](packages/harness/deerflow/agents/middlewares/AGENTS.md) |
 | Memory, subagents, skills, tools | [memory](packages/harness/deerflow/agents/memory/AGENTS.md), [subagents](packages/harness/deerflow/subagents/AGENTS.md), [skills](packages/harness/deerflow/skills/AGENTS.md), [tools](packages/harness/deerflow/tools/AGENTS.md) |
@@ -28,6 +29,7 @@ Read the guide for an area before you change it.
 ```bash
 make test               # offline suite in parallel shards
 make test-blocking-io   # strict blocking-I/O suite
+make test-bundled-extensions  # behavior suites of bundled examples (not in make test)
 make lint
 make format
 make test-live          # calls real APIs; needs DEER_FLOW_RUN_LIVE_TESTS=1

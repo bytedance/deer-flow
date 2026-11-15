@@ -89,6 +89,7 @@ markers = [
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
     "live: tests that call real external APIs and require explicit opt-in",
+    "bundled_extension: behavior tests owned by a bundled extension example; excluded from the core shards and run by the bundled extension CI job",
 ]
 
 [tool.uv]

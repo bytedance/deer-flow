@@ -23,7 +23,9 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
   `core.fileMode=false` or a non-POSIX filesystem does not keep executable bits.
 - **Host pnpm calls go through `scripts/pnpm.py`.** It chooses the launcher by
   Python's `os.name`, not by the invoking shell, so native Windows, MSYS and POSIX
-  each get the right one.
+  each get the right one. A direct pnpm with a version different from the
+  `frontend/package.json` pin falls back to Corepack; without Corepack, the
+  runner stops before running the mismatched pnpm.
 - **Shell filters stay compatible with GNU and BSD sed**, because macOS ships
   the BSD tools. `sandbox-mode.sh` uses Bash and awk only.
 - **Lookups that run before the environment exists use the standard library
@@ -52,9 +54,10 @@ Cases marked for real Compose run only when a `docker` CLI is installed.
 - **One dotenv selection per deployment.** `DEER_FLOW_COMPOSE_ENV_FILE` is
   resolved once, and Compose interpolation, service env files, secret probes and
   extras detection all use that path.
-- **Do not seed production `.env` from the examples.** `.env.example` holds
-  placeholder API keys that the production Gateway would receive. Both compose
-  files mark the env files optional so a fresh checkout still starts and stops.
+- **Do not seed production `.env` from the examples.** They hold development
+  defaults and sample keys, not values an operator chose for production. Both
+  compose files mark the env files optional so a fresh checkout still starts and
+  stops.
 - **Support bundles export no secrets** and show an external runtime home as
   `{DEER_FLOW_HOME}`.
 - **Doctor does not echo model credentials.** Obvious sample key values fail the

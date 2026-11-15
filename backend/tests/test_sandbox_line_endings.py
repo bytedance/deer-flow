@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.read_file_contract import count_file_lines
@@ -216,3 +218,23 @@ def test_read_before_write_content_changes_when_only_line_endings_change(tmp_pat
     after = read_current_file_content(runtime, "/mnt/user-data/outputs/file.txt")
 
     assert before != after
+
+
+@pytest.mark.parametrize(
+    ("pattern", "literal", "expected"),
+    [
+        (r"\s$", False, [(2, "trailing ")]),
+        (r"[^a-z]$", False, [(2, "trailing ")]),
+        (r"\n", False, []),
+        pytest.param("\n", True, [], id="literal-newline"),
+    ],
+)
+def test_grep_does_not_match_the_line_terminator(tmp_path, pattern, literal, expected) -> None:
+    # LocalSandbox excludes LF and CRLF terminators from matching, so
+    # a trailing-whitespace search only matches whitespace in the line text.
+    path = tmp_path / "ws.txt"
+    path.write_bytes(b"clean\ntrailing \r\nalso clean\r\nlast clean")
+
+    matches, _ = LocalSandbox("t").grep(str(path), pattern, literal=literal)
+
+    assert [(match.line_number, match.line) for match in matches] == expected
