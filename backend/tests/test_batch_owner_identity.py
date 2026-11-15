@@ -1,8 +1,11 @@
 """Gateway batch identity resolves against the current account repository."""
 
+from traceback import format_exception
+
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.auth.models import User
@@ -28,7 +31,7 @@ async def accounts(tmp_path, monkeypatch):
 
 
 def _batch(owner, **spec):
-    return {"user_id": owner, "execution_spec": spec}
+    return {"id": "batch-1", "user_id": owner, "execution_spec": spec}
 
 
 @pytest.mark.asyncio
@@ -101,14 +104,28 @@ async def test_auth_disabled_only_preserves_explicit_synthetic_owner(accounts, m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["missing_loader", "exception", "mismatch"])
-async def test_unavailable_identity_fails_closed(accounts, failure):
+async def test_unavailable_identity_fails_closed(accounts, failure, caplog):
     _, owner, _ = accounts
+    batch = _batch(str(owner.id), user_role="admin", is_internal=True)
+    fake_password = "fixture-db-password"
+    statement = "SELECT id FROM users WHERE id = :id"
 
     async def load_user(user_id):
         if failure == "exception":
-            raise RuntimeError("sensitive database connection details")
+            raise OperationalError(statement, {"id": user_id}, RuntimeError(f"postgresql://test:{fake_password}@test-db/deerflow"))
         return User(email="different@example.com", system_role="admin")
 
     with pytest.raises(PermissionError) as exc:
-        await resolve_batch_principal(_batch(str(owner.id), user_role="admin", is_internal=True), load_user=None if failure == "missing_loader" else load_user)
-    assert "sensitive" not in str(exc.value)
+        await resolve_batch_principal(batch, load_user=None if failure == "missing_loader" else load_user)
+    assert fake_password not in str(exc.value)
+    if failure == "exception":
+        records = [record for record in caplog.records if record.name == "app.subagent_batches.identity"]
+        assert len(records) == 1
+        record = records[0]
+        assert batch["id"] in record.getMessage()
+        assert "OperationalError" in record.getMessage()
+        assert record.exc_info is None
+        diagnostics = caplog.text + "".join(format_exception(exc.value))
+        assert fake_password not in diagnostics
+        assert str(owner.id) not in diagnostics
+        assert statement not in diagnostics

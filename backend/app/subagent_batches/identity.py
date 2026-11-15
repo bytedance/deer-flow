@@ -1,7 +1,11 @@
 """Resolve durable item owners through the Gateway's current account store."""
 
+import logging
+
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, get_auth_disabled_user, is_auth_disabled
 from deerflow.authz.provider import Principal
+
+logger = logging.getLogger(__name__)
 
 
 async def resolve_batch_principal(batch, *, load_user) -> Principal:
@@ -15,8 +19,9 @@ async def resolve_batch_principal(batch, *, load_user) -> Principal:
             if load_user is None:
                 raise RuntimeError("Account repository unavailable")
             user = await load_user(owner)
-        except Exception:
-            # Never restore serialized grants when the account store fails.
+        except Exception as exc:
+            # Database exception text can contain SQL parameters or credentials.
+            logger.warning("Batch owner lookup failed (batch_id=%s, error_type=%s)", batch.get("id"), type(exc).__name__)
             raise PermissionError("Batch owner could not be verified") from None
     if user is None:
         # Gateway stamps no role on an unmapped, trusted internal identity.
