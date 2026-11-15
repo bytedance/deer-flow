@@ -68,6 +68,13 @@ This section accumulates work toward the **2.3.0** milestone
 
 ### Fixed
 
+- **agents:** A todo list revised after the last `write_todos` call (for
+  example an approved plan edited on resume) is shown to the model again
+  instead of being silently skipped, and a stale injected reminder is
+  refreshed in place. Injected reminders are stamped with middleware
+  provenance, and caller-edited todo text is neutralized before rendering so
+  it cannot forge framework tags. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
   `0 24 * * *` stays a custom schedule and keeps its original text. Previously,
