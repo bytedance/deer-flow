@@ -82,6 +82,7 @@ import uuid
 from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from typing import TYPE_CHECKING, Annotated, Literal, NotRequired, override
 
 from langchain.agents import AgentState
@@ -307,6 +308,9 @@ _TOOL_FREQ_REJECT_MSG = (
     "the per-tool limit for this run. The other {admitted} were passed on; their results above show which of them actually ran. "
     "Do not call {names} again in this run. " + _WRAP_UP_INSTRUCTIONS
 )
+# For a drop whose tool the cap record cannot name (see ``_recordable_caps``).
+_UNNAMED_TOOL = "a tool"
+_UNNAMED_TOOL_AGAIN = "that tool"
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
@@ -319,6 +323,22 @@ def _usable_tool_name(name: object) -> bool:
 
 def _positive_int(value: object) -> bool:
     return type(value) is int and value > 0
+
+
+def _recordable_caps(existing: Mapping[str, int], limits: Mapping[str, int]) -> dict[str, int]:
+    """Add newly limited tools to the capped set, keeping only what ``_read_loop_cap`` accepts.
+
+    The names come from the model's response, so one can be longer than the
+    reader allows, and a response can limit more tools than a record may hold.
+    Such a tool is left out: the window already dropped its calls, and writing
+    it would make the next read discard the record with every other cap in it.
+    Existing caps are kept first.
+    """
+    recorded = dict(existing)
+    for name, limit in limits.items():
+        if name not in recorded and len(recorded) < _MAX_CAPPED_TOOLS and _usable_tool_name(name) and _positive_int(limit):
+            recorded[name] = limit
+    return recorded
 
 
 @dataclass(frozen=True)
@@ -338,6 +358,10 @@ class _LoopCap:
     other calls evict its entries from the frequency window. ``run_id`` is the
     run that last carried the cap: an approval resume adopts it, and
     ``before_agent`` expires a cap that another run left behind.
+
+    ``tools`` is empty when calls were dropped only for tools the record cannot
+    name. The record then still marks the execution as capped and carries the
+    notice.
     """
 
     run_id: str | None
@@ -358,8 +382,8 @@ class _LoopCap:
             skipped=notice.skipped,
             total=notice.total,
             admitted=notice.total - notice.skipped,
-            tools=", ".join(f"{name} (limit {self.tools[name]})" for name in notice.tools),
-            names=", ".join(notice.tools),
+            tools=", ".join(f"{name} (limit {self.tools[name]})" for name in notice.tools) or _UNNAMED_TOOL,
+            names=", ".join(notice.tools) or _UNNAMED_TOOL_AGAIN,
         )
 
 
@@ -373,7 +397,7 @@ def _read_loop_cap(value: object) -> _LoopCap | None:
         return None
     raw_tools = value.get("tools")
     run_id = value.get("run_id")
-    if not isinstance(raw_tools, Mapping) or not 0 < len(raw_tools) <= _MAX_CAPPED_TOOLS or not isinstance(run_id, str | None):
+    if not isinstance(raw_tools, Mapping) or len(raw_tools) > _MAX_CAPPED_TOOLS or not isinstance(run_id, str | None):
         return None
     if not all(_usable_tool_name(name) and _positive_int(limit) for name, limit in raw_tools.items()):
         return None
@@ -383,7 +407,7 @@ def _read_loop_cap(value: object) -> _LoopCap | None:
     raw_notice = value.get("notice")
     if isinstance(raw_notice, Mapping):
         total, skipped, names = raw_notice.get("total"), raw_notice.get("skipped"), raw_notice.get("tools")
-        if _positive_int(total) and _positive_int(skipped) and skipped < total and isinstance(names, list) and names and all(isinstance(name, str) and name in tools for name in names):
+        if _positive_int(total) and _positive_int(skipped) and skipped < total and isinstance(names, list) and all(isinstance(name, str) and name in tools for name in names):
             notice = _CapNotice(total=total, skipped=skipped, tools=tuple(dict.fromkeys(names)))
     return _LoopCap(run_id=run_id, tools=tools, notice=notice)
 
@@ -399,12 +423,12 @@ class _LoopDecision:
     count: int
     threshold: int
     # reject_excess only: positions of the calls removed from the batch, the
-    # limit of every tool they belong to, whether a tool reached its limit in
-    # this batch (rather than earlier), and a warning selected for the admitted
-    # calls that is delivered alongside.
+    # limit of every tool they belong to, the tools that reached their limit in
+    # this batch (rather than earlier) as (name, count, threshold), and a
+    # warning selected for the admitted calls that is delivered alongside.
     rejected_indices: tuple[int, ...] = ()
     limits: dict[str, int] = field(default_factory=dict)
-    new_limit: bool = False
+    crossings: tuple[tuple[str, int, int], ...] = ()
     companion_warning: str | None = None
 
     @property
@@ -699,6 +723,50 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
             self._touch_pending_warning_key_locked(pending_key)
             self._prune_pending_warning_state_locked(protected_key=pending_key)
 
+    def _count_after_call(self, scope_key: _RunScopeKey, name: str) -> int:
+        """The windowed count of ``name`` if one more call to it were recorded.
+
+        A full window drops its oldest entry for the new one, so a call that
+        replaces an older call to the same tool does not raise the count. This
+        is the count ``_record_call_locked`` would return, without recording.
+
+        Must be called while holding self._lock.
+        """
+        history = self._tool_name_history[scope_key]
+        overflow = len(history) + 1 - self._tool_freq_window
+        evicted = sum(1 for old in islice(history, max(overflow, 0)) if old == name)
+        return self._tool_name_counter[scope_key].get(name, 0) + 1 - evicted
+
+    def _record_call_locked(self, scope_key: _RunScopeKey, name: str) -> int:
+        """Record one call in the frequency window and return the tool's count.
+
+        Windowed counting: append the name and trim to the frequency window
+        (>= the largest threshold) so the count can reach the warn/hard limits
+        on a tight burst yet still decay for spread-out calls. A mirrored
+        Counter gives an O(1) count even when a per-tool override inflates the
+        window globally.
+
+        Must be called while holding self._lock.
+        """
+        history = self._tool_name_history[scope_key]
+        counter = self._tool_name_counter[scope_key]
+        history.append(name)
+        counter[name] += 1
+        while len(history) > self._tool_freq_window:
+            old = history.popleft()
+            c = counter[old] - 1
+            if c <= 0:
+                del counter[old]
+            else:
+                counter[old] = c
+            old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
+            if c < old_warn:
+                # Any tool can evict an older name from the shared window.
+                # Rearm that name as soon as its burst decays, even when the
+                # current call belongs to another tool.
+                self._tool_freq_warned[scope_key].discard(old)
+        return counter.get(name, 0)
+
     def _track_and_check(
         self,
         state: AgentState,
@@ -795,7 +863,6 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 )
 
             # --- Layer 2: per-tool-type frequency (windowed) ---
-            tool_name_history = self._tool_name_history[scope_key]
             name_counter = self._tool_name_counter[scope_key]
             # A call that would reach its tool's hard limit is rejected instead
             # of stopping the whole batch, so calls within the limit still run.
@@ -803,6 +870,9 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
             capped = cap.tools if cap is not None else {}
             rejected: list[int] = []
             limited: dict[str, tuple[int, int]] = {}
+            # Tools that reach their limit in this response, with the count and
+            # threshold of the crossing. One audit row is written for each.
+            crossings: list[tuple[str, int, int]] = []
             for index, tc in enumerate(tool_calls):
                 name = tc.get("name", "")
                 if not name:
@@ -817,31 +887,18 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                     rejected.append(index)
                     continue
                 eff_warn, eff_hard = self._tool_freq_overrides.get(name, self._default_tool_freq_thresholds)
-                if name_counter.get(name, 0) + 1 >= eff_hard:
-                    limited[name] = (name_counter.get(name, 0) + 1, eff_hard)
+                # Compare the count the call would leave in the window, after
+                # the window has dropped its oldest entry. Counting before that
+                # would reject a call that only replaces an older call to the
+                # same tool, and cap an interleaved workflow that never reaches
+                # the limit.
+                prospective = self._count_after_call(scope_key, name)
+                if prospective >= eff_hard:
+                    limited[name] = (prospective, eff_hard)
+                    crossings.append((name, prospective, eff_hard))
                     rejected.append(index)
                     continue
-                # Windowed counting: append the name and trim to the frequency
-                # window (>= the largest threshold) so the count can reach the
-                # warn/hard limits on a tight burst yet still decay for
-                # spread-out calls. A mirrored Counter gives O(1) freq_count
-                # even when a per-tool override inflates the window globally.
-                tool_name_history.append(name)
-                name_counter[name] += 1
-                while len(tool_name_history) > self._tool_freq_window:
-                    old = tool_name_history.popleft()
-                    c = name_counter[old] - 1
-                    if c <= 0:
-                        del name_counter[old]
-                    else:
-                        name_counter[old] = c
-                    old_warn = self._tool_freq_overrides.get(old, self._default_tool_freq_thresholds)[0]
-                    if c < old_warn:
-                        # Any tool can evict an older name from the shared
-                        # window. Rearm that name as soon as its burst decays,
-                        # even when the current call belongs to another tool.
-                        self._tool_freq_warned[scope_key].discard(old)
-                freq_count = name_counter.get(name, 0)
+                freq_count = self._record_call_locked(scope_key, name)
 
                 if freq_count >= eff_warn:
                     freq_warned = self._tool_freq_warned[scope_key]
@@ -868,8 +925,7 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 else:
                     # Count the call that reached the limit so later checks see
                     # the exhausted window.
-                    tool_name_history.append(name)
-                    name_counter[name] += 1
+                    self._record_call_locked(scope_key, name)
                     message = _TOOL_FREQ_HARD_STOP_MSG.format(tool_name=name, count=freq_count)
                 logger.error(
                     "Tool frequency hard limit reached — forcing stop",
@@ -942,7 +998,7 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                     threshold=eff_hard,
                     rejected_indices=tuple(rejected),
                     limits={name: hard for name, (_, hard) in limited.items()},
-                    new_limit=any(name not in capped for name in limited),
+                    crossings=tuple(crossings),
                     # A frequency warning for a tool that just hit its limit
                     # says less than the rejection itself, so it is not repeated.
                     companion_warning=None if warning is None or (warning.detection_layer == "tool_frequency" and warning.tool_names[0] in limited) else warning.message,
@@ -1055,8 +1111,13 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         if decision is not None:
             # Keep the shared loop-detection lock's critical section bounded; the
             # journal append is cheap and non-blocking but does not belong under
-            # it. A repeated rejection of an already capped tool is no transition.
-            if decision.action != "reject_excess" or decision.new_limit:
+            # it. A dropped batch is audited once per tool that reached its limit
+            # in it, with that tool's own count and threshold; a repeated
+            # rejection of an already capped tool is no transition.
+            if decision.action == "reject_excess":
+                for name, count, threshold in decision.crossings:
+                    self._record_audit_event(replace(decision, tool_names=(name,), count=count, threshold=threshold), runtime)
+            else:
                 self._record_audit_event(decision, runtime)
 
             if decision.action == "warn":
@@ -1072,14 +1133,14 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 self._mark_capped(runtime, overwrite=True)
                 last_msg = state.get("messages", [])[-1]
                 kept = self._admitted_calls(last_msg, decision) if decision.action == "reject_excess" else []
-                capped_tools = {**(cap.tools if cap is not None else {}), **decision.limits}
+                capped_tools = _recordable_caps(cap.tools if cap is not None else {}, decision.limits)
                 if kept:
                     # Run the calls within the limit and drop the rest. Like a
                     # warning, the explanation reaches the model on its next
                     # call; it is read from the cap record, so it survives a
                     # pause between this response and that call.
                     total = len(last_msg.tool_calls)
-                    notice = _CapNotice(total=total, skipped=total - len(kept), tools=decision.tool_names)
+                    notice = _CapNotice(total=total, skipped=total - len(kept), tools=tuple(name for name in decision.tool_names if name in capped_tools))
                     next_cap = _LoopCap(run_id=self._record_run_id(runtime), tools=capped_tools, notice=notice)
                     if decision.companion_warning:
                         self._queue_pending_warning(runtime, decision.companion_warning)

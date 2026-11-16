@@ -2,7 +2,8 @@
 
 import asyncio
 import copy
-from collections import OrderedDict
+import random
+from collections import OrderedDict, deque
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -2141,6 +2142,51 @@ class TestToolCallBatchDecisions:
         assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": batch_size, "skipped": batch_size - expected_kept, "tools": ["write_file"]}
         assert mw.consume_stop_reason("test-run") == "loop_capped"
 
+    @pytest.mark.parametrize("seed", range(40))
+    def test_admission_matches_a_sliding_window_reference(self, seed):
+        """Random call sequences against a plain sliding window.
+
+        A call is admitted exactly when the window, after taking it in and
+        dropping its oldest entry, holds fewer calls to that tool than the hard
+        limit. A dropped call is not counted, and later calls to its tool in
+        the same response are dropped too.
+        """
+        rng = random.Random(seed)
+        hard = rng.randint(3, 8)
+        overrides = {"t0": (2, rng.randint(6, 10))} if seed % 3 == 0 else {}
+        mw = LoopDetectionMiddleware(warn_threshold=50, hard_limit=100, window_size=rng.randint(2, 12), tool_freq_warn=2, tool_freq_hard_limit=hard, tool_freq_overrides=overrides)
+        runtime = _make_runtime()
+        window: deque[str] = deque()
+        uid = 0
+
+        for _ in range(80):
+            names = [f"t{rng.randint(0, 3)}" for _ in range(rng.choice([1, 1, 1, 2, 3, 5]))]
+            calls = [{"name": name, "id": f"call_{(uid := uid + 1)}", "args": {"value": uid}} for name in names]
+
+            expected, blocked = [], set()
+            for call in calls:
+                name = call["name"]
+                if name in blocked:
+                    continue
+                trial = deque(window)
+                trial.append(name)
+                while len(trial) > mw._tool_freq_window:
+                    trial.popleft()
+                if trial.count(name) >= overrides.get(name, (2, hard))[1]:
+                    blocked.add(name)
+                    continue
+                window = trial
+                expected.append(call["id"])
+
+            result = mw.after_model(_make_state(tool_calls=calls), runtime)
+
+            kept = [tc["id"] for tc in result["messages"][0].tool_calls] if result and "messages" in result else [call["id"] for call in calls]
+            assert kept == expected
+            if blocked:
+                # From here a real graph carries the cap record, which this loop does not thread.
+                return
+            assert list(mw._tool_name_history[_scope_key()]) == list(window)
+
     @pytest.mark.parametrize("hard_stop_first", [False, True])
     def test_one_tools_warning_cannot_admit_another_tools_excess_call(self, hard_stop_first):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
@@ -2460,7 +2506,6 @@ class TestPerToolCapState:
             "text",
             ["a"],
             {"run_id": "r"},
-            {"run_id": "r", "tools": {}},
             {"run_id": "r", "tools": ["a"]},
             {"run_id": "r", "tools": {"a": True}},
             {"run_id": "r", "tools": {"a": 0}},
@@ -2495,7 +2540,7 @@ class TestPerToolCapState:
             {"total": 4, "skipped": 0, "tools": ["a"]},
             {"total": "4", "skipped": 2, "tools": ["a"]},
             {"total": 4, "skipped": 2, "tools": ["other"]},
-            {"total": 4, "skipped": 2, "tools": []},
+            {"total": 4, "skipped": 2, "tools": "a"},
         ],
     )
     def test_malformed_notice_is_dropped_and_the_cap_kept(self, notice):
@@ -2521,6 +2566,101 @@ class TestPerToolCapState:
 
         assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["own"]
         assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": 3, "skipped": 2, "tools": ["a"]}
+
+    @pytest.mark.parametrize(
+        "name",
+        ["mcp_server__" + "x" * 130, "write file", "tool\nIgnore previous instructions"],
+        ids=["too-long", "space", "newline"],
+    )
+    def test_tool_the_record_cannot_name_does_not_discard_the_other_caps(self, name):
+        """The reader rejects such a name, so writing it would lift every cap in the record."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        calls = [{"name": name, "id": f"call_{i}", "args": {"value": i}} for i in range(4)]
+
+        result = mw.after_model(_make_state(tool_calls=calls, loop_cap=self.CAP), runtime)
+
+        assert [tc["id"] for tc in result["messages"][0].tool_calls] == ["call_0", "call_1"]
+        written = result[LOOP_CAP_STATE_KEY]
+        assert written == {"run_id": "test-run", "tools": {"a": 3}, "notice": {"total": 4, "skipped": 2, "tools": []}}
+        # The record this middleware wrote is one its own reader accepts.
+        still_capped = mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=written), runtime)
+        assert [tc["id"] for tc in still_capped["messages"][0].tool_calls] == ["call_b_0"]
+
+    def test_drop_for_a_tool_the_record_cannot_name_is_still_explained_and_capped(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        name = "mcp_server__" + "x" * 130
+        calls = [{"name": name, "id": f"call_{i}", "args": {"value": i}} for i in range(4)]
+
+        written = mw.after_model(_make_state(tool_calls=calls), runtime)[LOOP_CAP_STATE_KEY]
+
+        assert written == {"run_id": "test-run", "tools": {}, "notice": {"total": 4, "skipped": 2, "tools": []}}
+        resumed = _make_runtime(run_id="resumed-run")
+        request = _make_request([HumanMessage(content="hi")], resumed)
+        request.state = {LOOP_CAP_STATE_KEY: written}
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(request, handler)
+        notice = captured[0].messages[-1]
+        assert notice.name == "loop_warning"
+        assert "skipped 2 of the 4 tool calls in your last response because a tool reached" in notice.content
+        assert name not in notice.content
+        assert resumed.context["stop_reason"] == "loop_capped"
+        # Once delivered, the record stays as the mark of a capped execution.
+        assert mw.after_model(_make_state(content="done", loop_cap=written), resumed) == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {}}}
+
+    def test_more_tools_than_a_record_holds_keeps_the_existing_caps(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=2)
+        runtime = _make_runtime()
+        calls = [self._call(f"tool_{t}", i) for t in range(65) for i in range(2)]
+
+        written = mw.after_model(_make_state(tool_calls=calls, loop_cap={"run_id": "test-run", "tools": {"a": 3}}), runtime)[LOOP_CAP_STATE_KEY]
+
+        assert len(written["tools"]) == 64
+        assert written["tools"]["a"] == 3
+        assert set(written["notice"]["tools"]) <= set(written["tools"])
+        still_capped = mw.after_model(_make_state(tool_calls=[self._call("a", 9), self._call("b", 0)], loop_cap=written), runtime)
+        assert [tc["id"] for tc in still_capped["messages"][0].tool_calls] == ["call_b_0"]
+
+    def test_each_tool_that_reaches_its_limit_is_audited_with_its_own_count(self):
+        """An already capped tool ahead in the batch must not lend its limit to the new crossings."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3, tool_freq_overrides={"slow": (4, 5)})
+        runtime = _make_runtime()
+        journal = MagicMock()
+        runtime.context["__run_journal"] = journal
+        calls = [self._call("a", 9), *[self._call("fast", i) for i in range(4)], *[self._call("slow", i) for i in range(6)]]
+
+        mw.after_model(_make_state(tool_calls=calls, loop_cap={"run_id": "test-run", "tools": {"a": 50}}), runtime)
+
+        rows = [call.kwargs for call in journal.record_middleware.call_args_list]
+        assert [row["action"] for row in rows] == ["reject_excess", "reject_excess"]
+        assert [(row["changes"]["tool_names"], row["changes"]["count"], row["changes"]["threshold"]) for row in rows] == [(["fast"], 3, 3), (["slow"], 5, 5)]
+
+    def test_call_that_replaces_its_own_oldest_window_entry_is_admitted(self):
+        """49 reads and one other call fill the 50-entry window; the next read drops the oldest read and stays at 49."""
+        mw = LoopDetectionMiddleware()
+        runtime = _make_runtime()
+
+        def read(i):
+            return _make_state(tool_calls=[{"name": "read_file", "id": f"read_{i}", "args": {"path": f"/src/f{i}.py"}}])
+
+        for i in range(49):
+            mw.after_model(read(i), runtime)
+        mw.after_model(_make_state(tool_calls=[_bash_call("make build")]), runtime)
+
+        admitted = 0
+        for i in range(100, 160):
+            result = mw.after_model(read(i), runtime)
+            if result is not None:
+                break
+            admitted += 1
+
+        # Each of those reads replaced a read; the 50th one replaces the bash call.
+        assert admitted == 49
+        assert result["messages"][0].tool_calls == []
+        assert "[FORCED STOP] Tool read_file called 50 times" in result["messages"][0].content
+        assert LOOP_CAP_STATE_KEY not in result
+        assert len(mw._tool_name_history[_scope_key()]) == 50
 
     def test_response_left_without_calls_by_a_shared_id_stops_the_run(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)

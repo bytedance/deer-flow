@@ -29,8 +29,11 @@ candidate never short-circuits frequency accounting for the remaining calls
 in an admitted batch. The identical-call hard limit rejects the entire batch.
 A per-tool hard limit admits the batch's calls up to the limit and drops the
 calls that would reach it, because one response can carry many distinct calls
-that have not run yet; the dropped calls are not counted. Only a response in
-which no call fits stops the run. Only the selected warning is marked and logged;
+that have not run yet; the dropped calls are not counted. A call reaches the
+limit when the window would hold that many calls to its tool after taking the
+call in and dropping its oldest entry. A call that only replaces an older call
+to the same tool is therefore admitted, so an interleaved workflow below the
+limit keeps running. Only a response in which no call fits stops the run. Only the selected warning is marked and logged;
 hash warnings still precede frequency warnings when neither layer stops the
 run. Among simultaneous frequency-warning candidates, the first crossing in
 model tool-call order remains selected for compatibility; later calls are
@@ -67,6 +70,14 @@ cap, and a notice for the model.
   the graph and not when a paused run resumes, so it expires a record that
   another run left behind. A later entry of the same run, such as a hidden goal
   continuation, keeps it.
+
+- **The record holds only what its reader accepts.** Tool names come from the
+  model's response. A name the reader would reject (too long, or with
+  whitespace) and a tool beyond the record's size bound are left out, because
+  one such entry would make the next read discard every cap in the record. The
+  window already dropped that tool's calls. The record and its notice are
+  still written, so the drop is explained and the execution stays
+  `loop_capped`; the notice then refers to "a tool" instead of a name.
 
 The channel is server-owned: the Gateway rejects a client value for it, the
 graph leaves it out of its input and output, and a malformed record reads as
