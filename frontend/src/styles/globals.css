@@ -233,6 +233,7 @@
   --color-incognito-foreground: var(--incognito-foreground);
   --color-incognito-muted-foreground: var(--incognito-muted-foreground);
   --color-incognito-border: var(--incognito-border);
+  --color-incognito-surface: var(--incognito-surface);
   --animate-aurora: aurora 8s ease-in-out infinite alternate;
   @keyframes aurora {
     0% {
@@ -304,11 +305,14 @@
   --sidebar-border: oklch(0.922 0.0098 87.47);
   --sidebar-ring: oklch(0.708 0 0);
   /* Incognito chats keep a dark frame in both themes, like the browser mode
-     they are named after; these tokens deliberately do not flip. */
+     they are named after; these tokens deliberately do not flip. The
+     conversation surface does follow the theme, and in dark mode it is one
+     step lighter than the surround so the frame stays visible. */
   --incognito: oklch(0.24 0.0036 106.64);
   --incognito-foreground: oklch(0.985 0 0);
   --incognito-muted-foreground: oklch(0.708 0 0);
   --incognito-border: oklch(1 0 0 / 15%);
+  --incognito-surface: oklch(0.9855 0.0098 87.47);
 }
 
 html.dark .shiki span {
@@ -347,6 +351,9 @@ html.dark .shiki span {
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
+  /* The incognito conversation surface in dark mode: lighter than the fixed
+     `--incognito` surround, so the black frame still reads as a frame. */
+  --incognito-surface: oklch(0.3 0.0036 106.64);
   font-weight: 300;
 }
 
@@ -542,4 +549,23 @@ html.dark .shiki span {
   color: inherit;
   font-weight: 600;
   border-radius: 2px;
+}
+
+/*
+ * Incognito composer. The dashed border carries the whole focus state, so the
+ * input group's blue ring is replaced by the same border, bluer and thicker.
+ * These rules stay unlayered so they win over the generated
+ * `has-[…focus-visible]:ring-*` utilities in `ui/input-group.tsx`.
+ */
+.incognito-composer [data-slot="input-group"] {
+  border: 1.5px dashed var(--input);
+}
+
+.incognito-composer
+  [data-slot="input-group"]:has(
+    [data-slot="input-group-control"]:focus-visible
+  ) {
+  border-color: color-mix(in oklch, var(--ring) 50%, transparent);
+  border-width: 2px;
+  box-shadow: none;
 }

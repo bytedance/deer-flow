@@ -13,6 +13,7 @@ import { BrowserTrigger } from "@/components/workspace/browser-view";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
+import { usePublishIncognitoMode } from "@/components/workspace/incognito-mode-context";
 import {
   InputBox,
   type InputBoxSubmitOptions,
@@ -86,7 +87,12 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
-import { IncognitoFrame } from "./incognito-frame";
+import { IncognitoEntry } from "./incognito-entry";
+import {
+  IncognitoNotices,
+  IncognitoShell,
+  IncognitoTitle,
+} from "./incognito-frame";
 import { useSpecificChatMode } from "./use-chat-mode";
 import { useMarkOpenThreadRead } from "./use-mark-open-thread-read";
 import { useThreadChat } from "./use-thread-chat";
@@ -154,6 +160,9 @@ export default function ChatPage() {
   const isIncognito = isNewThread
     ? incognitoParam
     : threadMetadata.data?.incognito === true;
+  // An incognito chat owns the whole window: the workspace shell unmounts the
+  // sidebar while this surface renders.
+  usePublishIncognitoMode(isIncognito);
   // A saved thread that exists on the server is being read while open:
   // clears its unread dot (sidebar and chats list) on every device.
   const markThreadRead = useMarkOpenThreadRead(threadId, {
@@ -661,6 +670,326 @@ export default function ChatPage() {
     !hasOpenHumanInputCard &&
     !hasPendingApproval;
 
+  const chatSurface = (
+    <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
+      <div className="relative flex size-full min-h-0 justify-between">
+        {!isIncognito && (
+          <header
+            className={cn(
+              "absolute top-0 right-0 left-0 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
+              isWelcomeMode
+                ? "bg-background/0 z-40 backdrop-blur-none"
+                : "bg-background/80 z-30 shadow-xs backdrop-blur",
+            )}
+          >
+            {!isMock && <WorkspaceSidebarTrigger className="md:hidden" />}
+            <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
+              <ThreadTitle
+                threadId={threadId}
+                thread={thread}
+                canonicalTitle={threadMetadata.data?.values?.title}
+              />
+              {!isNewThread &&
+                !isMock &&
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                  <ThreadArchiveStatus
+                    threadId={threadId}
+                    metadata={threadMetadata.data?.metadata}
+                  />
+                )}
+              {affiliatedProjectId && (
+                <ProjectAffiliationBadge projectId={affiliatedProjectId} />
+              )}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <IncognitoEntry />
+              {!isNewThread &&
+                !isMock &&
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                  <ThreadBackgroundTasks threadId={threadId} />
+                )}
+              {!isNewThread &&
+                !isMock &&
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                  <ThreadSubagentBatches threadId={threadId} />
+                )}
+              {!isNewThread && !isMock && (
+                <ThreadScheduledTasksButton threadId={threadId} />
+              )}
+              {tokenUsageEnabled ? (
+                <TokenUsageIndicator
+                  threadId={isNewThread ? undefined : threadId}
+                  backendUsage={backendTokenUsage}
+                  contextUsage={contextUsage}
+                  enabled={tokenUsageEnabled}
+                  messages={thread.messages}
+                  pendingMessages={pendingUsageMessages}
+                  preferences={localSettings.tokenUsage}
+                  onPreferencesChange={(preferences) =>
+                    setLocalSettings("tokenUsage", preferences)
+                  }
+                />
+              ) : (
+                <ContextUsageBadge contextUsage={contextUsage} />
+              )}
+              <SidecarTrigger />
+              {browserEnabled && <BrowserTrigger />}
+              <ExportTrigger threadId={threadId} />
+              <ThreadExtensionActions threadId={threadId} />
+              <ArtifactTrigger />
+            </div>
+          </header>
+        )}
+        <main className="flex min-h-0 max-w-full grow flex-col">
+          <div className="flex min-h-0 flex-1 justify-center">
+            <MessageList
+              activeRunId={activeRunId}
+              activeRunStartedAt={activeRunStartedAt}
+              archiveDownloadsEnabled={
+                isNewThread || isMock || threadMetadata.data != null
+              }
+              className={cn(
+                "size-full",
+                !isWelcomeMode && (isIncognito ? "pt-4" : "pt-10"),
+              )}
+              testId="main-message-list"
+              threadId={threadId}
+              thread={thread}
+              scheduledTaskEvents={scheduledTaskEvents.data}
+              enableConversationOutline
+              paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
+              hasMoreHistory={hasMoreHistory}
+              loadMoreHistory={loadMoreHistory}
+              isHistoryLoading={isHistoryLoading}
+              tokenUsageInlineMode={tokenUsageInlineMode}
+              approvalRequests={approvalRequests}
+              approvalMetadataLoading={
+                hasPendingApproval && approvalRequests.length === 0
+              }
+              approvalMetadataError={
+                hasPendingApproval &&
+                approvalRequests.length === 0 &&
+                threadMetadata.isError
+              }
+              onReloadApprovalMetadata={() => threadMetadata.refetch()}
+              waitingForInputRunIds={waitingForInputRunIds}
+              onSubmitApproval={handleSubmitApproval}
+              canRegenerate={
+                !isNewThread &&
+                !isMock &&
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                !isUploading &&
+                !thread.isLoading &&
+                !hasPendingApproval
+              }
+              onRegenerateMessage={handleRegenerate}
+              canEdit={editBase && !hasGoal}
+              editLockedByGoal={editBase && hasGoal}
+              onEditAndRegenerateMessage={handleEditAndRegenerate}
+              onSubmitHumanInput={
+                isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+                  ? undefined
+                  : handleSubmitHumanInput
+              }
+              canBranch={
+                !isNewThread &&
+                !isMock &&
+                env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                !isUploading &&
+                !thread.isLoading &&
+                !branchThread.isPending &&
+                !hasPendingApproval
+              }
+              // A branch copies this conversation into a new persistent
+              // thread, so an incognito chat offers none: no handler, no
+              // action. The backend rejects a branch of an incognito
+              // thread as well, for direct API callers.
+              onBranchTurn={isIncognito ? undefined : handleBranchTurn}
+            />
+          </div>
+          <div
+            className={cn(
+              "z-30 flex justify-center px-3 sm:px-4",
+              isWelcomeMode
+                ? isIncognito
+                  ? // The title, composer and notices center as one group.
+                    "absolute inset-0 items-center"
+                  : "absolute right-0 bottom-0 left-0"
+                : "relative right-0 bottom-0 left-0 shrink-0 pb-4",
+            )}
+          >
+            <div
+              className={cn(
+                "relative w-full",
+                isWelcomeMode &&
+                  !isIncognito &&
+                  "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
+                isWelcomeMode
+                  ? "max-w-(--container-width-sm)"
+                  : "max-w-(--container-width-md)",
+              )}
+            >
+              {(hasGoal || goalOutcome !== null || hasTodos) && (
+                <div
+                  className={cn(
+                    "right-0 left-0 z-0",
+                    isWelcomeMode ? "absolute -top-4" : "relative",
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "right-0 bottom-0 left-0 flex flex-col",
+                      isWelcomeMode ? "absolute" : "relative",
+                    )}
+                  >
+                    <GoalStatus
+                      goal={activeGoal}
+                      outcome={goalOutcome}
+                      isRunning={thread.isLoading}
+                      hasOpenHumanInputCard={hasOpenHumanInputCard}
+                      hasPendingApproval={hasPendingApproval}
+                      approvalMetadataError={
+                        hasPendingApproval &&
+                        approvalRequests.length === 0 &&
+                        threadMetadata.isError
+                      }
+                    />
+                    {hasTodos && (
+                      <TodoList
+                        className="bg-background/5"
+                        todos={thread.values.todos ?? []}
+                        hidden={false}
+                      />
+                    )}
+                  </div>
+                </div>
+              )}
+              {modelControl.request && (
+                <div className="mb-3" data-testid="model-selection-card">
+                  <HumanInputCard
+                    request={modelControl.request}
+                    onSubmit={(response) => modelControl.choose(response)}
+                  />
+                </div>
+              )}
+              {modelChoiceSummary && (
+                <p
+                  className="text-muted-foreground mb-2 text-sm"
+                  data-testid="model-selection-applied"
+                >
+                  {modelChoiceSummary}
+                </p>
+              )}
+              {isIncognito && isWelcomeMode && <IncognitoTitle />}
+              {mountedRef.current ? (
+                <div className="w-full">
+                  <ThreadRunInputs
+                    inputs={runInputs}
+                    threadId={isNewThread || isMock ? undefined : threadId}
+                    isRunning={thread.isLoading}
+                    canCreate={canCreateRuns}
+                    canCancel={canStopStreaming}
+                  />
+                  <InputBox
+                    className={cn(
+                      "bg-background/5 w-full",
+                      // The dashed border is drawn by the composer's inner
+                      // input group; `.incognito-composer` in globals.css also
+                      // turns its focus state into a blue dashed border.
+                      isIncognito && "incognito-composer",
+                      isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                    )}
+                    isWelcomeMode={isWelcomeMode}
+                    threadId={threadId}
+                    projectId={projectParam ?? affiliatedProjectId}
+                    draftThreadId={isNewThread ? "new" : threadId}
+                    knowledgeScopeControl={
+                      selectorVisible && knowledgeScope ? (
+                        <KnowledgeScopeSelector
+                          agentName="lead_agent"
+                          disabled={
+                            thread.isLoading ||
+                            isUploading ||
+                            hasPendingApproval
+                          }
+                          selection={knowledgeScope}
+                          onChange={setKnowledgeScope}
+                        />
+                      ) : undefined
+                    }
+                    autoFocus={isWelcomeMode}
+                    status={
+                      thread.error
+                        ? "error"
+                        : thread.isLoading
+                          ? "streaming"
+                          : "ready"
+                    }
+                    context={settings.context}
+                    extraHeader={
+                      isWelcomeMode &&
+                      !isIncognito &&
+                      !hasGoal &&
+                      !hasTodos && <Welcome mode={settings.context.mode} />
+                    }
+                    disabled={
+                      isMock ||
+                      env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
+                      isUploading ||
+                      modelControl.busy ||
+                      (!isNewThread && isHistoryLoading) ||
+                      hasPendingApproval
+                    }
+                    inputLocked={hasPendingApproval}
+                    incognito={isIncognito}
+                    onContextChange={(context, options) => {
+                      if (options?.automatic)
+                        resolveThreadContext(threadId, context);
+                      else setSettings("context", context);
+                    }}
+                    onGoalChange={setLocalGoal}
+                    onPrepareThread={ensureThreadRow}
+                    onReferenceFileAttached={() => {
+                      if (!isNewThread) return;
+                      history.replaceState(
+                        null,
+                        "",
+                        `/workspace/chats/${threadId}`,
+                      );
+                      setThreadId(threadId);
+                      setIsNewThread(false);
+                    }}
+                    onSubmit={handleSubmit}
+                    onBusySubmit={canSendInput ? sendInput : undefined}
+                    onStop={handleStop}
+                    canStopStreaming={canStopStreaming}
+                    canCreateRuns={canCreateRuns}
+                  />
+                </div>
+              ) : (
+                <div
+                  aria-hidden="true"
+                  className={cn(
+                    "bg-background/5 h-32 w-full rounded-2xl",
+                    isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
+                  )}
+                />
+              )}
+              {isIncognito && (
+                <IncognitoNotices idleTtlSeconds={incognitoIdleTtlSeconds} />
+              )}
+              {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
+                <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
+                  {t.common.notAvailableInDemoMode}
+                </div>
+              )}
+            </div>
+          </div>
+        </main>
+      </div>
+    </ChatBox>
+  );
+
   return (
     <ThreadContext.Provider value={{ thread, isMock }}>
       <SidecarProvider
@@ -669,321 +998,13 @@ export default function ChatPage() {
         isMock={isMock}
         disabled={isIncognito}
       >
-        <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
-          <div className="relative flex size-full min-h-0 justify-between">
-            <header
-              className={cn(
-                "absolute top-0 right-0 left-0 flex h-12 shrink-0 items-center gap-2 px-2 sm:px-4",
-                isWelcomeMode
-                  ? "bg-background/0 z-40 backdrop-blur-none"
-                  : "bg-background/80 z-30 shadow-xs backdrop-blur",
-              )}
-            >
-              {!isMock && <WorkspaceSidebarTrigger className="md:hidden" />}
-              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm font-medium">
-                <ThreadTitle
-                  threadId={threadId}
-                  thread={thread}
-                  canonicalTitle={threadMetadata.data?.values?.title}
-                />
-                {!isNewThread &&
-                  !isMock &&
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                    <ThreadArchiveStatus
-                      threadId={threadId}
-                      metadata={threadMetadata.data?.metadata}
-                    />
-                  )}
-                {affiliatedProjectId && (
-                  <ProjectAffiliationBadge projectId={affiliatedProjectId} />
-                )}
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                {!isNewThread &&
-                  !isMock &&
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                    <ThreadBackgroundTasks threadId={threadId} />
-                  )}
-                {!isNewThread &&
-                  !isMock &&
-                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
-                    <ThreadSubagentBatches threadId={threadId} />
-                  )}
-                {!isNewThread && !isMock && (
-                  <ThreadScheduledTasksButton threadId={threadId} />
-                )}
-                {tokenUsageEnabled ? (
-                  <TokenUsageIndicator
-                    threadId={isNewThread ? undefined : threadId}
-                    backendUsage={backendTokenUsage}
-                    contextUsage={contextUsage}
-                    enabled={tokenUsageEnabled}
-                    messages={thread.messages}
-                    pendingMessages={pendingUsageMessages}
-                    preferences={localSettings.tokenUsage}
-                    onPreferencesChange={(preferences) =>
-                      setLocalSettings("tokenUsage", preferences)
-                    }
-                  />
-                ) : (
-                  <ContextUsageBadge contextUsage={contextUsage} />
-                )}
-                <SidecarTrigger />
-                {browserEnabled && <BrowserTrigger />}
-                <ExportTrigger threadId={threadId} />
-                <ThreadExtensionActions threadId={threadId} />
-                <ArtifactTrigger />
-              </div>
-            </header>
-            <main
-              className={cn(
-                "flex min-h-0 max-w-full grow flex-col",
-                // The frame sits below the 48px header, which overlays the
-                // top of the conversation area.
-                isIncognito && "pt-12",
-              )}
-            >
-              {isIncognito && (
-                <div className="mx-auto w-full max-w-(--container-width-md) shrink-0 px-3 pb-1 sm:px-4">
-                  <IncognitoFrame
-                    idleTtlSeconds={incognitoIdleTtlSeconds}
-                    onEnd={handleEndIncognito}
-                  />
-                </div>
-              )}
-              <div className="flex min-h-0 flex-1 justify-center">
-                <MessageList
-                  activeRunId={activeRunId}
-                  activeRunStartedAt={activeRunStartedAt}
-                  archiveDownloadsEnabled={
-                    isNewThread || isMock || threadMetadata.data != null
-                  }
-                  className={cn("size-full", !isWelcomeMode && "pt-10")}
-                  testId="main-message-list"
-                  threadId={threadId}
-                  thread={thread}
-                  scheduledTaskEvents={scheduledTaskEvents.data}
-                  enableConversationOutline
-                  paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
-                  hasMoreHistory={hasMoreHistory}
-                  loadMoreHistory={loadMoreHistory}
-                  isHistoryLoading={isHistoryLoading}
-                  tokenUsageInlineMode={tokenUsageInlineMode}
-                  approvalRequests={approvalRequests}
-                  approvalMetadataLoading={
-                    hasPendingApproval && approvalRequests.length === 0
-                  }
-                  approvalMetadataError={
-                    hasPendingApproval &&
-                    approvalRequests.length === 0 &&
-                    threadMetadata.isError
-                  }
-                  onReloadApprovalMetadata={() => threadMetadata.refetch()}
-                  waitingForInputRunIds={waitingForInputRunIds}
-                  onSubmitApproval={handleSubmitApproval}
-                  canRegenerate={
-                    !isNewThread &&
-                    !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                    !isUploading &&
-                    !thread.isLoading &&
-                    !hasPendingApproval
-                  }
-                  onRegenerateMessage={handleRegenerate}
-                  canEdit={editBase && !hasGoal}
-                  editLockedByGoal={editBase && hasGoal}
-                  onEditAndRegenerateMessage={handleEditAndRegenerate}
-                  onSubmitHumanInput={
-                    isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-                      ? undefined
-                      : handleSubmitHumanInput
-                  }
-                  canBranch={
-                    !isNewThread &&
-                    !isMock &&
-                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
-                    !isUploading &&
-                    !thread.isLoading &&
-                    !branchThread.isPending &&
-                    !hasPendingApproval
-                  }
-                  // A branch copies this conversation into a new persistent
-                  // thread, so an incognito chat offers none: no handler, no
-                  // action. The backend rejects a branch of an incognito
-                  // thread as well, for direct API callers.
-                  onBranchTurn={isIncognito ? undefined : handleBranchTurn}
-                />
-              </div>
-              <div
-                className={cn(
-                  "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
-                  isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
-                )}
-              >
-                <div
-                  className={cn(
-                    "relative w-full",
-                    isWelcomeMode &&
-                      "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
-                    isWelcomeMode
-                      ? "max-w-(--container-width-sm)"
-                      : "max-w-(--container-width-md)",
-                  )}
-                >
-                  {(hasGoal || goalOutcome !== null || hasTodos) && (
-                    <div
-                      className={cn(
-                        "right-0 left-0 z-0",
-                        isWelcomeMode ? "absolute -top-4" : "relative",
-                      )}
-                    >
-                      <div
-                        className={cn(
-                          "right-0 bottom-0 left-0 flex flex-col",
-                          isWelcomeMode ? "absolute" : "relative",
-                        )}
-                      >
-                        <GoalStatus
-                          goal={activeGoal}
-                          outcome={goalOutcome}
-                          isRunning={thread.isLoading}
-                          hasOpenHumanInputCard={hasOpenHumanInputCard}
-                          hasPendingApproval={hasPendingApproval}
-                          approvalMetadataError={
-                            hasPendingApproval &&
-                            approvalRequests.length === 0 &&
-                            threadMetadata.isError
-                          }
-                        />
-                        {hasTodos && (
-                          <TodoList
-                            className="bg-background/5"
-                            todos={thread.values.todos ?? []}
-                            hidden={false}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {modelControl.request && (
-                    <div className="mb-3" data-testid="model-selection-card">
-                      <HumanInputCard
-                        request={modelControl.request}
-                        onSubmit={(response) => modelControl.choose(response)}
-                      />
-                    </div>
-                  )}
-                  {modelChoiceSummary && (
-                    <p
-                      className="text-muted-foreground mb-2 text-sm"
-                      data-testid="model-selection-applied"
-                    >
-                      {modelChoiceSummary}
-                    </p>
-                  )}
-                  {mountedRef.current ? (
-                    <div className="w-full">
-                      <ThreadRunInputs
-                        inputs={runInputs}
-                        threadId={isNewThread || isMock ? undefined : threadId}
-                        isRunning={thread.isLoading}
-                        canCreate={canCreateRuns}
-                        canCancel={canStopStreaming}
-                      />
-                      <InputBox
-                        className={cn(
-                          "bg-background/5 w-full",
-                          // The border is drawn by the composer's inner
-                          // input group, so reach it with the same selector
-                          // the base class uses for its radius.
-                          isIncognito &&
-                            "*:data-[slot='input-group']:border-dashed",
-                          isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
-                        )}
-                        isWelcomeMode={isWelcomeMode}
-                        threadId={threadId}
-                        projectId={projectParam ?? affiliatedProjectId}
-                        draftThreadId={isNewThread ? "new" : threadId}
-                        knowledgeScopeControl={
-                          selectorVisible && knowledgeScope ? (
-                            <KnowledgeScopeSelector
-                              agentName="lead_agent"
-                              disabled={
-                                thread.isLoading ||
-                                isUploading ||
-                                hasPendingApproval
-                              }
-                              selection={knowledgeScope}
-                              onChange={setKnowledgeScope}
-                            />
-                          ) : undefined
-                        }
-                        autoFocus={isWelcomeMode}
-                        status={
-                          thread.error
-                            ? "error"
-                            : thread.isLoading
-                              ? "streaming"
-                              : "ready"
-                        }
-                        context={settings.context}
-                        extraHeader={
-                          isWelcomeMode &&
-                          !hasGoal &&
-                          !hasTodos && <Welcome mode={settings.context.mode} />
-                        }
-                        disabled={
-                          isMock ||
-                          env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-                          isUploading ||
-                          modelControl.busy ||
-                          (!isNewThread && isHistoryLoading) ||
-                          hasPendingApproval
-                        }
-                        inputLocked={hasPendingApproval}
-                        onContextChange={(context, options) => {
-                          if (options?.automatic)
-                            resolveThreadContext(threadId, context);
-                          else setSettings("context", context);
-                        }}
-                        onGoalChange={setLocalGoal}
-                        onPrepareThread={ensureThreadRow}
-                        onReferenceFileAttached={() => {
-                          if (!isNewThread) return;
-                          history.replaceState(
-                            null,
-                            "",
-                            `/workspace/chats/${threadId}`,
-                          );
-                          setThreadId(threadId);
-                          setIsNewThread(false);
-                        }}
-                        onSubmit={handleSubmit}
-                        onBusySubmit={canSendInput ? sendInput : undefined}
-                        onStop={handleStop}
-                        canStopStreaming={canStopStreaming}
-                        canCreateRuns={canCreateRuns}
-                      />
-                    </div>
-                  ) : (
-                    <div
-                      aria-hidden="true"
-                      className={cn(
-                        "bg-background/5 h-32 w-full rounded-2xl",
-                        isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
-                      )}
-                    />
-                  )}
-                  {env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" && (
-                    <div className="text-muted-foreground/67 w-full translate-y-12 text-center text-xs">
-                      {t.common.notAvailableInDemoMode}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </main>
-          </div>
-        </ChatBox>
+        {isIncognito ? (
+          <IncognitoShell onEnd={handleEndIncognito}>
+            {chatSurface}
+          </IncognitoShell>
+        ) : (
+          chatSurface
+        )}
       </SidecarProvider>
     </ThreadContext.Provider>
   );

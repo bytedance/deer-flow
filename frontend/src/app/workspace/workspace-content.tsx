@@ -5,6 +5,7 @@ import { QueryClientProvider } from "@/components/query-client-provider";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { CommandPalette } from "@/components/workspace/command-palette";
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
+import { IncognitoModeProvider } from "@/components/workspace/incognito-mode-context";
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { SettingsDialogHost } from "@/components/workspace/settings";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
@@ -37,12 +38,14 @@ export async function WorkspaceContent({
       <UserPreferencesBoundary>
         <ExtensionPageBootstrap />
         <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-          <WorkspaceSidebar />
-          <SidebarInset className="min-w-0">
-            <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-            <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-            {children}
-          </SidebarInset>
+          <IncognitoModeProvider>
+            <WorkspaceSidebar />
+            <SidebarInset className="min-w-0">
+              <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
+              <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
+              {children}
+            </SidebarInset>
+          </IncognitoModeProvider>
         </SidebarProvider>
         <CommandPalette />
         <SettingsDialogHost />

@@ -688,9 +688,11 @@ export interface Translations {
   // Incognito (temporary) chats
   incognito: {
     entry: string;
-    privacyNotice: string;
-    lifetimeNotice: (duration: string) => string;
-    lifetimeUnknown: string;
+    label: string;
+    title: string;
+    notices: (duration: string) => string;
+    noticesUnknown: string;
+    boundaryNotice: string;
     durationMinutes: (count: number) => string;
     durationHours: (count: number) => string;
     durationDays: (count: number) => string;

@@ -11,6 +11,7 @@ import {
 import { useThreadActivity } from "@/core/threads/activity";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
+import { useIncognitoMode } from "./incognito-mode-context";
 import { PluginNavigation } from "./plugin-navigation";
 import { ProjectsSection } from "./projects-section";
 import { RecentChatList } from "./recent-chat-list";
@@ -30,6 +31,12 @@ export function WorkspaceSidebar({
   // and changed server-created threads reach the thread lists without a
   // reload, and a read on another device clears their dots here.
   useThreadActivity();
+  // An incognito chat owns the whole window: the sidebar is unmounted, not
+  // collapsed, so no workspace navigation (or its thread lists) is reachable.
+  const incognito = useIncognitoMode();
+  if (incognito) {
+    return null;
+  }
   return (
     <ThreadDeleteDialogProvider>
       <WorkspaceSidebarFrame variant="sidebar" collapsible="icon" {...props}>

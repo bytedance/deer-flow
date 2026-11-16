@@ -792,14 +792,19 @@ export const zhCN: Translations = {
 
   // 无痕（临时）对话
   incognito: {
-    entry: "无痕对话",
-    privacyNotice: "本对话不会出现在历史记录、记忆或搜索结果中。",
-    lifetimeNotice: (duration) => `无活动 ${duration}后，本对话将自动删除。`,
-    lifetimeUnknown: "一段时间无活动后，本对话将自动删除。",
+    entry: "使用无痕模式",
+    label: "无痕对话",
+    title: "👻 您正处于无痕模式",
+    notices: (duration) =>
+      `本对话不会出现在历史记录、记忆或搜索结果中。无活动 ${duration}后，本对话将自动删除。`,
+    noticesUnknown:
+      "本对话不会出现在历史记录、记忆或搜索结果中。一段时间无活动后，本对话将自动删除。",
+    boundaryNotice:
+      "对话内容仍会发送给你配置的模型和工具服务，其数据处理不受 DeerFlow 控制。",
     durationMinutes: (count) => `${count} 分钟`,
     durationHours: (count) => `${count} 小时`,
     durationDays: (count) => `${count} 天`,
-    end: "结束无痕对话",
+    end: "退出无痕模式",
     endFailed: "无法结束对话，但它仍会在到期后自动删除。",
     createFailed: "无法开始无痕对话，消息未发送，请重试。",
   },

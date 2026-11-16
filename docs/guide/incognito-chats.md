@@ -15,14 +15,15 @@ is self-hosted and does not train models on your conversations.
 
 ## Start and end
 
-Start an incognito chat from the new-chat entry point or open
-`/workspace/chats/new?incognito=true`. The workspace shows a dark incognito
-frame, a dashed composer border and two notices: the chat does not enter
-history, memory or search, and the idle lifetime shown is taken from the live
-configuration. Ordinary chats and incognito chats cannot be converted into one
-another.
+Start an incognito chat from the ghost icon at the top right of a chat, or open
+`/workspace/chats/new?incognito=true`. The workspace sidebar is removed and the
+chat takes the whole window: a dark top bar around a framed conversation area,
+a dashed composer border and two notices. The first says the chat does not enter
+history, memory or search and gives the idle lifetime from the live
+configuration; the second names the third-party boundary below. Ordinary chats
+and incognito chats cannot be converted into one another.
 
-Use the **×** control to end the chat. The browser leaves immediately; the
+Use the **×** control in the top bar to end the chat. The browser leaves immediately; the
 Gateway then schedules a short deletion grace in the background. If that
 request fails, the idle lifetime still ends the chat. An ended chat cannot be
 reopened from a list, and its deadline no longer grows when a run finishes.
@@ -87,13 +88,13 @@ The deadline shown in `expires_at` moves forward on run admission and run
 completion, but never past the absolute maximum measured from creation. The
 defaults are:
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `incognito.idle_ttl_seconds` | 86400 | idle window after the last activity |
-| `incognito.end_grace_seconds` | 3600 | grace after an explicit end |
-| `incognito.max_lifetime_seconds` | 604800 | absolute lifetime from creation |
-| `incognito.sweep_interval_seconds` | 60 | Gateway scan cadence |
-| `incognito.sweep_batch_size` | 100 | maximum threads purged per pass |
+| Setting                            | Default | Meaning                             |
+| ---------------------------------- | ------- | ----------------------------------- |
+| `incognito.idle_ttl_seconds`       | 86400   | idle window after the last activity |
+| `incognito.end_grace_seconds`      | 3600    | grace after an explicit end         |
+| `incognito.max_lifetime_seconds`   | 604800  | absolute lifetime from creation     |
+| `incognito.sweep_interval_seconds` | 60      | Gateway scan cadence                |
+| `incognito.sweep_batch_size`       | 100     | maximum threads purged per pass     |
 
 The Gateway's background sweep writes a tombstone first
 (`status="expired"`, with the row's title, metadata and project membership

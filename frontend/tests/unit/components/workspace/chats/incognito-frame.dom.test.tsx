@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, rs, test } from "@rstest/core";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
-import { IncognitoFrame } from "@/components/workspace/chats/incognito-frame";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  IncognitoNotices,
+  IncognitoShell,
+  IncognitoTitle,
+} from "@/components/workspace/chats/incognito-frame";
 import { enUS } from "@/core/i18n/locales/en-US";
 
 rs.mock("@/core/i18n/hooks", () => ({
@@ -10,40 +15,69 @@ rs.mock("@/core/i18n/hooks", () => ({
 
 afterEach(cleanup);
 
-describe("IncognitoFrame", () => {
-  test("states both notices and the live idle lifetime", () => {
-    render(<IncognitoFrame idleTtlSeconds={24 * 60 * 60} onEnd={rs.fn()} />);
-
-    const text = screen.getByTestId("incognito-frame").textContent ?? "";
-    expect(text).toContain(enUS.incognito.privacyNotice);
-    expect(text).toContain(
-      "It is deleted automatically after 1 day of inactivity.",
+describe("IncognitoShell", () => {
+  test("labels the mode and frames the conversation", () => {
+    render(
+      <TooltipProvider>
+        <IncognitoShell onEnd={rs.fn()}>
+          <IncognitoTitle />
+        </IncognitoShell>
+      </TooltipProvider>,
     );
-  });
 
-  test("does not invent a lifetime it could not read", () => {
-    render(<IncognitoFrame idleTtlSeconds={null} onEnd={rs.fn()} />);
-
-    const text = screen.getByTestId("incognito-frame").textContent ?? "";
-    expect(text).toBe(
-      `${enUS.incognito.privacyNotice}${enUS.incognito.lifetimeUnknown}`,
-    );
-  });
-
-  test("renders a shorter window in whole hours", () => {
-    render(<IncognitoFrame idleTtlSeconds={3600} onEnd={rs.fn()} />);
-
-    expect(screen.getByTestId("incognito-frame").textContent).toContain(
-      "It is deleted automatically after 1 hour of inactivity.",
-    );
+    expect(screen.getByText(enUS.incognito.label)).not.toBeNull();
+    expect(screen.getByText(enUS.incognito.title)).not.toBeNull();
+    // The conversation area is the light panel inside the dark surround.
+    expect(
+      screen
+        .getByTestId("incognito-frame")
+        .contains(screen.getByText(enUS.incognito.title)),
+    ).toBe(true);
   });
 
   test("the × control ends the chat", () => {
     const onEnd = rs.fn();
-    render(<IncognitoFrame idleTtlSeconds={3600} onEnd={onEnd} />);
+    render(
+      <TooltipProvider>
+        <IncognitoShell onEnd={onEnd}>{null}</IncognitoShell>
+      </TooltipProvider>,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: enUS.incognito.end }));
 
     expect(onEnd).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("IncognitoNotices", () => {
+  test("states the storage notice with the live idle lifetime", () => {
+    render(<IncognitoNotices idleTtlSeconds={24 * 60 * 60} />);
+
+    const text = screen.getByTestId("incognito-notices").textContent ?? "";
+    expect(text).toContain(enUS.incognito.notices("1 day"));
+  });
+
+  test("does not invent a lifetime it could not read", () => {
+    render(<IncognitoNotices idleTtlSeconds={null} />);
+
+    expect(screen.getByTestId("incognito-notices").textContent).toContain(
+      enUS.incognito.noticesUnknown,
+    );
+  });
+
+  test("renders a shorter window in whole hours", () => {
+    render(<IncognitoNotices idleTtlSeconds={3600} />);
+
+    expect(screen.getByTestId("incognito-notices").textContent).toContain(
+      enUS.incognito.notices("1 hour"),
+    );
+  });
+
+  test("states the third-party boundary", () => {
+    render(<IncognitoNotices idleTtlSeconds={null} />);
+
+    expect(screen.getByTestId("incognito-notices").textContent).toContain(
+      enUS.incognito.boundaryNotice,
+    );
   });
 });

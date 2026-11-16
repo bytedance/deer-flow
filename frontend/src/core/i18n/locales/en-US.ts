@@ -842,17 +842,20 @@ export const enUS: Translations = {
 
   // Incognito (temporary) chats
   incognito: {
-    entry: "Incognito chat",
-    privacyNotice: "This chat won't appear in your history, memory or search.",
-    lifetimeNotice: (duration) =>
-      `It is deleted automatically after ${duration} of inactivity.`,
-    lifetimeUnknown:
-      "It is deleted automatically after a period of inactivity.",
+    entry: "Use incognito mode",
+    label: "Incognito chat",
+    title: "👻 You're in incognito mode",
+    notices: (duration) =>
+      `This chat won't appear in your history, memory or search. It is deleted automatically after ${duration} of inactivity.`,
+    noticesUnknown:
+      "This chat won't appear in your history, memory or search. It is deleted automatically after a period of inactivity.",
+    boundaryNotice:
+      "Conversation content is still sent to the models and tool services you configured; their data handling is outside DeerFlow's control.",
     durationMinutes: (count) =>
       `${count} ${count === 1 ? "minute" : "minutes"}`,
     durationHours: (count) => `${count} ${count === 1 ? "hour" : "hours"}`,
     durationDays: (count) => `${count} ${count === 1 ? "day" : "days"}`,
-    end: "End incognito chat",
+    end: "Exit incognito mode",
     endFailed:
       "Couldn't end the chat. It will still be deleted when it expires.",
     createFailed:
