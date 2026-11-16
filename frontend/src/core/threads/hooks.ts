@@ -510,6 +510,15 @@ function clearReconnectRun(threadId: string, runId: string): void {
     // Storage access is best-effort and must never block stream cleanup.
   }
 }
+
+/**
+ * Prefix of the client-generated id minted once per turn for the visible
+ * human message (`${LOCAL_HUMAN_MESSAGE_ID_PREFIX}${uuid()}`); the optimistic
+ * display copy and the submitted message share it, and the server echo
+ * (`<id>__user`) keeps it. Consumers that must recognize an optimistic human
+ * (e.g. the send-scroll pin) match on this prefix instead of restating it.
+ */
+export const LOCAL_HUMAN_MESSAGE_ID_PREFIX = "local-human-";
 /**
  * The turn this client submitted, recorded at dispatch time. The visible human
  * input gets one client-generated identity shared by the optimistic display
@@ -3071,7 +3080,7 @@ export function useThreadStream({
       // checkpoint must never promote an older history-only human into this
       // turn's anchor).
       const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
-      const humanMessageId = `local-human-${uuid()}`;
+      const humanMessageId = `${LOCAL_HUMAN_MESSAGE_ID_PREFIX}${uuid()}`;
       localTurnAnchorRef.current = {
         threadId,
         humanIdentity: hideFromUI ? null : `message:${humanMessageId}`,
