@@ -30,7 +30,7 @@ from typing import Any, override
 from deerflow_extension_api import ContentKind, provenance_kwargs, read_provenance
 from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse, hook_config
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
@@ -307,7 +307,10 @@ class TodoMiddleware(TodoListMiddleware):
         The same reminder fires when the state was edited after the last visible
         `write_todos` call, and an already-injected reminder is refreshed in
         place when it renders a stale list, so the model never keeps seeing a
-        superseded list while the current one is in state.
+        superseded list while the current one is in state. When the last
+        visible call already matches the current list, no reminder is needed;
+        a persisted reminder that still renders a superseded list is removed
+        instead of being left in history.
         """
         if not self._todo_capability_enabled:
             # write_todos was denied for this build; context-loss detection only
@@ -328,6 +331,21 @@ class TodoMiddleware(TodoListMiddleware):
             # argument degrades to "cannot prove a difference" and skips.
             last_written = _last_write_todos(messages)
             if last_written is None or _same_todos(last_written, todos):
+                # The visible call already shows the model the current list,
+                # so no reminder is needed — but a persisted reminder can
+                # still render a stale one: the state may have been edited
+                # to a different list (persisting a reminder for it) and
+                # later reverted to the last written list, so this fast
+                # path matches again while the reminder still renders the
+                # superseded list. Drop it instead of leaving it in
+                # history to steer the model back to the rejected plan.
+                # Only a reminder this middleware stamped is ever removed
+                # (_find_todo_reminder), and only when it provably renders
+                # a different list; a matching or unreadable reminder is
+                # left alone.
+                existing = _find_todo_reminder(messages)
+                if existing is not None and existing.id is not None and isinstance(existing.content, str) and _rendered_todo_section(existing.content) != _format_todos(todos):
+                    return {"messages": [RemoveMessage(id=existing.id)]}
                 return None
             edited_after_write = True
 

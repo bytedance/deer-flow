@@ -13,7 +13,7 @@ from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelRequest
 from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
@@ -408,6 +408,52 @@ class TestBeforeModelWithEditedTodos:
         assert "10 folders" in msgs[0].content
         assert "10 notebooks" not in msgs[0].content
         assert "was revised after your last `write_todos` call" in msgs[0].content
+
+    def test_removes_stale_reminder_when_state_reverts_to_last_write_todos(self):
+        # write_todos A -> state edited to B (reminder persisted for B) ->
+        # update_state restores A: the last write matches again, but the B
+        # reminder must not survive in history to steer the model back to
+        # the rejected plan.
+        mw = TodoMiddleware()
+        list_a = [{"content": "Record an order for 10 notebooks.", "status": "pending"}]
+        list_b = [{"content": "Record an order for 10 folders.", "status": "pending"}]
+        write_a = _ai_with_write_todos_args(list_a)
+        edited = mw.before_model({"messages": [write_a], "todos": [dict(todo) for todo in list_b]}, _make_runtime())
+        assert edited is not None
+        assert "10 folders" in edited["messages"][0].content
+        # The state reducer assigns an id when the reminder is persisted.
+        reminder_b = edited["messages"][0].model_copy(update={"id": "reminder-1"})
+        state = {
+            "messages": [write_a, reminder_b],
+            "todos": [dict(todo) for todo in list_a],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        assert isinstance(msgs[0], RemoveMessage)
+        assert msgs[0].id == "reminder-1"
+
+    def test_keeps_matching_reminder_when_state_matches_last_write_todos(self):
+        mw = TodoMiddleware()
+        todos = _sample_todos()
+        current = _build_todo_reminder(_format_todos(todos), edited_after_write=False, message_id="reminder-1")
+        state = {
+            "messages": [_ai_with_write_todos_args(todos), current],
+            "todos": [dict(todo) for todo in todos],
+        }
+        assert mw.before_model(state, _make_runtime()) is None
+
+    def test_does_not_remove_unstamped_same_name_message_when_state_matches(self):
+        # A caller-supplied HumanMessage named todo_reminder is user text,
+        # not this middleware's reminder: the fast path must leave it alone.
+        mw = TodoMiddleware()
+        todos = _sample_todos()
+        state = {
+            "messages": [_ai_with_write_todos_args(todos), _reminder_msg()],
+            "todos": [dict(todo) for todo in todos],
+        }
+        assert mw.before_model(state, _make_runtime()) is None
 
 
 class TestAbeforeModel:
