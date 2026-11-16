@@ -667,6 +667,7 @@ export default function ChatPage() {
         parentThreadId={threadId}
         context={settings.context}
         isMock={isMock}
+        disabled={isIncognito}
       >
         <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
           <div className="relative flex size-full min-h-0 justify-between">

@@ -1908,7 +1908,7 @@ export function MessageList({
             <MessageCircleIcon className="size-3.5" />
             {t.sidecar.addToConversation}
           </Button>
-          {!sidecarSurface && (
+          {!sidecarSurface && !sidecar.disabled && (
             <Button
               className="h-8 rounded-full px-2.5 text-xs"
               size="sm"
