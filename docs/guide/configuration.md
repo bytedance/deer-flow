@@ -413,7 +413,7 @@ fences, including unclosed fences, in complete and streamed replies.
 
    `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
 
-   Pi can be used as an external coding agent through the community `pi-acp` adapter. Install the adapter globally or let `npx` fetch it, then add it as an ACP agent:
+   Pi can be used as an external coding agent through the community `pi-acp` adapter. Install the adapter in the Gateway environment before starting DeerFlow, then add it as an ACP agent:
 
    ```bash
    npm install --global pi-acp
@@ -422,13 +422,13 @@ fences, including unclosed fences, in complete and streamed replies.
    ```yaml
    acp_agents:
      pi:
-       command: npx
-       args: ["-y", "pi-acp"]
+       command: pi-acp
+       args: []
        description: Pi coding agent for repository tasks and code generation
        auto_approve_permissions: false
    ```
 
-   `npx` and Node.js must be available on the Gateway process's `PATH`. When the Gateway runs in Docker, install them inside the Gateway image or container. Keep `auto_approve_permissions: false` for untrusted tasks.
+   Node.js and `pi-acp` must be available on the Gateway process's `PATH`. When the Gateway runs in Docker, install them inside the Gateway image or container. Keep `auto_approve_permissions: false` for untrusted tasks. Alternatively, set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand; this requires `npx` on the Gateway's `PATH` and may require network access at startup. Preinstalling the adapter lets deployment tooling control its version without fetching it during an invocation.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash

@@ -2216,10 +2216,13 @@ hitl_approval:
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
 #
 #   pi:
-#     # Pi coding agent through the standard ACP adapter. Install it globally
-#     # with `npm install --global pi-acp`, or let npx fetch it on demand.
-#     command: npx
-#     args: ["-y", "pi-acp"]
+#     # Pi coding agent through the community ACP adapter (`pi-acp`).
+#     # Install with `npm install --global pi-acp` in the Gateway environment.
+#     command: pi-acp
+#     args: []
+#     # Alternatively, fetch the adapter on demand (requires network access):
+#     # command: npx
+#     # args: ["-y", "pi-acp"]
 #     description: Pi coding agent for repository tasks and code generation
 #     # auto_approve_permissions: false  # Set to true only for trusted tasks
 #     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time

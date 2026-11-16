@@ -2280,7 +2280,7 @@ only when the agent is expected to edit files or run commands for a trusted
 task.
 
 Pi can run as an external coding agent through the community `pi-acp` adapter.
-Install the adapter globally or let `npx` fetch it on demand:
+Install the adapter in the Gateway environment before starting DeerFlow:
 
 ```bash
 npm install --global pi-acp
@@ -2289,15 +2289,19 @@ npm install --global pi-acp
 ```yaml
 acp_agents:
   pi:
-    command: npx
-    args: ["-y", "pi-acp"]
+    command: pi-acp
+    args: []
     description: Pi coding agent for repository tasks and code generation
     auto_approve_permissions: false
 ```
 
-Node.js and `npx` must be available on the Gateway process's `PATH`. When the
-Gateway runs in Docker, install them inside the Gateway image or container.
-Keep `auto_approve_permissions` disabled for untrusted tasks.
+Node.js and `pi-acp` must be available on the Gateway process's `PATH`. When
+the Gateway runs in Docker, install them inside the Gateway image or container.
+Keep `auto_approve_permissions` disabled for untrusted tasks. Alternatively,
+set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand;
+this requires `npx` on the Gateway's `PATH` and may require network access at
+startup. Preinstalling the adapter lets deployment tooling control its version
+without fetching it during an invocation.
 
 
 ## HITL Tool Approval
