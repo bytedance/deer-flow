@@ -1365,8 +1365,7 @@ def test_config_path_reads_the_selected_file_like_python_dotenv(tmp_path, monkey
     # into `/selected.yaml` and hide the override behind a path the Gateway
     # never reads.
     (stage / "stage.env").write_text(
-        "DEER_FLOW_CONFIG_PATH=${STAGE_DIR}/selected.yaml\n"
-        "BARE_REF=$STAGE_DIR/unused.yaml\n",
+        "DEER_FLOW_CONFIG_PATH=${STAGE_DIR}/selected.yaml\nBARE_REF=$STAGE_DIR/unused.yaml\n",
         encoding="utf-8",
     )
     (project_root / ".env").write_text(
