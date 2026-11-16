@@ -23,10 +23,13 @@ import { Tooltip } from "./tooltip";
 export function ExportTrigger({
   threadId,
   createdAt,
+  createdAtLoading = false,
 }: {
   threadId: string;
   /** The thread's ``created_at``, written into the export header. */
   createdAt?: string;
+  /** Hold the export until ``createdAt`` has loaded, so it is not left out. */
+  createdAtLoading?: boolean;
 }) {
   const { t } = useI18n();
   const { thread, isMock } = useThread();
@@ -79,7 +82,7 @@ export function ExportTrigger({
         <DropdownMenuTrigger asChild>
           <Button
             aria-label={t.common.export}
-            disabled={exporting || thread.isLoading}
+            disabled={exporting || thread.isLoading || createdAtLoading}
             className="text-muted-foreground hover:text-foreground"
             variant="ghost"
           >

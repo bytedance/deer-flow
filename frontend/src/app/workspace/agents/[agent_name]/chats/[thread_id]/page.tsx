@@ -587,6 +587,7 @@ export default function AgentChatPage() {
                 <ExportTrigger
                   threadId={threadId}
                   createdAt={threadMetadata.data?.created_at}
+                  createdAtLoading={threadMetadata.isLoading}
                 />
                 <ThreadExtensionActions threadId={threadId} />
                 <ArtifactTrigger />

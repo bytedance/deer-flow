@@ -161,3 +161,22 @@ test("disables export until history loading finishes", async () => {
   await waitFor(() => expect(button.hasAttribute("disabled")).toBe(false));
   expect(mocks.exportThread).toHaveBeenCalledTimes(1);
 });
+
+test("disables export until the thread creation time loads", async () => {
+  mocks.fetch.mockResolvedValueOnce(page([latest], 1, null));
+  const { rerender } = render(
+    <ExportTrigger threadId="chat" createdAtLoading />,
+  );
+  const button = screen.getByRole("button", { name: enUS.common.export });
+  expect(button.hasAttribute("disabled")).toBe(true);
+  rerender(<ExportTrigger threadId="chat" createdAt="2026-01-02T03:04:05Z" />);
+  expect(button.hasAttribute("disabled")).toBe(false);
+  fireEvent.keyDown(button, { key: "Enter" });
+  fireEvent.click(
+    await screen.findByRole("menuitem", { name: enUS.common.exportAsJSON }),
+  );
+  await waitFor(() => expect(mocks.exportThread).toHaveBeenCalledTimes(1));
+  expect(mocks.exportThread.mock.calls[0]?.[0]).toMatchObject({
+    created_at: "2026-01-02T03:04:05Z",
+  });
+});
