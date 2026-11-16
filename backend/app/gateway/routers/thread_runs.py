@@ -886,6 +886,9 @@ async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: 
         latest_checkpoint = await accessor.aget(latest_config)
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -980,6 +983,9 @@ async def _prepare_edit_regenerate_payload(
         latest_checkpoint = await accessor.aget(latest_config)
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
