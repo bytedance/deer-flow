@@ -763,10 +763,11 @@ class RunManager:
                 if record.terminal_commit_proof is not None and record.terminal_commit_proof.status != RunStatus.interrupted:
                     continue
                 task_active = record.task is not None and not record.task.done()
-                record.rollback_finalization_pending = action == "rollback" and task_active
+                winning_action = row.get("cancel_action") or action
+                record.rollback_finalization_pending = winning_action == "rollback" and task_active
                 outcome = TerminalCommitProof(RunStatus.interrupted, row.get("error"), row.get("stop_reason"), copy.deepcopy(row.get("goal_verdict")))
                 self._acknowledge_terminal(record, outcome, revision)
-                record.abort_action = action
+                record.abort_action = winning_action
                 record.abort_event.set()
                 if task_active and not record.finalizing:
                     record.task.cancel()

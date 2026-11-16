@@ -1236,6 +1236,9 @@ class RunRepository(RunStore):
                         raise ConflictError(f"Thread {thread_id} has an active checkpoint write")
                     row.status = "interrupted"
                     row.error = "Cancelled by newer run"
+                    if row.cancel_action is None:
+                        row.cancel_action = multitask_strategy
+                        row.cancel_requested_at = now
                     if row.owner_worker_id != owner_worker_id:
                         row.producer_state = "revoked"
                         row.producer_epoch = uuid4().hex
