@@ -27,6 +27,7 @@ from .base import OwnershipBackendError, RenewOutcome, SandboxOwnershipStore
 
 try:
     from redis import Redis
+    from redis.cluster import RedisCluster
     from redis.exceptions import RedisError
 except ImportError:  # pragma: no cover - only hit when the optional extra is missing
     # ``redis`` is an optional extra (mirrors the stream_bridge redis path). This
@@ -52,7 +53,7 @@ _DEL = "del:"
 # release that exit performs — must stay finite, otherwise a refresh blocked on
 # a black-holed connection could hold a destroy path (and its deferred release)
 # open indefinitely. Without a socket timeout redis-py blocks forever.
-_STORE_SOCKET_TIMEOUT_SECONDS = 5.0
+REDIS_STORE_SOCKET_TIMEOUT_SECONDS = 5.0
 
 # Acquire-path takeover. Overwrites a live peer's normal lease on purpose — a
 # thread's turn has routed here — but refuses a teardown in progress, which is
@@ -130,28 +131,31 @@ class RedisOwnershipStore(SandboxOwnershipStore):
         redis_url: str,
         ttl_seconds: float,
         key_prefix: str = "deerflow:sandbox:owner",
-        client: Redis | None = None,
+        client: Redis | RedisCluster | None = None,
+        owns_client: bool = False,
     ) -> None:
         self._owner_id = owner_id
         # Redis accepts integer milliseconds; round up so conversion never
         # shortens the configured lease.
         self._ttl_ms = max(1, math.ceil(float(ttl_seconds) * 1000))
         self._key_prefix = key_prefix.rstrip(":")
-        # Redis.from_url is lazy, so an unreachable Redis does not block provider
-        # construction; the first claim raises instead. socket_timeout bounds
-        # every round-trip (see _STORE_SOCKET_TIMEOUT_SECONDS) so no store call —
-        # in particular a teardown-heartbeat refresh — can block unbounded.
+        # Standalone Redis.from_url is lazy, so an unreachable Redis does not
+        # block provider construction; the first claim raises instead. A
+        # cluster client is built eagerly by the factory and fails closed at
+        # startup. socket_timeout bounds every round-trip (see
+        # REDIS_STORE_SOCKET_TIMEOUT_SECONDS) so no store call — in particular a
+        # teardown-heartbeat refresh — can block unbounded.
         self._redis = (
             client
             if client is not None
             else Redis.from_url(
                 redis_url,
                 decode_responses=True,
-                socket_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
-                socket_connect_timeout=_STORE_SOCKET_TIMEOUT_SECONDS,
+                socket_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
             )
         )
-        self._owns_client = client is None
+        self._owns_client = client is None or owns_client
         self._take = self._redis.register_script(_TAKE_SCRIPT)
         self._claim = self._redis.register_script(_CLAIM_SCRIPT)
         self._renew = self._redis.register_script(_RENEW_SCRIPT)

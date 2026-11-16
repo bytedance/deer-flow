@@ -1911,7 +1911,11 @@ sandbox:
 #   #
 #   # ownership:
 #   #   type: redis                  # required for multi-instance / load-balanced
-#   #   redis_url: redis://redis:6379/0
+#   #   redis_url: redis://redis:6379/0  # primary seed, credentials and TLS (rediss://)
+#   #   redis_mode: standalone       # standalone | cluster
+#   #   redis_cluster_nodes:         # extra seeds; only valid with cluster mode
+#   #     - redis-1:6379
+#   #     - redis-2:6379
 #   #   renewal_interval_seconds: 30 # how often an owner refreshes its leases
 #   #   ttl_multiplier: 4            # lease TTL = interval x this (min 2, so a
 #   #                                # single missed renewal cannot expire a live
@@ -1921,10 +1925,12 @@ sandbox:
 #   #   key_prefix: deerflow:sandbox:owner
 #   #
 #   # NOTE: the redis ownership store is fail-closed, matching the stream bridge's
-#   # fail-hard policy. Redis.from_url is lazy so a down Redis does not block
-#   # startup, but a sandbox whose ownership cannot be published is not handed out
-#   # — acquiring raises instead. The alternative (proceed unowned) is exactly the
-#   # #4206 cross-instance kill. Run Redis with HA / a restart policy.
+#   # fail-hard policy. Standalone mode uses Redis.from_url, which is lazy, so a
+#   # down Redis does not block startup but a sandbox whose ownership cannot be
+#   # published is not handed out — acquiring raises instead. Cluster mode uses
+#   # RedisCluster.from_url, which connects during provider construction, so an
+#   # unreachable cluster fails startup instead. The alternative (proceed unowned)
+#   # is exactly the #4206 cross-instance kill. Run Redis with HA / a restart policy.
 #   #
 #   # NOTE: the other boundary is the lease TTL (renewal_interval_seconds x
 #   # ttl_multiplier). A Redis outage longer than the TTL can let a reconciling

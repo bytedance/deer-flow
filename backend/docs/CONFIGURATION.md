@@ -1578,6 +1578,42 @@ and makes newly uploaded files unavailable inside the sandbox.
 
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
 
+**Redis ownership for multi-instance sandboxes**
+
+Multi-instance deployments must set `sandbox.ownership.type: redis` so one
+Gateway cannot adopt or destroy another's live sandbox. The default standalone
+mode accepts a normal Redis URL:
+
+```yaml
+sandbox:
+  ownership:
+    type: redis
+    redis_url: redis://redis:6379/0
+    redis_mode: standalone
+```
+
+For Redis Cluster, keep `redis_url` as the primary seed (it also carries
+credentials and TLS via `rediss://`) and list additional seeds separately:
+
+```yaml
+sandbox:
+  ownership:
+    type: redis
+    redis_url: redis://cluster-seed:6379/0
+    redis_mode: cluster
+    redis_cluster_nodes:
+      - redis-1:6379
+      - redis-2:6379
+```
+
+Standalone mode uses `Redis.from_url`, which is lazy: an unreachable Redis does
+not block provider construction, and the first ownership operation fails
+closed. Cluster mode uses `RedisCluster.from_url`, which connects while the
+provider is constructed; an unreachable cluster therefore fails startup instead
+of failing the first lease. Both modes refuse to hand out a sandbox whose
+ownership cannot be published, which is the #4206 cross-instance safety
+contract.
+
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
 
 ```yaml

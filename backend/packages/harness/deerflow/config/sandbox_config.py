@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from deerflow.config._boolean_guards import reject_boolean
 
 SandboxOwnershipType = Literal["memory", "redis"]
+SandboxOwnershipRedisMode = Literal["standalone", "cluster"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
@@ -119,6 +120,18 @@ class SandboxOwnershipConfig(BaseModel):
         default=None,
         description="Redis URL for the redis ownership type. If omitted, DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL, DEER_FLOW_STREAM_BRIDGE_REDIS_URL, REDIS_URL, or redis://localhost:6379/0 is used.",
     )
+    redis_mode: SandboxOwnershipRedisMode = Field(
+        default="standalone",
+        description=(
+            "Redis topology for the redis ownership type. 'standalone' uses Redis.from_url and stays lazy. "
+            "'cluster' uses RedisCluster.from_url, which connects during provider construction and fails closed when no seed is reachable. "
+            "The redis_url supplies the primary seed, credentials and TLS; redis_cluster_nodes adds extra seeds."
+        ),
+    )
+    redis_cluster_nodes: list[str] = Field(
+        default_factory=list,
+        description=("Additional Redis Cluster seed nodes in host:port form. Only valid with redis_mode: cluster. The primary seed and credentials come from redis_url, so no separate username/password/ssl fields are needed."),
+    )
     renewal_interval_seconds: float = Field(
         default=30.0,
         gt=0,
@@ -139,6 +152,30 @@ class SandboxOwnershipConfig(BaseModel):
     @classmethod
     def _reject_boolean_ownership_settings(cls, value: object, info: ValidationInfo) -> object:
         return reject_boolean(value, info, kind="a number")
+
+    @field_validator("redis_cluster_nodes")
+    @classmethod
+    def _validate_redis_cluster_nodes(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw in value:
+            node = str(raw).strip()
+            host, separator, port = node.rpartition(":")
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
+            if not separator or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+                raise ValueError(f"sandbox.ownership.redis_cluster_nodes must contain host:port entries, got {raw!r}")
+            candidate = f"{host}:{int(port)}"
+            if candidate not in normalized:
+                normalized.append(candidate)
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_redis_mode(self) -> "SandboxOwnershipConfig":
+        if self.redis_mode == "cluster" and self.type != "redis":
+            raise ValueError("sandbox.ownership.redis_mode: cluster requires sandbox.ownership.type: redis")
+        if self.redis_cluster_nodes and self.redis_mode != "cluster":
+            raise ValueError("sandbox.ownership.redis_cluster_nodes requires sandbox.ownership.redis_mode: cluster")
+        return self
 
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",

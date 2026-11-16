@@ -78,6 +78,18 @@ def compute_lease_ttl(config: SandboxOwnershipConfig) -> float:
     return config.renewal_interval_seconds * config.ttl_multiplier
 
 
+def _cluster_startup_nodes(nodes: list[str]) -> list:
+    from redis.cluster import ClusterNode
+
+    startup_nodes = []
+    for node in nodes:
+        host, _, port = node.rpartition(":")
+        if host.startswith("[") and host.endswith("]"):
+            host = host[1:-1]
+        startup_nodes.append(ClusterNode(host, int(port)))
+    return startup_nodes
+
+
 def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner_id: str | None = None) -> SandboxOwnershipStore:
     """Build the ownership store for *config*.
 
@@ -97,9 +109,35 @@ def make_sandbox_ownership_store(config: SandboxOwnershipConfig | None, *, owner
         return MemoryOwnershipStore(owner_id=effective_owner_id, ttl_seconds=ttl)
 
     if resolved.type == "redis":
-        from .redis import RedisOwnershipStore
+        from .redis import REDIS_STORE_SOCKET_TIMEOUT_SECONDS, RedisOwnershipStore
 
         redis_url = resolve_ownership_redis_url(resolved)
+        if resolved.redis_mode == "cluster":
+            from redis.cluster import RedisCluster
+
+            client = RedisCluster.from_url(
+                redis_url,
+                startup_nodes=_cluster_startup_nodes(resolved.redis_cluster_nodes),
+                decode_responses=True,
+                socket_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=REDIS_STORE_SOCKET_TIMEOUT_SECONDS,
+                read_from_replicas=False,
+            )
+            logger.info(
+                "Sandbox ownership store: redis-cluster (ttl=%.1fs, renewal=%.1fs, extra_seeds=%d)",
+                ttl,
+                resolved.renewal_interval_seconds,
+                len(resolved.redis_cluster_nodes),
+            )
+            return RedisOwnershipStore(
+                owner_id=effective_owner_id,
+                redis_url=redis_url,
+                ttl_seconds=ttl,
+                key_prefix=resolved.key_prefix,
+                client=client,
+                owns_client=True,
+            )
+
         logger.info("Sandbox ownership store: redis (ttl=%.1fs, renewal=%.1fs)", ttl, resolved.renewal_interval_seconds)
         return RedisOwnershipStore(
             owner_id=effective_owner_id,

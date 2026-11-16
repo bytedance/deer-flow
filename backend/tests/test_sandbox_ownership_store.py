@@ -36,6 +36,7 @@ from deerflow.config.sandbox_config import SandboxOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
 
 REDIS_TEST_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
+REDIS_CLUSTER_TEST_URL = os.environ.get("DEER_FLOW_TEST_REDIS_CLUSTER_URL")
 
 
 def _redis_available() -> bool:
@@ -55,6 +56,10 @@ def _redis_available() -> bool:
 
 
 requires_redis = pytest.mark.skipif(not _redis_available(), reason=f"Redis not reachable at {REDIS_TEST_URL}")
+requires_redis_cluster = pytest.mark.skipif(
+    not REDIS_CLUSTER_TEST_URL,
+    reason="DEER_FLOW_TEST_REDIS_CLUSTER_URL is not set",
+)
 
 
 class _StoreFactory:
@@ -338,6 +343,114 @@ def test_unknown_type_raises():
     object.__setattr__(config, "type", "bogus")
     with pytest.raises(ValueError, match="Unknown sandbox ownership type"):
         make_sandbox_ownership_store(config, owner_id="A")
+
+
+def test_cluster_config_accepts_and_normalizes_extra_seeds():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        redis_mode="cluster",
+        redis_url="redis://seed:6379/0",
+        redis_cluster_nodes=["redis-1:6379", "[::1]:6380", "redis-1:6379"],
+    )
+
+    assert config.redis_cluster_nodes == ["redis-1:6379", "::1:6380"]
+
+
+@pytest.mark.parametrize("node", ["redis-1", "redis-1:not-a-port", "redis-1:0", "redis-1:70000", ":6379"])
+def test_cluster_config_rejects_invalid_extra_seeds(node):
+    with pytest.raises(ValueError, match="host:port"):
+        SandboxOwnershipConfig(type="redis", redis_mode="cluster", redis_cluster_nodes=[node])
+
+
+def test_cluster_mode_requires_redis_type():
+    with pytest.raises(ValueError, match="requires sandbox.ownership.type: redis"):
+        SandboxOwnershipConfig(type="memory", redis_mode="cluster")
+
+
+def test_cluster_nodes_require_cluster_mode():
+    with pytest.raises(ValueError, match="requires sandbox.ownership.redis_mode: cluster"):
+        SandboxOwnershipConfig(type="redis", redis_cluster_nodes=["redis-1:6379"])
+
+
+def test_factory_builds_cluster_client_with_extra_seeds(monkeypatch):
+    import redis.cluster
+
+    client = MagicMock()
+    captured: dict[str, object] = {}
+
+    def _from_url(cls, url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(redis.cluster.RedisCluster, "from_url", classmethod(_from_url))
+    config = SandboxOwnershipConfig(
+        type="redis",
+        redis_mode="cluster",
+        redis_url="redis://seed:6379/0",
+        redis_cluster_nodes=["redis-1:6379", "redis-2:6380"],
+        key_prefix="deerflow:test:cluster",
+    )
+
+    store = make_sandbox_ownership_store(config, owner_id="A")
+
+    assert captured["url"] == "redis://seed:6379/0"
+    assert [(node.host, node.port) for node in captured["startup_nodes"]] == [
+        ("redis-1", 6379),
+        ("redis-2", 6380),
+    ]
+    assert captured["decode_responses"] is True
+    assert captured["socket_timeout"] == 5.0
+    assert captured["socket_connect_timeout"] == 5.0
+    assert captured["read_from_replicas"] is False
+    assert store._redis is client
+    assert store._owns_client is True
+    store.close()
+    client.close.assert_called_once()
+
+
+def test_factory_keeps_standalone_client_lazy(monkeypatch):
+    import redis
+
+    client = MagicMock()
+    captured: dict[str, object] = {}
+
+    def _from_url(cls, url, **kwargs):
+        captured["url"] = url
+        captured.update(kwargs)
+        return client
+
+    monkeypatch.setattr(redis.Redis, "from_url", classmethod(_from_url))
+    config = SandboxOwnershipConfig(type="redis", redis_url="redis://seed:6379/0")
+
+    store = make_sandbox_ownership_store(config, owner_id="A")
+
+    assert captured["url"] == "redis://seed:6379/0"
+    assert captured["decode_responses"] is True
+    assert captured["socket_timeout"] == 5.0
+    assert captured["socket_connect_timeout"] == 5.0
+    assert store._redis is client
+    assert store._owns_client is True
+    store.close()
+    client.close.assert_called_once()
+
+
+@requires_redis_cluster
+def test_redis_cluster_ownership_roundtrip():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        redis_mode="cluster",
+        redis_url=REDIS_CLUSTER_TEST_URL,
+        key_prefix=f"deerflow:test:cluster:{uuid.uuid4().hex}",
+    )
+    store = make_sandbox_ownership_store(config, owner_id="cluster-test")
+    try:
+        assert store.claim("cluster-s1") is True
+        assert store.owner("cluster-s1") == "cluster-test"
+        store.release("cluster-s1")
+        assert store.owner("cluster-s1") is None
+    finally:
+        store.close()
 
 
 def test_ttl_derives_from_renewal_interval_not_idle_timeout():
