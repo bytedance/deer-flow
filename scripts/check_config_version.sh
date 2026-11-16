@@ -42,6 +42,11 @@ if [ -z "$example" ] || [ -z "$chart" ]; then
   exit 1
 fi
 
+if [[ ! "$example" =~ ^[0-9]{1,18}$ || ! "$chart" =~ ^[0-9]{1,18}$ ]]; then
+  printf '::error::config_version must be a decimal integer of at most 18 digits (config.example.yaml: %s, values.yaml: %s)\n' "$example" "$chart" >&2
+  exit 1
+fi
+
 if [ "$chart" -lt "$example" ]; then
   echo "::error::chart config_version ($chart) is behind config.example.yaml ($example). Bump 'config_version' in deploy/helm/deer-flow/values.yaml (and the README example) to $example." >&2
   exit 1
