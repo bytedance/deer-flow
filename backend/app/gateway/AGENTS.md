@@ -100,3 +100,5 @@ replay, archive), [run event stream](../../docs/RUN_EVENT_STREAM.md),
   before the runtime starts and without a `sys.modules` entry. Keep its
   annotations eager, and identify Studio callers by the upstream `StudioUser`
   type, because the identity string can be reused by any client.
+
+- **Delayed recovered-stream END retries preserve retention.** If a stream existed when recovery scheduled the retry, recheck it after the lease delay; if retention cleanup removed it, do not publish END and recreate an empty stream. Preserve the retry path for a genuinely missing stream with a live producer.
