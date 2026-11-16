@@ -74,7 +74,13 @@ function selectAnswer() {
   fireEvent.mouseUp(paragraph);
 }
 
-function renderList(disabled: boolean) {
+function renderList(
+  disabled: boolean,
+  {
+    canBranch = false,
+    onBranchTurn,
+  }: { canBranch?: boolean; onBranchTurn?: () => void } = {},
+) {
   return render(
     <I18nContext.Provider
       value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
@@ -85,6 +91,8 @@ function renderList(disabled: boolean) {
         parentThreadId="thread-1"
       >
         <MessageList
+          canBranch={canBranch}
+          onBranchTurn={onBranchTurn}
           threadId="thread-1"
           thread={
             {
@@ -139,6 +147,26 @@ describe("message selection toolbar in an incognito chat", () => {
     ).not.toBeNull();
     expect(
       within(actions).getByText(enUS.sidecar.askInSideChat),
+    ).not.toBeNull();
+  });
+});
+
+describe("message actions without branching", () => {
+  it("renders no branch action when the surface offers no handler", () => {
+    // Chat-page omits ``onBranchTurn`` for an incognito chat: a branch would
+    // copy the conversation into a new persistent thread.
+    api.findLatestSidecarThread.mockResolvedValue(null);
+    renderList(true);
+    expect(
+      screen.queryByRole("button", { name: enUS.common.branch }),
+    ).toBeNull();
+  });
+
+  it("still renders the branch action in an ordinary chat", () => {
+    api.findLatestSidecarThread.mockResolvedValue(null);
+    renderList(false, { canBranch: true, onBranchTurn: () => undefined });
+    expect(
+      screen.getByRole("button", { name: enUS.common.branch }),
     ).not.toBeNull();
   });
 });

@@ -807,7 +807,11 @@ export default function ChatPage() {
                     !branchThread.isPending &&
                     !hasPendingApproval
                   }
-                  onBranchTurn={handleBranchTurn}
+                  // A branch copies this conversation into a new persistent
+                  // thread, so an incognito chat offers none: no handler, no
+                  // action. The backend rejects a branch of an incognito
+                  // thread as well, for direct API callers.
+                  onBranchTurn={isIncognito ? undefined : handleBranchTurn}
                 />
               </div>
               <div
