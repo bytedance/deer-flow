@@ -33,6 +33,8 @@ change to a query, a lock or a JSON predicate is verified on both dialects.
   Otherwise unrelated writers fail with `database is locked`.
 - **`FOR UPDATE SKIP LOCKED` does not serialize SQLite readers.** A claim on
   SQLite reserves the writer before it selects.
+- **Managed subagent updates lock before reading `updated_at`.** Peer registry
+  caches depend on each committed update advancing that timestamp.
 - **A create-or-update by unique key must survive two first writers.** Both can
   miss the SELECT. Use the dialect's `on_conflict_do_update`, or roll back and
   retry the select-then-write.
@@ -91,6 +93,9 @@ with best-effort cleanup, preserving the original publication outcome.
 - **Recovery never takes over a live run.** It finalizes an occurrence whose
   durable run row is already terminal, and it returns expired launch claims to
   the queue.
+- **Late launch reconciliation keeps a terminal occurrence terminal** when a
+  newer occurrence owns the active slot; attach only `run_id`/`started_at`,
+  since reviving would violate the one-active index.
 - **The scheduler is single-instance by default.** Multi-instance mode needs
   shared PostgreSQL and the settings that startup validates.
 - **Run-history filters are occurrence states**, not task states. Apply the

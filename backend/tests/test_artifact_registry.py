@@ -629,6 +629,19 @@ def test_merge_tool_artifacts_empty_new_preserves_existing():
     assert merged2 == existing
 
 
+def test_merge_tool_artifacts_skips_an_unhashable_handle():
+    """A checkpoint poisoned through the state route must not fail later captures."""
+    merged = merge_tool_artifacts([{"handle": ["poisoned"]}], [{"handle": "art_1", "display_name": "a.txt"}])
+
+    assert [entry["handle"] for entry in merged] == ["art_1"]
+
+
+def test_merge_tool_artifacts_skips_missing_or_empty_handles():
+    merged = merge_tool_artifacts(None, [{"display_name": "no handle"}, {"handle": ""}, {"handle": "art_2"}])
+
+    assert [entry["handle"] for entry in merged] == ["art_2"]
+
+
 def test_merge_tool_artifacts_trim_directive_slides_window():
     """A trailing trim directive makes the configured cap a sliding window."""
     existing = [_entry(f"art_{i:08x}", i) for i in range(20)]

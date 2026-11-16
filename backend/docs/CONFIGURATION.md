@@ -2112,6 +2112,8 @@ models:
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 
+Search, fetch and capture providers treat an example value that `.env.example` ships (such as `your-jina-api-key`, matched exactly) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. Any other value is sent as written, so a self-hosted token you chose keeps working. Browserless reads `BROWSERLESS_TOKEN` only when its `token` field is omitted, so a blank or placeholder `token` is not replaced by the variable. `make doctor` applies the same rules and names the variable or field that still holds a placeholder, including `JINA_API_KEY` and `YDC_API_KEY` for the keyless providers.
+
 ## Backend dotenv selection
 
 Set `DEER_FLOW_ENV_FILE` in the backend process environment **before startup**

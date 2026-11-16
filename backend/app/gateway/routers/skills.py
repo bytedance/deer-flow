@@ -492,7 +492,7 @@ async def _filter_visible_skills(
         return skills
 
     try:
-        provider, principal = resolve_skill_authorization(user, is_internal=_is_internal_caller(request, user))
+        provider, principal = await asyncio.to_thread(resolve_skill_authorization, user, is_internal=_is_internal_caller(request, user))
     except _AuthorizationUnavailable as exc:
         return [] if exc.fail_closed else skills
 
