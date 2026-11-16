@@ -1287,6 +1287,36 @@ def test_config_path_expands_pwd_like_the_launcher(tmp_path, monkeypatch):
     assert triage["signals"]["config_missing"] is False
 
 
+def test_config_path_expands_dotenv_before_the_harness_import(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (project_root / "other.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    # The launcher expands assignments in file order against the environment it
+    # inherited, so DEER_FLOW_CONFIG_PATH is empty when it is read: nothing
+    # defines DEER_FLOW_ALT_CONFIG yet, and the launcher takes the fallback
+    # YAML. Importing the harness loads the whole file first, so expanding
+    # against the post-import environment would resolve the other YAML.
+    (project_root / ".env").write_text(
+        "DEER_FLOW_CONFIG_PATH=$DEER_FLOW_ALT_CONFIG\nDEER_FLOW_ALT_CONFIG=other.yaml\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_ALT_CONFIG", raising=False)
+    monkeypatch.setenv("DEER_FLOW_ENV_FILE", str(project_root / ".env"))
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "checkout"}]}
+
+
 def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir()

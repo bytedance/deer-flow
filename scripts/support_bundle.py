@@ -243,8 +243,14 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
 CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
-def _dotenv_config_location(project_root: Path) -> dict[str, str]:
-    """Return the config-location variables the checkout `.env` exports."""
+def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
+    """Return the config-location variables the checkout `.env` exports.
+
+    ``environment`` is the process environment captured before the harness was
+    imported. Expanding against the live ``os.environ`` would read the
+    assignments that import already loaded from this same file, so a variable
+    defined later in `.env` would resolve here but not in the launcher.
+    """
     env_file = project_root / ".env"
     if not env_file.is_file():
         return {}
@@ -257,14 +263,10 @@ def _dotenv_config_location(project_root: Path) -> dict[str, str]:
         return {}
     # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the
     # same scope: an inherited PWD is wherever the bundle happened to start.
-    scope = dict(os.environ)
+    scope = dict(environment)
     scope["PWD"] = str(project_root)
     assignments = dict(parse_dotenv(text, scope))
-    return {
-        name: assignments[name]
-        for name in CONFIG_LOCATION_ENV_VARS
-        if name in assignments
-    }
+    return {name: assignments[name] for name in CONFIG_LOCATION_ENV_VARS if name in assignments}
 
 
 def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
@@ -289,7 +291,7 @@ def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
         # The harness reads the process environment, so stage the launcher's view
         # for the duration of the lookup only: the checkout `.env` wins for these
         # two variables, and the checkout stands in for an unset runtime root.
-        os.environ.update(_dotenv_config_location(project_root))
+        os.environ.update(_dotenv_config_location(project_root, previous))
         if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
             os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
         try:
