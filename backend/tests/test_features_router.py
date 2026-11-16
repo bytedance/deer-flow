@@ -38,6 +38,8 @@ def _app_with_config(
     scheduler_running: bool = False,
     scheduler_tool_enabled: bool = False,
     channel_connections_enabled: bool | None = None,
+    incognito_enabled: bool = True,
+    incognito_idle_ttl_seconds: int = 24 * 60 * 60,
 ) -> FastAPI:
     app = FastAPI()
     app.state.scheduled_task_repo = object() if scheduled_task_repo_available else None
@@ -62,6 +64,7 @@ def _app_with_config(
             scope_selection_enabled=scope_selection_enabled,
         ),
         scheduler=SimpleNamespace(enabled=scheduler_running, tool_enabled=scheduler_tool_enabled, min_once_delay_seconds=60),
+        incognito=SimpleNamespace(enabled=incognito_enabled, idle_ttl_seconds=incognito_idle_ttl_seconds),
     )
     if channel_connections_enabled is not None:
         fake_config.channel_connections = SimpleNamespace(enabled=channel_connections_enabled)
@@ -94,6 +97,7 @@ def test_features_reports_agents_api_enabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "incognito": {"enabled": True, "idle_ttl_seconds": 86400},
     }
 
 
@@ -120,6 +124,7 @@ def test_features_reports_agents_api_disabled() -> None:
         },
         "scheduled_tasks": {"available": False, "running": False, "tool_enabled": False, "min_interval_seconds": 60, "group_notifications": False},
         "thread_activity": {"available": False},
+        "incognito": {"enabled": True, "idle_ttl_seconds": 86400},
     }
 
 
@@ -305,3 +310,15 @@ def test_features_reports_thread_activity_only_with_sql_persistence(run_store, r
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["thread_activity"] == {"available": available}
+
+
+def test_features_reports_incognito_availability_and_idle_lifetime() -> None:
+    app = _app_with_config(
+        agents_api_enabled=True,
+        incognito_enabled=False,
+        incognito_idle_ttl_seconds=3600,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["incognito"] == {"enabled": False, "idle_ttl_seconds": 3600}

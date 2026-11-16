@@ -216,6 +216,7 @@ def _feature_config():
         subagent_runtime=SimpleNamespace(max_running=3),
         knowledge_base=SimpleNamespace(enabled=False, scope_selection_enabled=False),
         scheduler=SimpleNamespace(enabled=False, tool_enabled=False, min_once_delay_seconds=60),
+        incognito=SimpleNamespace(enabled=True, idle_ttl_seconds=86400),
     )
     config.get_tool_config = lambda _name: None
     return config
