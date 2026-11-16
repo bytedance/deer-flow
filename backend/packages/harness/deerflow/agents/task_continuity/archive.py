@@ -206,18 +206,20 @@ def capture(state: dict, runtime, messages, config) -> dict:
             # against stale retention state. Rollback restores evicted rows if
             # the replacement still cannot fit within SQLite's page ceiling.
             db.execute("BEGIN IMMEDIATE")
-            # Heal an archive written by an older tokenizer before adding to it: new terms
-            # cannot match index terms stored the old way.
-            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-            if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
-                rebuild_index(db)
-                db.execute("INSERT OR REPLACE INTO meta VALUES ('tokenizer_version', ?)", (str(TOKENIZER_VERSION),))
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
             expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
             for (expired_id,) in expired:
                 db.execute("DELETE FROM sources WHERE batch=?", (expired_id,))
                 db.execute("DELETE FROM batches WHERE id=?", (expired_id,))
+            # Heal an archive written by an older tokenizer, but only after the batches that
+            # are about to be dropped are gone: reindexing rows that are on the way out can
+            # grow an archive sitting at SQLite's page ceiling enough to fail with SQLITE_FULL,
+            # which would roll the whole capture back and reject the new batch as well.
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
+                rebuild_index(db)
+                db.execute("INSERT OR REPLACE INTO meta VALUES ('tokenizer_version', ?)", (str(TOKENIZER_VERSION),))
             if not exists:
                 db.execute("INSERT INTO batches VALUES (?, ?)", (batch, created))
                 db.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", [(batch, r["id"], json.dumps(r, ensure_ascii=False), index_text(r["text"])) for r in sources])
@@ -269,11 +271,21 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
                     if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
                         # The archive still holds index terms from the older tokenizer and this
-                        # path is read-only, so match the stored text directly for now; the next
-                        # capture rebuilds the index in place.
-                        like = " OR ".join(["lower(payload) LIKE ?" for _ in keywords])
-                        parameters = [*batches, *[f"%{term}%" for term in keywords], *([role] if role is not None else [])]
-                        rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND ({like}){role_filter} ORDER BY rowid", parameters)
+                        # path is read-only, so match the decoded text for now; the next capture
+                        # rebuilds the index in place.
+                        # Not SQL `LIKE`: SQLite's `lower()` folds ASCII only, so "STRASSE" would
+                        # miss a stored "Straße", and matching the raw JSON payload would let a
+                        # query like "human" hit the "role" field instead of the message text.
+                        parameters = [*batches, *([role] if role is not None else [])]
+                        legacy = []
+                        for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters):
+                            try:
+                                text = str(json.loads(payload).get("text", "")).casefold()
+                            except (TypeError, ValueError):
+                                continue
+                            if any(term in text for term in keywords):
+                                legacy.append((payload,))
+                        rows = legacy
                     else:
                         match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                         parameters = [match, *batches, *([role] if role is not None else [])]

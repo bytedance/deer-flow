@@ -1204,3 +1204,73 @@ def test_mixed_script_query_returns_the_exact_source(scoped):
 
     rows = _json.loads(history_search.func(scoped, "A股"))["results"]
     assert exact_id in [row["id"] for row in rows], f"the exact source must survive the result cap, got {[row['id'] for row in rows]}"
+
+
+def test_legacy_fallback_matches_decoded_text_not_the_json_payload(scoped):
+    """The read-only fallback must match the message, not the row's JSON envelope.
+
+    SQL `LIKE` on the payload has two problems: SQLite's `lower()` folds ASCII only, so a
+    query for `STRASSE` misses a stored `Straße`; and a common word can match the `role`
+    field of unrelated rows, displacing the real text match at the result cap. The active
+    message path compares `text.casefold()`, so the archived fallback must do the same.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="Bericht über die Straße", id="u-umlaut")
+    scoped.state = {"messages": [message]}
+    text_id = _json.loads(history_search.func(scoped, "Straße"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    db_path = _archive_db(scoped)
+    # Put the archive back in the pre-#8297 state: stale words, no version marker.
+    with _sqlite3.connect(db_path) as db:
+        db.execute("UPDATE sources SET words='bericht'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    hits = [row["id"] for row in _json.loads(history_search.func(scoped, "STRASSE"))["results"]]
+    assert text_id in hits, f"case folding must match Strasse against Straße, got {hits}"
+
+    # "human" only appears in the JSON envelope (the role), never in this text.
+    assert _json.loads(history_search.func(scoped, "human"))["results"] == []
+
+
+def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):
+    """Reindexing must not run against batches that are about to be dropped.
+
+    A legacy archive sitting at SQLite's page ceiling cannot absorb the growth from
+    reindexing rows that retention is about to delete: the transaction fails with
+    SQLITE_FULL and the new batch is rejected too. Eviction has to come first.
+    """
+    from deerflow.agents.task_continuity import archive as _archive
+
+    first = HumanMessage(content="第一条 内容", id="b1")
+    second = HumanMessage(content="第二条 内容", id="b2")
+    scoped.state = {"messages": [first, second]}
+
+    # First capture creates the archive with one batch.
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [first], TaskContinuityConfig(enabled=True, max_batches=1))}
+    db_path = _archive_db(scoped)
+    import sqlite3 as _sqlite3
+
+    with _sqlite3.connect(db_path) as db:
+        first_batch = db.execute("SELECT id FROM batches").fetchone()[0]
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    seen_remaining = []
+    real_rebuild = _archive.rebuild_index
+
+    def spy(db):
+        seen_remaining.append(db.execute("SELECT count(*) FROM sources WHERE batch=?", (first_batch,)).fetchone()[0])
+        return real_rebuild(db)
+
+    monkeypatch.setattr(_archive, "rebuild_index", spy)
+    scoped.state = {"messages": [], "task_history": archive.capture(scoped.state, scoped, [second], TaskContinuityConfig(enabled=True, max_batches=1))}
+
+    assert seen_remaining == [0], "the expired batch must be gone before the rebuild runs"
+    with _sqlite3.connect(db_path) as db:
+        assert db.execute("SELECT count(*) FROM batches").fetchone()[0] == 1
