@@ -147,6 +147,55 @@ def index_text(text: str) -> str:
     return " ".join(_tokens(text))
 
 
+def _source_row(payload: str) -> dict | None:
+    """Decode one stored source, or None when the row is not a usable record."""
+    try:
+        row = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    return row if isinstance(row, dict) and isinstance(row.get("id"), str) else None
+
+
+def _decoded_rows(cursor):
+    for (payload,) in cursor:
+        row = _source_row(payload)
+        if row is not None:
+            yield row
+
+
+def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: str | None, keywords: list[str], role_filter: str):
+    """Yield matches from an archive whose index predates the current tokenizer.
+
+    The stored index terms cannot answer the new query on their own, so the
+    decoded text is the source of truth. Index hits still come first: they are
+    genuine token matches, ordered by FTS rank, and running them before the
+    substring scan stops a query like "cat" from being filled with eight rows
+    that merely contain "concatenate". Both passes are lazy - rows are decoded
+    only until the caller has eight distinct sources - so a large archive is not
+    decoded in full to answer a query its own index can already rank.
+    """
+    emitted: set[str] = set()
+    parameters = [match, *batches, *([role] if role is not None else [])]
+    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters):
+        row = _source_row(payload)
+        if row is None or row["id"] in emitted:
+            continue
+        text = str(row.get("text", "")).casefold()
+        if not any(term in text for term in keywords):
+            # A stale index term: the stored text no longer carries it.
+            continue
+        emitted.add(row["id"])
+        yield row
+    parameters = [*batches, *([role] if role is not None else [])]
+    for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters):
+        row = _source_row(payload)
+        if row is None or row["id"] in emitted:
+            continue
+        if any(term in str(row.get("text", "")).casefold() for term in keywords):
+            emitted.add(row["id"])
+            yield row
+
+
 def _search_excerpt(text: str, keywords: list[str], *, substring: bool) -> dict:
     """Locate the first fitting casefolded keyword match in the readable source."""
     folded = text.casefold()
@@ -266,34 +315,25 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if present != len(batches) and status != "unavailable":
                     status = "partially_expired"
                 if source_id:
-                    rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
+                    rows = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id]))
                 else:
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
+                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
                         # The archive still holds index terms from the older tokenizer and this
                         # path is read-only, so match the decoded text for now; the next capture
-                        # rebuilds the index in place.
-                        # Not SQL `LIKE`: SQLite's `lower()` folds ASCII only, so "STRASSE" would
-                        # miss a stored "Straße", and matching the raw JSON payload would let a
-                        # query like "human" hit the "role" field instead of the message text.
-                        parameters = [*batches, *([role] if role is not None else [])]
-                        legacy = []
-                        for (payload,) in db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters):
-                            try:
-                                text = str(json.loads(payload).get("text", "")).casefold()
-                            except (TypeError, ValueError):
-                                continue
-                            if any(term in text for term in keywords):
-                                legacy.append((payload,))
-                        rows = legacy
+                        # rebuilds the index in place. Index hits are used first and the text is
+                        # the source of truth for both passes: not SQL `LIKE`, because SQLite's
+                        # `lower()` folds ASCII only, so "STRASSE" would miss a stored "Straße",
+                        # and not the raw JSON payload, which would let a query like "human" hit
+                        # the "role" field instead of the message text.
+                        rows = _legacy_rows(db, match, placeholders, batches, role, keywords, role_filter)
                     else:
-                        match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                         parameters = [match, *batches, *([role] if role is not None else [])]
                         # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
-                        rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
-                for (payload,) in rows:
-                    row = json.loads(payload)
-                    # Repeated archives share one result slot; keep FTS order
+                        rows = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters))
+                for row in rows:
+                    # Repeated archives share one result slot; keep match order
                     # and stop reading once eight distinct sources are selected.
                     found.setdefault(row["id"], row)
                     if len(found) == 8:

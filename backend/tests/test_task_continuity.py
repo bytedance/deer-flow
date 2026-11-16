@@ -1238,6 +1238,70 @@ def test_legacy_fallback_matches_decoded_text_not_the_json_payload(scoped):
     assert _json.loads(history_search.func(scoped, "human"))["results"] == []
 
 
+def test_legacy_archive_keeps_token_matches_ahead_of_substrings(scoped):
+    """An exact token match must not be crowded out by substring rows.
+
+    The legacy fallback answers from the decoded text, and "cat" is a substring of
+    "concatenate". Eight such rows used to fill the eight-source cap before the one
+    message that actually says "cat" was reached, so the exact match was dropped.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    noise = [HumanMessage(content=f"step {index}: we concatenate the fragments into one line", id=f"c{index}") for index in range(8)]
+    exact = HumanMessage(content="the cat sat on the warm keyboard", id="cat")
+    scoped.state = {"messages": [exact]}
+    exact_id = _json.loads(history_search.func(scoped, "cat"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*noise, exact], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    hits = [row["id"] for row in _json.loads(history_search.func(scoped, "cat"))["results"]]
+    assert hits[0] == exact_id, f"the exact token match must rank first, got {hits}"
+
+
+def test_legacy_archive_decodes_only_until_the_result_cap(scoped, monkeypatch):
+    """The fallback must feed the cap lazily instead of decoding the whole archive.
+
+    Collecting every matching payload first cost one JSON decode per stored row:
+    900 rows for eight results. The index can answer this query, so only the rows
+    that are actually yielded should be decoded.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    hits_needed = [HumanMessage(content=f"step {index}: we concatenate the fragments into one line", id=f"c{index}") for index in range(8)]
+    filler = [HumanMessage(content=f"unrelated note {index} about release planning", id=f"f{index}") for index in range(892)]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*hits_needed, *filler], TaskContinuityConfig(enabled=True, max_records_per_batch=1024)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        assert db.execute("SELECT count(*) FROM sources").fetchone()[0] == 900
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    decoded = []
+    real_loads = _json.loads
+
+    class CountingJson:
+        def loads(self, payload, *args, **kwargs):
+            decoded.append(payload)
+            return real_loads(payload, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(_json, name)
+
+    monkeypatch.setattr(archive, "json", CountingJson())
+    rows = _json.loads(history_search.func(scoped, "concatenate"))["results"]
+    assert len(rows) == 8
+    assert len(decoded) <= 20, f"decoded {len(decoded)} rows to return eight results"
+
+
 def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):
     """Reindexing must not run against batches that are about to be dropped.
 
