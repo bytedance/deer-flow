@@ -33,8 +33,14 @@ type HistoryClient = { threads: ThreadsClient };
  * metadata; only the refusal means the send never became a turn.
  */
 export function withHistoryErrorTagging<T extends HistoryClient>(client: T): T {
-  const threads = client.threads as unknown as TaggedThreads;
-  if (threads.__tagsHistoryErrors) {
+  const threads = client.threads as unknown as TaggedThreads | undefined;
+  // Test doubles and non-SDK clients may not expose a history reader; leave
+  // them untouched so `onError` falls back to its normal settlement.
+  if (
+    !threads ||
+    typeof threads.getHistory !== "function" ||
+    threads.__tagsHistoryErrors
+  ) {
     return client;
   }
   const getHistory = threads.getHistory.bind(threads);
