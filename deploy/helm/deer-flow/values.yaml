@@ -104,6 +104,20 @@ gateway:
     limits:
       cpu: "2"
       memory: 2Gi
+  # Init containers (init-home, init-extensions) that prepare the home volume
+  # before the gateway starts. Point `image` at a mirror if your nodes cannot
+  # pull from Docker Hub.
+  initContainers:
+    image:
+      repository: busybox
+      tag: "1.36"
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
 
 # -- Frontend (Next.js) deployment.
 frontend:
@@ -367,7 +381,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 65
+  config_version: 66
   log_level: info
   recursion_limit: 100
   max_recursion_limit: 1000

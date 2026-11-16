@@ -433,3 +433,31 @@ async def test_runtime_identity_is_not_a_model_argument(env):
     trusted.server_info = SimpleNamespace(user=SimpleNamespace(identity="user-1"))
     batch = await submit(env)
     assert (await read(env.service, batch, runtime=trusted))["status"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env", ["sqlite", "postgres"], indirect=True)
+async def test_read_batch_item_never_serves_a_gapped_position(env):
+    """``read_batch_item`` must verify the returned row's position like its
+    browser sibling: ``list_items(offset=position)`` only equals position
+    while rows are dense, so a retention gap must yield ``None`` — not the
+    next item's report attributed to the wrong item key."""
+    from sqlalchemy import delete as sa_delete
+
+    from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow
+
+    batch = await submit(env)
+    await complete(env, batch)
+    async with get_session_factory()() as session:
+        await session.execute(sa_delete(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id == batch, SubagentBatchItemRow.position == 0))
+        await session.commit()
+
+    # Without the position check this returned the surviving item's report
+    # attributed to the deleted item's position.
+    assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=0) is None
+    # The browser projection already defends against gaps; keep them aligned.
+    assert await env.service.read_browser_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=0) is None
+    # Positions past the gap never resolve to a shifted row either (OFFSET
+    # semantics): the survivor is only reachable from a fresh dense batch.
+    assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=1) is None
+    assert await env.service.read_batch_item(batch_id=batch, user_id="user-1", thread_id="thread-1", position=2) is None

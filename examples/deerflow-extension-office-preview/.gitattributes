@@ -1,0 +1,2 @@
+# Keep generated parser bundles byte-for-byte, including embedded template strings.
+deerflow_extension_office_preview/static/dist/** -whitespace linguist-generated=true

@@ -54,6 +54,10 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 
 Middlewares execute in strict order, each handling a specific concern:
 
+Starting a new graph invocation resets tool-progress tracking. Results and model
+retries still finishing from an earlier invocation cannot block its tools or
+restore obsolete progress hints, including same-run goal continuations.
+
 | # | Middleware | Purpose |
 |---|-----------|---------|
 | 1 | **ThreadDataMiddleware** | Creates per-thread isolated directories (workspace, uploads, outputs) |

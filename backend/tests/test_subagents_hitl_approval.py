@@ -34,7 +34,6 @@ def executor_module():
         "deerflow.agents.lead_agent.agent",
         "deerflow.agents.thread_state",
         "deerflow.agents.middlewares.audit_context",
-        "deerflow.agents.middlewares.hitl_approval_middleware",
         "deerflow.agents.middlewares.tool_declarations",
         "deerflow.agents.middlewares.tool_error_handling_middleware",
         "deerflow.models.factory",
@@ -132,8 +131,7 @@ async def test_native_subagent_denies_configured_tool_without_resume(executor_mo
     assert len(tool_messages) == 1
     assert tool_messages[0].name == "bash"
     assert tool_messages[0].status == "error"
-    assert "Approval is required" in tool_messages[0].content
-    assert "cannot collect approval" in tool_messages[0].content
+    assert "No parent approval channel" in tool_messages[0].content
     assert "tool was not executed" in tool_messages[0].content
 
 

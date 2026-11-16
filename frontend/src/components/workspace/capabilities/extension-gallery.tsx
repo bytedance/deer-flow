@@ -1,18 +1,8 @@
 "use client";
 
-import {
-  ArrowLeftIcon,
-  ChevronRightIcon,
-  CircleAlertIcon,
-  CircleCheckIcon,
-  CircleMinusIcon,
-  ExternalLinkIcon,
-  InfoIcon,
-  RefreshCwIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   extensionDirectory,
@@ -21,8 +11,8 @@ import {
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { extensionIcon } from "@/core/extensions/registry";
 import { useI18n } from "@/core/i18n/hooks";
-import type { Translations } from "@/core/i18n/locales/types";
 
+import { ExtensionDetail } from "./extension-detail";
 import { PluginRow } from "./plugin-directory";
 
 function ExtensionIconTile({ entry }: { entry: ExtensionCatalogEntry }) {
@@ -34,68 +24,8 @@ function ExtensionIconTile({ entry }: { entry: ExtensionCatalogEntry }) {
   );
 }
 
-function ExtensionDetail({
-  entry,
-  copy,
-}: {
-  entry: ExtensionCatalogEntry;
-  copy: Translations["extensions"];
-}) {
-  const { loaded } = entry;
-  const notice = loaded?.error
-    ? { icon: <CircleAlertIcon />, text: copy.moduleUnavailable }
-    : !loaded
-      ? { icon: <InfoIcon />, text: copy.catalogHint }
-      : loaded.settings.enabled === true
-        ? { icon: <CircleCheckIcon />, text: copy.enabledManaged }
-        : { icon: <CircleMinusIcon />, text: copy.disabledManaged };
-  return (
-    <div className="space-y-6">
-      <div className="flex items-start gap-4">
-        <ExtensionIconTile entry={entry} />
-        <div className="min-w-0 flex-1">
-          <h2 className="text-xl font-semibold tracking-tight">
-            {entry.title}
-          </h2>
-          <p className="text-muted-foreground mt-1.5 text-sm leading-6">
-            {entry.description}
-          </p>
-          {entry.package && (
-            <p className="text-muted-foreground mt-2 font-mono text-xs break-all">
-              {entry.package}
-            </p>
-          )}
-        </div>
-      </div>
-      <Alert
-        role={loaded?.error ? "alert" : "note"}
-        variant={loaded?.error ? "destructive" : "default"}
-        className="[&>svg]:translate-y-2"
-      >
-        {notice.icon}
-        <AlertDescription className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
-          <p className="min-w-0 grow basis-64 py-1">{notice.text}</p>
-          {entry.guide && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-foreground"
-              asChild
-            >
-              <a href={entry.guide} target="_blank" rel="noopener noreferrer">
-                {copy.installationGuide}
-                <ExternalLinkIcon />
-              </a>
-            </Button>
-          )}
-        </AlertDescription>
-      </Alert>
-    </div>
-  );
-}
-
 export function ExtensionGallery({ query = "" }: { query?: string }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const publicQuery = useFrontendExtensions();
   const params = useSearchParams();
   const router = useRouter();
@@ -104,6 +34,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
   const entries = extensionDirectory(
     publicQuery.data ?? [],
     t.extensions.catalog,
+    locale,
   );
   const source = publicQuery;
   function select(namespace?: string) {
@@ -140,7 +71,7 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
   if (selected) {
     const entry = entries.find((item) => item.id === selected);
     return (
-      <div className="max-w-3xl space-y-6">
+      <div className="space-y-6">
         <div className="flex items-center justify-between gap-2">
           <Button
             variant="ghost"
@@ -151,7 +82,6 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             <ArrowLeftIcon />
             {t.extensions.all}
           </Button>
-          {reload}
         </div>
         {status}
         {!entry ? (
@@ -159,7 +89,12 @@ export function ExtensionGallery({ query = "" }: { query?: string }) {
             {t.extensions.notInstalled}
           </p>
         ) : (
-          <ExtensionDetail entry={entry} copy={t.extensions} />
+          <ExtensionDetail
+            entry={entry}
+            discovery={
+              source.isPending ? "pending" : source.isError ? "error" : "ready"
+            }
+          />
         )}
       </div>
     );

@@ -17,9 +17,10 @@ import pytest_asyncio
 from fastapi import HTTPException
 from sqlalchemy import update
 
-from app.gateway.scheduled_task_validation import prepare_resume_updates
+from app.gateway.scheduled_task_validation import prepare_resume_updates, validate_scheduled_task_update
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
@@ -163,6 +164,47 @@ async def test_queue_expiry_pauses_an_unschedulable_task(repos):
     await _assert_paused(tasks, "broken")
 
 
+async def test_queue_expiry_continues_after_one_storage_error(repos, monkeypatch, caplog):
+    tasks, runs, _run_store, factory = repos
+    now = datetime.now(UTC)
+    await _create_task(tasks, "a-poison", next_run_at=None)
+    await _create_task(tasks, "z-healthy", next_run_at=None)
+    await runs.create(
+        run_record_id="poison-occurrence",
+        task_id="a-poison",
+        thread_id="thread-a-poison",
+        scheduled_for=now,
+        trigger="scheduled",
+        status="queued",
+    )
+    await runs.create(
+        run_record_id="healthy-occurrence",
+        task_id="z-healthy",
+        thread_id="thread-z-healthy",
+        scheduled_for=now,
+        trigger="scheduled",
+        status="queued",
+    )
+    original_lock_task = ScheduledTaskRunRepository._lock_task
+
+    async def flaky_lock_task(session, task_id):
+        if task_id == "a-poison":
+            raise RuntimeError("parent row lock failed")
+        return await original_lock_task(session, task_id)
+
+    monkeypatch.setattr(ScheduledTaskRunRepository, "_lock_task", staticmethod(flaky_lock_task))
+    expired = await runs.expire_queued_runs(
+        created_before=now + timedelta(seconds=1),
+        error="queue timeout",
+        now=now,
+    )
+
+    assert [row["id"] for row in expired] == ["healthy-occurrence"]
+    assert [row["status"] for row in await runs.list_by_task("a-poison")] == ["queued"]
+    assert [row["status"] for row in await runs.list_by_task("z-healthy")] == ["failed"]
+    assert "Failed to expire queued scheduled occurrence poison-occurrence" in caplog.text
+
+
 async def test_failed_recovery_pass_does_not_block_admission(repos, monkeypatch):
     tasks, runs, run_store, _factory = repos
     now = datetime.now(UTC)
@@ -177,6 +219,47 @@ async def test_failed_recovery_pass_does_not_block_admission(repos, monkeypatch)
     await service.run_once(now=now)
 
     assert launched == ["healthy"]
+
+
+@pytest.mark.parametrize("invalid_spec", [None, 42, [42]])
+async def test_paused_interval_can_replace_a_malformed_stored_spec(repos, invalid_spec):
+    tasks, _, _, factory = repos
+    now = datetime.now(UTC)
+    await _create_task(tasks, "broken", next_run_at=now + timedelta(minutes=10), context_mode="fresh_thread_per_run")
+    async with factory() as session:
+        await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == "broken").values(status="paused", schedule_spec=invalid_spec, next_run_at=None, origin_thread_id="thread-broken", max_runs=None, end_at=None))
+        await session.commit()
+    existing = await tasks.get("broken", user_id="user-1")
+    assert existing is not None
+
+    with pytest.raises(HTTPException) as resume_error:
+        prepare_resume_updates(existing, {}, used=0, now=now)
+    assert resume_error.value.status_code == 422
+    assert resume_error.value.detail["code"] == "invalid_schedule"
+
+    for fields in ({"timezone": "America/New_York"}, {"title": "Renamed"}):
+        with pytest.raises(HTTPException) as update_error:
+            await validate_scheduled_task_update(existing, fields, user_id="user-1", thread_store=None, scheduler_config=SchedulerConfig(), assistant_resolver=None, used=0, now=now)
+        assert update_error.value.status_code == 422
+        assert update_error.value.detail["code"] == "invalid_schedule"
+
+    updates = await validate_scheduled_task_update(
+        existing,
+        {"schedule_spec": {"every_seconds": 900}, "max_runs": 5},
+        user_id="user-1",
+        thread_store=None,
+        scheduler_config=SchedulerConfig(),
+        assistant_resolver=None,
+        used=0,
+        now=now,
+    )
+    repaired = await tasks.update("broken", user_id="user-1", updates=updates, require_mutable=True)
+    assert repaired is not None
+    assert repaired["status"] == "paused"
+    assert repaired["schedule_spec"] == {"every_seconds": 900}
+    resume = prepare_resume_updates(repaired, {}, used=0, now=now)
+    assert resume["status"] == "enabled"
+    assert resume["next_run_at"] == now + timedelta(seconds=900)
 
 
 async def test_resuming_reports_the_schedule_until_it_is_fixed(repos):

@@ -57,7 +57,7 @@ jobs:
       # its peers.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
 
     services:
       postgres:
@@ -105,7 +105,7 @@ jobs:
         working-directory: backend
         run: uv sync --group dev --extra postgres
 
-      - name: Run unit tests of backend (shard ${{ matrix.shard }} of 4)
+      - name: Run unit tests of backend (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
         working-directory: backend
         env:
           # Expose the job's Postgres service to the cross-pod dedupe integration
@@ -114,4 +114,4 @@ jobs:
           # exercised in CI.
           DEERFLOW_TEST_WORKFLOW_POSTGRES: ${{ env.TEST_POSTGRES_URI }}
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
-        run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }}
+        run: make test-shard SPLITS=${{ strategy.job-total }} GROUP=${{ matrix.shard }}

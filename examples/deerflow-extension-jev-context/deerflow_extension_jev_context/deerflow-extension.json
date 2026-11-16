@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "community.jev-context",
+  "locales": {
+    "zh-CN": {
+      "title": "上下文裁剪",
+      "description": "按需缩短旧的只读工具结果，保留近期消息与原生摘要。",
+      "usage": [
+        {
+          "title": "正常进行对话",
+          "description": "启用后自动检查长对话中的旧工具输出，不需要打开独立页面或输入额外命令。"
+        },
+        {
+          "title": "达到阈值时自动处理",
+          "description": "满足配置的上下文阈值和调用间隔后，裁剪已过时的只读工具结果，保留近期消息和受保护内容。"
+        }
+      ],
+      "requirements": [
+        "管理员已配置 TypeSafe Jev 服务凭据及触发阈值；处理时会向该服务发送限定范围的对话内容。"
+      ]
+    },
+    "en-US": {
+      "title": "Context pruning",
+      "description": "Shorten older read-only tool results while preserving recent messages and native summaries.",
+      "usage": [
+        {
+          "title": "Continue your conversation",
+          "description": "Once enabled, it automatically checks old tool output in long conversations. No separate page or command is needed."
+        },
+        {
+          "title": "Prune when the threshold is reached",
+          "description": "After the configured token threshold and call interval, obsolete read-only results are shortened while recent and protected content is retained."
+        }
+      ],
+      "requirements": [
+        "An administrator must configure TypeSafe Jev credentials and thresholds. Processing sends bounded conversation content to that service."
+      ]
+    }
+  },
+  "docs_url": "https://github.com/bytedance/deer-flow/tree/main/examples/deerflow-extension-jev-context#readme"
+}
