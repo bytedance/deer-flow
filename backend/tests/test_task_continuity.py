@@ -1093,3 +1093,34 @@ def test_repeated_archive_sources_keep_canonical_read_version(role_runtime):
     assert row["truncated"] is source["truncated"] is True
     assert source["text"] == text[:1000]
     assert row["excerpt"] == source["text"][row["excerpt_start"] : row["excerpt_end"]]
+
+
+def test_index_keeps_latin_words_whole_inside_cjk_text():
+    """A Latin word next to CJK characters stays one index term (#8297).
+
+    The tokenizer split a run of word characters at two characters whenever that
+    run contained a CJK character, so "采购ThinkPad电脑" indexed "ThinkPad" as
+    th/hi/in/nk/kp/pa/ad and a search for the product name found nothing.
+    """
+    assert "thinkpad" in archive.terms("采购ThinkPad电脑的预算为6000元")
+    assert "thinkpad" in archive.index_text("采购ThinkPad电脑的预算为6000元").split()
+    # Latin and digits stay whole; pure CJK still uses two-character terms.
+    assert "6000" in archive.terms("预算为6000元")
+    assert "用户" in archive.terms("用户登录")
+
+
+def test_latin_product_name_stays_searchable_after_capture(scoped):
+    """The same holds through compaction: the archived source is still findable."""
+    import json
+
+    message = HumanMessage(content="采购ThinkPad电脑的预算为6000元", id="u-budget")
+    scoped.state = {"messages": [message]}
+    active = json.loads(history_search.func(scoped, "ThinkPad"))["results"]
+    assert len(active) == 1
+
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    archived = json.loads(history_search.func(scoped, "ThinkPad"))["results"]
+    assert len(archived) == 1, "compaction must not turn a Latin word into two-character index terms"

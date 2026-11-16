@@ -77,11 +77,20 @@ def records(messages, cap: int = 16000) -> list[dict]:
     return result
 
 
+_CJK = "\u3400-\u9fff"
+# A Latin/digit run and a CJK run are different token units. `[^\W_]+` matches
+# letters, digits and CJK in one go, so "采购ThinkPad电脑" became a single run that
+# looked like CJK and had the product name split into two-character terms (#8297):
+# "ThinkPad" was indexed as th/hi/in/nk/kp/pa/ad and could never be found.
+_TOKEN_RE = re.compile(rf"[{_CJK}]+|[^\W{_CJK}_]+")
+_CJK_RUN_RE = re.compile(rf"[{_CJK}]")
+
+
 def _token_spans(folded: str):
     """Preserve indexed token positions in casefolded text without changing tokenization."""
-    for match in re.finditer(r"[^\W_]+", folded):
+    for match in _TOKEN_RE.finditer(folded):
         word = match.group()
-        if re.search(r"[\u3400-\u9fff]", word):
+        if _CJK_RUN_RE.match(word):
             for index in range(max(1, len(word) - 1)):
                 yield word[index : index + 2], match.start() + index, match.start() + min(index + 2, len(word))
         else:
