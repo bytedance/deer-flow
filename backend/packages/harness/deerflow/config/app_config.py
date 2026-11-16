@@ -347,7 +347,8 @@ class AppConfig(BaseModel):
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
-    model_config = ConfigDict(extra="allow")
+    # Validation errors are logged at startup and on reload. Resolved inputs can contain secrets.
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,
         description=format_field_description(

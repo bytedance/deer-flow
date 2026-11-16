@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.requests import Request
 
+from app.gateway import deps
 from app.gateway.auth.models import User
 from app.gateway.authz import AuthContext
 from app.gateway.deps import get_config
@@ -38,10 +39,11 @@ def upstream(monkeypatch):
     return state
 
 
-def client_for(config, *, authenticated=True, permitted=True):
+def client_for(config, *, authenticated=True, permitted=True, use_config_loader=False):
     app = FastAPI()
     app.include_router(voice_input.router)
-    app.dependency_overrides[get_config] = lambda: SimpleNamespace(voice_input=config)
+    if not use_config_loader:
+        app.dependency_overrides[get_config] = lambda: SimpleNamespace(voice_input=config)
 
     @app.middleware("http")
     async def auth(request, call_next):
@@ -100,6 +102,7 @@ def test_disabled_invalid_and_oversized_requests_never_contact_provider(upstream
         (httpx.Response(200, text="not json synthetic-key"), 502),
         (httpx.Response(200, json=[]), 502),
         (httpx.Response(200, json={"text": 1}), 502),
+        (httpx.Response(200, content=rb'{"text":"\ud800"}'), 502),
         (httpx.Response(200, json={"text": " "}), 422),
         (httpx.Response(200, text="x" * (1024 * 1024 + 1)), 502),
     ],
@@ -112,6 +115,27 @@ def test_provider_failures_are_bounded_and_redacted(upstream, provider, status):
     assert len(upstream.requests) == 1
     assert "synthetic-key" not in response.text
     assert "speech.example" not in response.text
+
+
+def test_invalid_voice_key_is_hidden_in_config_errors(monkeypatch, caplog, upstream):
+    secret_marker = "synthetic-invalid-voice-key"
+    voice = {"base_url": "https://speech.example/v1", "model": "stt-test", "api_key": f"{secret_marker}\n"}
+
+    with pytest.raises(ValidationError) as direct_error:
+        VoiceInputConfig.model_validate(voice)
+    assert secret_marker not in str(direct_error.value)
+
+    def load_invalid_config():
+        return AppConfig.model_validate({"config_version": 67, "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}, "voice_input": voice})
+
+    monkeypatch.setattr(deps, "get_app_config", load_invalid_config)
+    with client_for(None, use_config_loader=True) as client:
+        response = client.post("/api/voice-input/transcribe", content=b"audio", headers={"Content-Type": "audio/webm"})
+
+    assert response.status_code == 503
+    assert "voice_input.api_key" in caplog.text
+    assert secret_marker not in caplog.text
+    assert not upstream.requests
 
 
 def test_provider_timeout_is_sanitized(upstream):

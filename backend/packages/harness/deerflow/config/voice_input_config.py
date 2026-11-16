@@ -8,7 +8,7 @@ from deerflow.config._boolean_guards import reject_boolean
 
 
 class VoiceInputConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
     base_url: str = Field(description="OpenAI-compatible API base URL, including /v1 if required")
     model: str = Field(min_length=1, description="Transcription model served by this endpoint")

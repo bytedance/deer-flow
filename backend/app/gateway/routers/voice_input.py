@@ -88,6 +88,8 @@ async def _transcribe(audio: bytes, mime: str, config: VoiceInputConfig) -> str:
         text = result["text"].strip()
         if not text:
             raise HTTPException(422, "No speech was detected")
+        # JSON escapes can decode to lone surrogates that the API cannot serialize.
+        text.encode("utf-8")
         return text
     except (TimeoutError, httpx.TimeoutException):
         raise HTTPException(504, "Transcription service timed out") from None
