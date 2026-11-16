@@ -880,6 +880,13 @@ async def purge_thread_data(
         await await_drained(approval_store.delete_thread(thread_id, user_id=user_id))
     if batch_repo is not None:
         await batch_repo.suppress_thread_continuations(thread_id)
+        # Suppression only fences in-flight continuations; the durable batch
+        # rows (each item's prompt text, the execution_spec) stay readable.
+        # Remove them so a swept incognito thread and a user delete both leave
+        # nothing behind. Batch rows are owner-scoped, so this needs a resolved
+        # user_id; a None owner (migration/CLI purge) skips it.
+        if user_id is not None:
+            await batch_repo.delete_by_thread(thread_id, user_id=user_id)
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be

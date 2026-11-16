@@ -1008,6 +1008,7 @@ class SubagentExecutor:
         input_gate: Any | None = None,
         agent_mcp_authority: Any | None = None,
         principal_resolver: Callable[[], Awaitable[Principal]] | None = None,
+        incognito: bool = False,
     ):
         """Initialize the executor.
 
@@ -1091,6 +1092,12 @@ class SubagentExecutor:
         self.agent_mcp_authority = agent_mcp_authority
         self.thread_id = thread_id
         self.thread_incarnation = thread_incarnation
+        # Server-owned incognito marker captured from the parent runtime context.
+        # Propagated into the subagent's own runtime context so the shared
+        # L4 durable-write gates (blob externalization, view_image) read the
+        # same verdict inside the delegated loop. A client cannot set this: the
+        # parent context key is admission-pinned and stripped from caller input.
+        self.incognito = incognito is True
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
@@ -2035,6 +2042,10 @@ class SubagentExecutor:
                 context["thread_id"] = self.thread_id
             if self.thread_incarnation is not _THREAD_INCARNATION_UNSET:
                 context[THREAD_INCARNATION_CONTEXT_KEY] = self.thread_incarnation
+            if self.incognito:
+                from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+                context[INCOGNITO_CONTEXT_KEY] = True
             if self.app_config is not None:
                 context["app_config"] = self.app_config
             # Propagate guardrail attribution so delegated tool calls are

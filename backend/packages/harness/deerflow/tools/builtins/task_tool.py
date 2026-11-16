@@ -30,6 +30,7 @@ from deerflow.mcp_scope import (
     runtime_thread_incarnation,
 )
 from deerflow.models.selection import authorize_selected_model
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -1178,6 +1179,13 @@ async def task_tool(
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
         executor_kwargs["thread_incarnation"] = parent_context[THREAD_INCARNATION_CONTEXT_KEY]
+    # Propagate the admission-pinned incognito marker so the delegated loop's
+    # shared durable-write gates (blob externalization, view_image) read the
+    # same verdict as the lead. Strict ``is True``: the parent key is
+    # server-owned and stripped from caller input, so any other value is an
+    # ordinary run.
+    if parent_context.get(INCOGNITO_CONTEXT_KEY) is True:
+        executor_kwargs["incognito"] = True
     if context_snapshot is not None:
         executor_kwargs["context_snapshot"] = context_snapshot
     middleware_recorder = None

@@ -588,12 +588,14 @@ def test_delete_thread_route_isolates_failing_mcp_cleanup(tmp_path):
     pool.close_thread_scope.assert_awaited_once()
 
 
-def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo):
+def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo, batch_repo=None):
     app = make_authed_test_app()
     app.state.run_manager = _ThreadTestRunManager()
     app.state.run_store = run_store
     app.state.run_event_store = event_store
     app.state.feedback_repo = feedback_repo
+    if batch_repo is not None:
+        app.state.subagent_batch_repo = batch_repo
     app.include_router(threads.router)
     return app
 
@@ -722,6 +724,45 @@ def test_delete_thread_route_cleans_persisted_records(tmp_path):
     run_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
     event_store.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
     feedback_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
+
+
+def test_delete_thread_route_removes_durable_batch_rows(tmp_path):
+    """Purge fences continuations, then deletes the durable batch rows.
+
+    ``suppress_thread_continuations`` only flips the continuation status; the
+    batch/item rows — including each item's prompt text — stay readable. A user
+    delete (and the incognito sweep that reuses this orchestration) must remove
+    them, scoped to the owner.
+    """
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = Paths(tmp_path)
+    user_id = get_effective_user_id()
+    run_store = MagicMock()
+    run_store.delete_by_thread = AsyncMock(return_value=0)
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=0)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+    batch_repo = MagicMock()
+    batch_repo.suppress_thread_continuations = AsyncMock(return_value=None)
+    batch_repo.delete_by_thread = AsyncMock(return_value=1)
+
+    app = _persistence_cleanup_app(
+        tmp_path,
+        run_store=run_store,
+        event_store=event_store,
+        feedback_repo=feedback_repo,
+        batch_repo=batch_repo,
+    )
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-cleanup")
+
+    assert response.status_code == 200
+    batch_repo.suppress_thread_continuations.assert_awaited_once_with("thread-cleanup")
+    batch_repo.delete_by_thread.assert_awaited_once_with("thread-cleanup", user_id=user_id)
 
 
 def test_delete_thread_route_isolates_failing_persistence_cleanup(tmp_path):

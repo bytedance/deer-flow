@@ -148,3 +148,66 @@ async def test_capped_attempt_can_retry_before_releasing_its_dependent(repo):
     ready = await claim(repo)
     assert [item["item_key"] for item in ready] == ["b"]
     assert ready[0]["attempt"] == 1
+
+
+async def _count_dependency_rows() -> int:
+    """Read the raw dependency edges; no public projection exposes them."""
+    from sqlalchemy import func, select
+
+    from deerflow.persistence.subagent_batches.model import SubagentBatchDependencyRow
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        return int(await session.scalar(select(func.count()).select_from(SubagentBatchDependencyRow)) or 0)
+
+
+@pytest.mark.asyncio
+async def test_delete_by_thread_removes_batches_items_and_dependencies(repo):
+    """Purge must leave nothing behind: batch, item prompt text, and dependency edges.
+
+    ``suppress_thread_continuations`` only fences in-flight continuations; the
+    durable rows stay readable. An incognito sweep and a user delete both call
+    this to remove them. Rows go dependency-first so the result does not rely on
+    ``ondelete=CASCADE`` being enforced by the backend, and a sibling thread's
+    batch under the same owner is untouched.
+    """
+    await create(
+        repo,
+        [
+            {"key": "a", "prompt": "Read sales"},
+            {"key": "b", "prompt": "Combine A", "depends_on": ["a"]},
+        ],
+        batch_id="batch-target",
+        submission_key="run:call-target",
+        thread_id="thread-secret",
+    )
+    await create(
+        repo,
+        [{"key": "x", "prompt": "Keep me"}],
+        batch_id="batch-sibling",
+        submission_key="run:call-sibling",
+        thread_id="thread-keep",
+    )
+    assert await _count_dependency_rows() == 1
+
+    removed = await repo.delete_by_thread("thread-secret", user_id="owner")
+
+    assert removed == 1
+    assert await repo.get_batch("batch-target", user_id="owner") is None
+    assert await _count_dependency_rows() == 0
+    # The sibling thread under the same owner is untouched.
+    assert (await repo.get_batch("batch-sibling", user_id="owner"))["id"] == "batch-sibling"
+    assert len(await repo.list_items("batch-sibling", user_id="owner")) == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_by_thread_is_scoped_to_the_owner(repo):
+    """A delete never crosses owners: it scopes by ``user_id`` like the other repos."""
+    await create(repo, [{"key": "a", "prompt": "Owner one"}], batch_id="batch-one", submission_key="run:one", user_id="owner", thread_id="shared-thread")
+    await create(repo, [{"key": "b", "prompt": "Owner two"}], batch_id="batch-two", submission_key="run:two", user_id="other", thread_id="shared-thread")
+
+    removed = await repo.delete_by_thread("shared-thread", user_id="owner")
+
+    assert removed == 1
+    assert await repo.get_batch("batch-one", user_id="owner") is None
+    assert (await repo.get_batch("batch-two", user_id="other"))["id"] == "batch-two"

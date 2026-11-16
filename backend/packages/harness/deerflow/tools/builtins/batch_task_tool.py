@@ -25,6 +25,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -264,6 +265,11 @@ async def batch_task(
     }
     if THREAD_INCARNATION_CONTEXT_KEY in context:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = context[THREAD_INCARNATION_CONTEXT_KEY]
+    # The admission-pinned incognito marker rides the durable spec so a batch
+    # worker on another process still builds its executor without durable
+    # writes. Strict ``is True`` mirrors the task tool's propagation.
+    if context.get(INCOGNITO_CONTEXT_KEY) is True:
+        execution_spec[INCOGNITO_CONTEXT_KEY] = True
     if KNOWLEDGE_SCOPE_RUNTIME_KEY in context:
         execution_spec["knowledge_scope"] = execution_scope(context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
     from deerflow.mcp.agent_auth import export_agent_authority, runtime_agent_authority

@@ -1835,6 +1835,42 @@ class TestAsyncExecutionPath:
         assert stream.closed is True
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("incognito", [True, False])
+    async def test_aexecute_propagates_the_incognito_marker_into_child_context(self, classes, base_config, mock_agent, msg, incognito):
+        """An incognito parent hands the marker to the delegated loop.
+
+        The shared durable-write gates (blob externalization, view_image) read
+        ``is_incognito_runtime(runtime)`` off the child's own runtime context.
+        Without propagation they fail open inside the subagent, so an incognito
+        research run would leave oversized tool output and viewed images in the
+        content-addressed blob store that thread purge never deletes.
+        """
+        from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        final_state = {"messages": [msg.human("Do something"), msg.ai("done", "msg-1")]}
+        captured: dict = {}
+
+        def capture_astream(*args, **kwargs):
+            captured["context"] = kwargs.get("context")
+            return async_iterator([final_state])
+
+        mock_agent.astream = capture_astream
+
+        executor_kwargs = {"config": base_config, "tools": [], "thread_id": "test-thread"}
+        if incognito:
+            executor_kwargs["incognito"] = True
+        executor = SubagentExecutor(**executor_kwargs)
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            await executor._aexecute("Do something")
+
+        context = captured["context"]
+        assert context is not None
+        assert (context.get(INCOGNITO_CONTEXT_KEY) is True) == incognito
+
+    @pytest.mark.anyio
     async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]

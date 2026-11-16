@@ -5,7 +5,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased, defer
@@ -398,6 +398,36 @@ class SubagentBatchRepository:
                 update(ExtensionExecutionLeaseRow).where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id.in_(ids)).values(expires_at=0, epoch=ExtensionExecutionLeaseRow.epoch + 1)
             )
             await session.commit()
+
+    async def delete_by_thread(self, thread_id: str, *, user_id: str) -> int:
+        """Delete every batch row of one thread; return the batch count removed.
+
+        Called by ``purge_thread_data`` after ``suppress_thread_continuations``
+        has fenced in-flight continuations. Suppression only flips
+        ``continuation_status``; the rows — including each item's ``prompt``
+        text and the batch ``execution_spec`` — stay readable. An incognito
+        thread is swept and a user delete must leave nothing behind, so the rows
+        go too. ``user_id`` scopes the delete to the owner (the same convention
+        the feedback and task-event repos follow): batches belong to one user,
+        and purge always knows the owner.
+
+        Rows are removed dependency-first (dependencies → items → batches)
+        rather than relying on the ``ondelete=CASCADE`` foreign keys, so the
+        result is identical on a backend where cascade is not enforced.
+        """
+        async with self._sf() as session:
+            batch_ids = list((await session.scalars(select(SubagentBatchRow.id).where(SubagentBatchRow.thread_id == thread_id, SubagentBatchRow.user_id == user_id))).all())
+            if not batch_ids:
+                return 0
+            item_ids = select(SubagentBatchItemRow.id).where(SubagentBatchItemRow.batch_id.in_(batch_ids))
+            await session.execute(delete(SubagentBatchDependencyRow).where(or_(SubagentBatchDependencyRow.item_id.in_(item_ids), SubagentBatchDependencyRow.prerequisite_id.in_(item_ids))))
+            await session.execute(delete(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id.in_(batch_ids)))
+            await session.execute(delete(SubagentBatchRow).where(SubagentBatchRow.id.in_(batch_ids)))
+            # Drop the continuation fence rows too; they are keyed by batch id
+            # and would otherwise outlive the batches they guarded.
+            await session.execute(delete(ExtensionExecutionLeaseRow).where(ExtensionExecutionLeaseRow.namespace == BATCH_CONTINUATION_NAMESPACE, ExtensionExecutionLeaseRow.resource_id.in_(batch_ids)))
+            await session.commit()
+            return len(batch_ids)
 
     async def latest_run_state(self, thread_id: str, *, user_id: str) -> dict | None:
         async with self._sf() as session:

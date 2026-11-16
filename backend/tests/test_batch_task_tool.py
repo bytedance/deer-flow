@@ -121,6 +121,46 @@ async def test_batch_task_is_explicit_idempotent_submission(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [True, "true", 1, None])
+async def test_batch_task_records_only_the_server_incognito_marker_in_spec(
+    monkeypatch,
+    marker,
+) -> None:
+    """The durable execution_spec carries the marker so any worker replays it.
+
+    A batch worker may run on another process after a restart, reconstructing
+    its executor purely from the stored spec. Recording the admission-pinned
+    marker there is what keeps a delegated incognito run's blob writes off
+    across that boundary. Only the exact boolean ``True`` is recorded.
+    """
+    from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+    submitter = AsyncMock()
+    submitter.submit.return_value = {"id": "subagent-batch-1", "status": "queued", "total_items": 1}
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: submitter)
+    monkeypatch.setattr(tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(tool_module, "get_subagent_config", lambda *_args, **_kwargs: SubagentConfig(name="general-purpose", description="General purpose"))
+
+    runtime = _runtime()
+    runtime.context[INCOGNITO_CONTEXT_KEY] = marker
+
+    await tool_module.batch_task.coroutine(
+        runtime=runtime,
+        title="Research",
+        items=[BatchTaskItem(key="record-1", prompt="Process one")],
+        subagent_type="general-purpose",
+        tool_call_id="call-1",
+    )
+
+    request = submitter.submit.await_args.args[0]
+    recorded = request.execution_spec.get(INCOGNITO_CONTEXT_KEY)
+    if marker is True:
+        assert recorded is True
+    else:
+        assert recorded is None
+
+
+@pytest.mark.asyncio
 async def test_batch_task_rejects_stale_standalone_thread_incarnation(
     monkeypatch,
 ) -> None:

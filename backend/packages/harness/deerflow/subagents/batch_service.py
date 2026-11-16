@@ -16,6 +16,7 @@ from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.extensions import LoadedExtensions, get_loaded_extensions
 from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.subagents.batch_acceptance import check_batch_acceptance
 from deerflow.subagents.batch_lease import BatchItemLease
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
@@ -553,6 +554,10 @@ class SubagentBatchService:
                 executor_kwargs["agent_mcp_authority"] = restore_agent_authority(batch["user_id"], spec["mcp_agent_auth"])
             if THREAD_INCARNATION_CONTEXT_KEY in spec:
                 executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
+            # Rebuild the incognito verdict from the durable spec so a worker on
+            # any process skips the shared blob writes the lead's gates skip.
+            if spec.get(INCOGNITO_CONTEXT_KEY) is True:
+                executor_kwargs["incognito"] = True
             executor = SubagentExecutor(
                 config=config,
                 tools=tools,
