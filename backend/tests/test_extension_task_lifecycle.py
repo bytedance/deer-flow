@@ -608,3 +608,22 @@ async def test_lead_stop_cancellation_is_deferred_rather_than_swallowed():
 
     assert record.finalizing is False
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+def test_stopped_task_info_detaches_goal_verdict_and_keeps_identity():
+    from deerflow_extension_api import TaskStopDetail
+
+    from deerflow.extensions.notify import stopped_task_info
+
+    verdict = {"satisfied": False, "blocker": "missing_input", "stand_down_reason": "no data"}
+    info = _info()
+    stopped = stopped_task_info(info, status="success", goal_verdict=verdict)
+
+    assert stopped.task_id == info.task_id and stopped.metadata == info.metadata
+    assert info.stop is None
+    assert stopped.stop == TaskStopDetail(status="success", goal_verdict=verdict)
+    verdict["satisfied"] = True
+    assert stopped.stop.goal_verdict["satisfied"] is False
+    with pytest.raises(TypeError):
+        stopped.stop.goal_verdict["satisfied"] = True  # type: ignore[index]
+    assert hash(stopped) == hash(info)

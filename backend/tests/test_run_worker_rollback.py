@@ -1973,6 +1973,69 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
 
 
 @pytest.mark.anyio
+async def test_task_stop_carries_final_status_error_and_run_metadata_for_llm_error_fallback():
+    """The graph ends normally, so only on_task_stop can see that the run failed."""
+    from deerflow_extension_api import TaskOutcome
+
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    run_manager = RunManager()
+    scheduled = {"scheduled_task_id": "task-1", "scheduled_task_run_id": "occurrence-1", "scheduled_trigger": "scheduled"}
+    record = await run_manager.create("thread-1", "researcher", metadata=dict(scheduled))
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {
+                "messages": [
+                    AIMessage(
+                        content="The configured LLM provider is temporarily unavailable after multiple retries.",
+                        additional_kwargs={"deerflow_error_fallback": True, "error_detail": "Connection error."},
+                    )
+                ]
+            }
+
+    class Recorder:
+        def __init__(self):
+            self.starts = []
+            self.stops = []
+
+        async def on_task_start(self, _app_store, _task_store, info):
+            self.starts.append(info)
+
+        async def on_task_stop(self, _app_store, _task_store, info, outcome):
+            self.stops.append((info, outcome))
+
+    recorder = Recorder()
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:task-stop-detail"):
+        registry.task_lifecycle(recorder)
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=registry.build()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    [start] = recorder.starts
+    assert start.stop is None
+    assert {key: start.metadata[key] for key in scheduled} == scheduled
+    with pytest.raises(TypeError):
+        start.metadata["scheduled_task_id"] = "other"  # type: ignore[index]
+    [(info, outcome)] = recorder.stops
+    assert outcome is TaskOutcome.FAILED
+    assert info.stop is not None
+    assert info.stop.status == "error"
+    assert info.stop.error == "Connection error."
+    assert info.stop.goal_verdict is None
+    assert info.metadata == start.metadata
+
+
+@pytest.mark.anyio
 async def test_run_agent_rolls_back_failed_edit_replay_and_publishes_restored_values():
     run_manager = RunManager()
     record = await run_manager.create(

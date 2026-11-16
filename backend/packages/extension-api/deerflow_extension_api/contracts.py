@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_checkable
 
 from deerflow_extension_api.plugins import PluginContribution
@@ -60,6 +61,27 @@ class TaskOutcome(StrEnum):
 
 
 @dataclass(frozen=True)
+class TaskStopDetail:
+    """The final state the host recorded for a task, passed to ``on_task_stop``.
+
+    ``TaskOutcome`` stays the coarse, stable classification; this carries the
+    detail behind it. A lead run's status is decided after the graph has ended
+    (a model failing after retries ends the graph normally), so callback-based
+    observers cannot see it; ``on_task_stop`` runs after it is persisted.
+    """
+
+    # Lead run: the RunStatus value (``success``, ``error``, ``timeout``,
+    # ``interrupted``). Subagent: the SubagentStatus value (``completed``,
+    # ``failed``, ``cancelled``, ``timed_out``).
+    status: str
+    # The short error message the host stored for the task, if any.
+    error: str | None = None
+    # Lead run with a goal: the goal evaluator's verdict (for example
+    # ``satisfied``, ``blocker``, ``stand_down_reason``), a read-only copy.
+    goal_verdict: Mapping[str, Any] | None = field(default=None, hash=False)
+
+
+@dataclass(frozen=True)
 class TaskInfo:
     """Identity of one lead-agent or subagent execution."""
 
@@ -70,6 +92,12 @@ class TaskInfo:
     parent_task_id: str | None = None
     agent_name: str | None = None
     resumed: bool = False
+    # Lead run: a read-only copy of the run's metadata (for a scheduled run,
+    # ``scheduled_task_id``, ``scheduled_task_run_id`` and ``scheduled_trigger``).
+    # Empty for subagents.
+    metadata: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}), hash=False)
+    # Set only on the ``info`` passed to ``on_task_stop``; ``None`` at start.
+    stop: TaskStopDetail | None = field(default=None, hash=False)
 
 
 class TaskLifecycleContributor(Protocol):

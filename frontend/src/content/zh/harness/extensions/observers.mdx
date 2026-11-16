@@ -63,6 +63,10 @@ class TaskLifecycleContributor(Protocol):
 | `parent_task_id` | `None`                     | 父运行 id，也就是 Lead 任务的 `task_id`     |
 | `agent_name`     | assistant 或自定义 Agent id | 子 Agent 名称，例如 `general-purpose`      |
 | `resumed`        | `False`                    | `False`                                    |
+| `metadata`       | 运行 metadata 的只读副本    | 空                                         |
+| `stop`           | 开始时为 `None`；停止时为 `TaskStopDetail` | 开始时为 `None`；停止时为 `TaskStopDetail` |
+
+对定时运行，`metadata` 中包含 `scheduled_task_id`、`scheduled_task_run_id` 和 `scheduled_trigger`，观察者可据此区分定时运行和交互式运行。
 
 <Callout type="info">
   `resumed` 属于契约的一部分，但当前宿主从不把它设为 `True`。暂时不要依赖它来识别续跑。
@@ -81,6 +85,18 @@ class TaskLifecycleContributor(Protocol):
 | `failed`    | 其他情况，例如 `error`                     | 其他情况，包括超时             |
 
 这个映射刻意偏保守。触达 token 或轮次预算的子 Agent 仍可能是 `completed`。
+
+### TaskStopDetail
+
+`info.stop` 携带结果背后的细节。Lead 运行的状态在图结束后才由宿主决定（模型重试后仍失败时，图会正常结束），因此基于回调的追踪看不到它；`on_task_stop` 在状态持久化之后运行。
+
+| 字段           | Lead 运行                                           | 子 Agent                                       |
+| -------------- | --------------------------------------------------- | ---------------------------------------------- |
+| `status`       | 运行状态：`success`、`error`、`timeout` 或 `interrupted` | `completed`、`failed`、`cancelled` 或 `timed_out` |
+| `error`        | 运行上保存的简短错误信息（如有）                    | 执行的错误信息（如有）                         |
+| `goal_verdict` | 评估过目标时，目标评估器结论的只读副本              | `None`                                         |
+
+带目标的定时运行，在状态为 `success` 但 `goal_verdict` 缺失或未 `satisfied` 时记为未达成（unmet）。`stop` 只设置在传给 `on_task_stop` 的 `info` 上；任务存储中的 `TaskInfo` 保持 `stop=None`。
 
 ### 示例
 

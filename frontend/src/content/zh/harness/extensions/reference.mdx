@@ -154,6 +154,18 @@ class TaskLifecycleContributor(Protocol):
 | `parent_task_id` | `str \| None`                 | `None`  |
 | `agent_name`     | `str \| None`                 | `None`  |
 | `resumed`        | `bool`                        | `False` |
+| `metadata`       | `Mapping[str, Any]`           | 空，只读 |
+| `stop`           | `TaskStopDetail \| None`      | `None`  |
+
+### `TaskStopDetail`
+
+冻结的 dataclass，设置在传给 `on_task_stop` 的 `TaskInfo` 上。
+
+| 字段           | 类型                        | 默认值 |
+| -------------- | --------------------------- | ------ |
+| `status`       | `str`                       | 必填   |
+| `error`        | `str \| None`               | `None` |
+| `goal_verdict` | `Mapping[str, Any] \| None` | `None` |
 
 ### `TaskOutcome`
 

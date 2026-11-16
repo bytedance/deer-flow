@@ -154,6 +154,18 @@ Frozen dataclass. The host also stores it in every task store it allocates (for 
 | `parent_task_id` | `str \| None`                 | `None`  |
 | `agent_name`     | `str \| None`                 | `None`  |
 | `resumed`        | `bool`                        | `False` |
+| `metadata`       | `Mapping[str, Any]`           | empty, read-only |
+| `stop`           | `TaskStopDetail \| None`      | `None`  |
+
+### `TaskStopDetail`
+
+Frozen dataclass, set on the `TaskInfo` passed to `on_task_stop`.
+
+| Field          | Type                        | Default  |
+| -------------- | --------------------------- | -------- |
+| `status`       | `str`                       | required |
+| `error`        | `str \| None`               | `None`   |
+| `goal_verdict` | `Mapping[str, Any] \| None` | `None`   |
 
 ### `TaskOutcome`
 
