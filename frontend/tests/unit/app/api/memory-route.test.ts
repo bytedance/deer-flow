@@ -90,4 +90,50 @@ describe("memory API proxy", () => {
       rs.resetModules();
     }
   });
+
+  it.each([
+    "http://gateway:8001/private-gateway",
+    "http://gateway:8001/private-gateway/",
+  ])("keeps the path prefix of the Gateway base %s", async (baseUrl) => {
+    const saved = process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
+    process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL = baseUrl;
+    rs.resetModules();
+    try {
+      const { DELETE: deleteMemoryAt } = await import("@/app/api/memory/route");
+      const { POST: postMemoryPathAt } =
+        await import("@/app/api/memory/[...path]/route");
+      const fetchMock = rs
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () => new Response("{}", { status: 200 }));
+
+      await deleteMemoryAt(
+        new NextRequest(
+          "http://deer-flow.test/api/memory?agent_name=Research-Agent",
+          { method: "DELETE" },
+        ),
+      );
+      await postMemoryPathAt(
+        new NextRequest(
+          "http://deer-flow.test/api/memory/import?agent_name=Research-Agent",
+          { method: "POST", body: "{}" },
+        ),
+        { params: Promise.resolve({ path: ["import"] }) },
+      );
+
+      const targets = fetchMock.mock.calls.map(([target]) =>
+        target instanceof URL ? target.href : target,
+      );
+      expect(targets).toEqual([
+        "http://gateway:8001/private-gateway/api/memory?agent_name=Research-Agent",
+        "http://gateway:8001/private-gateway/api/memory/import?agent_name=Research-Agent",
+      ]);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL;
+      } else {
+        process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL = saved;
+      }
+      rs.resetModules();
+    }
+  });
 });

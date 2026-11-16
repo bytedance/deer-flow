@@ -5,11 +5,12 @@ import { getGatewayConfig } from "@/core/auth/gateway-config";
 function buildBackendUrl(request: NextRequest, pathname: string) {
   // This route shadows the /api/* rewrite in next.config.js, so it must reach
   // the same Gateway: DEER_FLOW_INTERNAL_GATEWAY_BASE_URL, not a fixed port.
-  const url = new URL(
-    pathname,
+  // Append (not resolve) the path so a base like http://host/prefix keeps
+  // its /prefix, as the rewrite's `${gatewayURL}/api/...` destination does.
+  const base =
     process.env.NEXT_PUBLIC_BACKEND_BASE_URL ??
-      getGatewayConfig().internalGatewayUrl,
-  );
+    getGatewayConfig().internalGatewayUrl;
+  const url = new URL(`${base.replace(/\/+$/, "")}${pathname}`);
   url.search = request.nextUrl.search;
   return url;
 }
