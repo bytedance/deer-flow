@@ -24,8 +24,6 @@ the selected text and file path, plus the source line range when available. You 
 add several quotations before sending your question. Assistant replies already
 offer the same two quotation actions.
 
-![Select an artifact passage to quote or rewrite](assets/artifact-selection/artifact-selection-entry.png)
-
 For a writable output file, **Rewrite selection** opens side chat with that
 passage. Describe the change and choose **Rewrite selection** in the side-chat
 composer. Use the regular send action to ask a question about the passage and
@@ -34,8 +32,6 @@ end the pending rewrite. Once the rewrite finishes, choose
 **Apply to draft**. This replaces exactly the selected source range and opens
 the file's editor. **Save** publishes the draft using the existing revision
 check. Everything before and after the selected range stays unchanged.
-
-![Review the replacement before applying it to the draft](assets/artifact-selection/artifact-rewrite-review.png)
 
 The edit survives switching from the artifact panel to side chat. Changing
 the draft, changing its saved revision, or starting a run prevents stale edits
