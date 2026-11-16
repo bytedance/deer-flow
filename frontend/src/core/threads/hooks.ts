@@ -1,4 +1,6 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
+import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
+import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
@@ -19,8 +21,6 @@ import {
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
-import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
-import { useStream } from "@langchain/langgraph-sdk/react";
 
 import { getAPIClient } from "../api";
 import { GatewayApiError } from "../api/errors";
