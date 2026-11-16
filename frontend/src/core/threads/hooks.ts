@@ -2571,11 +2571,16 @@ export function useThreadStream({
     [],
   );
 
+  // Tagged so `onError` can tell a failed history fetch from a refused run:
+  // the SDK reports both without run metadata, but only the refusal means the
+  // send never became a turn.
+  const streamClient = useMemo(
+    () => withHistoryErrorTagging(getAPIClient(isMock)),
+    [isMock],
+  );
+
   const thread = useStream<AgentThreadState>({
-    // Tagged so `onError` can tell a failed history fetch from a refused run:
-    // the SDK reports both without run metadata, but only the refusal means
-    // the send never became a turn.
-    client: withHistoryErrorTagging(getAPIClient(isMock)),
+    client: streamClient,
     assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,

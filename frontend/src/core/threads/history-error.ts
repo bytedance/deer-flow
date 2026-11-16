@@ -7,6 +7,9 @@ import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
  */
 const historyErrors = new WeakSet<object>();
 
+/** Clients already wrapped, so a re-render or a reload cannot stack wrappers. */
+const taggedClients = new WeakSet<object>();
+
 export function markHistoryError(error: unknown): void {
   if (typeof error === "object" && error !== null) {
     historyErrors.add(error);
@@ -20,9 +23,8 @@ export function isHistoryError(error: unknown): boolean {
   );
 }
 
-type TaggedThreads = {
+type HistoryReader = {
   getHistory: (...args: unknown[]) => Promise<unknown>;
-  __tagsHistoryErrors?: boolean;
 };
 
 type HistoryClient = { threads: ThreadsClient };
@@ -33,13 +35,15 @@ type HistoryClient = { threads: ThreadsClient };
  * metadata; only the refusal means the send never became a turn.
  */
 export function withHistoryErrorTagging<T extends HistoryClient>(client: T): T {
-  const threads = client.threads as unknown as TaggedThreads | undefined;
+  const threads = client.threads as unknown as HistoryReader | undefined;
   // Test doubles and non-SDK clients may not expose a history reader; leave
-  // them untouched so `onError` falls back to its normal settlement.
+  // them untouched so `onError` falls back to its normal settlement. The
+  // client stays shadowed by its wrapper for the page, so recording it here
+  // keeps a re-render from wrapping it twice.
   if (
     !threads ||
     typeof threads.getHistory !== "function" ||
-    threads.__tagsHistoryErrors
+    taggedClients.has(client)
   ) {
     return client;
   }
@@ -52,6 +56,6 @@ export function withHistoryErrorTagging<T extends HistoryClient>(client: T): T {
       throw error;
     }
   };
-  threads.__tagsHistoryErrors = true;
+  taggedClients.add(client);
   return client;
 }
