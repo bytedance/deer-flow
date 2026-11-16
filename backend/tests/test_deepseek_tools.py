@@ -439,3 +439,136 @@ async def test_cancellation_propagates_and_closes_client(provider):
         with pytest.raises(asyncio.CancelledError):
             await task
     assert provider.clients[0].is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["request_cancel", "request_timeout", "response_complete"])
+async def test_repeated_cancellation_drains_transport_teardown(provider, monkeypatch, trigger):
+    request_started = asyncio.Event()
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    close_completed = asyncio.Event()
+
+    async def respond(request):
+        request_started.set()
+        if trigger != "response_complete":
+            await asyncio.Event().wait()
+        return httpx.Response(200, json=_completion())
+
+    class GatedTransport(httpx.MockTransport):
+        async def aclose(self):
+            close_started.set()
+            await release_close.wait()
+            await super().aclose()
+            close_completed.set()
+
+    transport = GatedTransport(respond)
+    module = importlib.import_module("deerflow.community.deepseek.tools")
+
+    def client(**kwargs):
+        result = httpx.AsyncClient(transport=transport, **kwargs)
+        provider.clients.append(result)
+        return result
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", client)
+    if trigger == "request_timeout":
+        provider.extras["timeout_seconds"] = 0.01
+    task = asyncio.create_task(provider.tool.ainvoke({"query": "test"}))
+    finished_before_release = False
+    try:
+        await asyncio.wait_for(request_started.wait(), 5)
+        if trigger == "request_cancel":
+            task.cancel()
+        await asyncio.wait_for(close_started.wait(), 5)
+        for _ in range(2):
+            task.cancel()
+            checkpoint = asyncio.Event()
+            asyncio.get_running_loop().call_soon(checkpoint.set)
+            await checkpoint.wait()
+        finished_before_release = task.done()
+    finally:
+        release_close.set()
+        if not task.done():
+            task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        completed_by_tool = close_completed.is_set()
+        if not completed_by_tool:
+            await transport.aclose()
+    assert not finished_before_release
+    assert completed_by_tool
+    assert provider.clients[0].is_closed
+
+
+@pytest.mark.asyncio
+async def test_citation_spans_preserve_claim_associations_and_unicode_offsets(provider):
+    answer = "😀甲。乙。"
+    first = {"url": "https://example.com/one", "title": "first", "start_index": 1, "end_index": 2}
+    second = {"url": "https://example.com/two", "title": "second", "start_index": 3, "end_index": len(answer)}
+    provider.response = _completion(
+        content=answer,
+        sources=[first, second],
+        annotations=[{"type": "url_citation", "url_citation": first}, {"type": "url_citation", "url_citation": second}],
+    )
+    result = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    first["start_index"], second["start_index"] = second["start_index"], first["start_index"]
+    first["end_index"], second["end_index"] = second["end_index"], first["end_index"]
+    swapped = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    assert result != swapped
+    assert result["answer"] == swapped["answer"] == answer
+    assert result["results"][0]["citation_spans"] == [{"start_index": 1, "end_index": 2}]
+    assert result["results"][1]["citation_spans"] == [{"start_index": 3, "end_index": len(answer)}]
+    assert answer[1:2] == "甲"
+    assert swapped["results"][0]["citation_spans"] == [{"start_index": 3, "end_index": len(answer)}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [(None, None), (None, 1), (0, None), ("0", 1), (0, "1"), (False, 1), (0, True), (0.0, 1), (0, 1.0), (-1, 1), (0, 0), (2, 1), (0, 4)],
+)
+async def test_invalid_citation_spans_preserve_legacy_source_shape(provider, start, end):
+    citation = {"url": "https://example.com/cited", "title": "source", "start_index": start, "end_index": end}
+    provider.response = _completion(content="甲😀乙", server_tool_calls=[], annotations=[{"type": "url_citation", "url_citation": citation}])
+    result = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    assert result == {
+        "query": "test",
+        "total_results": 1,
+        "results": [{"title": "source", "url": citation["url"], "snippet": ""}],
+        "answer": "甲😀乙",
+        "truncated": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_citation_spans_preserve_whitespace_multiple_sources_and_distinct_ranges(provider):
+    answer = "  😀甲乙\n"
+    annotations = [
+        {"type": "url_citation", "url_citation": {"url": url, "start_index": start, "end_index": end}}
+        for url, start, end in [
+            ("https://example.com/one", 2, 4),
+            ("https://example.com/one", 2, 4),
+            ("https://example.com/one", 3, len(answer)),
+            ("https://example.com/two", 2, 4),
+        ]
+    ]
+    provider.response = _completion(content=answer, server_tool_calls=[], annotations=annotations)
+    result = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    assert result["answer"] == answer
+    assert result["results"][0]["citation_spans"] == [{"start_index": 2, "end_index": 4}, {"start_index": 3, "end_index": len(answer)}]
+    assert result["results"][1]["citation_spans"] == [{"start_index": 2, "end_index": 4}]
+    assert answer[2:4] == "😀甲"
+
+
+@pytest.mark.asyncio
+async def test_citation_spans_follow_url_screening_and_result_limit(provider):
+    urls = ["https://example.com/kept", "https://example.com/limited", "http://127。0。0。1/private", "javascript:alert(1)"]
+    provider.response = _completion(
+        content="claim",
+        sources=[{"url": url} for url in urls],
+        annotations=[{"type": "url_citation", "url_citation": {"url": url, "start_index": 0, "end_index": 5}} for url in urls],
+    )
+    result = json.loads(await provider.tool.ainvoke({"query": "test", "max_results": 1}))
+    assert result["total_results"] == 1
+    assert result["results"] == [{"title": "", "url": urls[0], "snippet": "", "citation_spans": [{"start_index": 0, "end_index": 5}]}]
+    assert all(url not in json.dumps(result, ensure_ascii=False) for url in urls[1:])

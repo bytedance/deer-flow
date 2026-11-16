@@ -14,6 +14,7 @@ from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
+from deerflow.runtime.cancellation import drained_async_context
 
 logger = logging.getLogger(__name__)
 _ENDPOINT = "https://api.deepseek.com/chat/completions"
@@ -101,7 +102,10 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
                 search_failed = True
 
     # 引用可能指向深度搜索中打开、但未出现在搜索列表中的网页。
+    answer = _text(message.get("content"))
     cited_urls: set[str] = set()
+    spans_by_url: dict[str, list[dict[str, int]]] = {}
+    seen_spans: set[tuple[str, int, int]] = set()
     for annotation in _objects(message.get("annotations"), "annotations"):
         if annotation.get("type") != "url_citation":
             continue
@@ -113,9 +117,19 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
             )
             raise ValueError
         sources.append(citation)
-        cited_urls.add(safe_public_result_url(citation.get("url")))
+        url = safe_public_result_url(citation.get("url"))
+        cited_urls.add(url)
+        start, end = citation.get("start_index"), citation.get("end_index")
+        if not url or type(start) is not int or type(end) is not int:
+            continue
+        if not 0 <= start < end <= len(answer):
+            continue
+        span = (url, start, end)
+        if span not in seen_spans:
+            seen_spans.add(span)
+            spans_by_url.setdefault(url, []).append({"start_index": start, "end_index": end})
 
-    results_by_url: dict[str, dict[str, str]] = {}
+    results_by_url: dict[str, dict[str, Any]] = {}
     for source in sources:
         url = safe_public_result_url(source.get("url"))
         if not url:
@@ -125,7 +139,6 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
             if not result[field]:
                 result[field] = _text(source.get(field))
     results = list(results_by_url.values())
-    answer = _text(message.get("content"))
     if not results:
         if finish_reason == "length":
             return {"error": "DeepSeek search reached max_tokens before returning sources", "query": query}
@@ -136,6 +149,9 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
     # 优先保留回答实际引用的来源，同时保留搜索结果提供的摘要。
     results.sort(key=lambda result: result["url"] not in cited_urls)
     results = results[:max_results]
+    for result in results:
+        if spans := spans_by_url.get(result["url"]):
+            result["citation_spans"] = spans
     return {
         "query": query,
         "total_results": len(results),
@@ -197,7 +213,7 @@ async def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -
     if error:
         return json.dumps({"error": error, "query": query}, ensure_ascii=False)
     assert client is not None
-    async with client:
+    async with drained_async_context(client):
         try:
             options = _Options.model_validate(extras)
         except ValidationError:

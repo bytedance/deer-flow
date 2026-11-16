@@ -1343,7 +1343,11 @@ The tool accepts `query` and `max_results` and returns JSON with `query`,
 `total_results`, `results` (`title`, `url`, `snippet`), `answer`, and `truncated`.
 Source URLs use the shared public-URL policy and are deduplicated. Sources cited
 by the generated answer take priority, with search snippets preserved when
-available. `max_results` defaults to 5 and is capped at 50. A configured value
+available. Retained sources with valid citations include `citation_spans`, a list
+of `{start_index, end_index}` ranges into the unchanged `answer`. Indices count
+Unicode code points, with an inclusive start and exclusive end. Duplicate ranges
+for the same source are removed. Sources without valid ranges keep their usual
+fields. `max_results` defaults to 5 and is capped at 50. A configured value
 takes precedence over the tool argument. It limits returned source links, while
 DeepSeek controls how many searches it executes and what answer it generates.
 
@@ -1357,8 +1361,10 @@ DeepSeek decides whether to search. A completed response with no usable public
 sources returns `No results found`. Provider failures, malformed payloads,
 timeouts and output-budget exhaustion return structured errors. A partial
 response with usable sources sets `truncated: true` when it reaches its output
-limit. Cancellation closes the HTTP client. Requests have no automatic retries.
-DeepSeek bills model inference and server-side search/fetch calls.
+limit. Cancellation waits for HTTP transport cleanup to complete, including when
+the caller is cancelled repeatedly during client teardown. Requests have no
+automatic retries. DeepSeek bills model inference and server-side search/fetch
+calls.
 
 Offline regression tests use HTTPX mock transports. To explicitly run the paid
 API checks for both thinking modes, export `DEEPSEEK_API_KEY` and run from
