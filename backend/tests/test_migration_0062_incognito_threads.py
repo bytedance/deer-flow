@@ -40,13 +40,13 @@ async def test_incognito_upgrade_downgrade_and_schema(tmp_path, backend):
         if schema:
             async with engine.begin() as conn:
                 await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
-        await asyncio.to_thread(command.upgrade, config, "0055_thread_shares")
+        await asyncio.to_thread(command.upgrade, config, "0061_coordination_coordinator")
         async with engine.begin() as conn:
             await conn.execute(
                 ThreadMetaRow.__table__.insert().values(thread_id="existing", user_id="alice", display_name="Existing conversation", status="idle", metadata_json={}, created_at=datetime.now(UTC), updated_at=datetime.now(UTC))
             )
 
-        await asyncio.to_thread(command.upgrade, config, "0056_incognito_threads")
+        await asyncio.to_thread(command.upgrade, config, "0062_incognito_threads")
 
         async with engine.begin() as conn:
             legacy = (await conn.execute(text("SELECT incognito, expires_at FROM threads_meta WHERE thread_id='existing'"))).one()
@@ -65,14 +65,14 @@ async def test_incognito_upgrade_downgrade_and_schema(tmp_path, backend):
 
             assert await conn.run_sync(schema_diff) == []
 
-        await asyncio.to_thread(command.downgrade, config, "0055_thread_shares")
+        await asyncio.to_thread(command.downgrade, config, "0061_coordination_coordinator")
         async with engine.connect() as conn:
             columns = await conn.run_sync(_columns)
             assert "incognito" not in columns
             assert "expires_at" not in columns
             assert (await conn.execute(text("SELECT display_name FROM threads_meta WHERE thread_id='existing'"))).scalar_one() == "Existing conversation"
 
-        await asyncio.to_thread(command.upgrade, config, "0056_incognito_threads")
+        await asyncio.to_thread(command.upgrade, config, "0062_incognito_threads")
         async with engine.connect() as conn:
             assert {"incognito", "expires_at"} <= await conn.run_sync(_columns)
     finally:

@@ -13,8 +13,8 @@ during a rolling upgrade keeps inserting and reading rows, and NULL reads as
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0056_incognito_threads"
-down_revision = "0055_thread_shares"
+revision = "0062_incognito_threads"
+down_revision = "0061_coordination_coordinator"
 branch_labels = None
 depends_on = None
 

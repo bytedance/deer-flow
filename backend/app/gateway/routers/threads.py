@@ -1095,9 +1095,11 @@ async def end_incognito_thread(thread_id: ThreadId, request: Request) -> Respons
         raise HTTPException(status_code=409, detail="Thread is not an incognito thread")
     if is_incognito_expired(record):
         raise HTTPException(status_code=410, detail="This incognito thread has expired")
+    # Reading config touches the filesystem; keep it off the event loop.
+    app_config = await asyncio.to_thread(get_config)
     ended = await thread_store.end_incognito(
         thread_id,
-        grace=timedelta(seconds=get_config().incognito.end_grace_seconds),
+        grace=timedelta(seconds=app_config.incognito.end_grace_seconds),
     )
     if not ended:
         raise HTTPException(status_code=410, detail="This incognito thread has expired")
@@ -1124,12 +1126,17 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
 
     checkpointer = get_checkpointer(request)
     thread_store = get_thread_store(request)
-    app_config = get_config()
     now = now_iso()
+    expires_at: datetime | None = None
     if body.incognito:
+        # Only incognito creation needs the configuration, and the read touches
+        # the filesystem: keep ordinary creates free of it and the incognito
+        # read off the event loop.
+        app_config = await asyncio.to_thread(get_config)
         _require_incognito_creation_allowed(request, enabled=app_config.incognito.enabled)
         if body.project_id is not None:
             raise HTTPException(status_code=400, detail="An incognito thread cannot belong to a project")
+        expires_at = datetime.now(UTC) + timedelta(seconds=app_config.incognito.idle_ttl_seconds)
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by
@@ -1147,8 +1154,6 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
 
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
-
-    expires_at = datetime.now(UTC) + timedelta(seconds=app_config.incognito.idle_ttl_seconds) if body.incognito else None
 
     try:
         created_record = await thread_store.create(

@@ -777,17 +777,17 @@ def test_install_runtime_context_preserves_the_pinned_project_context():
 
 def test_pin_admission_project_context_hoists_only_the_stamped_value():
     from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
-    from deerflow.runtime.runs.worker import _pin_admission_project_context
+    from deerflow.runtime.runs.worker import _pin_admission_server_context
 
     stamped = {"project_id": "p-1", "name": "Roadmap", "instructions": "x"}
     runtime_ctx = {"thread_id": "record-thread", "run_id": "run-1"}
-    _pin_admission_project_context({"context": {PROJECT_CONTEXT_KEY: stamped}}, runtime_ctx)
+    _pin_admission_server_context({"context": {PROJECT_CONTEXT_KEY: stamped}}, runtime_ctx)
     assert runtime_ctx[PROJECT_CONTEXT_KEY] is stamped
 
     empty = {"thread_id": "record-thread", "run_id": "run-1"}
-    _pin_admission_project_context({"context": {}}, empty)
-    _pin_admission_project_context({}, empty)
-    _pin_admission_project_context({"context": "not-a-mapping"}, empty)
+    _pin_admission_server_context({"context": {}}, empty)
+    _pin_admission_server_context({}, empty)
+    _pin_admission_server_context({"context": "not-a-mapping"}, empty)
     assert PROJECT_CONTEXT_KEY not in empty
 
 

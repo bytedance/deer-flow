@@ -24,6 +24,7 @@ export const SCHEDULED_TASK_ERROR_KEYS: Readonly<
   once_time_passed: "onceTimePassed",
   invalid_context_mode: "invalidContextMode",
   reuse_thread_requires_thread: "reuseThreadRequiresThread",
+  incognito_thread_not_schedulable: "incognitoThreadNotSchedulable",
   thread_not_found: "threadNotFound",
   invalid_assistant: "invalidAssistant",
   unknown_assistant: "unknownAssistant",

@@ -38,7 +38,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -76,7 +75,7 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     authenticated context and skips its own re-authentication path.
     """
 
-    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False, auth_source: str = AUTH_SOURCE_SESSION) -> None:
+    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False, auth_source: str | None = None) -> None:
         super().__init__(app)
         self._user_factory = user_factory
         self._bind_current_user = bind_current_user
@@ -85,9 +84,14 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
         request.state.user = user
-        # Production always stamps an auth source; routes that gate on it (e.g.
-        # incognito thread creation) need the same value here.
-        request.state.auth_source = self._auth_source
+        # Production always stamps an auth source. Only stamp it when a test
+        # explicitly opts in: get_current_user_from_request treats a stamped
+        # session as an identified owner, which turns on per-user run/event
+        # filters. Legacy fixtures persist rows with user_id=None, so leaving
+        # the default unstamped preserves their no-filter behavior. Tests that
+        # gate on the auth source (e.g. incognito creation) pass it explicitly.
+        if self._auth_source is not None:
+            request.state.auth_source = self._auth_source
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
         if not self._bind_current_user:
             return await call_next(request)
@@ -103,7 +107,7 @@ def make_authed_test_app(
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
     bind_current_user: bool = False,
-    auth_source: str = AUTH_SOURCE_SESSION,
+    auth_source: str | None = None,
 ) -> FastAPI:
     """Build a FastAPI test app with stub auth + permissive thread_store.
 
@@ -117,6 +121,10 @@ def make_authed_test_app(
             permission failures surface correctly.
         bind_current_user: Also bind the stub user to the request's user
             context when a test needs to assert owner-scoped behavior.
+        auth_source: When set, stamp ``request.state.auth_source`` with this
+            value. Leave unset for the legacy fixtures that persist rows with
+            ``user_id=None``; a stamped session activates per-user run/event
+            filters for those rows. Source-gated routes pass it explicitly.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and

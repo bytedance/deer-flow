@@ -1389,6 +1389,7 @@ export const zhCN: Translations = {
       onceTimePassed: "这个单次任务的时间已过，修改时间后才能恢复。",
       invalidContextMode: "不支持这种对话方式。",
       reuseThreadRequiresThread: "请选择要在哪个对话中运行。",
+      incognitoThreadNotSchedulable: "无痕对话不能被定时任务复用。",
       threadNotFound: "找不到这个对话。",
       invalidAssistant: "智能体名称无效。",
       unknownAssistant: "找不到这个智能体。",

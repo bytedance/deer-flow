@@ -1475,6 +1475,8 @@ export const enUS: Translations = {
         "This one-time task's time has passed. Edit the time to resume it.",
       invalidContextMode: "This chat option isn't supported.",
       reuseThreadRequiresThread: "Choose the chat to run in.",
+      incognitoThreadNotSchedulable:
+        "An incognito chat can't be reused by a scheduled task.",
       threadNotFound: "That chat wasn't found.",
       invalidAssistant: "That agent name isn't valid.",
       unknownAssistant: "That agent wasn't found.",

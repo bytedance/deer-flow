@@ -28,6 +28,7 @@ SCHEDULER_UI_ERROR_CODES: frozenset[str] = frozenset(
         "once_time_passed",
         "invalid_context_mode",
         "reuse_thread_requires_thread",
+        "incognito_thread_not_schedulable",
         "thread_not_found",
         "invalid_assistant",
         "unknown_assistant",
