@@ -39,15 +39,39 @@ _MAX_MEMBER_DEPTH = 33
 _MAX_MEMBER_SEGMENT_BYTES = 255
 
 
-def _host_path_limit(root: Path) -> int:
-    """Return the destination filesystem's maximum path length in bytes."""
+def _host_path_length(path: Path, *, windows: bool | None = None) -> int:
+    """Return a path's length in the units the host filesystem limits."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        # Win32 path limits count UTF-16 code units, not UTF-8 bytes.
+        return len(str(path).encode("utf-16-le")) // 2
+    return len(os.fsencode(path))
+
+
+def _host_path_limit(root: Path, *, windows: bool | None = None) -> int:
+    """Return the destination filesystem's maximum path length in host units."""
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SYSTEM\CurrentControlSet\Control\FileSystem",
+            ) as key:
+                if winreg.QueryValueEx(key, "LongPathsEnabled")[0]:
+                    return 32767
+        except (ImportError, OSError):
+            pass
+        return 260
     if hasattr(os, "pathconf"):
         try:
             return os.pathconf(root, "PC_PATH_MAX")
         except (OSError, ValueError):
             pass
-    # Windows without long-path support: legacy MAX_PATH.
-    return 260
+    return 4096
 
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
@@ -202,7 +226,7 @@ def safe_extract_skill_archive(
                 # already refused for support-file writes and skill names.
                 raise ValueError(f"Archive member path is not portable to Windows: {info.filename!r} ({reason})")
 
-        if len(os.fsencode(dest_root.joinpath(*parts))) >= host_path_limit:
+        if _host_path_length(dest_root.joinpath(*parts)) >= host_path_limit:
             raise ValueError(f"Archive member path is too long for the destination filesystem: {info.filename!r}")
 
         # Compare NFC+casefolded keys so case-insensitive and normalization-

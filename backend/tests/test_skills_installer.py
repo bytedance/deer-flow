@@ -463,6 +463,17 @@ class TestInstallSkillFromArchive:
             )
         return zip_path
 
+    def test_rejects_publication_path_too_long(self, tmp_path, monkeypatch):
+        zip_path = self._make_skill_zip(tmp_path)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        monkeypatch.setattr(
+            "deerflow.skills.storage.local_skill_storage._publication_path_limit",
+            lambda root: 1,
+        )
+        with pytest.raises(ValueError, match="publication path is too long"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
     def test_success(self, tmp_path):
         zip_path = self._make_skill_zip(tmp_path)
         skills_root = tmp_path / "skills"
@@ -1118,3 +1129,10 @@ def test_safe_extract_rejects_paths_over_the_host_limit(tmp_path, monkeypatch):
     with zipfile.ZipFile(zip_path) as zf:
         with pytest.raises(ValueError, match="destination filesystem"):
             safe_extract_skill_archive(zf, dest)
+
+
+def test_host_path_length_counts_windows_utf16_units():
+    from deerflow.skills.installer import _host_path_length
+
+    assert _host_path_length(Path("𝄞"), windows=True) == 2
+    assert _host_path_length(Path("𝄞"), windows=False) == 4
