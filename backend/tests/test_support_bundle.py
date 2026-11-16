@@ -1317,6 +1317,36 @@ def test_config_path_expands_dotenv_before_the_harness_import(tmp_path, monkeypa
     assert config_summary == {"models": [{"name": "checkout"}]}
 
 
+def test_config_path_follows_the_env_file_selected_by_the_checkout_dotenv(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (stage / "selected.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    (stage / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=$PWD/selected.yaml\n", encoding="utf-8")
+    # The launcher exports the checkout `.env`, which selects a second env file;
+    # importing the harness then loads that file. Expanding only the checkout
+    # `.env` never sees the config override, so the bundle would report the
+    # checkout YAML while the Gateway reads `selected.yaml`.
+    (project_root / ".env").write_text(f"DEER_FLOW_ENV_FILE={stage / 'stage.env'}\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("PWD", str(stage))
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+    # The staged selection must not leak into the process environment.
+    assert "DEER_FLOW_CONFIG_PATH" not in os.environ
+
+
 def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir()

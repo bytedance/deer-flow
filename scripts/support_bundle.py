@@ -243,30 +243,58 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
 CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
+def _read_dotenv_assignments(env_file: Path, scope: dict[str, str], parse_dotenv: Any) -> list[tuple[str, str]] | None:
+    """Return the assignments in one dotenv file, or ``None`` when it is unreadable."""
+    try:
+        text = env_file.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
+    return parse_dotenv(text, scope)
+
+
 def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
-    """Return the config-location variables the checkout `.env` exports.
+    """Return the config-location variables the launcher resolves.
 
     ``environment`` is the process environment captured before the harness was
     imported. Expanding against the live ``os.environ`` would read the
     assignments that import already loaded from this same file, so a variable
     defined later in `.env` would resolve here but not in the launcher.
+
+    The launcher exports the checkout `.env`, and importing the harness then
+    loads ``DEER_FLOW_ENV_FILE`` without overriding what is already set. Follow
+    both, so a `.env` that selects a second env file reports the config path the
+    Gateway actually reads.
     """
-    env_file = project_root / ".env"
-    if not env_file.is_file():
-        return {}
     try:
         from dotenv_exports import parse_dotenv
-
-        text = env_file.read_text(encoding="utf-8-sig")
-    except (ImportError, OSError, UnicodeError):
-        # Diagnostics must still work with a broken environment or unreadable .env.
+    except ImportError:
         return {}
-    # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the
-    # same scope: an inherited PWD is wherever the bundle happened to start.
-    scope = dict(environment)
-    scope["PWD"] = str(project_root)
-    assignments = dict(parse_dotenv(text, scope))
-    return {name: assignments[name] for name in CONFIG_LOCATION_ENV_VARS if name in assignments}
+    selected: set[str] = set()
+    env_file = project_root / ".env"
+    if env_file.is_file():
+        # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the
+        # same scope: an inherited PWD is wherever the bundle happened to start.
+        checkout_scope = dict(environment)
+        checkout_scope["PWD"] = str(project_root)
+        assignments = _read_dotenv_assignments(env_file, checkout_scope, parse_dotenv)
+        if assignments is None:
+            # Diagnostics must still work with a broken environment or unreadable .env.
+            return {}
+        for name, value in assignments:
+            checkout_scope[name] = value
+            selected.add(name)
+        environment = {**environment, **{name: checkout_scope[name] for name in selected}}
+    # `load_selected_env_file` resolves a relative selector against the backend
+    # process working directory, and skips keys the environment already defines.
+    selector = environment.get("DEER_FLOW_ENV_FILE")
+    if selector:
+        selected_file = _read_dotenv_assignments(Path(selector), dict(environment), parse_dotenv)
+        if selected_file is not None:
+            for name, value in selected_file:
+                if name not in environment:
+                    environment[name] = value
+                    selected.add(name)
+    return {name: environment[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
 
 
 def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
