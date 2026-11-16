@@ -705,7 +705,27 @@ def _shutdown_isolated_subagent_loop(*, only_if_pending: bool = False) -> None:
                 return
 
         if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            from deerflow.subagents.checkpoints import drain_checkpoint_runtimes, has_checkpoint_runtimes
+
+            if has_checkpoint_runtimes(loop):
+
+                async def drain_then_stop() -> None:
+                    await drain_checkpoint_runtimes()
+                    loop.call_soon(loop.stop)
+
+                cleanup = asyncio.run_coroutine_threadsafe(drain_then_stop(), loop)
+                if thread is threading.current_thread():
+                    return
+                try:
+                    cleanup.result(timeout=1)
+                except FuturesTimeoutError:
+                    logger.warning("Retaining isolated subagent loop ownership until checkpoint resources finish draining")
+                    return
+                except Exception:
+                    logger.exception("Retaining isolated subagent loop ownership because checkpoint resource cleanup failed")
+                    return
+            else:
+                loop.call_soon_threadsafe(loop.stop)
 
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1)
@@ -809,10 +829,10 @@ def _run_on_isolated_loop_if_live(callback: Callable[[], None]) -> None:
         callback()
 
 
-def _submit_to_isolated_loop_in_context(
+def _submit_to_isolated_loop_in_context[T](
     context: Context,
-    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
-) -> Future[SubagentResult]:
+    coro_factory: Callable[[], Coroutine[Any, Any, T]],
+) -> Future[T]:
     """Submit a coroutine to the isolated loop while preserving ContextVar state.
 
     The loop must be resolved before the coroutine is created: as direct
@@ -827,7 +847,7 @@ def _submit_to_isolated_loop_in_context(
     before the error propagates.
     """
 
-    def _submit() -> Future[SubagentResult]:
+    def _submit() -> Future[T]:
         loop = _get_isolated_subagent_loop()
         coroutine = coro_factory()
         try:
@@ -868,6 +888,9 @@ def _copy_isolated_subagent_context() -> Context:
     continue to reach the parent stream.
     """
     context = copy_context()
+    from deerflow.subagents.checkpoints import capture_checkpoint_runtime
+
+    capture_checkpoint_runtime(context)
     inherited_config = context.get(var_child_runnable_config)
     if inherited_config is None or "callbacks" not in inherited_config:
         return context
@@ -1254,7 +1277,6 @@ class SubagentExecutor:
                 authorization_provider=authz_provider,
             )
             middlewares = apply_declared_tool_view(middlewares, authorized_names=declared_authorized)
-            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         elif authz_provider is not None:
             # Defense in depth: the provider is configured but the seeded
             # decision state is missing, so the declaration pass is skipped.
@@ -1284,6 +1306,17 @@ class SubagentExecutor:
 
         policy_names = ToolPolicyNameResolver()
         middlewares = apply_declared_tool_policy(middlewares, allowed=self.config.tools, disallowed=self.config.disallowed_tools, name_resolver=policy_names)
+
+        from deerflow.subagents.checkpoints import checkpoint_runtime
+
+        history_runtime = checkpoint_runtime()
+        state_schema = ThreadState
+        if history_runtime is not None and history_runtime.mode == "delta":
+            from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
+
+            state_schema = get_thread_state_schema("delta")
+            middlewares = normalize_middleware_state_schemas(middlewares, "delta")
+
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware,
         # ModelLengthFinishReasonMiddleware) so _aexecute can read
@@ -1296,6 +1329,10 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
+        # Delta normalization can copy middleware, so audit both policies on
+        # the final instances that create_agent will bind.
+        if declared_authorized is not None:
+            verify_declared_tool_view(middlewares, authorized_names=declared_authorized)
         verify_subagent_tool_policy(
             bound_tools,
             middlewares,
@@ -1309,8 +1346,11 @@ class SubagentExecutor:
             tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
-            state_schema=ThreadState,
-            checkpointer=False,
+            state_schema=state_schema,
+            # The opted-in scope replaces the inherited saver with its
+            # loop-owned peer before graph construction. All other entrypoints
+            # keep isolation from a possibly synchronous parent saver.
+            checkpointer=None if history_runtime is not None else False,
         )
         # Use the compiled registry: it includes middleware tools, normalized
         # callables, and LangChain's last-definition-wins name precedence.
@@ -1735,11 +1775,16 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
+        from deerflow.subagents.checkpoints import SubagentCheckpointError, subagent_checkpoint_scope
+
         with ensure_trace_context(self.deerflow_trace_id):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 slot = capacity.slot(wait=False) if self.input_gate is not None and not self.input_gate.can_queue else capacity.slot()
-                async with slot:
+                async with (
+                    subagent_checkpoint_scope(execution_id=result.task_id, run_id=self.run_id, tool_call_id=result.external_task_id, agent_name=self.config.name),
+                    slot,
+                ):
                     if self._principal_resolver is not None:
                         # Durable work can wait behind ordinary subagents after
                         # its worker-side check. Revalidate before marking it
@@ -1764,6 +1809,9 @@ class SubagentExecutor:
                         result.status = SubagentStatus.RUNNING
                         result.started_at = _utcnow()
                     return await self._aexecute_admitted(task, result)
+            except SubagentCheckpointError as exc:
+                result.try_set_terminal(SubagentStatus.FAILED, error=str(exc), admission_failure=True)
+                return result
             except SubagentCapacityError as exc:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
