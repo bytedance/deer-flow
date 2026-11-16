@@ -480,10 +480,10 @@ class ScheduledTaskRunRepository:
     ):
         """SELECT for the next bounded drain batch, fair to task owners.
 
-        Only same-thread FIFO heads are eligible (an older active row on the
-        same thread hides every newer one). Rows at or before ``created_after``
-        are already due for timeout and are removed before FIFO checks, owner
-        ranking, and the batch limit; they must not occupy another row's slot.
+        Only same-thread FIFO heads are eligible. Older running or launching
+        rows on the same thread block newer rows regardless of age. Queued rows
+        at or before ``created_after`` are due for timeout and are excluded before
+        FIFO checks, owner ranking, and the batch limit.
         Eligible rows are ranked within their owner by
         ``attempt_count, created_at, id`` and the batch is ordered by that rank
         first, so every owner's head comes before any owner's second row: one
@@ -511,7 +511,10 @@ class ScheduledTaskRunRepository:
             ),
         ]
         if created_after is not None:
-            older_conditions.append(older.created_at > created_after)
+            # The timeout cutoff only removes expired queue entries. A running
+            # or launching occurrence remains a same-thread FIFO blocker no
+            # matter how long it has been active.
+            older_conditions.append(or_(older.status != "queued", older.created_at > created_after))
         older_same_thread = exists(select(older.id).where(*older_conditions))
         executing_run = aliased(ScheduledTaskRunRow)
         executing_task = aliased(ScheduledTaskRow)
@@ -877,6 +880,33 @@ class ScheduledTaskRunRepository:
                 return False
             if row.status in TERMINAL_RUN_STATUSES:
                 if row.run_id is None:
+                    # A newer occurrence may already own the active slot when
+                    # this late launch returns. Reviving this terminal row in
+                    # that case would violate uq_scheduled_task_run_active and
+                    # abort the launch path; preserve the terminal outcome but
+                    # attach the durable run for completion and later fencing.
+                    newer_active = await session.scalar(
+                        select(ScheduledTaskRunRow.id)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            ScheduledTaskRunRow.id != run_record_id,
+                            ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if newer_active is not None:
+                        # The terminal occurrence never started; its durable
+                        # run row carries the real start. Backfilling
+                        # started_at here would place it after finished_at.
+                        row.run_id = run_id
+                        await session.commit()
+                        logger.warning(
+                            "Scheduled task-run %s launched durable run %s while occurrence %s holds the active slot; keeping the terminal status",
+                            run_record_id,
+                            run_id,
+                            newer_active,
+                        )
+                        return True
                     # Timeout/pause can terminalize a claim that recovery
                     # briefly returned to ``queued`` while Gateway admission
                     # was still completing.  A returned durable run is the
