@@ -1053,6 +1053,25 @@ def test_safe_extract_rejects_deep_paths(tmp_path):
             safe_extract_skill_archive(zf, dest)
 
 
+def test_safe_extract_accepts_the_export_depth_boundary(tmp_path):
+    """A skill exported at export.py's 32-component limit must reinstall.
+
+    The archive member adds the enclosing skill directory on top of those 32
+    components, so the installer limit is 33.
+    """
+    skill_name = "demo"
+    relative = "/".join(["d"] * 31) + "/a.txt"
+    zip_path = tmp_path / "boundary.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(f"{skill_name}/{relative}", "x")
+    assert len(relative.split("/")) == 32
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        safe_extract_skill_archive(zf, dest)
+    assert (dest / skill_name / relative).read_text() == "x"
+
+
 def test_safe_extract_rejects_overlong_paths(tmp_path):
     zip_path = tmp_path / "long-path.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:

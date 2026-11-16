@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 
 # Mirror the path limits export.py applies to installed skills, so an archive
 # that cannot be listed or extracted fails as a validation error instead of an
-# OS error during installation.
+# OS error during installation. Export limits depth relative to the skill root,
+# so the archive limit adds the enclosing skill directory component.
 _MAX_MEMBER_PATH_BYTES = 1024
-_MAX_MEMBER_DEPTH = 32
+_MAX_MEMBER_DEPTH = 33
 _MAX_MEMBER_SEGMENT_BYTES = 255
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
