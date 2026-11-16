@@ -291,6 +291,39 @@ def test_gateway_drops_caller_forged_source_artifacts() -> None:
     assert artifact["knowledge_sources"]  # no mutation of caller data
 
 
+def test_global_budget_preserves_dependencies_when_rebudgeting_a_saved_result():
+    from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_model_messages
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.knowledge.sources import strip_source_artifact
+
+    source = KnowledgeSource(provider="test", title="Original", excerpt="Document evidence. " + "x" * 200)
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content="Oversized unrelated entry. " + "a" * 650),
+                RetrievalHit(content=source.excerpt, source=source),
+                RetrievalHit(content="Dependent relation", depends_on=[2]),
+                RetrievalHit(content="Independent entry"),
+            ]
+        )
+    )
+    original = ToolMessage(content=content, artifact={**artifact, "other": "kept"}, name="entity_relations_search", tool_call_id="relations")
+    assert strip_source_artifact(original.artifact) == {"other": "kept"}
+
+    (first,) = _patch_model_messages([original], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=550))
+    assert "Evidence: result [2].\nDependent relation" in first.content
+    assert sources_from_messages([first]) == [source]
+
+    restored = ToolMessage.model_validate_json(first.model_dump_json())
+    (second,) = _patch_model_messages([restored], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=100))
+    assert len(second.content) <= 100
+    assert "Dependent relation" not in second.content and "Evidence: result [2]" not in second.content
+    assert "[4] Unattributed content\nIndependent entry" in second.content
+    assert second.artifact == {"knowledge_sources_version": 1, "knowledge_sources": [], "other": "kept"}
+    assert "Dependent relation" in restored.content
+    assert sources_from_messages([restored]) == [source]
+
+
 def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:
     from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
     from deerflow.config.tool_output_config import ToolOutputConfig

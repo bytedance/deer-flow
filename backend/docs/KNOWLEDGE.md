@@ -244,8 +244,10 @@ budget before truncating the body. A hit that loses a dependency or cannot fit
 with a usable body is omitted as a whole, and later hits remain eligible.
 Empty dependencies are omitted from serialized retrieval results.
 
-The global tool-output budget prunes evidence removed by truncation or
-externalization and replaces complete orphan citations with their labels.
+The global tool-output budget keeps complete entries when truncating a result
+with evidence dependencies or previewing it after saving the full output.
+A dependent entry stays visible only when all of its cited excerpts and source
+records fit in the same output. Other results use the existing citation pruning.
 Subagents accumulate at most 100 validated sources across values frames before
 terminal publication, surviving compaction. Ordinary `task` forwards only
 sources whose handles appear in the child report, with a bounded evidence

@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .contract import KnowledgeSource, RetrievalResult
 
 ARTIFACT_VERSION = 1
 TRUNCATION_MARKER = "… (response truncated)"
+_RESULT_LAYOUT_KEY = "knowledge_result_layout"
+_SOURCE_ARTIFACT_KEYS = frozenset({"knowledge_sources", "knowledge_sources_version", "retrieval_sources", _RESULT_LAYOUT_KEY})
+_ResultPosition = Annotated[int, Field(strict=True, ge=1, le=100)]
+
+
+class _ResultEntry(BaseModel):
+    position: _ResultPosition
+    start: int = Field(strict=True, ge=0)
+    end: int = Field(strict=True, gt=0)
+    source_id: str | None = None
+    depends_on: list[_ResultPosition] = Field(max_length=99)
+
+
+class _ResultLayout(BaseModel):
+    digest: str
+    entries: list[_ResultEntry] = Field(max_length=100)
 
 
 def redact_strings(value: Any, secret: str | None) -> Any:
@@ -27,8 +44,8 @@ def redact_strings(value: Any, secret: str | None) -> Any:
 
 def strip_source_artifact(artifact: Any) -> Any:
     """Remove only server-owned evidence keys from untrusted writes."""
-    if isinstance(artifact, Mapping) and ("knowledge_sources" in artifact or "knowledge_sources_version" in artifact or "retrieval_sources" in artifact):
-        return {key: value for key, value in artifact.items() if key not in {"knowledge_sources", "knowledge_sources_version", "retrieval_sources"}}
+    if isinstance(artifact, Mapping) and not _SOURCE_ARTIFACT_KEYS.isdisjoint(artifact):
+        return {key: value for key, value in artifact.items() if key not in _SOURCE_ARTIFACT_KEYS}
     return artifact
 
 
@@ -64,9 +81,27 @@ def citation(source: KnowledgeSource) -> str:
     return f"[citation:{title}](#knowledge-source-{source.id})"
 
 
+def _evidence_line(positions: list[int]) -> str:
+    if not positions:
+        return ""
+    references = ", ".join(f"result [{position}]" for position in positions)
+    return f"Evidence: {references}.\n"
+
+
+def _content_digest(content: str) -> str:
+    return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def _set_result_layout(artifact: dict[str, Any], content: str, entries: list[dict[str, Any]]) -> None:
+    # Persist offsets only for results that need dependency-aware budgeting.
+    if any(entry["depends_on"] for entry in entries):
+        artifact[_RESULT_LAYOUT_KEY] = {"digest": _content_digest(content), "entries": entries}
+
+
 def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, max_total_chars: int = 8000) -> tuple[str, dict[str, Any]]:
     """Budget text and its evidence together; never cut a citation in half."""
     entries: list[str] = []
+    layout: list[dict[str, Any]] = []
     sources: list[KnowledgeSource] = []
     retained_evidence: set[int] = set()
     used_chars = 0
@@ -79,10 +114,7 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
         if not retained_evidence.issuperset(hit.depends_on):
             truncated = True
             continue
-        evidence_line = ""
-        if hit.depends_on:
-            references = ", ".join(f"result [{position}]" for position in hit.depends_on)
-            evidence_line = f"Evidence: {references}.\n"
+        evidence_line = _evidence_line(hit.depends_on)
         raw_content = hit.content.strip()
         content = truncate(raw_content, max_chars_per_chunk - len(evidence_line))
         if not content or (evidence_line and content == "…"):
@@ -106,6 +138,7 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
             truncated = True
             continue
         entries.append(separator + entry)
+        layout.append({"position": index, "start": used_chars + len(separator), "end": used_chars + len(separator) + len(entry), "source_id": source.id if source is not None else None, "depends_on": hit.depends_on.copy()})
         used_chars += len(separator) + len(entry)
         if source is not None:
             sources.append(source)
@@ -116,7 +149,62 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
         text += truncate(TRUNCATION_MARKER, remaining, marker="")
     elif not text:
         text = truncate("No relevant content found.", budget, marker="")
-    return text, source_artifact(sources)
+    artifact = source_artifact(sources)
+    _set_result_layout(artifact, text, layout)
+    return text, artifact
+
+
+def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file_notice: str = "") -> tuple[str, dict[str, Any]] | None:
+    """Project whole retrieval entries and their evidence into a later budget."""
+    if not isinstance(artifact, Mapping) or _RESULT_LAYOUT_KEY not in artifact:
+        return None
+    updated = {key: value for key, value in artifact.items() if key != _RESULT_LAYOUT_KEY}
+    try:
+        layout = _ResultLayout.model_validate(artifact[_RESULT_LAYOUT_KEY])
+    except ValidationError:
+        layout = None
+    entries: list[str] = []
+    retained_layout: list[dict[str, Any]] = []
+    retained_sources: dict[str, KnowledgeSource] = {}
+    retained_evidence: set[int] = set()
+    used = previous_position = previous_end = 0
+    if layout is not None and layout.digest == _content_digest(content):
+        available = {source.id: source for source in sources_from_messages([{"type": "tool", "content": content, "artifact": artifact}])}
+        for entry in layout.entries:
+            if not (entry.position > previous_position and previous_end <= entry.start < entry.end <= len(content)):
+                continue
+            previous_position, previous_end = entry.position, entry.end
+            if not retained_evidence.issuperset(entry.depends_on):
+                continue
+            text = content[entry.start : entry.end]
+            source = available.get(entry.source_id) if entry.source_id is not None else None
+            if entry.source_id is not None and source is None:
+                continue
+            label = citation(source) if source is not None else "Unattributed content"
+            prefix = f"[{entry.position}] {label}\n" + _evidence_line(entry.depends_on)
+            if not text.startswith(prefix) or (source is not None and text[len(prefix) :] != source.excerpt):
+                continue
+            start = used + (2 if entries else 0)
+            if start + len(text) > max_chars:
+                continue
+            entries.append(text)
+            used = start + len(text)
+            retained_layout.append(entry.model_dump() | {"start": start, "end": used})
+            if source is not None:
+                retained_evidence.add(entry.position)
+                retained_sources[source.id] = source
+
+    text = "\n\n".join(entries)
+    separator = "\n\n" if text else ""
+    if layout is None or len(entries) < len(layout.entries) or content.endswith(TRUNCATION_MARKER):
+        remaining = max_chars - len(text) - len(separator)
+        if remaining > 0:
+            text += separator + TRUNCATION_MARKER[:remaining]
+    if file_notice:
+        text = f"{text}\n\n{file_notice}" if text else file_notice
+    updated.update(source_artifact(retained_sources.values()))
+    _set_result_layout(updated, text, retained_layout)
+    return text, updated
 
 
 def sources_from_messages(messages: Iterable[Any]) -> list[KnowledgeSource]:

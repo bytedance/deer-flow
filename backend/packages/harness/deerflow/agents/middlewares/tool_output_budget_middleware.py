@@ -53,6 +53,7 @@ from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
+from deerflow.knowledge.sources import budget_dependent_result, prune_sources
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
@@ -95,6 +96,7 @@ class _BudgetedContent(NamedTuple):
     replacement: str
     transform_kind: str
     blob_metadata: dict[str, Any] | None = None
+    artifact: dict[str, Any] | None = None
 
 
 def _default_config() -> ToolOutputConfig:
@@ -538,6 +540,7 @@ def _budget_content(
     config: ToolOutputConfig,
     sandbox: Sandbox | None = None,
     thread_id: str | None = None,
+    artifact: Any = None,
 ) -> _BudgetedContent | None:
     """Apply budget to *content* and name the applied transform.
 
@@ -643,6 +646,14 @@ def _budget_content(
                 len(content),
                 virtual_path,
             )
+            file_notice = f"[Full output saved to {virtual_path} ({len(content)} chars). Use read_file to inspect it.]"
+            preview_chars = config.preview_head_chars + config.preview_tail_chars
+            if config.fallback_max_chars > 0:
+                preview_chars = min(preview_chars, max(0, config.fallback_max_chars - len(file_notice) - 2))
+            retrieval = budget_dependent_result(content, artifact, preview_chars, file_notice=file_notice)
+            if retrieval is not None:
+                replacement, retained_artifact = retrieval
+                return _BudgetedContent(replacement, "externalized", blob_metadata, retained_artifact)
             return _BudgetedContent(
                 _build_preview(
                     content,
@@ -670,6 +681,10 @@ def _budget_content(
             len(content),
             fallback_max_chars,
         )
+        retrieval = budget_dependent_result(content, artifact, fallback_max_chars)
+        if retrieval is not None:
+            replacement, retained_artifact = retrieval
+            return _BudgetedContent(replacement, "truncated", artifact=retained_artifact)
         return _BudgetedContent(
             _build_fallback(
                 content,
@@ -713,11 +728,14 @@ def _patch_tool_message(
         config=config,
         sandbox=sandbox,
         thread_id=thread_id,
+        artifact=msg.artifact,
     )
     update: dict[str, Any] = {}
     trigger = _effective_trigger(tool_name, config)
     citation_result = None
-    if tool_name in {"knowledge_search", "task"} and trigger > 0 and len(text) > trigger:
+    if budgeted is not None and budgeted.artifact is not None:
+        update["artifact"] = budgeted.artifact
+    elif tool_name in {"knowledge_search", "task"} and trigger > 0 and len(text) > trigger:
         citation_result = budget_source_artifact(text, msg.artifact, trigger, summary=(budgeted.replacement if budgeted else text) if tool_name == "task" else "")
     if citation_result is not None:
         replacement, update["artifact"] = citation_result
@@ -727,11 +745,10 @@ def _patch_tool_message(
         transform_kind = budgeted.transform_kind
     else:
         return msg
-    from deerflow.knowledge.sources import prune_sources
-
-    replacement, artifact = prune_sources(replacement, update.get("artifact", msg.artifact))
-    if artifact is not msg.artifact or "artifact" in update:
-        update["artifact"] = artifact
+    if budgeted is None or budgeted.artifact is None:
+        replacement, artifact = prune_sources(replacement, update.get("artifact", msg.artifact))
+        if artifact is not msg.artifact or "artifact" in update:
+            update["artifact"] = artifact
     update["content"] = [{"type": "text", "text": replacement}, *retained_blocks] if retained_blocks else replacement
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
