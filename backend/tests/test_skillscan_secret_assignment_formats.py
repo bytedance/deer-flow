@@ -8,6 +8,7 @@ to read the same way. The quoted-key shapes below are what a JSON config uses.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -151,3 +152,63 @@ def test_pretty_printed_json_reports_the_line_the_key_is_on(tmp_path: Path) -> N
     root = _write_package(tmp_path, "config.json", '{\n  "api_key": "' + SECRET + '"\n}')
 
     assert [finding["line"] for finding in _secret_findings(root)] == [2]
+
+
+@pytest.mark.parametrize("name", ["tokens", "total_tokens", "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens"])
+@pytest.mark.parametrize("value", [0, 84852])
+@pytest.mark.parametrize("template", ['{"%s": %s}', '{\n  "%s": %s,\n  "duration_ms": 23332\n}', "%s: %s", "%s=%s"])
+def test_numeric_model_token_counts_are_not_credentials(tmp_path: Path, name: str, value: int, template: str) -> None:
+    root = _write_package(tmp_path, "measurements.md", template % (name.upper() if "=" in template else name, value))
+
+    assert _secret_findings(root) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"total_tokens": "84852"}',
+        '{"total_tokens": "' + SECRET + '"}',
+        "total_tokens: 84852secret",
+        "access_tokens: 84852",
+        "api_key: 84852",
+        "password: 84852",
+        "access_total_tokens: 84852",
+        '{"access total_tokens": 84852}',
+        '{"access/total_tokens": 84852}',
+        '{"tokens": "84852"}',
+        '{"tokens": {"mean": "' + SECRET + '", "stddev": 1, "min": 0, "max": 2}}',
+        '{"tokens": {"api_key": "' + SECRET + '"}}',
+        '{"tokens": {"mean": true, "stddev": 1, "min": 0, "max": 2}}',
+        '{"tokens": {"mean": NaN, "stddev": 1, "min": 0, "max": 2}}',
+        '{"tokens": {"mean": 1e999, "stddev": 1, "min": 0, "max": 2}}',
+        '{"tokens": {"mean": "' + SECRET + '", "mean": 1, "stddev": 1, "min": 0, "max": 2}}',
+        '{"tokens": [["mean", 1], ["stddev", 1], ["min", 0], ["max", 2]]}',
+        '{"tokens": "+1700' + SECRET + '"}',
+    ],
+)
+def test_token_count_exemption_preserves_credential_detection(tmp_path: Path, text: str) -> None:
+    root = _write_package(tmp_path, "config.md", text)
+
+    assert [finding["line"] for finding in _secret_findings(root)] == [1]
+
+
+def test_numeric_token_count_does_not_hide_later_credential(tmp_path: Path) -> None:
+    root = _write_package(tmp_path, "config.md", '{"total_tokens": 84852}\napi_key: ' + SECRET)
+
+    assert [finding["line"] for finding in _secret_findings(root)] == [2]
+
+
+def test_numeric_token_count_does_not_suppress_cloud_token_scan(tmp_path: Path) -> None:
+    token = "sk-" + "a1b2c3d4" * 4
+    root = _write_package(tmp_path, "config.md", '{"total_tokens": 84852}\nAuthorization: Bearer ' + token)
+
+    findings = scan_skill_dir(root)["findings"]
+
+    assert any(finding["rule_id"] == "secret-cloud-token" and finding["severity"] == "CRITICAL" for finding in findings)
+
+
+@pytest.mark.parametrize("value", [{"mean": 3800.5, "stddev": 400, "min": 3200, "max": 4100}, "+1700", "-12.5"])
+def test_benchmark_token_summaries_are_measurements(tmp_path: Path, value) -> None:
+    root = _write_package(tmp_path, "benchmark.md", json.dumps({"tokens": value}))
+
+    assert _secret_findings(root) == []

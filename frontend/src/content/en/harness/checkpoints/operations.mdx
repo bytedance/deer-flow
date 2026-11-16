@@ -77,10 +77,10 @@ Exactly two shapes are proven safe, and the retention service implements only th
 
 Two mechanical constraints come with deletion:
 
-- **Joint table deletion, orphan-first.** Deleting a checkpoint row requires deciding which writes and blob rows are orphaned; a row is an orphan only if no *surviving* checkpoint references it, computed in a whole-thread pass. A real duration-only leaf is not payload-free — it materializes the parent's values — and on Postgres its blob rows are the same rows backing its parent.
+- **Preserve shared storage.** General retention computes blob reachability in a whole-thread pass. Admission cleanup instead requires the root duration leaf and its parent to have identical channel-version maps, deletes only the leaf's checkpoint/writes rows, and leaves all shared blobs intact.
 - **All-or-nothing.** A partial deletion that leaves a dangling parent link converts a cleanup into a thread-level outage: branch and regenerate fail loudly for every later turn.
 
-There is also a history fast-path interaction to sequence around: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. Deleting the leaf makes the next history read fall back to store scans and re-persist a fresh leaf, so any wiring must sequence retention away from history reads or spare cache-carrying leaves.
+There is also a history fast-path interaction: the trailing duration-only leaf carries the `run_durations` and `run_message_ids` maps that `get_thread_history` reads from the latest checkpoint. The Gateway keeps that leaf available for history reads until the next run wins durable same-thread admission, then deletes it under the checkpoint lock before the run's first checkpoint read. Cleanup reads at most the root head and its parent and probes only the candidate's pending writes; it performs no history scan, statistics pass or blob GC. Explicit `checkpoint_id` and `checkpoint_map` selections are protected. Delta-history caches are invalidated before deletion, and a cache failure preserves the source checkpoint.
 
 ### Policy defaults
 
@@ -92,11 +92,11 @@ There is also a history fast-path interaction to sequence around: the trailing d
 | `strict_pending_write_guard` | `True` | Treat any checkpoint that still owns writes rows as protected |
 | `max_delete_per_run` | `None` | Optional cap on deletions per run |
 
-### There is no production trigger yet
+### Production retention trigger
 
-The retention service (`backend/app/gateway/checkpoint_retention.py`) ships **without a production trigger**: where retention is invoked from — post-run hook, scheduler, or explicit admin action — is a maintainer decision that lands with the contract itself. Nothing in DeerFlow calls it, and there is no production caller of `prune` or `aprune` either: in the pinned environment only the base implementation defines them, and it raises `NotImplementedError`.
+After a run wins durable same-thread admission, the Gateway calls the conservative retention policy before its first checkpoint read. The admission fence and per-thread checkpoint lock exclude concurrent runs and writers; explicitly selected checkpoint IDs are protected. The hook deletes at most one contract-proven trailing metadata-only leaf and treats failures as non-fatal. It does not prune resumable ancestors or sibling branches.
 
-Treat this as unfinished work rather than a safe default. The executable contract proves the branch-ancestor, explicit-resume-target, pending-writes, leaf-duration, and leaf-sibling scenarios against the **full-mode** state schema; only the growth baseline is delta-shaped. Delta-specific prune safety is neither proved by the suite nor implemented.
+The production trailing-duration-leaf deletion has regressions against both **full** and **delta** state schemas. The broader branch-ancestor, explicit-resume-target, pending-writes, and sibling-branch contract is still primarily full-shaped; production does not attempt those deletions without a future rebase/TTL contract.
 
 ## The one remaining patch
 
@@ -128,13 +128,13 @@ The dependency floor is what keeps the removed saver bug out, so the floors are 
 
 | Distribution | Floor | Why |
 | --- | --- | --- |
-| `langgraph-checkpoint` | `>=4.2.0,<5.0` | 4.2.0 fixes the dropped first post-migration write (upstream #8526). A 4.1.x resolution would silently reintroduce it, and `langgraph`'s own `langgraph-checkpoint>=4.1.0` constraint does not exclude that version |
-| `langgraph-checkpoint-postgres` | `>=3.1.2,<3.2` | 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.1 walks past them to the thread root |
-| `langgraph-checkpoint-sqlite` | `>=3.1.1,<3.2` | Pinned alongside the other savers |
+| `langgraph-checkpoint` | `>=4.3.0,<5.0` | 4.2.0 fixes the dropped first post-migration write (upstream #8526); 4.3.0 preserves live task-path order when replaying parallel same-superstep writes (upstream #8544) |
+| `langgraph-checkpoint-postgres` | `>=3.1.3,<3.2` | 3.1.2 finds plain-value delta seeds (upstream #8535); 3.1.3 fixes the paged ancestor-walk cursor (upstream #8556) |
+| `langgraph-checkpoint-sqlite` | `>=3.1.2,<3.2` | Matches the checkpoint replay-order fix |
 
-The regression gate is `backend/tests/test_delta_channel_checkpointers.py::test_full_to_delta_migration_replays_on_same_thread`: it fails when the 4.2.0 fix is absent, and a full-to-delta migration must keep replaying on the same thread. The pinned environment resolves `langgraph 1.2.9`, `langgraph-checkpoint 4.2.0`, and `langgraph-checkpoint-postgres 3.1.2`.
+The regression gates in `backend/tests/test_delta_channel_checkpointers.py` cover full-to-delta migration, parallel-write replay order, and paged ancestor walks. The locked environment resolves `langgraph 1.2.14`, `langgraph-checkpoint 4.3.0`, and `langgraph-checkpoint-postgres 3.1.3`.
 
-There is no runtime version check or warning. The only version signal an operator sees is a trigger-skipped test naming the pinned version, for example the `#8448` Postgres skip or the `#8382` replay-order skip.
+There is no runtime version check or warning. The dependency floors exclude affected versions, and all three regression contracts fail rather than skip when a defect returns.
 
 ## Running the benchmarks
 

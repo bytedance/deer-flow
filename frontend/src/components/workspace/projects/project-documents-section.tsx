@@ -285,9 +285,6 @@ function ProjectDocumentShelf({
             </EmptyMedia>
             <EmptyTitle>{t.projects.documentsEmptyTitle}</EmptyTitle>
             <EmptyDescription>{t.projects.documentsEmptyHint}</EmptyDescription>
-            <EmptyDescription>
-              {t.projects.interimMemoryNotice}
-            </EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -719,7 +716,9 @@ function AttachToThreadDialog({
                 disabled={isPending}
                 onClick={() => onAttach(thread)}
               >
-                <span className="truncate">{titleOfThread(thread)}</span>
+                <span className="truncate">
+                  {titleOfThread(thread, t.pages.untitled)}
+                </span>
               </Button>
             ))
           )}

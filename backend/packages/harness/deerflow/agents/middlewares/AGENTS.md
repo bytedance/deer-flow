@@ -1,130 +1,97 @@
-### Middleware Chain
+# Agent middlewares (`deerflow/agents/middlewares/`)
 
-Compaction keeps state `SystemMessage`s; transient instructions use request
-wrappers, and fully rescued partitions skip compaction. If latest-user rescue
-empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;
-mixed windows keep normal anchoring and final-message fallback. Budget raw text
-before escaping/wrapping; pass `trim_tokens_to_summarize=None` to avoid the
-LangChain default.
+Every model call and tool call of the lead agent and of subagents passes through
+this chain. The order is defined in code:
+`tool_error_handling_middleware.py::_build_runtime_middlewares` builds the base
+that lead and subagents share, and `../lead_agent/agent.py::build_middlewares`
+appends the lead-only part. Read those two functions for the current list.
+Background: [execution flow](../../../../../docs/middleware-execution-flow.md),
+[summarization](../../../../../docs/summarization.md),
+[guardrails](../../../../../docs/GUARDRAILS.md),
+[tool artifacts](TOOL_ARTIFACTS.md),
+[tool output persistence](TOOL_OUTPUT_PERSISTENCE.md).
 
-Todo compaction: [contract](../../../../../docs/summarization.md#todo-reminders).
+## Verify
 
-Delegation verdicts are untrusted: revalidate persisted values, ignore malformed
-ones, and treat completed work as reusable evidence rather than acceptance.
+```bash
+cd backend
+python -m pytest tests -q -k "middleware"
+make test-blocking-io
+```
 
-On new user turns, DurableContext cancels earlier-run unanswered delegations.
-It preserves resumes, same-run continuations, and entries without `run_id`.
-A pre-turn reply prevents cancellation; legacy replies without status metadata may
-stay `in_progress`. Never infer status from reply text.
+## Order is behaviour
 
-Assembly order: `tool_error_handling_middleware.py::_build_runtime_middlewares` (exposed as `build_lead_runtime_middlewares`), then `../lead_agent/agent.py::build_middlewares` appends lead-only entries. Optional entries require their config/runtime condition.
+- **The first middleware is the outermost model wrapper.** Input sanitization is
+  first so that every inner middleware, including model retries, sees sanitized
+  messages. Decide where a new middleware goes by what it needs to see and what
+  needs to see its output.
+- **Lead and subagent chains differ on purpose.** Subagents skip the lead-only
+  part. A middleware declared in config needs an explicit scope from each builder;
+  there is no implicit lead default.
+- **Tool wrappers nest.** Receipts wrap authorization, audit and write checks, so
+  a denied call still gets a receipt. Progress tracking wraps error handling, so it
+  sees the result that error handling produced.
+- **Progress tracking fences late results and hint retries by graph entry**, also
+  within one run.
 
-**Message provenance.** Stamp injected/rewritten messages with
-`provenance_kwargs()` from `deerflow_extension_api.provenance`: server-owned
-`deerflow_content_kind`, `deerflow_producer_kind`, and optional entity ID, even
-without observers. Producers: DynamicContext, DurableContext,
-SystemMessageCoalescing, ViewImage, SkillActivation. Summarization/Title use
-`SystemOperationKind.SUMMARIZATION`/`.TITLE`; summaries enter via DurableContext's
-`durable_context_data`, memory recall via DynamicContext's
-`dynamic_context_memory`. Memory only queues extraction.
+## Rules for a middleware that changes messages
 
-**Self-description.** Configurable middleware exposes JSON-serialisable
-`release_policy_parameters()` (`ReleasePolicyProvider`, duck typed). Update
-`collect_release_policies()` declarations with behavior; use `canonical_hash`
-for long text. Summarization declares enabled task-continuity retention or None;
-DurableContext declares normalized skills root, sorted read tools and continuity
-switch. History readers, including capture failures, validate persisted metadata
-so malformed values cannot abort compaction/model calls.
+- **Stamp provenance.** A message that a middleware injects or rewrites and that
+  stays in state carries `provenance_kwargs()` from the extension API. Consumers
+  tell server-written context from user text by that stamp. A rewrite that exists
+  only inside one model request needs no stamp.
+- **Record tool-result transforms.** A middleware that rewrites a tool result
+  appends an entry with `append_tool_transform`. Observers classify raw-to-visible
+  changes from that trail and never from the output wording.
+- **Remove tool calls with `clone_ai_message_with_tool_calls`.** Updating
+  `tool_calls` alone leaves the tool-call blocks in `content`, and strict
+  providers reject the resend.
+- **State and UI keep the raw result.** The model-facing projection of a tool
+  result (metadata envelope, shortening) is built per request. Receipt hashes and
+  the UI read the stored value.
+- **Persisted metadata is untrusted.** Checkpoints written by older versions and
+  by direct integrations contain malformed values. Every history reader validates
+  what it reads, and a bad value must not abort compaction or a model call.
+- **Declare release policy.** A configurable middleware returns JSON-safe
+  `release_policy_parameters()`, and `collect_release_policies()` changes with its
+  behaviour.
 
-**Removing tool calls.** Use `clone_ai_message_with_tool_calls`, not a bare
-`tool_calls` update: adapters resend stale `content` tool-call blocks, which
-strict providers reject.
+## Trust and classification
 
-**Shared runtime base** (`build_lead_runtime_middlewares`; subagents reuse most of this via `build_subagent_runtime_middlewares`):
+- **User text never gains framework authority.** Sanitization encodes
+  framework-looking tags in user input, and remote tool results are neutralized
+  separately.
+- **Classify failures from structure.** Model and tool failures are classified by
+  status codes, provider fields, exception types and producer metadata. Message
+  text is diagnostic only. An incidental JSON field in a tool result cannot make
+  the result an auth failure.
+- **Authorization identity comes from the server.** The Gateway strips identity
+  keys that a client sends. Guardrail decisions are published into the run context
+  under a `__`-prefixed key so that a caller cannot forge one.
+- **Sandbox audit is not a security boundary.** Command classification is
+  defense in depth and has known gaps. The sandbox is the isolation.
+- **Delegation verdicts are untrusted.** Revalidate persisted values. Completed
+  subagent work is evidence, not acceptance.
+- **Status comes from metadata.** Do not infer a delegation, todo or tool status
+  from reply text.
+- **A tool-call id is unique only within one response.** Some providers number
+  every response's calls from `call_0`, so a delegation is identified by its run,
+  its call id and the AIMessage that issued it. Pairing by call id alone merges
+  separate delegations and lets the per-run cap under-count.
 
-1. **InputSanitizationMiddleware** - First, so it is the outermost `wrap_model_call` wrapper; every inner middleware (including LLM retries) sees sanitized messages. `additional_kwargs.original_user_content` is server-owned provenance: Gateway strips caller-supplied values for non-internal run requests, trusted IM calls may carry the string they captured before adding transport/file context, and the middleware replaces any non-string value before wrapping. Uploads and sanitization retain first-writer-wins only for validated strings. Caller markers are marked `untrusted_input`, never stripped; scope is every turn.
+## Compaction
 
-   **KnowledgeScopeMiddleware** follows input sanitization: it exposes only Gateway-admitted execution scope, removes scope/display data from model messages, and blocks `knowledge_search` when disabled without reading storage or RAGFlow.
-2. **ToolOutputBudgetMiddleware** - Caps model-bound outputs per app config. Externalizes oversized results under thread outputs in `tool_output.storage_subdir` (default `.tool-results`, `TOOL_RESULTS_DIRNAME`), leaving a typed synopsis + `read_file` reference. Host permissions, publication and crash cleanup: [contract](TOOL_OUTPUT_PERSISTENCE.md). Blob refs restore across hosts; failures use ≤30,000 inline chars. These files bypass workspace-change scans and delivery verification. `wrap_model_call` elides successful `write_file` content only in model requests after a later successful same-path `read_file`/`write_file`/`str_replace` (#5328); disk is the reference. Keeps `keep_recent_writes` newest writes. Shared `tool_call_args` helpers pair calls (`pair_tool_call_results`) and rewrite args. Controls: `elide_superseded_writes`, `superseded_write_min_chars`.
-3. **ToolResultSanitizationMiddleware** - Neutralizes framework/injection tags (e.g. `<system-reminder>`) and boundary markers in *remote-content* tool results (`web_fetch`/`web_search`/`image_search`/`web_capture`) so attacker-controlled fetched pages cannot forge trusted framework context. Mirrors `InputSanitizationMiddleware`'s user-input guardrail for the other untrusted-content entry point; sits inner of `ToolOutputBudgetMiddleware` (neutralizes the raw output, then the budget truncates). Local tool output (bash/read_file) is left untouched. Scope is a name-based allowlist for the first-party web tools, plus every MCP-sourced tool via its `deerflow_mcp` metadata tag, so an MCP server naming its fetcher `fetch_url` is still covered
+- The summarizer never sees replayed reasoning or media bytes. PII redaction runs
+  before splitting, and budgets apply before escaping.
+- Durable context (delegations, loaded skill names) is captured before compaction
+  and re-enters through the durable-context channel. Recalled memory enters
+  through the dynamic-context channel. Summaries do not carry either.
+- Fraction-based triggers follow the model that runs the turn. A separate summary
+  model only generates the summary.
+- Superseded-write elision is opt-in, because it rewrites earlier request prefixes.
 
-   Result-rewriting middlewares between the raw callable boundary and the
-   model-visible result append a declared entry to
-   `additional_kwargs["deerflow_tool_transforms"]` via
-   `agents/middlewares/tool_transform_meta.py::append_tool_transform`. The trail is
-   ordered by application — the last entry produced the final visible bytes — so an
-   observer classifies raw→visible transforms from facts rather than by sniffing
-   output wording.
-4. **PiiRedactionMiddleware** - *(optional, `pii_redaction.enabled`, default off, #3190)* Rewrites PII in genuine user messages (`wrap_model_call`) and remote-content tool results (`wrap_tool_call`, the tool-result allowlist) to irreversible value-derived placeholders. Deterministic regex detectors only. Innermost Layer-1 wrapper; compaction input, summaries, title input and queued memory payloads are redacted via `redact_text`.
+## Concurrency
 
-5. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
-6. **UploadsMiddleware** - Injects current uploads (lead only). Check existence in the runtime user's bucket; coerce invalid `files[*].size` to `0`. Copy the user message when adding context to preserve caller metadata, including `response_metadata`.
-7. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state. The
-   lead runtime normally owns the thread's physical Agent-skill projection;
-   delegated subagents and the prompt-only bootstrap agent are non-owners, so
-   their narrower discovery allowlists never rebuild the shared thread view or
-   force eager sandbox acquisition.
-8. **DanglingToolCallMiddleware** - Injects placeholder ToolMessages for AIMessage tool_calls that lack responses (e.g., user interruption), preserving raw provider tool-call payloads in `additional_kwargs["tool_calls"]`; malformed tool-call names and arguments are sanitized in the model-bound request so strict OpenAI-compatible providers do not reject the next request
-9. **LLMErrorHandlingMiddleware** - Converts provider/model failures to recoverable assistant errors. Sync and async calls carry circuit-generation ownership; only the current owner may settle or release a half-open probe, so stale completions cannot affect a newer recovery attempt. Cancellation propagates unchanged without retry or failure accounting.
-10. **ArtifactResolutionMiddleware** - See [tool artifacts](TOOL_ARTIFACTS.md).
-11. **Authorization / GuardrailMiddleware** - Up to two independent pre-tool-call gates run here. When `authorization.enabled`, the `AuthorizationProvider` instance already used for Layer 1 capability filtering is wrapped by `GuardrailAuthorizationAdapter` and reused for Layer 2 execution checks. A generated `tool_search` bypasses the adapter's second provider call only when the current build has a concrete deferred setup; its catalog was already filtered by Layer 1, and an ordinary same-named tool without that deferred setup receives no exemption. When `guardrails.enabled`, the explicitly configured `GuardrailProvider` is appended after authorization and still evaluates every call, including `tool_search`. Authorization therefore runs outermost and can deny before an external guardrail call; both use the existing middleware's fail-closed, audit, sync/async, and error-`ToolMessage` behavior. See the authorization RFC and [docs/GUARDRAILS.md](../../../../../docs/GUARDRAILS.md).
-
-   Every guardrail decision path publishes a neutral
-   `deerflow.authz.outcome.AuthorizationOutcome` into the per-run runtime context,
-   keyed by `tool_call_id` under the `__`-prefixed
-   `__authorization_outcome` key (so `build_run_config` strips caller-supplied
-   forgeries). Consumers pop it; the publisher and the consumer share only that
-   contract module.
-12. **SandboxAuditMiddleware** - Audits sandboxed shell/file operations before tool execution; command classification is **defense-in-depth and audit, not a security boundary** (the sandbox is the isolation boundary). Command substitution is judged by *position*, not the presence of `$(`: **command position** (`$(curl url)`, `` `curl url` ``, the word after `|`/`&&`/`;`, an `eval`/`source` argument) executes fetched content and is blocked; **value position** (`x=$(curl url)`, `echo $(curl url)`, an argument, a `for` word list) only captures output and passes (#4611). So `_HIGH_RISK_COMMAND_POSITION_PATTERNS` is matched anchored against each sub-command from `_split_compound_command(split_pipes=True)`, never the whole string; pipe-spanning rules (`| sh`, `base64 -d | ...`) still use `_classify_command`'s whole-command Pass 1. `_COMMAND_POSITION_PREFIX` extends the anchor over leading assignments and exec wrappers (`FOO=1 $(curl url)`, `env`/`command`/`builtin`/`exec`/`nohup`/`time`/`sudo`/`doas`); its assignment branch requires whitespace before the substitution, which keeps `x=$(curl url)` in value position. Two contexts are deliberately **position-blind** (matched whole-command in Pass 1, since they execute their input anywhere, e.g. `xargs sh -c "$(curl url)"`): an `eval`/`source` argument, and an interpreter **code-string flag** — `-c` (shells, `python`), `-e` (`perl`/`ruby`/`node`), `-p` (`perl`/`node`), `-r` (`php`) — plus the here-string (`<<<`) reaching the same place via stdin. All three substitution spellings (`$(`, `<(`, `` ` ``) share one `_RISKY_SUBSTITUTION` opener. An unquoted newline splits like `;` (else `echo hi\n$(curl url)` evades the anchored rules). Heredoc bodies are data: `_split_compound_command` records headers (`<<EOF`, `<<-EOF`, `<<'EOF'`) and consumes their bodies verbatim, so a body line starting `$(curl url)` isn't promoted to a command position; `<<<` (here-string, needs look-ahead + look-behind) and a `<<` inside `$(( ))`/`(( ))` (bit shift, arithmetic depth tracked with the quote flags) must not open one. This is a heuristic, not shell parsing — an unterminated body consumes the rest of the string, an unclosed `((` only disables heredoc detection, and the failure direction is always toward *more* command positions, not fewer. Known gaps: process substitution outside `eval`/`source` (`. <(curl u)`) is undetected, and two-step forms (`x=$(curl u); eval "$x"`) need dataflow analysis. Medium-risk warnings precede a trailing exit marker and keep `deerflow_tool_meta`. No config gate — appended unconditionally in `_build_runtime_middlewares`, for both lead and subagents.
-13. **ReadBeforeWriteMiddleware** - *(optional, `read_before_write.enabled`, default on)* Outermost write gate (#3857): `read_file` stamps a content hash on its ToolMessage; `write_file` (existing file, incl. append) and `str_replace` are blocked unless the newest mark for the path matches its current hash. Sits outside ToolProgress/ToolErrorHandling (a block consumes no ToolProgress slot); blocked results self-stamp `deerflow_tool_meta` and carry `deerflow_write_block` (`{path, tool}`). Marks live on messages, so summarization dropping the read invalidates the gate; writes never refresh marks. Gate check + execution are serialized per (thread, path); `"Error: ..."`-string sandboxes (AIO/E2B) fail open. It owns the composed call's sandbox authorization scope; `SandboxAuthorizationError` becomes an error ToolMessage. Its `wrap_model_call` swaps blocked calls' dead payload (`content`, `old_str`/`new_str`) for a deterministic placeholder in the model-bound request only (`elide_blocked_payloads`, `elide_min_chars`); state, receipts, and the journal keep the originals. Policy stays in the gate; the shared `tool_call_args` helper rewrites every arg surface together and every model-bound arg rewrite must use it.
-14. **ToolProgressMiddleware** - *(optional, if `tool_progress.enabled`)* State-machine-based stagnation guard (RFC #3177). Outer wrapper around ToolErrorHandlingMiddleware so its tool wrapper receives results already stamped with `deerflow_tool_meta`. Recoverable problems stay WARNED with hints; retryable non-recoverable problems escalate to BLOCKED; stop-category failures block immediately. It is independent of LoopDetection's turn-level call-pattern guard. Effective phase changes emit `middleware:tool_progress`, including `reset` when a later agent invocation (for example, goal continuation) clears WARNED/BLOCKED state. The state machine supplies the action and count threshold (`null` for category rules, recovery, and reset); recorder calls happen after releasing the state lock. Events include the actual sync/async hook plus bounded status, error, and recovery fields. Server-owned recorder keys determine subagent attribution. Arguments, content, prompts, and hashes are never persisted; recorder failures are fail-open. See [event semantics](../../../../../docs/RUN_EVENT_STREAM.md).
-15. **ToolReceiptMiddleware + ToolErrorHandlingMiddleware** - `ToolReceiptMiddleware` is *(optional, if `verification.receipts_enabled`, default on)*. It is the **outermost `wrap_tool_call` layer** — registered ahead of authorization, audit, write and progress gates — because Guardrail/SandboxAudit/ReadBeforeWrite/ToolProgress can short-circuit a call with their own ToolMessage (and SandboxAudit annotates medium-risk results); an inner receipt layer would silently gap the ledger on those results (ordering constraints in `deerflow.extensions.ordering`). Normal results still carry the `deerflow_tool_meta` status ToolErrorHandlingMiddleware stamps on the inner return path; short-circuit messages self-stamp meta or fall back to `message.status`. It stamps deterministic provenance (tool name, status, args/output hashes, byte count, timestamp) onto direct `ToolMessage` results and every matching `ToolMessage` carried in `Command.update.messages`, including delegated `task`, `present_file`, `view_image`, and `tool_search` results; before model calls it derives a hidden receipt ledger (display ids r1..rN) from message state, and when the 2,000-character budget is exceeded the newest receipts are retained in chronological order with their original ids plus an older-receipts omission marker. Rendering returns both the text and its retained receipt subset; every response that received a ledger carries only that exact server-owned subset, never omitted receipts. Snapshot validation accepts a strictly consecutive positive original-id range (for example `r24`–`r30`) rather than requiring `r1`, so subagent terminal citation verification resolves ids against evidence present in the citing turn even when later summarization drops and renumbers tool messages. Model-generated citation IDs are digit-bounded before integer conversion; oversized IDs are ignored as malformed input rather than raising through task write-back. Citation parsing deduplicates exact `(id, anchor)` pairs, not IDs alone, so repeated identical references stay compact while every distinct anchor claim is verified. Gateway strips delegated receipts/verdicts from external messages. `ToolErrorHandlingMiddleware` receives `AppConfig`, converts tool exceptions into error `ToolMessage`s so the run can continue instead of aborting, stamps every result with `deerflow_tool_meta` (status / error_type / recoverable_by_model / recommended_next_action / source) via `tool_result_meta.normalize_tool_result`, stamps structured metadata for task exception wrappers, and stamps skill-read metadata for downstream durable-context capture. Task tool result text is generated from the same status/result/error inputs as the structured metadata so callers do not hand-write a second protocol string.
-16. **ArtifactCaptureMiddleware** - See [tool artifacts](TOOL_ARTIFACTS.md).
-
-Authorization identity is independent of enforcement. Gateway strips client identity overrides: only the server auth source sets `is_internal`, and only authenticated IM `body.context` supplies `channel_user_id` (never `body.config`). `build_principal_from_context` applies role defaults, strict provenance, and copied attributes; RBAC rejects unknown defaults. Delegation and `GuardrailMiddleware` share this identity. Layer 1 precedes deferred assembly across agent paths and its provider is reused for Layer 2; framework skill/memory ordering stays stable. Trusted `DeerFlowClient.stream()` accepts identity overrides. Its graph key always includes effective storage `user_id` and, when enforced, the full Principal; nested attributes are copied so mutation cannot hide stale cache state.
-
-Gateway route permissions and per-caller skill visibility are documented in the [Gateway guide](../../../../../app/gateway/AGENTS.md#route-and-skill-listing-authorization). Runtime skill activation remains a separate layer.
-
-Model authorization uses `authz.py::resolve_model_authorization()` (same cached-provider, internal-role, and principal-building path as route authorization) as the Gateway integration point for the `models` router: `list_models` filters names through `filter_resources(principal, "model", ...)`, and `get_model` enforces `authorize(resource="model", action="use")` with a deny surfacing as 403; provider errors follow `authorization.fail_closed` (fail-open returns the unfiltered list / proceeds). At runtime, `lead_agent/agent.py::_authorize_model_name` — called from `_make_lead_agent` and from `DeerFlowClient._ensure_agent` — applies the same `model:use` check to the resolved model name. On deny it scans the `filter_resources`-visible names (excluding the denied model), re-verifying each candidate with `authorize("model", "use")` before falling back, because a custom provider may allow `list` while denying `use`; no usable fallback raises under `fail_closed` and keeps the original model under fail-open. The built-in RBAC provider maps this to the per-role `models` policy key. Tests: `tests/test_models_authorization.py`.
-
-Sandbox authorization (`sandbox:execute`) gates every sandbox acquisition before `provider.acquire` — including this middleware's eager path (`before_agent` / `abefore_agent` skip acquisition on deny instead of raising, deferring to the lazy per-tool gate). See the [sandbox module guide](../../sandbox/AGENTS.md) authorization-gate paragraph and `tests/test_sandbox_authorization.py`.
-
-Before changing a later authorization phase, read the [authorization RFC](../../../../../../docs/plans/2026-07-10-pluggable-authorization-rfc.md) and its [implementation notes](../../../../../../docs/plans/2026-07-10-pluggable-authorization-implementation-notes.md). The notes are the cumulative handoff record for merged PR behavior, reviewer feedback, trust-boundary decisions, deferred scope, and required regression coverage.
-
-**Lead-only middlewares** (`build_middlewares`, appended after the base):
-
-17. **DynamicContextMiddleware** - Injects date and optional memory outside the static prompt. Opt-out removes its frozen server memory but retains date/user messages. Date follows server-local time unless `DEER_FLOW_DATE_TIMEZONE` names an IANA zone (invalid values fall back locally).
-18. **SkillActivationMiddleware** - Detects strict `/skill-name task` syntax on the latest real user message, resolves only enabled and runtime-allowed skills, injects the `SKILL.md` body as hidden current-turn context, and records a `middleware:skill_activation` audit event
-19. **SkillToolPolicyMiddleware** - Applies `allowed-tools` only after real activation; passive enabled skills and a custom agent's configured skill allowlist do not clamp the lead toolset. A run-scoped slash activation is authoritative and suppresses `skill_context` as a policy source, so reading another skill cannot widen the explicit skill's tools; without slash activation, skills captured after configured `read_file` loads retain the existing union semantics. The middleware filters model-visible schemas and blocks unauthorized execution, resolving canonical paths against the live enabled/agent-allowed registry on every model call, then stores a versioned, JSON-safe, middleware-token-bound decision signed by policy source plus active paths in run context for the resulting tool calls to reuse. The next model call always refreshes it, and malformed, foreign, stale, or unmatched decisions fall back to live resolution. `tool_search` and `describe_skill` remain framework-safe discovery tools under a restrictive policy; they may reveal or promote metadata, but a deferred business tool must still be declared by the active policy before its schema or execution can survive the policy middleware. The decision's owner token is authorization-sensitive, so its reserved context key is owned by `runtime.secret_context` and included in `REDACTED_CONTEXT_KEYS` for observable and persisted context copies. Registry load failures and a non-empty active set with no authorized skill fail closed to framework-safe tools; an individual stale path is skipped only when at least one valid active skill remains. This is best-effort behavioral scoping rather than a hard security boundary: alternate loads such as `bash cat` are not captured, and bounded autonomous `skill_context` can evict old entries. `task` is not framework-exempt, so a restricted skill cannot delegate around its policy. The middleware must remain immediately after `SkillActivationMiddleware` (which publishes the slash source through `runtime.secret_context`'s public path helpers authenticated by a required token shared only within the assembled middleware chain) and immediately before `DurableContextMiddleware`; assembly and compiled-graph tests pin ordering, token sharing, schema filtering, and execution blocking.
-20. **DurableContextMiddleware** - Before compaction, captures task dispatches/result summaries in `ThreadState.delegations` and loaded skill name/path/description references (never bodies) in `ThreadState.skill_context`; projects them into each model request. Static authority rules are injected as a `SystemMessage`; untrusted field values (`summary_text`, delegation results, skill descriptions) are injected separately as a hidden `HumanMessage` data block so compressed history, delegated work, and which skills are active stay visible without being stored as `messages` or promoted to system-role instructions. `build_subagent_runtime_middlewares` also attaches this middleware immediately before subagent summarization so a compacted `summary_text` is projected ahead of a preserved assistant/tool tail instead of leaving strict providers with an assistant-first request. See [tool artifacts](TOOL_ARTIFACTS.md) for projection, retry limits and delegation scope.
-21. **SummarizationMiddleware** - *(optional)* Compacts near token limits. Fraction trigger/keep profiles belong to the active run model; an explicit summary model only generates. Memory flush/manual compaction follow runtime/checkpoint agent policy. Preserve the latest user request and DynamicContext reminders; a backward cutoff may retain old AI/tool turns or make first-turn compaction a no-op.
-22. **TodoListMiddleware** - *(optional, if `is_plan_mode`)* Task tracking with `write_todos`. Skips reminders on `model_length_termination` so capped turns end cleanly. A raising model call requeues its reminder, uncounted, for the retry.
-23. **TokenUsageMiddleware** - *(optional, if `token_usage.enabled`)* Records token usage metrics; subagent usage is read from terminal `ToolMessage.additional_kwargs` in the current run and merged back into the dispatching AIMessage by message position. The same state update marks the ToolMessage with `subagent_token_usage_attributed=true`, so checkpoint replay or middleware re-entry cannot add the cumulative snapshot twice; missing/malformed usage or a result with no matching dispatch remains unmarked and retryable.
-    TODO attribution skips non-string statuses before membership; preserve args/TODO state for normal tool validation.
-24. **TitleMiddleware** - Auto-generates the thread title after the first complete exchange and normalizes structured message content before prompting the title model. If a first-turn run is interrupted before this middleware can write a title, `runtime/runs/worker.py` keeps the run in a finalizing state, persists a local fallback title from the latest checkpoint or original run input, and then syncs it to `threads_meta.display_name`. Replacement runs admitted by `multitask_strategy="interrupt"` / `"rollback"` wait for older same-thread finalization before entering the graph; the interrupted run only skips the fallback title write once a later run has started and may have advanced the checkpoint.
-25. **MemoryMiddleware** - Queues conversations for async memory update (filters to user + final AI responses); captures the runtime-resolved user so standalone LangGraph Server reads and writes stay in the same bucket
-26. **ViewImageMiddleware** - *(vision models only)* Rebuilds hidden base64 image context in `ModelRequest.messages`, never in new checkpoint state; state retains lightweight `viewed_images` metadata. Blob refs resolve first and fail over to existing paths. `_image_injection_plan` first sweeps stale server-marked context (including payloads stranded by the old `before_model`/`after_model` lifecycle), then shares one read-eligibility predicate between sync injection and async authorization. The sweep requires both the reserved ID prefix and server-owned marker, preserving user messages and unmarked legacy payloads. Before reading images, both paths recheck `sandbox:execute`, including restored views after role changes; denial skips I/O and removes marked stale context. Host-copy reads additionally require the saved `actual_path` to match the current user/thread's canonical virtual image path, including for old checkpoints and replacement sandboxes; a missing or mismatched thread identity skips that host read. Only the async wrapper passes `authorization_checked=True` after its gate, avoiding a duplicate synchronous provider call in its worker.
-27. **McpRoutingMiddleware** - Auto-promotes deferred schemas matching the latest real user message before `DeferredToolFilterMiddleware`, without executing tools. New names emit `middleware:tool_promotion` with `source=routing_hint`; repeat passes emit nothing
-28. **DeferredToolPromotionAuditMiddleware** - Observes final `tool_search` `Command`s; keep it outer of `SkillToolPolicyMiddleware` so denied names are excluded. It atomically claims new names per lead run or subagent execution to dedupe parallel searches, derives subagent attribution from the server-installed recorder, returns the original `Command`, and omits private payloads
-29. **DeferredToolFilterMiddleware** - *(optional, if `tool_search.enabled`)* Hides deferred (MCP) tool schemas from the bound model until `tool_search` or `McpRoutingMiddleware` promotes them (reads per-thread promotions from `ThreadState.promoted`, hash-scoped)
-30. **SystemMessageCoalescingMiddleware** - Merges every SystemMessage into a single leading SystemMessage per request; provider-agnostic fix for strict backends (vLLM/SGLang/Qwen/Anthropic) that reject non-leading system messages. Touches the per-request payload only (checkpoint state unchanged); on midnight crossings only the latest `dynamic_context_reminder` SystemMessage survives. The subagent builder places its date-only context middleware immediately before this coalescer, so the built-in subagent prompt and hidden date reminder still reach providers as one leading system block
-31. **SubagentLimitMiddleware** - `subagent_enabled`: caps ordinary `task` calls per response (`max_concurrent_subagents`, resolved before construction against startup `subagent_runtime.max_running` and 1-64) and per run (`max_total_subagents` override or `subagents.max_total_per_run`, default 6, clamped 1-50). Count current-run durable ledger entries, tagged with `run_id` on capture: repeated planning shares the cap; later user runs get a fresh budget. Durable `batch_task` has separate persisted total/live/running limits and no ordinary ledger entries. When exhausted, strip remaining `task` calls, force `finish_reason="stop"`, and append a visible limit note so the agent synthesizes existing results.
-   Capture/retain delegations by `(run_id, tool_call_id)`. Later-run replies cannot close older orphans; missing run IDs match conservatively.
-32. **LoopDetectionMiddleware** - `loop_detection.enabled`: detects repeated tool-call loops. Hard stops clear structured/raw/content-block calls, force a final text answer, and stamp `loop_capped` via `consume_stop_reason` (#3875 Phase 2, matching `TokenBudgetMiddleware`). Persist first warned-state transitions per call hash/tool-frequency burst and hard stops as `middleware:loop_detection`, with `is_subagent`/optional `agent_id`; omit arguments, message content, results and argument-derived hashes. Ordinary task subagents use dedicated recorder keys via a parent-loop proxy; never pass `RunJournal` into their isolated loop. Durable batch subagents have no parent journal and persist no transitions.
-   New user runs reset budgets/history; same-run goal continuations share it.
-   Isolate sibling warnings and keep lifecycle hooks topology-stable. Before changing this guard, read
-   [Loop detection lifecycle](../../../../../docs/LOOP_DETECTION.md) for
-   fallback identity, cleanup/LRU/reset, severity ordering, and test invariants.
-33. **TokenBudgetMiddleware** - `token_budget.enabled`: run-ID budgets survive continuations; missing/invalid IDs reset invocation state. With token usage tracking, place CompletedSubagentUsageMiddleware after the guard: reversed `after_model` hooks backfill terminal child usage before enforcement. Keep TokenUsageMiddleware earlier so current-step attribution reflects calls retained by all guards.
-34. **Custom middlewares** - *(optional)* Any `custom_middlewares` passed to `build_middlewares` are injected here, before config-declared extensions and the terminal-response/safety/clarification tail
-35. **Configured extension middlewares** - `extensions.middlewares` in `config.yaml` or `extensions_config.json` optionally accepts `module.path:ClassName` strings or `{class, kwargs}` objects. `deerflow.reflection.resolve_class` loads `AgentMiddleware` classes; import, class, and constructor errors fail agent creation. `kwargs` must be JSON-compatible; YAML dates/timestamps become ISO strings. Order: built-ins/custom and loop/token guards → extensions → terminal-response/safety/clarification tail. Subagents share the list before their safety tail; separate lead/subagent lists are unsupported. Trusted operator config only: paths instantiate arbitrary code. Gateway skill/MCP toggles preserve it in raw JSON; adding an API write path requires explicit trust-boundary review.
-36. **TerminalResponseMiddleware** - When a provider returns an empty terminal `AIMessage` after tool execution, injects a hidden recovery prompt and retries the model once; a second empty response is replaced in checkpoint state by a visible error fallback marked for the run worker, so the run finishes as an error instead of a silent success
-37. **ModelLengthFinishReasonMiddleware** - Match stamps `stop_reason=model_length_capped` and ends tool loop. Suppresses calls, appends notice even with partial text, and stamps `model_length_termination` so downstream guards stand down. Preserves content blocks.
-38. **SafetyFinishReasonMiddleware** - *(optional, if `safety_finish_reason.enabled`)* Suppresses tool execution when the provider safety-terminated the response (e.g. `finish_reason=content_filter`); registered after terminal-response/custom/configured middlewares so LangChain's reverse-order `after_model` dispatch runs it first
-39. **ClarificationMiddleware** - Intercepts `ask_clarification`, writes a readable `ToolMessage.content` fallback plus a structured `ToolMessage.artifact.human_input` payload, and interrupts via `Command(goto=END)` (must be last). `after_model` drops same-turn sibling tool calls so they cannot run before the user answers; a malformed `ask_clarification` parked on `invalid_tool_calls` is the same stop signal. `disable_clarification` runs keep the siblings. Payloads are versioned — legacy `free_text`/`choice_with_other` stay `version: 1`; the v2 `form` mode (from `fields`) is `version: 2` so older frontends reject it and fall back to plain text. Field normalization is deterministic and lives in the middleware (it short-circuits before tool execution, so tool-arg typing gives no runtime validation), and it is atomic: any structurally broken entry — non-dict, bad/duplicate name, a name colliding with a JS `Object.prototype` member (`__proto__`/`constructor`), or exceeding the caps (16 fields / 24 options per field / 200 chars per text / `MAX_FORM_SERIALIZED_BYTES` = 16KB UTF-8, the per-item caps alone admitting forms whose IM text fallback overruns channel limits) — degrades the whole form to the legacy option/free-text modes, so a card never renders "complete" while missing a field. Benign issues degrade locally (unknown types — incl. unhashable JSON like `type: []`, which must not raise from the membership probe — and option-less selects become `text`); options are trimmed/deduped with blanks dropped (form- and top-level) since the frontend rejects blank labels. XML-to-dict option payloads are recursively flattened from dict/list containers in source order, scalar leaves kept, residual XML tags stripped before that trimming. Checkboxes are booleans defaulting to "no"; `required` on one means consent semantics. The response protocol is unchanged (v1 `text`/`option`): form cards submit a text summary as `response_kind: "text"`, so journal persistence needs no new allowlist entries. `RunJournal` reconciles visible, unpersisted `ToolMessage`s for current-run lead-agent calls at the next lead-agent `on_chat_model_start` after consumption, or at successful root `on_chain_end`. This preserves any middleware short-circuit, including blocked writes, across later model errors and checkpoint compaction (#4666). `_remember_current_run_tool_calls` excludes subagents; their results stay in `subagent.step`. Human Input Card replies are `hide_from_ui` `HumanMessage`s with `additional_kwargs.human_input_response`; `RunJournal` persists only allowlisted hidden sources (currently `ask_clarification`) as `llm.human.input`.
-
-Inline `skill_references` accepts 1–16 names; empty lists retain slash/plain flow.
-Resolve the whole batch through user storage, enabled state and agent allowlist
-before activation; reject any invalid entry. Keep bodies in escaped HumanMessage
-context with task text once. Authenticated paths feed secrets/tool policy; record usage per skill.
-Legacy slash syntax is unchanged.
+Middlewares run on the event loop that serves the run. File and network I/O goes
+off the loop, and a started operation is drained even after cancellation. Waiters
+that cross loops own separate futures; notify them outside the state lock.

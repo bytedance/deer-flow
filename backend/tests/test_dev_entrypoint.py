@@ -140,6 +140,20 @@ def test_no_explicit_extras_uses_the_runtime_selected_config(tmp_path: Path):
     assert proc.stdout.strip() == "--extra browser --extra postgres"
 
 
+@pytest.mark.parametrize("uv_extras, expected", [(None, "--extra buzz --extra discord"), ("postgres", "--extra postgres")])
+def test_channel_connections_extras_respect_explicit_override(tmp_path: Path, uv_extras, expected):
+    config_path = tmp_path / "deployment.yaml"
+    config_path.write_text(
+        "channel_connections:\n  enabled: true\n  discord:\n    enabled: true\n  buzz:\n    enabled: true\n",
+        encoding="utf-8",
+    )
+
+    proc = _run(uv_extras, config_path=config_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected
+
+
 def test_single_extra():
     proc = _run("postgres")
     assert proc.returncode == 0

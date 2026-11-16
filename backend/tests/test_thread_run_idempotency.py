@@ -418,6 +418,23 @@ def test_scope_http_run_idempotency_key_ignores_header_default():
     assert thread_runs._scope_http_run_idempotency_key(request, "thread-1", None) is None
 
 
+def test_internal_caller_key_is_scoped_by_owner_not_thread():
+    """The IM channel manager may route a redelivered message to a different
+    thread after ``/new`` rebound the conversation; its key must still meet the
+    run admitted for the first delivery."""
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+
+    internal = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE)), headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "alice"})
+    other_owner = SimpleNamespace(state=internal.state, headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "bob"})
+    browser = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="alice", system_role="user")), headers={})
+
+    scope = thread_runs._scope_http_run_idempotency_key
+    assert scope(internal, "thread-1", "message-1") == scope(internal, "thread-2", "message-1")
+    assert scope(internal, "thread-1", "message-1") != scope(other_owner, "thread-1", "message-1")
+    assert scope(browser, "thread-1", "message-1") != scope(browser, "thread-2", "message-1")
+    assert scope(internal, "thread-1", "message-1") != scope(browser, "thread-1", "message-1")
+
+
 def test_stream_reused_store_only_running_run_returns_409(monkeypatch):
     """A reused running record on a process-local bridge must not hang on an empty stream."""
 
@@ -648,6 +665,27 @@ def _make_start_run_request(run_manager):
     )
 
 
+async def _pause_checkpoint(thread_id: str = "thread-1", payload: dict | None = None):
+    """Create a real checkpoint whose only pause signal is a raw interrupt write."""
+    from langchain_core.messages import HumanMessage
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.graph import MessagesState, StateGraph
+    from langgraph.types import interrupt
+
+    def approval(_state):
+        interrupt(payload or {"kind": "hitl_approval", "request_id": "approval-1", "pending_tool_call_ids": ["call-1"]})
+        return {}
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("approval", approval)
+    builder.set_entry_point("approval")
+    builder.set_finish_point("approval")
+    saver = InMemorySaver()
+    graph = builder.compile(checkpointer=saver)
+    await graph.ainvoke({"messages": [HumanMessage(content="start")]}, {"configurable": {"thread_id": thread_id}})
+    return saver
+
+
 @pytest.fixture
 def _stub_app_config():
     set_app_config(AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}}))
@@ -723,6 +761,1282 @@ async def test_start_run_rejects_reused_key_with_different_input(_stub_app_confi
 
     assert excinfo.value.status_code == 409
     assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("stable_message_id", "reused"), [(True, True), (False, False)], ids=["keyed-message-id", "random-message-id"])
+async def test_channel_redelivery_on_another_instance_reuses_the_admitted_run(_stub_app_config, stable_message_id, reused):
+    """The IM manager's keyed request, as a second Gateway instance sees it.
+
+    The human message id is part of the compared input, so only a message id
+    derived from the same key lets a redelivery reuse the admitted run; a
+    fresh uuid per delivery is a different request (409).
+    """
+    from app.channels.manager import ChannelManager, _human_input_message
+    from app.channels.message_bus import InboundMessage
+    from app.gateway.services import start_run
+
+    msg = InboundMessage(channel_name="slack", chat_id="C1", user_id="U1", text="hi", metadata={"event_id": "evt-1", "team_id": "T1"})
+    key = f"http-run:{ChannelManager._run_idempotency_key(msg)}"
+
+    def body() -> RunCreateRequest:
+        message_id = ChannelManager._human_message_id(msg) if stable_message_id else None
+        return RunCreateRequest(input={"messages": [_human_input_message("hi", message_id=message_id)]}, on_disconnect="continue")
+
+    async def fake_run_agent(*args, **kwargs):
+        del args, kwargs
+        await asyncio.Event().wait()
+
+    store = MemoryRunStore()
+    first_instance, second_instance = RunManager(store=store, worker_id="worker-a"), RunManager(store=store, worker_id="worker-b")
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        first = await start_run(body(), "thread-1", _make_start_run_request(first_instance), idempotency_key=key)
+        try:
+            if reused:
+                second = await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert (second.run_id, second.idempotency_reused) == (first.run_id, True)
+            else:
+                with pytest.raises(HTTPException) as excinfo:
+                    await start_run(body(), "thread-1", _make_start_run_request(second_instance), idempotency_key=key)
+                assert excinfo.value.status_code == 409
+                assert "different request" in str(excinfo.value.detail)
+        finally:
+            first.task.cancel()
+            await asyncio.gather(first.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_key_already_admitted_on_another_thread_is_a_409_not_a_second_run(_stub_app_config):
+    """A redelivery routed to the conversation's new thread after ``/new``."""
+    from app.gateway.services import start_run
+
+    input_payload = {"messages": [{"role": "user", "content": "hello"}]}
+    store = MemoryRunStore()
+    first_instance, second_instance = RunManager(store=store, worker_id="worker-a"), RunManager(store=store, worker_id="worker-b")
+    await first_instance.create_or_reject("thread-old", user_id=None, idempotency_key="internal-run:same", kwargs={"input": input_payload, "config": None})
+
+    for run_manager in (first_instance, second_instance):  # the local record, then the durable row
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+            pytest.raises(HTTPException) as excinfo,
+        ):
+            await start_run(RunCreateRequest(input=input_payload), "thread-new", _make_start_run_request(run_manager), idempotency_key="internal-run:same")
+
+        assert excinfo.value.status_code == 409
+        assert "Idempotency-Key already used" in str(excinfo.value.detail)
+    assert await store.list_by_thread("thread-new") == []
+
+
+def test_resume_idempotency_fingerprint_is_typed_and_order_independent():
+    from app.gateway.services import _run_idempotency_request
+
+    first = _run_idempotency_request(RunCreateRequest(command={"resume": {"enabled": True, "count": 1, "ratio": 1.0}}))
+    reordered = _run_idempotency_request(RunCreateRequest(command={"resume": {"ratio": 1.0, "count": 1, "enabled": True}}))
+
+    assert first == reordered
+    assert first != _run_idempotency_request(RunCreateRequest(command={"resume": {"enabled": 1, "count": 1, "ratio": 1.0}}))
+    assert first != _run_idempotency_request(RunCreateRequest(command={"resume": {"enabled": True, "count": 1.0, "ratio": 1.0}}))
+    assert first != _run_idempotency_request(RunCreateRequest(input={"command": {"resume": {"enabled": True, "count": 1, "ratio": 1.0}}}))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_resume_idempotency_fingerprint_rejects_non_finite_numbers(value):
+    from app.gateway.services import _run_idempotency_request
+
+    with pytest.raises(HTTPException) as excinfo:
+        _run_idempotency_request(RunCreateRequest(command={"resume": value}))
+
+    assert excinfo.value.status_code == 422
+    assert "strict JSON" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("idempotency_key", [None, "http-run:same"])
+async def test_start_run_rejects_invalid_resume_before_agent_assembly(_stub_app_config, idempotency_key):
+    from app.gateway.services import start_run
+
+    factory = MagicMock(side_effect=AssertionError("agent assembly must not run"))
+    with (
+        patch("app.gateway.services.resolve_agent_factory", factory),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            RunCreateRequest(command={"resume": float("nan")}),
+            "thread-1",
+            _make_start_run_request(RunManager(store=MemoryRunStore())),
+            idempotency_key=idempotency_key,
+        )
+
+    assert excinfo.value.status_code == 422
+    factory.assert_not_called()
+
+
+def test_run_response_never_contains_internal_idempotency_fingerprint():
+    record = _run("run-1", "thread-1")
+    record.kwargs = {"input": None}
+    record.idempotency_request = {
+        "version": 1,
+        "kind": "resume",
+        "sha256": "a" * 64,
+    }
+
+    response = thread_runs._record_to_response(record)
+
+    assert response.kwargs == {"input": None}
+
+
+def test_run_response_sanitizes_legacy_resume_idempotency_fence():
+    record = _run("run-1", "thread-1")
+    record.kwargs = {
+        "input": ["deerflow-resume-idempotency", 1, "a" * 64],
+        "idempotency_request": {
+            "version": 1,
+            "kind": "resume",
+            "sha256": "a" * 64,
+        },
+    }
+
+    response = thread_runs._record_to_response(record)
+
+    assert response.kwargs == {"input": None}
+
+
+@pytest.mark.anyio
+async def test_start_run_rejects_legacy_reused_key_for_resume(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        kwargs={"input": None, "config": None},
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            RunCreateRequest(command={"resume": {"answer": "approve"}}),
+            "thread-1",
+            _make_start_run_request(peer),
+            idempotency_key="http-run:same",
+        )
+
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+async def test_start_run_reuses_matching_legacy_writer_resume_fingerprint(_stub_app_config):
+    from app.gateway.services import _run_idempotency_request, start_run
+
+    approved = RunCreateRequest(command={"resume": {"answer": "approve"}})
+    denied = RunCreateRequest(command={"resume": {"answer": "deny"}})
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        kwargs={
+            "input": ["deerflow-resume-idempotency", 1, "a" * 64],
+            "idempotency_request": _run_idempotency_request(approved),
+            "config": None,
+        },
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+    ):
+        reused = await start_run(
+            approved,
+            "thread-1",
+            _make_start_run_request(peer),
+            idempotency_key="http-run:same",
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            await start_run(
+                denied,
+                "thread-1",
+                _make_start_run_request(peer),
+                idempotency_key="http-run:same",
+            )
+
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+async def test_start_run_reuses_only_matching_resume_fingerprint(_stub_app_config):
+    from app.gateway.services import _run_idempotency_request, start_run
+
+    approved = RunCreateRequest(command={"resume": {"answer": "approve"}})
+    denied = RunCreateRequest(command={"resume": {"answer": "deny"}})
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        idempotency_request=_run_idempotency_request(approved),
+        kwargs={"input": None, "config": None},
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+    ):
+        reused = await start_run(
+            approved,
+            "thread-1",
+            _make_start_run_request(peer),
+            idempotency_key="http-run:same",
+        )
+        with pytest.raises(HTTPException) as excinfo:
+            await start_run(
+                denied,
+                "thread-1",
+                _make_start_run_request(peer),
+                idempotency_key="http-run:same",
+            )
+
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert reused.store_only is True
+    assert reused.task is None
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.parametrize("original_input", [None, {}], ids=["static-resume", "new-input"])
+@pytest.mark.anyio
+async def test_start_run_idempotency_distinguishes_static_resume_from_new_input(_stub_app_config, original_input):
+    from app.gateway.services import start_run
+
+    # {} also models a legacy null-input record, whose original intent is lost.
+    body = RunCreateRequest(input=original_input)
+    manager = RunManager(store=MemoryRunStore())
+    first = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="static-resume-key",
+        kwargs={"input": original_input, "config": None},
+    )
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        patch("app.gateway.services._recover_run_knowledge_scope", new=AsyncMock(return_value=None)),
+    ):
+        reused = await start_run(body, "thread-1", _make_start_run_request(manager), idempotency_key="static-resume-key")
+        with pytest.raises(HTTPException) as excinfo:
+            await start_run(
+                RunCreateRequest(input={} if original_input is None else None),
+                "thread-1",
+                _make_start_run_request(manager),
+                idempotency_key="static-resume-key",
+            )
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+async def test_start_run_reuses_admitted_resume_before_current_pause_validation(_stub_app_config):
+    from app.gateway.services import _run_idempotency_request, start_run
+
+    approved = RunCreateRequest(command={"resume": {"answer": "approve"}})
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        idempotency_request=_run_idempotency_request(approved),
+        kwargs={"input": None, "config": None},
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(side_effect=AssertionError("current pause must not be revalidated"))) as validate,
+        patch("app.gateway.hitl_approval.mark_approval_answered", new=AsyncMock(side_effect=AssertionError("reused resume must not mutate the pause"))) as mark_answered,
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+    ):
+        reused = await start_run(
+            approved,
+            "thread-1",
+            _make_start_run_request(peer),
+            idempotency_key="http-run:same",
+        )
+
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    validate.assert_not_awaited()
+    mark_answered.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_start_run_rejects_checkpointless_resume(_stub_app_config):
+    from app.gateway.services import start_run
+
+    manager = RunManager(store=MemoryRunStore(), worker_id="worker-a")
+    request = _make_start_run_request(manager)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            RunCreateRequest(command={"resume": {"answer": "approve"}}),
+            "thread-1",
+            request,
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "no_pending_approval"
+    worker.assert_not_called()
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_start_run_persists_resume_fingerprint_without_payload(_stub_app_config):
+    from app.gateway.services import _run_idempotency_request, start_run
+
+    request_body = RunCreateRequest(command={"resume": {"answer": "approve"}})
+    manager = RunManager(store=MemoryRunStore(), worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    request.app.state.checkpointer = await _pause_checkpoint(payload={"question": "Continue?"})
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock),
+    ):
+        record = await start_run(
+            request_body,
+            "thread-1",
+            request,
+            idempotency_key="http-run:same",
+        )
+        assert record.task is not None
+        await record.task
+
+    assert record.idempotency_request == _run_idempotency_request(request_body)
+    assert record.idempotency_request["kind"] == "resume"
+    assert set(record.idempotency_request) == {"version", "kind", "sha256"}
+    assert record.kwargs["input"] is None
+    assert "idempotency_request" not in record.kwargs
+
+
+@pytest.mark.anyio
+async def test_start_run_rejects_checkpoint_only_pending_approval(_stub_app_config):
+    from app.gateway.services import start_run
+
+    manager = RunManager(store=MemoryRunStore(), worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    request.app.state.checkpointer = await _pause_checkpoint()
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.build_thread_checkpoint_state_accessor", new=AsyncMock(side_effect=AssertionError("ordinary admission must use raw checkpoints"))),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            RunCreateRequest(input={"messages": [{"role": "user", "content": "new work"}]}),
+            "thread-1",
+            request,
+        )
+
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["code"] == "approval_pending"
+    worker.assert_not_called()
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_paused_non_resume_keyed_retry_defers_to_reuse_and_fingerprint(_stub_app_config):
+    from app.gateway.services import start_run
+
+    input_payload = {"messages": [{"role": "user", "content": "original"}]}
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    first = await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        kwargs={"input": input_payload, "config": None},
+    )
+    request = _make_start_run_request(peer)
+    request.app.state.checkpointer = await _pause_checkpoint()
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.build_thread_checkpoint_state_accessor", new=AsyncMock(side_effect=AssertionError("a keyed retry must not revalidate the pause"))),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+    ):
+        reused = await start_run(RunCreateRequest(input=input_payload), "thread-1", request, idempotency_key="http-run:same")
+        with pytest.raises(HTTPException) as excinfo:
+            await start_run(
+                RunCreateRequest(input={"messages": [{"role": "user", "content": "different"}]}),
+                "thread-1",
+                request,
+                idempotency_key="http-run:same",
+            )
+
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+async def test_rejected_resume_admission_leaves_paused_run_untouched(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    paused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        metadata={"hitl_approval": {"kind": "hitl_approval", "pending_tool_call_ids": ["call-1"]}},
+        kwargs={"input": None, "config": None},
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    paused_before = await store.get(paused.run_id, user_id=None)
+    await manager.create_or_reject("thread-1", user_id=None, kwargs={"input": None, "config": None})
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new_callable=AsyncMock) as validate,
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            RunCreateRequest(command={"resume": {"answer": "approve"}}),
+            "thread-1",
+            _make_start_run_request(manager),
+        )
+
+    assert excinfo.value.status_code == 409
+    validate.assert_awaited_once()
+    assert await store.get(paused.run_id, user_id=None) == paused_before
+
+
+@pytest.mark.anyio
+async def test_cancelled_resume_marks_admitted_run_failed_without_attaching_worker(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    mark_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    original_fail_start = manager.fail_start_if_pending
+
+    async def block_mark_answered(*args, **kwargs):
+        del args, kwargs
+        mark_started.set()
+        await asyncio.Future()
+
+    async def controlled_fail_start(*args, **kwargs):
+        cleanup_started.set()
+        await release_cleanup.wait()
+        await original_fail_start(*args, **kwargs)
+        cleanup_finished.set()
+
+    manager.fail_start_if_pending = controlled_fail_start
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new_callable=AsyncMock),
+        patch("app.gateway.hitl_approval.mark_approval_answered", side_effect=block_mark_answered),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as run_agent,
+    ):
+        start_task = asyncio.create_task(
+            start_run(
+                RunCreateRequest(command={"resume": {"answer": "approve"}}),
+                "thread-1",
+                request,
+            )
+        )
+        await asyncio.wait_for(mark_started.wait(), 1)
+        start_task.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), 1)
+
+        # A repeated cancellation must not cancel the shielded terminal write.
+        start_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await start_task
+        assert not cleanup_finished.is_set()
+
+        release_cleanup.set()
+        await asyncio.wait_for(cleanup_finished.wait(), 1)
+
+    run_agent.assert_not_called()
+    admitted = await manager.list_by_thread("thread-1")
+    assert len(admitted) == 1
+    assert admitted[0].status == RunStatus.error
+    assert admitted[0].task is None
+    assert (await store.get(admitted[0].run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_concurrent_resume_only_attaches_transition_winner(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    paused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        metadata={
+            "hitl_approval": {
+                "kind": "hitl_approval",
+                "request_id": "approval-1",
+                "pending_tool_call_ids": ["call-1"],
+                "actions": [{"tool_call_id": "call-1", "request_id": "approval-1"}],
+            }
+        },
+        kwargs={"input": None, "config": None},
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+
+    body = RunCreateRequest(command={"resume": {"responses": [{"option_id": "approve", "tool_call_id": "call-1", "request_id": "approval-1"}]}})
+    both_validated = asyncio.Event()
+    worker_finished = asyncio.Event()
+    validated = 0
+    mark_results = []
+    executions = []
+
+    async def validate_after_both_arrive(*args, **kwargs):
+        nonlocal validated
+        validated += 1
+        arrival = validated
+        if arrival == 2:
+            both_validated.set()
+        await asyncio.wait_for(both_validated.wait(), 1)
+        if arrival == 2:
+            # Both requests validated against the stale pause. Let the first
+            # finish before the second enters the per-thread admission lock.
+            await asyncio.wait_for(worker_finished.wait(), 5)
+        return {"call-1": "approval-1"}
+
+    original_mark = manager.mark_approval_answered
+
+    async def record_mark_result(thread_id, *, expected_request_ids=None):
+        result = await original_mark(thread_id, expected_request_ids=expected_request_ids)
+        mark_results.append(result)
+        return result
+
+    manager.mark_approval_answered = record_mark_result
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        executions.append(record.run_id)
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        worker_finished.set()
+
+    async def invoke(key):
+        try:
+            outcome = await start_run(body, "thread-1", request, idempotency_key=key)
+        except HTTPException as exc:
+            outcome = exc
+        return key, outcome
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", side_effect=validate_after_both_arrive),
+        patch("app.gateway.services.run_agent", new=fake_run_agent),
+    ):
+        results = dict(await asyncio.gather(invoke("http-run:race-a"), invoke("http-run:race-b")))
+        winners = [(key, outcome) for key, outcome in results.items() if isinstance(outcome, RunRecord)]
+        conflicts = [outcome for outcome in results.values() if isinstance(outcome, HTTPException)]
+
+        assert len(winners) == 1
+        assert len(conflicts) == 1
+        assert conflicts[0].status_code == 409
+        assert conflicts[0].detail["code"] == "no_pending_approval"
+        winner_key, winner = winners[0]
+        assert winner.task is not None
+        await winner.task
+
+        # The accepted request remains reusable under its original key.
+        reused = await start_run(body, "thread-1", request, idempotency_key=winner_key)
+        assert reused.run_id == winner.run_id
+        assert reused.idempotency_reused is True
+
+    assert sorted(result is not None for result in mark_results) == [False, True]
+    assert executions == [winner.run_id]
+    assert paused.status == RunStatus.success
+    failed = next(record for record in await manager.list_by_thread("thread-1") if record.run_id not in {paused.run_id, winner.run_id})
+    assert failed.status == RunStatus.error
+    assert failed.task is None
+    assert (await store.get(failed.run_id))["status"] == "error"
+
+
+@pytest.mark.anyio
+async def test_resume_attach_failure_restores_pause_and_allows_all_reject_retry(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    original_metadata = {
+        "hitl_approval": {
+            "kind": "hitl_approval",
+            "request_id": "approval-1",
+            "pending_tool_call_ids": ["call-1"],
+            "actions": [{"tool_call_id": "call-1", "request_id": "approval-1"}],
+        },
+        "retained": True,
+    }
+    paused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        metadata=original_metadata,
+        kwargs={"input": None, "config": None},
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    request = _make_start_run_request(manager)
+    request.app.state.run_store = store
+
+    class FailingTransferBridge:
+        supports_cross_process = True
+        owner_task = None
+
+        async def start_producer_lease(self, run_id):
+            return True
+
+        def transfer_producer_lease(self, run_id, owner_task):
+            self.owner_task = owner_task
+            raise RuntimeError("injected attachment failure")
+
+        async def abort_producer_lease(self, run_id):
+            return None
+
+    failing_bridge = FailingTransferBridge()
+    request.app.state.stream_bridge = failing_bridge
+    executions = []
+
+    async def fake_run_agent(bridge, run_manager, record, **kwargs):
+        executions.append(record.run_id)
+        await run_manager.set_status(record.run_id, RunStatus.success)
+
+    all_reject = RunCreateRequest(command={"resume": {"responses": [{"option_id": "reject", "tool_call_id": "call-1", "request_id": "approval-1"}]}})
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(return_value={"call-1": "approval-1"})),
+        patch("app.gateway.services.run_agent", new=fake_run_agent),
+        pytest.raises(RuntimeError, match="injected attachment failure"),
+    ):
+        await start_run(all_reject, "thread-1", request, idempotency_key="http-run:attach-retry")
+
+    assert failing_bridge.owner_task is not None
+    assert failing_bridge.owner_task.cancelled()
+    assert executions == []
+    assert paused.status == RunStatus.waiting_for_input
+    assert paused.metadata == original_metadata
+    restored = await store.get(paused.run_id)
+    assert restored["status"] == "waiting_for_input"
+    assert restored["metadata"] == original_metadata
+    failed = next(record for record in await manager.list_by_thread("thread-1") if record.run_id != paused.run_id)
+    assert failed.status == RunStatus.error
+    assert failed.task is None
+
+    request.app.state.stream_bridge = SimpleNamespace()
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(return_value={"call-1": "approval-1"})) as validate,
+        patch("app.gateway.services.run_agent", new=fake_run_agent),
+    ):
+        retried = await start_run(all_reject, "thread-1", request, idempotency_key="http-run:attach-retry")
+        assert retried.task is not None
+        await retried.task
+
+    validate.assert_awaited_once()
+    assert executions == [retried.run_id]
+    assert retried.run_id != failed.run_id
+    assert await store.get(failed.run_id) is None
+    assert paused.status == RunStatus.success
+    assert paused.metadata == {"retained": True}
+    assert (await store.get(paused.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_all_reject_recovers_checkpoint_pause_after_resume_crash(_stub_app_config):
+    from app.gateway.services import start_run
+
+    store = MemoryRunStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    request = _make_start_run_request(manager)
+    request.app.state.run_store = store
+    metadata = {
+        "hitl_approval": {
+            "kind": "hitl_approval",
+            "request_id": "approval-1",
+            "pending_tool_call_ids": ["call-1"],
+            "actions": [{"tool_call_id": "call-1", "request_id": "approval-1"}],
+        }
+    }
+    paused = await manager.create_or_reject("thread-1", user_id=None, metadata=metadata)
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    answered = await manager.mark_approval_answered("thread-1", expected_request_ids={"call-1": "approval-1"})
+    assert answered is not None
+    assert paused.status == RunStatus.success
+
+    body = RunCreateRequest(command={"resume": {"responses": [{"option_id": "reject", "tool_call_id": "call-1", "request_id": "approval-1"}]}})
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock(return_value={"call-1": "approval-1"})),
+        patch("app.gateway.hitl_approval.current_approval_request_ids", new=AsyncMock(return_value={"call-1": "approval-1"})),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
+    ):
+        retried = await start_run(body, "thread-1", request)
+        assert retried.task is not None
+        await retried.task
+
+    worker.assert_awaited_once()
+    assert (await store.get(paused.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_resume_persistence_failure_allows_same_key_retry_to_resume(_stub_app_config):
+    import sqlite3
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.runs.manager import PersistenceRetryPolicy, RunStartupError
+
+    store = MemoryRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="worker-a",
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=2, initial_delay=0, max_delay=0),
+    )
+    paused = await manager.create_or_reject(
+        "thread-1",
+        user_id=None,
+        metadata={"hitl_approval": {"kind": "hitl_approval", "pending_tool_call_ids": ["call-1"]}},
+        kwargs={"input": None, "config": None},
+    )
+    await manager.set_status(paused.run_id, RunStatus.waiting_for_input)
+    original_answer = store.answer_approval
+    paused_writes = 0
+
+    async def fail_paused_write(run_id, *, metadata, answered_updated_at, expected_request_id=None):
+        nonlocal paused_writes
+        if run_id == paused.run_id:
+            paused_writes += 1
+            raise sqlite3.OperationalError("database is locked")
+        return await original_answer(
+            run_id,
+            metadata=metadata,
+            answered_updated_at=answered_updated_at,
+            expected_request_id=expected_request_id,
+        )
+
+    store.answer_approval = fail_paused_write
+    body = RunCreateRequest(command={"resume": {"answer": "approve"}})
+    request = _make_start_run_request(manager)
+    request.app.state.run_store = store
+    key = "http-run:resume-retry"
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new_callable=AsyncMock),
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
+        pytest.raises(RunStartupError, match="Failed to mark approval run"),
+    ):
+        await start_run(
+            body,
+            "thread-1",
+            request,
+            idempotency_key=key,
+        )
+
+    assert paused_writes == 2
+    worker.assert_not_called()
+    assert paused.status == RunStatus.waiting_for_input
+    assert paused.metadata["hitl_approval"]["pending_tool_call_ids"] == ["call-1"]
+    paused_row = await store.get(paused.run_id)
+    assert paused_row["status"] == "waiting_for_input"
+    assert "hitl_approval" in paused_row["metadata"]
+    admitted = next(record for record in await manager.list_by_thread("thread-1") if record.run_id != paused.run_id)
+    assert admitted.status == RunStatus.error
+    assert admitted.task is None
+    assert (await store.get(admitted.run_id))["status"] == "error"
+
+    failed_run_id = admitted.run_id
+    store.answer_approval = original_answer
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.hitl_approval.validate_resume_request", new_callable=AsyncMock) as validate,
+        patch("app.gateway.services.run_agent", new_callable=AsyncMock) as worker,
+    ):
+        retried = await start_run(body, "thread-1", request, idempotency_key=key)
+        assert retried.task is not None
+        await retried.task
+
+    assert retried.run_id != failed_run_id
+    assert retried.idempotency_reused is False
+    validate.assert_awaited_once()
+    worker.assert_awaited_once()
+    assert await store.get(failed_run_id) is None
+    assert paused.status == RunStatus.success
+    assert (await store.get(paused.run_id))["status"] == "success"
+
+
+async def _pre_6499_resume_retry(session_factory, body, idempotency_key):
+    """Freeze the null-input resume reuse policy from 02ce9ab2, without mapping the new column.
+
+    This intentionally models only the historical resume case exercised below,
+    not an alternative implementation of current Gateway admission.
+    """
+    import sqlalchemy as sa
+
+    assert body.input is None and body.command.get("resume") is not None
+    old_runs = sa.Table(
+        "runs",
+        sa.MetaData(),
+        sa.Column("run_id", sa.String(64), primary_key=True),
+        sa.Column("idempotency_key", sa.String(255)),
+        sa.Column("assistant_id", sa.String(128)),
+        sa.Column("kwargs_json", sa.JSON()),
+    )
+    async with session_factory() as session:
+        row = (await session.execute(sa.select(old_runs).where(old_runs.c.idempotency_key == idempotency_key))).mappings().one()
+    stored = row["kwargs_json"]
+    # Old start_run compares input, assistant and references, ignoring command.resume.
+    if stored.get("input") != body.input or row["assistant_id"] != body.assistant_id or stored.get("conversation_references", []) != list(body.conversation_references or []):
+        raise HTTPException(status_code=409, detail="Idempotency-Key already used with a different request")
+    return row["run_id"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("writer_version", ["pre-6499", "current"])
+async def test_mixed_version_resume_admission_requires_upgraded_routing(tmp_path, _stub_app_config, writer_version):
+    """Read compatibility does not make old workers safe keyed-resume retry targets."""
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+    from deerflow.persistence.run import RunRepository
+
+    await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path / 'mixed-resume.db'}", sqlite_dir=str(tmp_path))
+    try:
+        session_factory = get_session_factory()
+        repo = RunRepository(session_factory)
+        owner = RunManager(store=repo, worker_id="writer")
+        peer = RunManager(store=repo, worker_id="upgraded-reader")
+        approved = RunCreateRequest(command={"resume": {"answer": "approve"}})
+        denied = RunCreateRequest(command={"resume": {"answer": "deny"}})
+        key = "http-run:mixed-resume"
+        with (
+            patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+            patch("app.gateway.hitl_approval.validate_resume_request", new=AsyncMock()),
+            patch("app.gateway.services.run_agent", new_callable=AsyncMock) as run_agent,
+        ):
+            if writer_version == "current":
+                first = await services.start_run(approved, "thread-1", _make_start_run_request(owner), idempotency_key=key)
+                assert first.task is not None
+                await first.task
+                assert run_agent.await_args.kwargs["graph_input"].resume == {"answer": "approve"}
+            else:
+                # Pre-6499 writers admit null input and persist no resume identity.
+                first = await owner.create_or_reject("thread-1", approved.assistant_id, user_id=None, idempotency_key=key, kwargs={"input": None, "config": None})
+
+            persisted = await repo.get(first.run_id, user_id=None)
+            assert persisted is not None
+            assert bool(persisted["idempotency_request"]) is (writer_version == "current")
+            assert persisted["kwargs"]["input"] is None
+            assert "idempotency_request" not in persisted["kwargs"]
+
+            # The genuine old-column SQL projection cannot see the private identity:
+            # both decisions reuse the same row under the historical input-only policy.
+            assert await _pre_6499_resume_retry(session_factory, approved, key) == first.run_id
+            assert await _pre_6499_resume_retry(session_factory, denied, key) == first.run_id
+
+            if writer_version == "current":
+                retry = await services.start_run(approved, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+                assert retry.run_id == first.run_id and retry.idempotency_reused
+            else:
+                # Even an identical retry is unverifiable for an identity-less legacy row.
+                with pytest.raises(HTTPException) as error:
+                    await services.start_run(approved, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+                assert error.value.status_code == 409
+
+            with pytest.raises(HTTPException) as error:
+                await services.start_run(denied, "thread-1", _make_start_run_request(peer), idempotency_key=key)
+            assert error.value.status_code == 409
+            assert run_agent.await_count == (1 if writer_version == "current" else 0)
+            assert len(await repo.list_by_thread("thread-1", user_id=None)) == 1
+            assert (await repo.get(first.run_id, user_id=None))["idempotency_request"] == persisted["idempotency_request"]
+    finally:
+        await close_engine()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("stored_kind", ["input", "resume"])
+async def test_start_run_rejects_input_resume_kind_collision(_stub_app_config, stored_kind):
+    from app.gateway.services import _run_idempotency_request, start_run
+
+    collision = {"command": {"resume": {"answer": "approve"}}}
+    input_request = RunCreateRequest(input=collision)
+    resume_request = RunCreateRequest(input=collision, command={"resume": {"answer": "approve"}})
+    stored_request, retry_request = (input_request, resume_request) if stored_kind == "input" else (resume_request, input_request)
+    store = MemoryRunStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    await owner.create_or_reject(
+        "thread-1",
+        user_id=None,
+        idempotency_key="http-run:same",
+        idempotency_request=_run_idempotency_request(stored_request),
+        kwargs={"input": collision, "config": None},
+    )
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await start_run(
+            retry_request,
+            "thread-1",
+            _make_start_run_request(peer),
+            idempotency_key="http-run:same",
+        )
+
+    assert excinfo.value.status_code == 409
+    assert "different request" in str(excinfo.value.detail)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+async def test_memory_store_reuses_live_idempotency_key_before_foreign_lease_conflict(strategy):
+    from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+    store = MemoryRunStore()
+    ownership = RunOwnershipConfig(
+        lease_seconds=30,
+        grace_seconds=10,
+        heartbeat_enabled=True,
+    )
+    owner = RunManager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    first = await owner.create_or_reject(
+        "thread-1",
+        multitask_strategy=strategy,
+        idempotency_key="http-run:same",
+    )
+
+    reused = await peer.create_or_reject(
+        "thread-1",
+        multitask_strategy=strategy,
+        idempotency_key="http-run:same",
+    )
+
+    assert reused.run_id == first.run_id
+    assert reused.idempotency_reused is True
+    assert reused.store_only is True
+    stored = await store.get(first.run_id)
+    assert stored is not None
+    assert stored["status"] == "pending"
+    assert stored["owner_worker_id"] == "worker-a"
+
+
+@pytest.mark.anyio
+async def test_keyed_input_remains_compatible_with_legacy_explicit_atomic_signature():
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class LegacyAtomicMemoryStore(MemoryRunStore):
+        async def create_thread_operation_atomic(
+            self,
+            run_id,
+            *,
+            thread_id,
+            owner_worker_id,
+            lease_expires_at,
+            operation_kind="run",
+            multitask_strategy="reject",
+            assistant_id=None,
+            user_id=None,
+            model_name=None,
+            metadata=None,
+            kwargs=None,
+            created_at=None,
+            grace_seconds=10,
+            idempotency_key=None,
+        ):
+            return await super().create_thread_operation_atomic(
+                run_id,
+                thread_id=thread_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+                operation_kind=operation_kind,
+                multitask_strategy=multitask_strategy,
+                assistant_id=assistant_id,
+                user_id=user_id,
+                model_name=model_name,
+                metadata=metadata,
+                kwargs=kwargs,
+                created_at=created_at,
+                grace_seconds=grace_seconds,
+                idempotency_key=idempotency_key,
+            )
+
+    store = LegacyAtomicMemoryStore()
+    manager = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+
+    record = await manager.create_or_reject(
+        "thread-1",
+        idempotency_key="http-run:key",
+    )
+
+    assert record.idempotency_key == "http-run:key"
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_key"] == "http-run:key"
+    reused = await peer.create_or_reject("thread-1", idempotency_key="http-run:key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
+        await manager.create_or_reject(
+            "thread-2",
+            idempotency_key="http-run:resume",
+            idempotency_request={
+                "version": 1,
+                "kind": "resume",
+                "sha256": "a" * 64,
+            },
+        )
+
+
+@pytest.mark.anyio
+async def test_keyed_resume_rejects_ambiguous_kwargs_store_before_admission():
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKwargsStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKwargsStore()
+    manager = RunManager(store=store)
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
+        await manager.create_or_reject(
+            "thread-1",
+            idempotency_key="http-run:resume",
+            idempotency_request={
+                "version": 1,
+                "kind": "resume",
+                "sha256": "a" * 64,
+            },
+        )
+
+    assert await store.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+async def test_keyed_resume_allows_explicit_kwargs_store_capability():
+    class ForwardingKwargsStore(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = ForwardingKwargsStore()
+    manager = RunManager(store=store)
+    identity = {
+        "version": 1,
+        "kind": "resume",
+        "sha256": "a" * 64,
+    }
+
+    record = await manager.create_or_reject(
+        "thread-1",
+        idempotency_key="http-run:resume",
+        idempotency_request=identity,
+    )
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_request"] == identity
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("multitask_strategy", ["reject", "interrupt", "rollback"])
+async def test_keyed_input_rejects_ambiguous_kwargs_store_before_admission(multitask_strategy):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKwargsStore(MemoryRunStore):
+        atomic_called = False
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            self.atomic_called = True
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKwargsStore()
+    manager = RunManager(store=store)
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed run"):
+        await manager.create_or_reject(
+            "thread-1",
+            idempotency_key="http-run:input",
+            multitask_strategy=multitask_strategy,
+        )
+
+    assert store.atomic_called is False
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+async def test_explicit_resume_parameter_does_not_imply_key_support(with_resume_identity):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class DroppingKeyStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, *, idempotency_request=None, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, idempotency_request=idempotency_request, **kwargs)
+
+    store = DroppingKeyStore()
+    manager = RunManager(store=store)
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed run"):
+        await manager.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+@pytest.mark.parametrize("declaration", ["replaced_parent_method", "child_flag", "mixin_flag"])
+async def test_kwargs_store_capability_must_belong_to_implementation_owner(declaration, with_resume_identity):
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    class OptedInParent(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class ReplacingChild(OptedInParent):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class UnoptedParent(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            kwargs.pop("idempotency_request", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class FlagOnlyChild(UnoptedParent):
+        supports_idempotency_request_kwargs = True
+
+    class FlagMixin:
+        supports_idempotency_request_kwargs = True
+
+    class MixinStore(FlagMixin, UnoptedParent):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    stores = {"replaced_parent_method": ReplacingChild, "child_flag": FlagOnlyChild, "mixin_flag": MixinStore}
+    store = stores[declaration]()
+    manager = RunManager(store=store)
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    with pytest.raises(RunIdempotencyUnsupported):
+        await manager.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("with_resume_identity", [False, True])
+async def test_kwargs_store_inherits_capability_with_unchanged_implementation(with_resume_identity):
+    class OptedInParent(MemoryRunStore):
+        supports_idempotency_request_kwargs = True
+
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    class InheritingStore(OptedInParent):
+        pass
+
+    store = InheritingStore()
+    owner = RunManager(store=store, worker_id="worker-a")
+    peer = RunManager(store=store, worker_id="worker-b")
+    identity = {"version": 1, "kind": "resume", "sha256": "a" * 64} if with_resume_identity else None
+
+    record = await owner.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+    reused = await peer.create_or_reject("thread-1", idempotency_key="http-run:key", idempotency_request=identity)
+
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted["idempotency_key"] == "http-run:key"
+    assert persisted["idempotency_request"] == identity
+    assert len(await store.list_by_thread("thread-1")) == 1
+
+
+@pytest.mark.anyio
+async def test_start_run_returns_503_for_ambiguous_key_only_store(_stub_app_config):
+    class DroppingKeyStore(MemoryRunStore):
+        async def create_thread_operation_atomic(self, run_id, **kwargs):
+            kwargs.pop("idempotency_key", None)
+            return await super().create_thread_operation_atomic(run_id, **kwargs)
+
+    store = DroppingKeyStore()
+    manager = RunManager(store=store)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=AssertionError("worker must not attach")),
+        pytest.raises(HTTPException) as excinfo,
+    ):
+        await services.start_run(
+            RunCreateRequest(input={"messages": [{"role": "user", "content": "hello"}]}),
+            "thread-1",
+            _make_start_run_request(manager),
+            idempotency_key="http-run:input",
+        )
+
+    assert excinfo.value.status_code == 503
+    assert "does not support keyed run" in str(excinfo.value.detail)
+    assert await store.list_by_thread("thread-1") == []
+    assert await manager.list_by_thread("thread-1") == []
 
 
 @pytest.mark.anyio

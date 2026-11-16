@@ -8,6 +8,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
@@ -28,6 +29,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
+from deerflow.models.selection import authorize_selected_model
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
@@ -73,6 +75,11 @@ _SUBAGENT_POLL_INTERVAL_SECONDS = 5.0
 # cleaner on the persistent subagent loop.
 _UNEXPECTED_EXIT_GRACE_SECONDS = 5.0
 
+# A hard timeout returns to the lead immediately while cleanup stays owned on
+# the isolated loop. Retain its terminal result for this bounded usage-tail
+# window so callbacks emitted during cleanup are not lost.
+_TERMINAL_USAGE_TAIL_POLLS = 12
+
 # Sentinel returned by ``_peek_subagent_result`` when the registry entry exists
 # but cannot be read (persistent status-lookup / status-object failure).
 _STATUS_UNREADABLE = object()
@@ -85,6 +92,69 @@ _explicit_app_config: ContextVar[Any | None] = ContextVar(
     "deerflow_explicit_subagent_app_config",
     default=None,
 )
+
+
+def _preflight_delegation_checks(
+    *,
+    subagent_type: str,
+    context_mode: str,
+    runtime_app_config: Any | None,
+    allowed_subagents: Any | None,
+) -> tuple[Any | None, str | None]:
+    """Read-only preflight (validate-then-mutate).
+
+    Runs every precondition check in one pass before any side-effecting
+    delegation work (tool assembly, SubagentExecutor creation, background task
+    registration) is triggered.
+
+    This helper has zero side effects of its own:
+    - Does not create a SubagentExecutor
+    - Does not register background tasks
+    - Does not assemble MCP/business tools
+    - Does not snapshot the parent context
+    - Does not preempt or cancel any source task
+
+    Returns (config, None) when every check passes; returns (None, error_str)
+    when rejected, and the caller should return the failure directly. The
+    helper's internal state is unchanged, so callers can retry safely.
+    Note: before this helper runs, the caller has already registered a child
+    gateway entry on RunInputControl; that entry can be reused for benign
+    retries and is not a side effect of this helper itself.
+
+    If the recovery feature lands later, add read-only source-task
+    recoverability checks here (type compatibility, extractable history,
+    non-empty), and have the caller run supersede_and_claim_resumable_task only
+    after all checks pass, so a rejected recovery request does not consume the
+    source task (see issue #7633).
+    """
+    config: Any | None = None
+
+    if context_mode not in {"isolated", "snapshot"}:
+        return None, f"Unknown context_mode '{context_mode}'. Use isolated or snapshot."
+
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
+            return None, LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+
+    # Catalog discovery only after the cheapest guards pass: an invalid
+    # context_mode must not reach the managed-subagent store lookup.
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    else:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if config is None or subagent_type not in available_subagent_names:
+        if available_subagent_names:
+            available = ", ".join(available_subagent_names)
+        elif allowed_subagents is not None:
+            available = "none permitted by caller policy"
+        else:
+            available = "none"
+        return None, f"Unknown subagent type '{subagent_type}'. Available: {available}"
+
+    return config, None
 
 
 def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> None:
@@ -160,7 +230,20 @@ class _ParentLoopMiddlewareRecorderProxy:
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
-    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
+    status = result.status
+    terminal = getattr(status, "is_terminal", None)
+    if isinstance(terminal, bool):
+        return terminal
+    return (
+        getattr(status, "value", status)
+        in {
+            "completed",
+            "failed",
+            "cancelled",
+            "timed_out",
+        }
+        or getattr(result, "completed_at", None) is not None
+    )
 
 
 def _peek_subagent_result(execution_id: str, *, trace_id: str) -> Any:
@@ -290,6 +373,13 @@ async def _finalize_interrupted_subagent(
         if final_result is not None:
             _report_subagent_usage(runtime, final_result)
         if final_terminal:
+            _supervise_terminal_usage_tail(
+                runtime,
+                execution_id,
+                trace_id,
+                max_polls,
+                final_result,
+            )
             cleanup_background_task(execution_id)
         else:
             _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_polls)
@@ -372,14 +462,15 @@ async def _deferred_cleanup_subagent_task(
     max_polls: int,
     *,
     report_loop: asyncio.AbstractEventLoop | None = None,
+    terminal_result: Any | None = None,
 ) -> None:
     """Keep polling an interrupted subagent until it can be safely removed.
 
-    Only the resolved usage recorder is retained (plus ids and the captured
-    report loop) — never the whole ``runtime``: the strongly-referenced
-    cleanup task lives for up to the full poll budget, and through
-    ``runtime`` it would pin the parent run's journal and event store for
-    that entire window.
+    Only the resolved usage recorder is retained (plus ids, the captured report
+    loop, and an optional already-terminal result) — never the whole ``runtime``:
+    the strongly-referenced cleanup task lives for up to the full poll budget,
+    and through ``runtime`` it would pin the parent run's journal and event store
+    for that entire window.
 
     On a terminal result, schedule the subagent's FINAL usage report (deltas
     since the unwind snapshot included) onto the parent run's loop BEFORE
@@ -392,7 +483,9 @@ async def _deferred_cleanup_subagent_task(
     """
     cleanup_poll_count = 0
     while True:
-        result = _peek_subagent_result(execution_id, trace_id=trace_id)
+        result = terminal_result
+        if result is None:
+            result = _peek_subagent_result(execution_id, trace_id=trace_id)
         if result is None:
             return
         if result is _STATUS_UNREADABLE:
@@ -401,6 +494,17 @@ async def _deferred_cleanup_subagent_task(
                 force_cleanup_background_task(execution_id)
                 return
         elif _is_subagent_terminal(result):
+            execution_done = getattr(result, "execution_done_event", None)
+            if isinstance(execution_done, threading.Event) and not execution_done.is_set():
+                if cleanup_poll_count >= max_polls:
+                    # Non-pinned callers have not requested registry removal
+                    # yet. The supervisor must reap it when the fence opens.
+                    cleanup_background_task(execution_id)
+                    logger.warning(f"[trace={trace_id}] Deferred cleanup for terminal execution {execution_id} timed out after {cleanup_poll_count} polls")
+                    return
+                await asyncio.sleep(_SUBAGENT_POLL_INTERVAL_SECONDS)
+                cleanup_poll_count += 1
+                continue
             # Never-raise by contract: delivery problems (closed parent loop)
             # are logged inside and must not block the registry removal.
             _deliver_final_usage_report(usage_recorder, result, report_loop, execution_id=execution_id)
@@ -472,6 +576,8 @@ def _schedule_deferred_subagent_cleanup(
     execution_id: str,
     trace_id: str,
     max_polls: int,
+    *,
+    terminal_result: Any | None = None,
 ) -> asyncio.Task[None] | concurrent.futures.Future:
     """Schedule the deferred registry cleanup on the process-owned subagent loop.
 
@@ -482,7 +588,7 @@ def _schedule_deferred_subagent_cleanup(
     obtained, fall back to the caller loop rather than raising out of an
     unwind path that is already handling an error.
     """
-    logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
+    logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for execution {execution_id}")
     # Resolve both cross-loop dependencies here, on the unwind path's loop:
     # the parent run's loop, so the deferred final usage report can be
     # delivered back onto the loop that owns the RunJournal (see
@@ -494,7 +600,14 @@ def _schedule_deferred_subagent_cleanup(
     except RuntimeError:
         report_loop = None
     usage_recorder = _find_usage_recorder(runtime)
-    coro = _deferred_cleanup_subagent_task(usage_recorder, execution_id, trace_id, max_polls, report_loop=report_loop)
+    coro = _deferred_cleanup_subagent_task(
+        usage_recorder,
+        execution_id,
+        trace_id,
+        max_polls,
+        report_loop=report_loop,
+        terminal_result=terminal_result,
+    )
     try:
         cleanup_handle = run_on_isolated_subagent_loop(coro)
     except Exception:
@@ -599,6 +712,29 @@ def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) ->
     _report_usage_records(_find_usage_recorder(runtime), result, final=final)
 
 
+def _supervise_terminal_usage_tail(
+    runtime: Any,
+    execution_id: str,
+    trace_id: str,
+    max_polls: int,
+    result: Any,
+) -> None:
+    """Deliver usage collected after a terminal outcome was published."""
+    execution_done = getattr(result, "execution_done_event", None)
+    if not isinstance(execution_done, threading.Event):
+        return
+    if execution_done.is_set():
+        _report_subagent_usage(runtime, result, final=True)
+        return
+    _schedule_deferred_subagent_cleanup(
+        runtime,
+        execution_id,
+        trace_id,
+        max_polls,
+        terminal_result=result,
+    )
+
+
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
     explicit = _explicit_app_config.get()
     if explicit is not None:
@@ -625,6 +761,7 @@ def _merge_skill_allowlists(parent: list[str] | None, child: list[str] | None) -
 def _task_result_command(
     *,
     tool_call_id: str,
+    message_id: str | None = None,
     status: SubagentStatusValue,
     result: str | None = None,
     error: str | None = None,
@@ -635,20 +772,32 @@ def _task_result_command(
     source_messages: list[dict] | None = None,
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
+    knowledge_sources: list[dict] | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     if acceptance_verdict is not None:
         # RFC #4651 PR4: the rendered checklist rides the model-visible result
         # text; metadata carries the structured verdict for the ledger/judge.
         content = f"{content}\n\n{render_acceptance_section(acceptance_verdict)}"
+    artifact = cited_source_artifact(source_messages or [], content, include_omissions=True)
+    if knowledge_sources:
+        from deerflow.knowledge.sources import forward_sources
+
+        content, unified_artifact = forward_sources(content, knowledge_sources)
+        if artifact is None:
+            artifact = unified_artifact
+        else:
+            # Preserve the native RAGFlow envelope for existing history and batch readers.
+            artifact = {**artifact, "retrieval_sources": unified_artifact["knowledge_sources"], "knowledge_sources_version": 1}
     return Command(
         update={
             "messages": [
                 ToolMessage(
+                    id=message_id,
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    artifact=cited_source_artifact(source_messages or [], content),
+                    artifact=artifact,
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,
@@ -676,6 +825,7 @@ async def task_tool(
     acceptance_criteria: list[str] | None = None,
     description: str = "",
     context_mode: Literal["isolated", "snapshot"] = "isolated",
+    model_name: str | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -742,6 +892,10 @@ async def task_tool(
       syntax up to 50,000 bytes, rejecting NaN/Infinity. Oversize files, incomplete reads,
       or parser resource limits return UNVERIFIED. No schema or business validation;
       .json files are not checked automatically.
+    - CSV deliverables can opt into `file:<path> csv-columns:["id","name"]`: check the
+      first UTF-8 header record (optional BOM), with exact required names and extra columns
+      allowed. Empty/duplicate headers fail; incomplete or oversized headers are UNVERIFIED.
+      The header budget is 50,000 bytes; data rows are not validated.
     - `completed` means execution ended, not task acceptance. Read each criterion
       and retain useful work. For `does not hold`, inspect the reason and repair
       or recheck only the unmet condition, reusing unaffected outputs.
@@ -778,43 +932,46 @@ async def task_tool(
             summary as background at dispatch time, increasing input tokens.
             The child keeps its own role/tools; later parent turns are not synced.
             Historical tool actions are not evidence of child completion.
+        model_name: Optional configured model name for this child only. Omit to
+            keep the subagent's configured/inherited model. Does not change the
+            parent conversation or the saved subagent configuration.
     """
-    if context_mode not in {"isolated", "snapshot"}:
-        return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
+    from deerflow.runtime.runs.input_control import run_input_control
+
+    parent_context = getattr(runtime, "context", None)
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    input_control = run_input_control(parent_context)
+    input_gate = input_control.child(tool_call_id) if input_control is not None else None
+    result_command = partial(_task_result_command, message_id=input_gate.result_id) if input_gate is not None else _task_result_command
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
     allowed_subagents = metadata.get("allowed_subagents")
-    if allowed_subagents is None:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-    else:
-        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
-    # Preserve the dedicated sandbox-policy guidance before the generic
-    # registry/policy membership gate filters bash from the visible catalog.
-    if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-        if not host_bash_allowed:
-            return _task_result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
-            )
-
-    # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-    if config is None or subagent_type not in available_subagent_names:
-        if available_subagent_names:
-            available = ", ".join(available_subagent_names)
-        elif allowed_subagents is not None:
-            available = "none permitted by caller policy"
-        else:
-            available = "none"
-        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
-        return _task_result_command(
+    # Preflight: read-only checks with zero side effects. Complete every
+    # precondition check in one pass before any side-effecting delegation work
+    # (tool assembly, executor creation, background task registration). Return
+    # immediately on failure; the helper's internal state is unchanged, so the
+    # caller can retry safely. The context_mode guard is the first branch
+    # executed inside the helper, and catalog discovery was moved after the
+    # guard so an invalid mode never triggers a managed-subagent store access.
+    # The helper sweeps the managed-definition store for its signature (file
+    # stats, or a SQL query) on every TTL miss, and the sandbox-policy check
+    # may read config files, so it resolves on the assembly pool like every
+    # other blocking hop below (issue #5172).
+    preflight_config, preflight_error = await run_assembly(
+        _preflight_delegation_checks,
+        subagent_type=subagent_type,
+        context_mode=context_mode,
+        runtime_app_config=runtime_app_config,
+        allowed_subagents=allowed_subagents,
+    )
+    if preflight_error is not None:
+        return result_command(
             tool_call_id=tool_call_id,
             status="failed",
-            error=error,
+            error=preflight_error,
         )
+    config = preflight_config
     # Rejected delegations must not serialize the retained history. Capture
     # after delegation validation, before child setup (including tool loading).
     context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
@@ -868,8 +1025,20 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    requested_model = parent_context.get("subagent_model_name")
+    if model_name is not None and requested_model is not None and model_name != requested_model:
+        return result_command(tool_call_id=tool_call_id, status="failed", error="The child model conflicts with the user's selection.")
+    selected_model = model_name if model_name is not None else requested_model
+    if selected_model is not None:
+        resolved_config = runtime_app_config or await run_assembly(get_app_config)
+        try:
+            if not isinstance(selected_model, str) or not selected_model.strip():
+                raise ValueError("A configured model name is required.")
+            await run_assembly(authorize_selected_model, selected_model, context=parent_context, app_config=resolved_config)
+        except ValueError as exc:
+            return result_command(tool_call_id=tool_call_id, status="failed", error=str(exc))
+        runtime_app_config = resolved_config
+        config = replace(config, model=selected_model)
     if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
         runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")
@@ -912,7 +1081,11 @@ async def task_tool(
     parent_tool_groups = metadata.get("tool_groups")
     resolved_app_config = runtime_app_config
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
-        resolved_app_config = get_app_config()
+        # get_app_config() reads config/extension files (and may fully reload
+        # them) on every miss. Resolve it on the assembly pool like every other
+        # fallback above so the inherit path cannot stall the calling event
+        # loop (issue #5172).
+        resolved_app_config = await run_assembly(get_app_config)
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive
@@ -937,6 +1110,8 @@ async def task_tool(
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
+    from deerflow.mcp.agent_auth import runtime_agent_authority
+
     executor_kwargs = {
         "config": config,
         "tools": tools,
@@ -956,6 +1131,7 @@ async def task_tool(
         "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
         "knowledge_scope": knowledge_scope,
+        "agent_mcp_authority": runtime_agent_authority(runtime),
         # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
         # executor, which appends them to the subagent's task HumanMessage as
         # untrusted data (sanitized and boundary-framed by
@@ -964,6 +1140,9 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    approval_runtime = parent_context.get("__tool_approval_runtime")
+    if approval_runtime is not None:
+        executor_kwargs["approval_runtime"] = approval_runtime.child()
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
@@ -990,11 +1169,15 @@ async def task_tool(
     explicit_capacity = _explicit_execution_capacity.get()
     if explicit_capacity is not None:
         executor_kwargs["execution_capacity"] = explicit_capacity
+    if input_gate is not None:
+        executor_kwargs["input_gate"] = input_gate
     executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
     execution_id = executor.execute_async(prompt, task_id=tool_call_id)
+    if input_control is not None:
+        input_control.bind_execution(tool_call_id, execution_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -1032,7 +1215,7 @@ async def task_tool(
                 )
                 cleanup_background_task(execution_id)
                 error = f"Task {tool_call_id} disappeared from background tasks"
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=error,
@@ -1114,7 +1297,7 @@ async def task_tool(
                         )
                     except Exception:
                         logger.warning(f"[trace={trace_id}] Acceptance checklist failed for task {tool_call_id}; result flows back unchecked", exc_info=True)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
                     result=result.result,
@@ -1125,6 +1308,7 @@ async def task_tool(
                     source_messages=getattr(result, "ai_messages", None),
                     receipt_verdict=receipt_verdict,
                     acceptance_verdict=acceptance_verdict,
+                    knowledge_sources=getattr(result, "knowledge_sources", None),
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -1143,7 +1327,7 @@ async def task_tool(
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="failed",
                     error=result.error,
@@ -1167,7 +1351,7 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} cancelled: {result.error}")
                 cleanup_background_task(execution_id)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="cancelled",
                     error=result.error,
@@ -1189,8 +1373,15 @@ async def task_tool(
                     writer=writer,
                 )
                 logger.warning(f"[trace={trace_id}] Task {tool_call_id} timed out: {result.error}")
+                _supervise_terminal_usage_tail(
+                    runtime,
+                    execution_id,
+                    trace_id,
+                    _TERMINAL_USAGE_TAIL_POLLS,
+                    result,
+                )
                 cleanup_background_task(execution_id)
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="timed_out",
                     error=result.error,
@@ -1227,7 +1418,7 @@ async def task_tool(
                 request_cancel_background_task(execution_id)
                 _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
-                return _task_result_command(
+                return result_command(
                     tool_call_id=tool_call_id,
                     status="polling_timed_out",
                     error=message,

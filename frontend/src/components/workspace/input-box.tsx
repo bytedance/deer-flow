@@ -6,6 +6,7 @@ import type { ChatStatus } from "ai";
 import {
   AtSignIcon,
   CheckIcon,
+  ChevronDownIcon,
   GraduationCapIcon,
   LightbulbIcon,
   Loader2Icon,
@@ -44,7 +45,6 @@ import {
   PromptInputActionMenuContent,
   PromptInputActionMenuItem,
   PromptInputActionMenuTrigger,
-  PromptInputAttachment,
   PromptInputAttachments,
   PromptInputButton,
   PromptInputFooter,
@@ -101,7 +101,10 @@ import {
   supportsThinking as modelSupportsThinking,
 } from "@/core/models/reasoning";
 import { attachProjectDocument } from "@/core/projects/api";
-import { useStagedProjectAttachments } from "@/core/projects/composer-attach";
+import {
+  retireProjectAttachments,
+  useStagedProjectAttachments,
+} from "@/core/projects/composer-attach";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -118,9 +121,11 @@ import {
   getSessionComposerDraftStorage,
   readComposerDraft,
   resolveComposerDraft,
+  retireSentComposerDraft,
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
+import type { RunInputMode } from "@/core/threads/run-inputs";
 import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -131,6 +136,7 @@ import {
   type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
+import { AttachmentUploadSession } from "@/core/uploads/attachment-upload-session";
 import {
   appendSpeechTranscript,
   getSpeechRecognitionConstructor,
@@ -152,6 +158,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { InputAttachment } from "./input-attachment";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -200,9 +207,17 @@ import {
   ModelPickerTrigger,
 } from "./model-picker-content";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+import { ToolApprovalMode } from "./tool-approval-mode";
 import { Tooltip } from "./tooltip";
+import {
+  normalizeGoalStatusRead,
+  type GoalChangeKind,
+} from "./use-active-goal";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
+
+/** A `/goal` request either saved, failed (toast shown), or went stale. */
+type GoalCommandResult = "saved" | "failed" | "stale";
 
 function focusContentEditableEnd(element: HTMLElement | null) {
   if (!element) {
@@ -253,6 +268,7 @@ function escapeXmlAttribute(value: string) {
 }
 
 export type InputBoxSubmitOptions = {
+  attachmentUploads?: AttachmentUploadSession;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /** Thread IDs attached through the conversation picker; sent as run context. */
@@ -333,9 +349,11 @@ export function InputBox({
   onPrepareThread,
   onReferenceFileAttached,
   onSubmit,
+  onBusySubmit,
   onStop,
   canStopStreaming = true,
   canCreateRuns = true,
+  inputLocked = false,
   agentSkillNames,
   agentSkillsLoading = false,
   ...props
@@ -343,11 +361,14 @@ export function InputBox({
   assistantId?: string | null;
   status?: ChatStatus;
   disabled?: boolean;
+  /** Prevent new input while retaining cancellation of a live run. */
+  inputLocked?: boolean;
   context: Omit<
     AgentThreadContext,
     "thread_id" | "is_plan_mode" | "thinking_enabled" | "subagent_enabled"
   > & {
     mode: "flash" | "thinking" | "pro" | "ultra" | undefined;
+    tool_approval_mode?: "ask" | "auto" | "full";
     reasoning_effort?: ReasoningEffortValue;
   };
   extraHeader?: React.ReactNode;
@@ -388,7 +409,7 @@ export function InputBox({
     options?: { automatic: boolean },
   ) => void;
   onFollowupsVisibilityChange?: (visible: boolean) => void;
-  onGoalChange?: (goal: GoalState | null) => void;
+  onGoalChange?: (goal: GoalState | null, kind: GoalChangeKind) => void;
   /**
    * Prepare a not-yet-materialized thread before a builtin command creates
    * it server-side. The `/goal <condition>` PUT endpoint materializes a
@@ -406,6 +427,7 @@ export function InputBox({
     options?: InputBoxSubmitOptions,
   ) => void | Promise<void>;
   onStop?: () => void;
+  onBusySubmit?: (text: string, mode: RunInputMode) => Promise<unknown>;
   /**
    * Whether the caller's role holds `runs:cancel` (RFC #4063 Phase 4).
    * Defaults to true so callers that don't resolve permissions (pre-Phase-4
@@ -422,6 +444,11 @@ export function InputBox({
   canCreateRuns?: boolean;
 }) {
   const { locale, t } = useI18n();
+  const [runInputMode, setRunInputMode] = useState<RunInputMode>("queue");
+  const [runInputSending, setRunInputSending] = useState(false);
+  const runInputInFlight = useRef(false);
+  const canSendBusyInput = !!onBusySubmit && canCreateRuns;
+  useEffect(() => setRunInputMode("queue"), [threadId]);
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const mentionListId = useId();
@@ -584,6 +611,10 @@ export function InputBox({
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
   const draftSaveGenerationRef = useRef(0);
+  // Bumped whenever the composer stops showing a conversation (switch or
+  // unmount). A send's onSent can arrive after an attachment upload, when
+  // the composer that sent it shows another conversation or is gone.
+  const composerLifetimeRef = useRef(0);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -874,6 +905,16 @@ export function InputBox({
       }),
     [context.agent_name, draftAgentName, draftThreadId, user?.id],
   );
+  // A different draft owns a fresh cache, even when its files have the same names.
+  const attachmentUploads = useMemo(
+    () => new AttachmentUploadSession(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [draftKey],
+  );
+  useLayoutEffect(() => {
+    attachmentUploads.activate();
+    return () => attachmentUploads.deactivate();
+  }, [attachmentUploads]);
   const agentScopedSkills = useMemo(
     () =>
       agentSkillsLoading ? [] : filterSkillsForAgent(skills, agentSkillNames),
@@ -909,9 +950,10 @@ export function InputBox({
   }, [cancelDraftSaveTimer]);
   const scheduleDraftSave = useCallback(
     (draft: ComposerDraft, key = draftKey) => {
-      // An accepted attachment send keeps its text visible until upload finishes.
-      // Reference cleanup can rerun this effect meanwhile; do not resurrect the
-      // accepted snapshot. Actual input edits release it, even for identical text.
+      // An accepted attachment send keeps its text visible until its submit
+      // resolves. Reference cleanup can rerun this effect meanwhile; do not
+      // resurrect the accepted snapshot. Actual input edits release it, even
+      // for identical text.
       const accepted = acceptedDraftRef.current;
       if (
         accepted?.key === key &&
@@ -1015,6 +1057,7 @@ export function InputBox({
   }, [thread.messages]);
 
   useLayoutEffect(() => {
+    composerLifetimeRef.current += 1;
     promptHistoryIndexRef.current = null;
     promptHistoryDraftRef.current = "";
     setTextInput("");
@@ -1033,6 +1076,7 @@ export function InputBox({
     latestDraftRef.current = null;
     invalidateDraftSaveTimer();
     return () => {
+      composerLifetimeRef.current += 1;
       mentionEpoch.current += 1;
       flushLatestDraft(draftKey);
     };
@@ -1204,9 +1248,16 @@ export function InputBox({
   );
 
   const handleGoalCommand = useCallback(
-    async (command: GoalCommand): Promise<boolean> => {
+    async (command: GoalCommand): Promise<GoalCommandResult> => {
       const request = beginGoalRequest(goalRequestStateRef.current, threadId);
       const signal = request.controller.signal;
+      // A 409 means a run this tab is not streaming is still in flight.
+      const requestError = async (response: Response) =>
+        new Error(
+          response.status === 409
+            ? t.inputBox.goalBar.busy
+            : await readGoalResponseError(response),
+        );
       try {
         let goal: GoalState | null = null;
         if (command.kind === "status") {
@@ -1217,11 +1268,11 @@ export function InputBox({
             { method: "GET", signal },
           );
           if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
+            throw await requestError(response);
           }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
+          goal = normalizeGoalStatusRead(
+            ((await response.json()) as { goal?: unknown }).goal,
+          );
           if (
             !isCurrentGoalRequest(
               goalRequestStateRef.current,
@@ -1229,7 +1280,7 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            return "stale";
           }
           const objective = goal?.objective;
           toast.info(
@@ -1239,7 +1290,7 @@ export function InputBox({
                 t.inputBox.goalActive.replace("{goal}", () => objective)
               : t.inputBox.goalNone,
           );
-          onGoalChange?.(goal);
+          onGoalChange?.(goal, "status");
         } else if (command.kind === "clear") {
           const response = await fetch(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
@@ -1248,7 +1299,7 @@ export function InputBox({
             { method: "DELETE", signal },
           );
           if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
+            throw await requestError(response);
           }
           if (
             !isCurrentGoalRequest(
@@ -1257,10 +1308,10 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            return "stale";
           }
           toast.success(t.inputBox.goalCleared);
-          onGoalChange?.(null);
+          onGoalChange?.(null, "clear");
         } else {
           const response = await fetch(
             `${getBackendBaseURL()}/api/threads/${encodeURIComponent(
@@ -1274,7 +1325,7 @@ export function InputBox({
             },
           );
           if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
+            throw await requestError(response);
           }
           goal =
             ((await response.json()) as { goal?: GoalState | null }).goal ??
@@ -1286,24 +1337,24 @@ export function InputBox({
               threadId,
             )
           ) {
-            return false;
+            return "stale";
           }
           toast.success(t.inputBox.goalSet);
-          onGoalChange?.(goal);
+          onGoalChange?.(goal, "set");
         }
         textInput.setInput("");
-        return true;
+        return "saved";
       } catch (error) {
         if (
           isAbortError(error) ||
           !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
         ) {
-          return false;
+          return "stale";
         }
         toast.error(
           error instanceof Error ? error.message : t.inputBox.goalFailed,
         );
-        return false;
+        return "failed";
       } finally {
         finishGoalRequest(goalRequestStateRef.current, request);
       }
@@ -1311,6 +1362,7 @@ export function InputBox({
     [
       onGoalChange,
       t.inputBox.goalActive,
+      t.inputBox.goalBar.busy,
       t.inputBox.goalCleared,
       t.inputBox.goalFailed,
       t.inputBox.goalNone,
@@ -1429,12 +1481,13 @@ export function InputBox({
           ),
         );
       }
-      const activeConversations = reconcileConversationReferences(
+      const reconciledDraft = reconcileConversationReferences(
         textInput.value,
         conversationReferences,
         conversationCapability,
         threadId,
-      ).references;
+      );
+      const activeConversations = reconciledDraft.references;
       const referenceIds = activeConversations.map(
         (reference) => reference.threadId,
       );
@@ -1481,6 +1534,12 @@ export function InputBox({
         text: textInput.value,
         skillName: null,
       };
+      // What this send carries, so a late onSent retires only that.
+      const sendingLifetime = composerLifetimeRef.current;
+      const sentDraftTexts = [textInput.value, reconciledDraft.text];
+      const sentAttachmentPaths = new Set(
+        projectAttachments.map((attachment) => attachment.virtual_path),
+      );
       const additionalKwargs = {
         ...extensionMetadata,
         ...(skillReferences.length
@@ -1493,6 +1552,7 @@ export function InputBox({
         ...(stagedFiles.length > 0 ? { files: stagedFiles } : {}),
       };
       const submitOptions: InputBoxSubmitOptions = {
+        attachmentUploads,
         ...(Object.keys(additionalKwargs).length ? { additionalKwargs } : {}),
         ...(quotes.length
           ? {
@@ -1506,9 +1566,23 @@ export function InputBox({
         ...(referenceIds.length
           ? { conversationReferences: referenceIds }
           : {}),
-        // Clear one-time state only once the send genuinely proceeds. If the
-        // send is dropped by the in-flight guard, `onSent` never fires.
+        // Clear one-time state only once the send is genuinely dispatched.
+        // `onSent` never fires for a dropped send or a failed attachment
+        // upload, so a retry keeps its quotes, references and staged files.
         onSent: () => {
+          if (composerLifetimeRef.current !== sendingLifetime) {
+            // The upload finished after the composer moved to another
+            // conversation or unmounted. Leave live state alone and retire
+            // only what this send persisted, keeping anything a later
+            // composer saved or staged since.
+            retireSentComposerDraft(
+              getSessionComposerDraftStorage(),
+              draftKey,
+              sentDraftTexts,
+            );
+            retireProjectAttachments(threadId, projectAttachments);
+            return;
+          }
           setMentionQuery(null);
           setMentionButtonOpen(false);
           if (pendingDraftSubmissionRef.current?.key === draftKey) {
@@ -1524,7 +1598,11 @@ export function InputBox({
           }
           sidecar?.clearConversationQuotes(quoteIds);
           setConversationReferences([]);
-          setProjectAttachments([]);
+          setProjectAttachments((previous) =>
+            previous.filter(
+              (attachment) => !sentAttachmentPaths.has(attachment.virtual_path),
+            ),
+          );
         },
       };
       const submit = () => onSubmit?.(message, submitOptions);
@@ -1554,6 +1632,7 @@ export function InputBox({
       textInput.value,
       conversationReferences,
       draftKey,
+      attachmentUploads,
       invalidateDraftSaveTimer,
       onContextChange,
       onSubmit,
@@ -1595,6 +1674,32 @@ export function InputBox({
       if (mentionInFlight.current)
         return Promise.reject(new Error("Reference is loading"));
       if (status === "streaming") {
+        if (canSendBusyInput && onBusySubmit) {
+          if (runInputInFlight.current)
+            return Promise.reject(new Error("input-in-flight"));
+          if (
+            !message.text.trim() ||
+            message.files.length ||
+            projectAttachments.length ||
+            conversationReferences.length ||
+            inlineRefs.length ||
+            (sidecar?.conversationQuotes.length ?? 0) ||
+            message.text.trimStart().startsWith("/")
+          ) {
+            toast.info(t.inputBox.runInputTextOnly);
+            return Promise.reject(new Error("text-input-required"));
+          }
+          abortVoiceInput();
+          runInputInFlight.current = true;
+          setRunInputSending(true);
+          try {
+            await onBusySubmit(message.text, runInputMode);
+            return;
+          } finally {
+            runInputInFlight.current = false;
+            setRunInputSending(false);
+          }
+        }
         toast.info(t.inputBox.pleaseWaitStreaming);
         return Promise.reject(new Error("streaming"));
       }
@@ -1673,9 +1778,15 @@ export function InputBox({
         setFollowups([]);
         setFollowupsHidden(false);
         setFollowupsLoading(false);
-        const saved = await handleGoalCommand(submitAction.command);
+        const result = await handleGoalCommand(submitAction.command);
+        if (result !== "saved") {
+          // Reject so PromptInput leaves the composer alone: a failed command
+          // keeps the /goal text for a retry, and a stale one leaves it to the
+          // request or conversation that replaced it.
+          return Promise.reject(new Error(`goal-command-${result}`));
+        }
         // Only start a run when a goal was actually saved; status/clear never run.
-        if (saved && submitAction.command.kind === "set") {
+        if (submitAction.command.kind === "set") {
           return submitThreadMessage({
             ...message,
             text: submitAction.command.objective,
@@ -1695,16 +1806,21 @@ export function InputBox({
     [
       abortVoiceInput,
       canCreateRuns,
+      canSendBusyInput,
+      onBusySubmit,
+      runInputMode,
       handleCompactCommand,
       handleGoalCommand,
       onPrepareThread,
       projectAttachments.length,
       conversationReferences.length,
       inlineRefs.length,
+      sidecar?.conversationQuotes.length,
       status,
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
+      t.inputBox.runInputTextOnly,
       t.inputBox.startTurnUnavailable,
     ],
   );
@@ -1783,7 +1899,12 @@ export function InputBox({
     dismissedCommandSuggestionValue !== textInput.value;
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
-  const composerLocked = isComposerDisabled || polishingInput || mentionBusy;
+  const composerLocked =
+    isComposerDisabled ||
+    inputLocked ||
+    polishingInput ||
+    mentionBusy ||
+    runInputSending;
   const showMentions =
     !disabled &&
     !polishingInput &&
@@ -1838,14 +1959,12 @@ export function InputBox({
     [],
   );
   const focusComposerAt = useCallback((offset: number) => {
-    requestAnimationFrame(() => {
-      const textarea = textareaRef.current;
-      if (textarea) {
-        textarea.focus();
-        textarea.setSelectionRange(offset, offset);
-      } else if (inlineSkillTextRef.current)
-        focusReferenceAt(inlineSkillTextRef.current, offset);
-    });
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      textarea.setSelectionRange(offset, offset);
+    } else if (inlineSkillTextRef.current)
+      focusReferenceAt(inlineSkillTextRef.current, offset);
   }, []);
   const selectMention = useCallback(
     async (selection: MentionSelection) => {
@@ -1881,9 +2000,11 @@ export function InputBox({
           setConversationReferences((previous) =>
             previous.filter((ref) => ref.threadId !== selectionId),
           );
-        textInput.setInput(next);
-        setMentionQuery(null);
-        setMentionButtonOpen(false);
+        flushSync(() => {
+          textInput.setInput(next);
+          setMentionQuery(null);
+          setMentionButtonOpen(false);
+        });
         focusComposerAt(Math.min(caret, next.length));
         return;
       }
@@ -2017,10 +2138,14 @@ export function InputBox({
         latestDraftRef.current = null;
         clearComposerDraft(storage, draftKey);
       }
-      textInput.setInput(nextText);
-      setMentionQuery(null);
-      setMentionButtonOpen(false);
-      setMentionError(null);
+      // Commit the replacement editor before restoring its selection. Deferring
+      // to the next frame can misplace typing or overwrite a later caret move.
+      flushSync(() => {
+        textInput.setInput(nextText);
+        setMentionQuery(null);
+        setMentionButtonOpen(false);
+        setMentionError(null);
+      });
       focusComposerAt(caret + inserted.length);
       if (selection.kind === "file") onReferenceFileAttached?.();
     },
@@ -3016,7 +3141,10 @@ export function InputBox({
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
-                <PromptInputAttachment data={attachment} />
+                <InputAttachment
+                  data={attachment}
+                  uploadSession={attachmentUploads}
+                />
               </div>
             )}
           </PromptInputAttachments>
@@ -3166,8 +3294,8 @@ export function InputBox({
             />
           )}
         </div>
-        <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
-          <PromptInputTools className="min-w-0 flex-1 flex-wrap">
+        <PromptInputFooter className="flex flex-col gap-2 sm:flex-row sm:flex-nowrap">
+          <PromptInputTools className="w-full min-w-0 flex-wrap sm:w-auto sm:flex-1">
             <Tooltip content={t.inputBox.mentionPicker}>
               <PromptInputButton
                 aria-label={t.inputBox.mentionPicker}
@@ -3179,7 +3307,6 @@ export function InputBox({
               </PromptInputButton>
             </Tooltip>
             <AddAttachmentsButton
-              onOpen={openMentions}
               className="px-2!"
               disabled={composerLocked}
               uploadLimits={uploadLimits}
@@ -3223,6 +3350,14 @@ export function InputBox({
                 )}
               </PromptInputButton>
             </Tooltip>
+            <ToolApprovalMode
+              value={context.tool_approval_mode}
+              onChange={(mode) =>
+                onContextChange?.({ tool_approval_mode: mode })
+              }
+              threadId={isWelcomeMode ? undefined : threadId}
+              disabled={composerLocked}
+            />
             <PromptInputActionMenu>
               <ModeHoverGuide
                 mode={
@@ -3450,7 +3585,7 @@ export function InputBox({
               </PromptInputActionMenu>
             )}
           </PromptInputTools>
-          <PromptInputTools className="min-w-0 justify-end">
+          <PromptInputTools className="w-full min-w-0 justify-end sm:w-auto">
             {goalObjectiveCounter && (
               <span
                 aria-label={t.inputBox.goalLengthCounter
@@ -3475,7 +3610,12 @@ export function InputBox({
             >
               <ModelPickerTrigger asChild>
                 <PromptInputButton
-                  className="max-w-40 min-w-0 sm:max-w-56"
+                  className={cn(
+                    "max-w-40 min-w-0 sm:max-w-56",
+                    status === "streaming" &&
+                      canSendBusyInput &&
+                      "max-sm:max-w-28",
+                  )}
                   disabled={composerLocked}
                 >
                   <div className="flex min-w-0 flex-col text-left">
@@ -3492,16 +3632,82 @@ export function InputBox({
                 onModelSelect={handleModelSelect}
               />
             </ModelPicker>
+            {status === "streaming" && canSendBusyInput && (
+              <>
+                <PromptInputActionMenu>
+                  <PromptInputActionMenuTrigger
+                    aria-label={t.inputBox.runInputMode}
+                    disabled={composerLocked}
+                  >
+                    {runInputMode === "queue"
+                      ? t.inputBox.queueMode
+                      : t.inputBox.steerMode}
+                    <ChevronDownIcon className="ml-1 size-3" aria-hidden />
+                  </PromptInputActionMenuTrigger>
+                  <PromptInputActionMenuContent>
+                    <PromptInputActionMenuItem
+                      onSelect={() => setRunInputMode("queue")}
+                    >
+                      <div>
+                        <div>{t.inputBox.queueMode}</div>
+                        <div className="text-muted-foreground text-xs">
+                          {t.inputBox.queueModeHelp}
+                        </div>
+                      </div>
+                      {runInputMode === "queue" && (
+                        <CheckIcon className="ml-auto size-4" />
+                      )}
+                    </PromptInputActionMenuItem>
+                    <PromptInputActionMenuItem
+                      onSelect={() => setRunInputMode("steer")}
+                    >
+                      <div>
+                        <div>{t.inputBox.steerMode}</div>
+                        <div className="text-muted-foreground text-xs">
+                          {t.inputBox.steerModeHelp}
+                        </div>
+                      </div>
+                      {runInputMode === "steer" && (
+                        <CheckIcon className="ml-auto size-4" />
+                      )}
+                    </PromptInputActionMenuItem>
+                  </PromptInputActionMenuContent>
+                </PromptInputActionMenu>
+                <PromptInputSubmit
+                  aria-label={t.inputBox.runInputSend}
+                  title={
+                    runInputMode === "queue"
+                      ? t.inputBox.queueModeHelp
+                      : t.inputBox.steerModeHelp
+                  }
+                  className="rounded-full"
+                  variant="outline"
+                  status={runInputSending ? "submitted" : "ready"}
+                  disabled={composerLocked || !textInput.value.trim()}
+                />
+              </>
+            )}
             <PromptInputSubmit
               className="rounded-full"
               disabled={
-                composerLocked ||
+                (status === "streaming"
+                  ? isComposerDisabled ||
+                    polishingInput ||
+                    mentionBusy ||
+                    runInputSending
+                  : composerLocked) ||
                 stopDenied ||
                 sendDenied ||
                 (status !== "streaming" && conversationReferencesUnavailable)
               }
               variant="outline"
               status={status}
+              {...(status === "streaming" && canSendBusyInput
+                ? {
+                    "aria-label": t.inputBox.stopRun,
+                    title: t.inputBox.stopRun,
+                  }
+                : {})}
               // A bare disabled square reads as a broken composer; explain
               // the permission boundary (native title, since a Radix
               // tooltip won't fire on a disabled button). Spread
@@ -3685,9 +3891,7 @@ function AddAttachmentsButton({
   className,
   disabled,
   uploadLimits,
-  onOpen,
 }: {
-  onOpen?: () => void;
   className?: string;
   disabled?: boolean;
   uploadLimits?: UploadLimits;
@@ -3708,7 +3912,7 @@ function AddAttachmentsButton({
         className={cn("px-2!", className)}
         data-testid="add-attachments-button"
         disabled={disabled}
-        onClick={onOpen ?? (() => attachments.openFileDialog())}
+        onClick={() => attachments.openFileDialog()}
       >
         <PaperclipIcon className="size-3" />
       </PromptInputButton>

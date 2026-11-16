@@ -7,11 +7,58 @@ import {
 } from "@/core/messages/derived-state";
 import { getMessageGroups } from "@/core/messages/utils";
 
+import {
+  loadScheduledThread,
+  withOrdinaryHumanTurn,
+} from "../../helpers/scheduled-fixtures";
+
 function message(type: Message["type"], id: string, content: string): Message {
   return { type, id, content } as Message;
 }
 
 describe("incremental message derivation", () => {
+  it("reuses result copies by message id and keeps ID-less results distinct", () => {
+    const assistant = {
+      type: "ai",
+      id: "a1",
+      content: "",
+      tool_calls: [{ id: "call_0", name: "read_file", args: {} }],
+    } as Message;
+    for (const id of ["result-1", undefined]) {
+      const result = {
+        type: "tool",
+        ...(id ? { id } : {}),
+        tool_call_id: "call_0",
+        content: "same output",
+      } as Message;
+      const initial = deriveStableMessageGroups(
+        [assistant, result],
+        false,
+        [],
+        false,
+      );
+      const replay = deriveStableMessageGroups(
+        [assistant, { ...result }],
+        false,
+        initial,
+        false,
+      );
+      if (id) {
+        expect(replay[0]).toBe(initial[0]);
+        const other = deriveStableMessageGroups(
+          [assistant, { ...result, id: "result-2" }],
+          false,
+          initial,
+          false,
+        );
+        expect(other[0]).not.toBe(initial[0]);
+        expect(other[0]?.messages.at(-1)?.id).toBe("result-2");
+      } else {
+        expect(replay[0]).not.toBe(initial[0]);
+      }
+    }
+  });
+
   it("reuses completed groups when only the streaming turn changes", () => {
     const messages = Array.from({ length: 1_000 }, (_, turn) => [
       message("human", `h-${turn}`, `question ${turn}`),
@@ -210,4 +257,63 @@ it("keeps pre-clarification answers stable through hidden replies, reconnect, an
     "assistant:processing",
   );
   expect(settled.find((group) => group.id === "next")?.type).toBe("assistant");
+});
+
+describe("scheduled run threads and schedule cards", () => {
+  const types = (groups: ReturnType<typeof getMessageGroups>) =>
+    groups.map((group) => group.type);
+
+  it("segments a run thread's turn like an ordinary human turn while streaming", () => {
+    const { messages } = loadScheduledThread("minute-run");
+    const ordinaryMessages = withOrdinaryHumanTurn(messages);
+    for (const source of [messages, ordinaryMessages]) {
+      let previous: ReturnType<typeof getMessageGroups> = [];
+      for (let end = 2; end <= source.length; end += 1) {
+        previous = deriveStableMessageGroups(
+          source.slice(0, end),
+          end < source.length,
+          previous,
+          true,
+        );
+        expect(types(previous)).toEqual(
+          types(
+            getMessageGroups(source.slice(0, end), {
+              isCurrentTurnLoading: end < source.length,
+            }),
+          ),
+        );
+      }
+    }
+    const scheduled = deriveStableMessageGroups(messages, false, [], false);
+    const ordinary = deriveStableMessageGroups(
+      ordinaryMessages,
+      false,
+      [],
+      false,
+    );
+    expect(types(scheduled)).toEqual(types(ordinary));
+    const usageIds = (groups: typeof scheduled) =>
+      deriveAssistantTurnUsageState(groups).byGroupIndex.map((items) =>
+        items?.map((item) => item.id),
+      );
+    expect(usageIds(scheduled)).toEqual(usageIds(ordinary));
+  });
+
+  it("keeps a schedule card inside its turn for usage", () => {
+    // Live: create (after a read_file), trial, edit, pause, resume.
+    const { messages } = loadScheduledThread("weekday-chat");
+    const groups = deriveStableMessageGroups(messages, false, [], false);
+    const { byGroupIndex } = deriveAssistantTurnUsageState(groups);
+    const cardIndexes = groups.flatMap((group, index) =>
+      group.type === "assistant:scheduled-task" ? [index] : [],
+    );
+    expect(cardIndexes).toHaveLength(5);
+    // The create turn has three model calls (read_file, schedule_task,
+    // reply); the others two. The card splits none of them.
+    cardIndexes.forEach((index, turn) => {
+      expect(byGroupIndex[index]).toBeNull();
+      expect(groups[index + 1]?.type).toBe("assistant");
+      expect(byGroupIndex[index + 1]?.length).toBe(turn === 0 ? 3 : 2);
+    });
+  });
 });

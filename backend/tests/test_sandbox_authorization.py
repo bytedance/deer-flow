@@ -359,6 +359,59 @@ def test_authorize_sandbox_calls_provider_with_correct_request(monkeypatch):
 # artifact edit) still succeeds with the sandbox sync skipped.
 
 
+def test_gateway_missing_client_keeps_infrastructure_error_lease():
+    from app.gateway.authz import try_acquire_sandbox_for_request
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+    provider = MagicMock()
+    provider.acquire_async = AsyncMock(return_value="lost-after-acquire")
+    provider.get.return_value = None
+
+    async def go():
+        lease = await try_acquire_sandbox_for_request(None, provider, "thread-1", user_id="user-1", app_config=None)
+        assert lease.sandbox is None
+        assert lease.sandbox_id == "lost-after-acquire"
+        assert lease.denied is False
+        assert lease.owner_id is None
+        assert lease.provider is provider
+        await lease.release()
+        await lease.release()
+
+    try:
+        asyncio.run(go())
+        provider.release.assert_called_once_with("lost-after-acquire")
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+@pytest.mark.parametrize("failure", ["acquire", "lookup", "rollback"])
+def test_gateway_client_lease_preserves_provider_errors(failure):
+    from app.gateway.authz import try_acquire_sandbox_for_request
+    from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+    error = RuntimeError(f"{failure} failed")
+    provider = MagicMock()
+    provider.acquire_async = AsyncMock(return_value="lost-after-acquire")
+    provider.get.return_value = None
+    if failure == "acquire":
+        provider.acquire_async.side_effect = error
+    elif failure == "lookup":
+        provider.get.side_effect = error
+    else:
+        provider.release.side_effect = error
+
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            asyncio.run(try_acquire_sandbox_for_request(None, provider, "thread-1", user_id="user-1", app_config=None))
+        assert exc_info.value is error
+        if failure == "acquire":
+            provider.release.assert_not_called()
+        else:
+            provider.release.assert_called_once_with("lost-after-acquire")
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
 def _make_upload_app(monkeypatch, provider, *, fail_closed: bool = True):
     """Build a FastAPI app with the uploads router and authz enabled."""
     from _router_auth_helpers import make_authed_test_app
@@ -599,6 +652,77 @@ def test_artifact_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     )
     sandbox_provider.acquire_async.assert_not_called()
     assert artifact_path.read_bytes() == b"after"
+
+
+def test_safe_app_config_denies_after_authz_config_becomes_unreadable(monkeypatch):
+    """A config that was authorization-enabled must fail closed after becoming unreadable."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    assert mod.safe_app_config() is app_config
+
+    def _unreadable():
+        raise FileNotFoundError("config.yaml was removed after startup")
+
+    monkeypatch.setattr("deerflow.config.get_app_config", _unreadable)
+    with pytest.raises(SandboxAuthorizationError) as exc_info:
+        mod.safe_app_config()
+    assert "temporarily unavailable" in str(exc_info.value)
+
+
+def test_safe_app_config_still_denies_with_fail_closed_false(monkeypatch):
+    """The unavailable-policy error is intentional even if the old policy said fail_open."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config, fail_closed=False)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+    assert mod.safe_app_config() is app_config
+
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: (_ for _ in ()).throw(FileNotFoundError("config.yaml removed")),
+    )
+    with pytest.raises(SandboxAuthorizationError):
+        mod.safe_app_config()
+
+
+def test_safe_app_config_uses_loaded_config_before_first_helper_call(monkeypatch):
+    """A config loaded by the ordinary loader must arm the guard before the first helper call."""
+    from deerflow.authz import sandbox_authz as mod
+
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.peek_loaded_app_config", lambda: app_config)
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: (_ for _ in ()).throw(FileNotFoundError("config.yaml removed")),
+    )
+
+    with pytest.raises(SandboxAuthorizationError) as exc_info:
+        mod.safe_app_config()
+    assert "temporarily unavailable" in str(exc_info.value)
+
+
+def test_safe_app_config_does_not_log_config_exception_details(monkeypatch, caplog):
+    """The deny warning records the exception type, not configuration values."""
+    from deerflow.authz import sandbox_authz as mod
+
+    mod._authorization_config_loaded = True
+    secret = "token=SUPERSECRET"
+
+    def _unreadable():
+        raise ValueError(secret)
+
+    monkeypatch.setattr("deerflow.config.get_app_config", _unreadable)
+    with caplog.at_level("WARNING", logger=mod.__name__):
+        with pytest.raises(SandboxAuthorizationError):
+            mod.safe_app_config()
+
+    assert secret not in caplog.text
+    assert "ValueError" in caplog.text
 
 
 def test_authorize_sandbox_no_config_file_is_noop(monkeypatch):
@@ -957,7 +1081,18 @@ def test_composed_write_authorization_deny_is_not_swallowed(monkeypatch, is_asyn
     """The gate's generic fail-open path must never turn an authz deny into allow."""
     import asyncio
 
+    import deerflow.agents.middlewares.read_before_write_middleware as read_before_write_module
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    stamped_exceptions = []
+    original_stamp_exception_meta = read_before_write_module.stamp_exception_meta
+
+    def record_stamped_exception(message, exc_info):
+        stamped_exceptions.append(exc_info)
+        return original_stamp_exception_meta(message, exc_info)
+
+    monkeypatch.setattr(read_before_write_module, "stamp_exception_meta", record_stamped_exception)
 
     provider, sandbox, runtime = _install_composed_file_authz(monkeypatch, allow=False)
     path = "/mnt/user-data/outputs/report.md"
@@ -981,6 +1116,8 @@ def test_composed_write_authorization_deny_is_not_swallowed(monkeypatch, is_asyn
 
     assert result.status == "error"
     assert "not permitted" in str(result.content).lower()
+    assert len(stamped_exceptions) == 1
+    assert isinstance(stamped_exceptions[0], SandboxAuthorizationError)
     handler.assert_not_called()
     sandbox.read_file.assert_not_called()
 

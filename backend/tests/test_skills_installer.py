@@ -105,6 +105,20 @@ class TestCodeFileClassification:
             ("bin/notes.txt", b"#!/bin/sh\n", False),
             ("bin/scripts", b"echo", False),
             ("assets/logo.png", b"\x89PNG", False),
+            ("hooks/install.bat", b"@echo off\r\n", True),
+            ("hooks/install.CMD", b"@echo off\r\n", True),
+            ("hooks/install.vbs", b'CreateObject("WScript.Shell")\r\n', True),
+            ("hooks/install.wsf", b"<job></job>\r\n", True),
+            ("hooks/module.psm1", b"Export-ModuleMember -Function *", True),
+            ("hooks/install.jse", b"plain", True),
+            ("hooks/install.JSE", b"plain", True),
+            ("hooks/install.vbe", b"plain", True),
+            ("hooks/install.VBE", b"plain", True),
+            ("assets/setup.hta", b"<html></html>", True),
+            ("assets/setup.HTA", b"<html></html>", True),
+            ("policy/install.sct", b"<scriptlet></scriptlet>", True),
+            ("policy/install.SCT", b"<scriptlet></scriptlet>", True),
+            ("references/notes.txt", b"plain", False),
         ],
     )
     def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):
@@ -268,6 +282,53 @@ class TestSafeExtract:
         with zipfile.ZipFile(zip_path) as zf:
             with pytest.raises(ValueError, match="executable binary"):
                 safe_extract_skill_archive(zf, dest)
+
+    @pytest.mark.parametrize(
+        ("filler", "magic"),
+        [
+            pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
+            pytest.param(b" ", b"MZ", id="space-pe"),
+            pytest.param(b"\x00\x00\x00\n", b"\x7fELF", id="nul-run-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\x7fELF", id="utf8-bom-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\xbf\xba\xfe\xca", id="utf8-bom-macho-fat64-le"),
+            pytest.param(b" " * 63, b"\x7fELF", id="max-filler-offset"),
+        ],
+    )
+    def test_rejects_whitespace_prefixed_executable_binary(self, tmp_path, filler, magic):
+        """Leading filler must not smuggle a binary past the extraction guard."""
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                "my-skill/assets/payload": filler + magic + b"\x00" * 64,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            with pytest.raises(ValueError, match="executable binary"):
+                safe_extract_skill_archive(zf, dest)
+
+    @pytest.mark.parametrize(
+        ("payload", "identifier"),
+        [
+            pytest.param(b" " * 64 + b"\x7fELF" + b"\x00" * 64, "filler-at-cap"),
+            pytest.param(b"\xef\xbb\xbf\xba\xfe\xca" + b"\x00" * 64, "bom-tail-is-not-macho"),
+        ],
+    )
+    def test_allows_non_executable_payloads_with_prefixes_outside_the_sniff(self, tmp_path, payload, identifier):
+        zip_path = self._make_zip(
+            tmp_path,
+            {
+                "my-skill/SKILL.md": "---\nname: test\ndescription: x\n---\n# Test",
+                f"my-skill/assets/{identifier}": payload,
+            },
+        )
+        dest = tmp_path / "out"
+        dest.mkdir()
+        with zipfile.ZipFile(zip_path) as zf:
+            safe_extract_skill_archive(zf, dest)
+        assert (dest / "my-skill" / "assets" / identifier).read_bytes() == payload
 
     def test_allows_non_executable_binary_assets(self, tmp_path):
         zip_path = self._make_zip(
@@ -571,17 +632,20 @@ class TestInstallSkillFromArchive:
 
         assert sniffed == ["tool"]
 
-    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("rel_path", ["lib/run.py", "hooks/install.jse", "hooks/install.vbe", "assets/setup.hta", "policy/install.sct"])
+    def test_code_file_outside_scripts_warn_prevents_install(self, tmp_path, monkeypatch, rel_path):
         zip_path = tmp_path / "test-skill.skill"
         with zipfile.ZipFile(zip_path, "w") as zf:
             zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
             # Benign payload on purpose: the native scanner must stay quiet so the
             # test exercises the LLM executable policy (warn != allow) on its own.
-            zf.writestr("test-skill/lib/run.py", "print('needs human review')\n")
+            zf.writestr(f"test-skill/{rel_path}", "print('needs human review')\n")
         skills_root = tmp_path / "skills"
         skills_root.mkdir()
+        calls = []
 
         async def _scan(*args, executable, **kwargs):
+            calls.append((kwargs["location"], executable))
             if executable:
                 return ScanResult(decision="warn", reason="code needs review")
             return ScanResult(decision="allow", reason="ok")
@@ -589,6 +653,28 @@ class TestInstallSkillFromArchive:
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
 
         with pytest.raises(SkillSecurityScanError, match="rejected executable.*code needs review"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+
+        assert (f"test-skill/{rel_path}", True) in calls
+        assert not (skills_root / "custom" / "test-skill").exists()
+
+    @pytest.mark.parametrize(
+        ("filler", "magic"),
+        [
+            pytest.param(b"\n", b"\x7fELF", id="newline-elf"),
+            pytest.param(b"\xef\xbb\xbf", b"\x7fELF", id="bom-elf"),
+            pytest.param(b" " * 63, b"\xbf\xba\xfe\xca", id="max-filler-offset-macho-fat64-le"),
+        ],
+    )
+    def test_filler_prefixed_executable_binary_prevents_install(self, tmp_path, filler, magic):
+        zip_path = tmp_path / "test-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("test-skill/SKILL.md", "---\nname: test-skill\ndescription: A test skill\n---\n\n# test-skill\n")
+            zf.writestr("test-skill/assets/payload", filler + magic + b"\x00" * 64)
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        with pytest.raises(ValueError, match="executable binary"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
         assert not (skills_root / "custom" / "test-skill").exists()

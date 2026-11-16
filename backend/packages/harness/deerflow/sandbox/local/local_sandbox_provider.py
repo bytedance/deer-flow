@@ -97,6 +97,27 @@ class LocalSandboxProvider(SandboxProvider):
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
         self._max_cached_threads = max_cached_threads
         self._lock = threading.Lock()
+        self._environment = self._load_sandbox_environment()
+
+    def _load_sandbox_environment(self) -> dict[str, str]:
+        """Load operator-configured ``sandbox.environment`` for local sandboxes.
+
+        The file-backed AppConfig loader has already substituted every ``$VAR``
+        reference in field values before the parsed config reaches here, so the
+        values are consumed verbatim — re-resolving would corrupt a credential
+        that legitimately starts with ``$`` (e.g. host ``APP_PASSWORD='$s3cret'``
+        would be re-expanded into a different variable or the empty string).
+        Missing/unloadable config yields an empty mapping (nothing injected;
+        scrubbing alone applies).
+        """
+        try:
+            from deerflow.config import get_app_config
+
+            sandbox_config = get_app_config().sandbox
+        except Exception:
+            return {}
+        env_config = getattr(sandbox_config, "environment", None) or {}
+        return dict(env_config)
 
     def _setup_path_mappings(self) -> list[PathMapping]:
         """
@@ -455,7 +476,7 @@ class LocalSandboxProvider(SandboxProvider):
                 if self._generic_sandbox is None:
                     mappings = list(self._path_mappings)
                     self._append_public_skill_mapping(mappings, skill_projection)
-                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings)
+                    self._generic_sandbox = LocalSandbox("local", path_mappings=mappings, environment=self._environment)
                     _singleton = self._generic_sandbox
                 return self._generic_sandbox.id
 
@@ -466,9 +487,15 @@ class LocalSandboxProvider(SandboxProvider):
         # triggers a full rebuild (~400 ms measured locally) under the
         # cross-process projection lock, serializing concurrent acquires and
         # mutations for that user. Acceptable for an editing-frequency event.
+        #
+        # A thread view exists only to enforce an Agent skill allowlist, and
+        # SandboxMiddleware keeps it fresh only while this provider can enforce
+        # one. With host bash allowed it skips the view (restricted runs are
+        # rejected), so mounting a leftover view would pin the last restricted
+        # Agent's allowlist; use the shared projection instead.
         skill_projection = self._ensure_skills_projection(
             effective_user_id,
-            thread_id=thread_id,
+            thread_id=thread_id if self.supports_agent_skill_isolation else None,
         )
         key = self._thread_key(thread_id, effective_user_id)
 
@@ -500,6 +527,7 @@ class LocalSandboxProvider(SandboxProvider):
                 replacement = LocalSandbox(
                     self._sandbox_id_for_thread(thread_id, effective_user_id),
                     path_mappings=new_mappings,
+                    environment=self._environment,
                 )
                 if cached is not None:
                     replacement._agent_written_paths.update(cached._agent_written_paths)

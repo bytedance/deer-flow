@@ -1,128 +1,88 @@
-# Backend Tests
+# Backend tests (`backend/tests/`)
 
-Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
+The offline suite for the Gateway and the harness. `blocking_io/` is the strict
+event-loop gate, `support/` holds shared helpers, and `fixtures/` holds recorded
+data. What a single test file covers is stated in that file, not here.
 
-Browser-asset confinement tests use `support.symlinks.symlink_or_skip` for real
-file and directory symlinks. Keep missing-file, duplicate-key, and size-limit
-checks separate so they still run when the host cannot create symlinks.
+## Verify
 
-`blocking_io/test_web_tool_url_validation.py` resolves a synthetic `.invalid`
-hostname to loopback by patching `_socket.getaddrinfo`, below the real
-`socket.getaddrinfo` wrapper. Do not replace that wrapper or the production URL
-guard: the strict gate must still reject on-loop resolution. Assert each tool
-path reaches the native fixture so an unresolved-host rejection cannot mask it.
-The IPv4 fixture accepts only `AF_UNSPEC` and `AF_INET`; unsupported families
-must fail rather than receive a fabricated IPv4 answer.
+```bash
+cd backend
+make test                 # four offline shards; TEST_JOBS=1 runs serially
+make test-blocking-io     # strict gate over tests/blocking_io/
+python -m pytest tests/test_<feature>.py::test_<name> -q
+```
 
-The local sandbox's UTF-8 subprocess guard inspects each text-mode call with
-`ast`, checking both `encoding` and `errors`; module-wide literal counts can
-hide unpinned calls behind unrelated settings.
+Live tests run only with `DEER_FLOW_RUN_LIVE_TESTS=1`. PostgreSQL cases run when
+`TEST_POSTGRES_URI` is set and skip otherwise. Helm and real-Compose cases skip
+with a reason when the binary is missing.
 
-## Router auth fixtures
+## What a test must exercise
 
-For owner-scoped route assertions, pass a stable `user_factory` and
-`bind_current_user=True` to `make_authed_test_app`. The default stub stamps
-request state but leaves the ambient user context unchanged; the opt-in binding
-uses the stub user during the request and restores the previous context after it.
+- **Run the production path.** Drive the real graph, worker, repository, script
+  or HTTP client, and replace only the outermost boundary: the model response,
+  the network transport, the clock. A test that raises the expected error itself
+  or writes the stored result directly proves nothing about the code.
+- **Put the double below the SDK.** A fake HTTP transport under the real vendor
+  client checks the payload that DeerFlow sends. A mocked client method does not.
+- **A regression test fails on the unfixed code.** Check that before you commit
+  the fix. Do not encode a known bug as expected behaviour, and do not hide it
+  behind a permanent `xfail`.
+- **Assert on structure.** Check decoded payloads, stored rows and metadata.
+  User-facing wording is asserted only where the wording is the contract.
+- **Scripts run as copies in a temporary checkout.** Never swap sources in the
+  working tree during a test, and never let a test read the developer's own
+  `config.yaml`, `.env` or runtime home.
 
-## Lark CLI blocking-I/O fixtures
+## Concurrency and timing
 
-`blocking_io/test_integrations_router.py` uses a real local CLI stub: a `.cmd`
-script on Windows and an executable shell script on POSIX. Resolve it through
-the production PATH lookup, including a directory containing spaces. Seed fake
-app credentials so auth completion reaches the CLI instead of returning early,
-and keep fixture filesystem work behind `asyncio.to_thread`.
+- **Synchronize with events and barriers.** A sleep or a timing threshold passes
+  on a fast machine and fails on a loaded CI runner. Park the code at a named
+  point, observe the peer reach it, then release.
+- **Use a controlled clock** for leases, expiry and scheduling.
+- **Release everything in `finally`.** Blocked workers, paused tasks, patched
+  process-wide state and event loops are restored even when the assertion fails.
+  A leaked worker fails a later, unrelated test.
+- **Treat an unhandled warning from a worker thread as an error.**
+- **Injected failures must be shown to fire.** Assert that the injection ran, so
+  a refactor cannot turn a failure test into a silent pass.
 
-## Shared sandbox search contracts
+## Portability
 
-`test_sandbox_search_contract.py` runs shared `ls`/`glob`/`grep` scenarios through
-Local, AIO, E2B, BoxLite, Tenki and OpenSandbox adapters. POSIX shell transports
-execute production commands against temporary files; AIO file RPCs use an
-independent filesystem-backed double. Do not substitute precomputed final search
-results or import another test module's private fixtures. Provisioning, live SDK
-compatibility, permissions enforced above Sandbox, and session lifecycle remain
-in their existing suites. Windows skips this POSIX execution tier explicitly.
+- **Use the helpers in `support/`.** `support.postgres` builds the isolated schema
+  URL, `support.symlinks.symlink_or_skip` handles hosts without symlink rights,
+  `support.shell` finds a POSIX shell or Git Bash, and `support.compose` detects
+  the Compose version.
+- **Guard POSIX-only cases with `os.name`** so that Windows collection succeeds.
+  Permission tests also skip as root, where mode bits do not restrict access.
+- **Write fixtures with an explicit newline mode and encoding.** Platform
+  defaults change LF/CRLF hashes and non-ASCII paths.
+- **Do not import another test module's private fixtures.** Shared code moves to
+  `support/` or `conftest.py`.
+- **Circular imports are solved in `conftest.py`** with a `sys.modules` stub; see
+  the existing entry for `deerflow.subagents.executor`.
 
-Compare result names/content, errors and completeness, allowing documented root
-entries and directory suffixes to differ. First-stage cases use ordinary roots,
-positive caps and a plain literal pattern: ignored-root fixes (#5667), E2B literal
-metacharacters (#5627), and exactly-full local caps (#5491) have separate owners.
-Add those shared scenarios after their fixes land; do not encode known bugs as
-expected successful behavior or hide them with permanent xfails.
+## Bundled extension behavior
 
-## External system-role admission
+A module that validates a bundled example's own behavior carries
+`pytest.mark.bundled_extension` at module level, so the core shards skip it and
+the bundled extension CI runs it. Host mechanisms stay in the core shards even
+when an example package is the payload: loading and registration, the public
+extension API, authorization, routing and runtime. Host/extension compatibility
+checks live in `test_extension_host_contracts.py`, so a broken compatibility
+guarantee still fails core CI, and `test_bundled_extension_ci.py` keeps the
+workflow's test-file list in step with the marker. Run the bundled suites with
+`make test-bundled-extensions`.
 
-`poc_external_system_message_injection.py --help` is the opt-in live reproduction
-and post-fix verifier; never run it automatically against an existing user's chat.
-`test_poc_external_system_message_injection.py` tests that CLI offline.
-`test_external_system_message_boundary.py` records model inputs with a fake model:
-the same regression must fail on unfixed admission and pass after rejection,
-without production-provider logging or interpreting model obedience as proof.
+## Blocking-I/O tests
 
-## Scope-isolation benchmark
+Every test under `blocking_io/` runs with a detector that fails on a blocking
+call made on the event loop through DeerFlow code. Add a case there when you add
+an async entry point that touches files, subprocesses or a synchronous SDK.
+`@pytest.mark.allow_blocking_io` is for a test that needs the unguarded behaviour
+and states why.
 
-`test_bench_deermem_scope_isolation.py` exercises production admission and storage.
-Check persisted facts and user/history summaries for semantic safety, but only
-agent-local facts for routing. Failed updates must not become sealed observations;
-report and resume must reject failed or old-schema rows. Stub live models so these
-tests never need credentials or network access.
+## Guidance inventory
 
-## MCP claim fencing
-
-`test_mcp_task_repository.py` covers same-worker reclaim during an in-flight
-release, poll/cancel snapshot, or notification completion. Use explicit events
-to pause the old operation at the persistence boundary, reclaim via the real
-repository, then verify the entire new row remains unchanged. Reclaiming before
-the old operation starts does not catch SQLite SELECT/ORM-flush races. Keep the
-old completion timestamp within its original lease so expiry cannot mask a
-missing token fence; always drain paused tasks and restore session patches.
-
-## Executor starvation tests
-
-`test_executor_starvation.py` covers the deterministic starvation semantics from RFC #4560:
-
-- default-executor saturation and queueing;
-- cancellation of an awaiter while an already-started synchronous worker continues;
-- isolation between the asyncio default executor and DeerFlow's dedicated file-I/O executor.
-
-Use explicit synchronization such as `threading.Event` rather than sleep-based timing thresholds for worker lifecycle assertions. Every test must release blocked workers and restore any process-global monkeypatches so teardown cannot leak threads or state into later tests.
-
-Stress/soak testing, AnyIO worker instrumentation, Uvicorn multi-process behavior, and broad production executor redesign are separate concerns and should not be folded into these deterministic regressions.
-
-## Managed DeepSeek compatibility
-
-`test_managed_deepseek.py` exercises real SDK request serialization and SSE parsing
-with an HTTP double; do not replace the provider classes with successful stubs.
-`test_managed_deepseek_live.py` uses the same production probe/model configuration
-against DeepSeek only with `DEER_FLOW_RUN_LIVE_TESTS=1` and
-`DEEPSEEK_TEST_API_KEY`, never in CI. Keep credentials and provider payloads out of
-committed evidence. A passing connectivity probe does not establish full agent
-compatibility; distinguish protocol assertions from observed live behavior.
-
-## Classification request packing
-
-Pin the Jev example's outbound byte budget against captured HTTP request bodies.
-Cover UTF-8 text and JSON embedded in chat messages, including escaping-heavy
-inputs that fit the host's separate input limit. Use offline transports.
-Check the host's JSON output bound with the maximum item count and keys that
-expand when escaped; preserving raw UTF-8 limits alone does not cover it.
-
-## Advisory fetched-content screening example
-
-Load the example through `load_extensions()` and the host isolation wrapper, as a
-`plugins:` entry is loaded; never instantiate the middleware directly.
-`test_jev_result_screening_extension.py` checks install/config diagnostics, bounded
-requests, the task-store handover between the tool wrapper and `before_model`, copy
-semantics, fail-open provider errors and isolation diagnostics for local bugs. It
-also pins per-message classification: a benign first message in a `Command` must
-not take the flag of an injected later one, and a malformed, compressed or slow
-answer for one message must not cancel or hide another's flag. The loopback test
-uses a real local server behind an unreachable proxy variable.
-`test_jev_screening_pipeline.py` runs real lead/subagent graphs to a recording model
-with a task store bound under the runtime-context key the Gateway worker uses; cover
-the redacted excerpt, error metadata/receipts, budget, one-time warnings including
-valid empty-string message IDs, and runs without a task store. Only `None` awaits ID
-assignment. Use offline transports. Detection is not behavioral defense; do not infer
-the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
-the host descriptor builder to pin policy identity; hash endpoint/prompt text and
-never project credential values.
+When you add a scoped `AGENTS.md`, add its path to `EXPECTED_GUIDANCE_PATHS` in
+`test_agent_guidance_check.py` in the same change.

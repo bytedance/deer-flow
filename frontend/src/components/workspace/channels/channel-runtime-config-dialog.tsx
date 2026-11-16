@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { channelProviderName } from "@/core/channels/provider-state";
 import type {
   ChannelProvider,
   ChannelRuntimeConfigValues,
@@ -197,8 +198,8 @@ export function ChannelRuntimeConfigDialog({
             <DialogHeader className={cn(hasWechatQR && "gap-1 text-left")}>
               <DialogTitle>
                 {isEditing && !completionProvider
-                  ? t.channels.setupEditTitle(provider.display_name)
-                  : t.channels.setupTitle(provider.display_name)}
+                  ? t.channels.setupEditTitle(channelProviderName(provider, t))
+                  : t.channels.setupTitle(channelProviderName(provider, t))}
               </DialogTitle>
               <DialogDescription
                 className={cn(hasWechatQR && "text-xs leading-relaxed")}

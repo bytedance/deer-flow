@@ -28,15 +28,16 @@ import { Callout } from "nextra/components";
 
 ### 截断原因 stop_reason
 
-三道防护可以提前结束一次运行。运行通常仍是 `completed`；没有可用输出时为 `failed`，并保留同样的 `stop_reason`：
+四道防护可以提前结束一次运行。运行通常仍是 `completed`；没有可用输出时为 `failed`，并保留同样的 `stop_reason`：
 
 | `subagent_stop_reason` | 触发                         | 结果正文                                             |
 | ---------------------- | ---------------------------- | ---------------------------------------------------- |
 | `turn_capped`          | 用尽 `max_turns`             | `Task Succeeded (capped: turn budget). Result: ...`  |
 | `token_capped`         | 触达 `token_budget` 硬停止   | `Task Succeeded (capped: token budget). Result: ...` |
 | `loop_capped`          | 循环检测硬停止               | `Task Succeeded (capped: repeated tool-call loop). Result: ...` |
+| `model_length_capped`  | provider 输出长度上限        | `Task Succeeded (capped: model output length limit). Result: ...` |
 
-被截断意味着报告是**部分结果**：最后一轮的工具调用被剥离，模型被迫给出最终答案。轮次用尽时如果连一段可用文本都没有，状态是 `failed`，正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。旧版本的 `max_turns_reached` 状态在读取时映射为 `turn_capped`。
+被截断意味着报告是**部分结果**：最后一轮的工具调用被剥离，模型被迫给出最终答案。`model_length_capped` 表示 provider 在输出长度上限处截断了最后一次回答（`finish_reason=length` 或等价信号），该回答里的工具调用会被丢弃而不是执行。轮次用尽时如果连一段可用文本都没有，状态是 `failed`，正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。旧版本的 `max_turns_reached` 状态在读取时映射为 `turn_capped`。
 
 ### 失败的判定依据
 

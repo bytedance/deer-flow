@@ -242,12 +242,17 @@ def test_user_response_system_role_literal():
     assert resp.system_role == "user"
 
 
-def test_user_response_rejects_invalid_role():
-    """UserResponse should reject invalid system_role values."""
+def test_user_response_accepts_configured_custom_role():
+    """Custom roles are representable end-to-end (RFC #4063 gap 2): the DB
+    column is a plain string and the RBAC provider accepts arbitrary
+    configured role names, so the API model must not pin admin/user. Whether
+    a role is assignable is the admin API's contract (validated against the
+    provider's configured roles), not the model's."""
     from app.gateway.auth.models import UserResponse
 
-    with pytest.raises(ValidationError):
-        UserResponse(id="1", email="a@b.com", system_role="superadmin")
+    response = UserResponse(id="1", email="a@b.com", system_role="guest")
+
+    assert response.system_role == "guest"
 
 
 # ══════════════════════════════════════════════════════════════════════

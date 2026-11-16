@@ -22,6 +22,7 @@ sandbox:
   # request_timeout: 30
   # ready_timeout: 30
   # use_server_proxy: false
+  # secure_access: false
   # sandbox_timeout: 14400  # remote lifetime; 0 means explicit cleanup only
   # bash_command_timeout: 600  # default command timeout
   # replicas: 3             # active + warm sandboxes per gateway process
@@ -35,14 +36,64 @@ sandbox:
 reach the OpenSandbox management service but cannot directly reach sandbox
 `execd` endpoints.
 
+Use unquoted `true` or `false` for `use_server_proxy` and `secure_access`.
+Omitted and `null` values default to `false`. Quoted booleans and other
+non-boolean values cause a provider startup error.
+
+`secure_access: true` creates each sandbox with OpenSandbox
+[Secure Access](https://github.com/opensandbox-group/OpenSandbox/blob/main/docs/guides/secure-access.md):
+the ingress gateway, and the server proxy, then reject endpoint requests that
+lack the sandbox's access token. The server issues the token with the endpoint
+and the SDK attaches it to every execd and file request, so no token setting is
+needed in DeerFlow. The server must run the Kubernetes runtime with
+`[ingress] mode = "gateway"`; the Docker runtime and other ingress modes reject
+the create with HTTP 400.
+
 Values in `sandbox.environment` that start with `$` are resolved from the
-Gateway process environment when the provider starts. Missing variables resolve
-to an empty string, matching the E2B provider.
+Gateway process environment once, when `config.yaml` loads; a missing variable
+fails the load. The provider injects the resolved values unchanged, so a secret
+that itself starts with `$` reaches the sandbox intact.
 
 ## Lifecycle and contract
 
 The provider derives a stable local ID from `(user_id, thread_id)`. A released
 sandbox enters an in-process warm pool and only the same scope may reclaim it.
+Before parking a user/thread-scoped sandbox, the provider copies regular files
+from `/mnt/user-data/outputs` to that owner's local thread outputs directory.
+This makes generated artifacts available to Gateway previews and downloads after
+the turn finishes. Nested paths and binary content are preserved; uploads and
+workspace files are not mirrored. The same scope waits for this copy before its
+next acquire.
+
+Output synchronization is best effort: failures log a warning and preserve any
+previous complete local copy. Each pass processes at most 2,000 files, a 512 KiB
+listing and 512 MiB of downloaded content, with a 100 MiB per-file limit. An
+oversized listing skips the pass; a failed or oversized download stops the pass
+because a partial stream cannot be charged accurately to the remaining budget.
+A 120-second
+cooperative deadline is checked between files and download chunks; an active SDK
+read is bounded by `request_timeout`, so this is not a hard wall-clock limit.
+The listing requires `find`, `head`, `base64` and `mktemp` in the remote image.
+If `find` reports a traversal error, complete NUL-framed records are still
+mirrored with a warning; oversized or incomplete listings and failed pipeline
+stages skip the pass.
+Remote links are not followed and linked local destinations are rejected.
+Mirrored names must also be portable host paths: traversal, backslashes, colons,
+Windows reserved components and components ending in a space or dot are skipped
+with a warning, including when the Gateway runs on Unix.
+The entire accepted listing is checked before any download for names that differ
+only by case or Unicode normalization, including directory components and records
+beyond the file limit. All outputs under an ambiguous component are skipped, on
+every host, so one remote report cannot overwrite another on a case-insensitive
+volume. A path that aliases a differently spelled existing local file or directory
+is also skipped; previous complete copies are preserved. Unambiguous outputs
+continue to be mirrored.
+Files deleted remotely are not removed from the local outputs directory.
+Non-UTF-8 filename records are skipped individually with a warning and still
+count against the file limit. Each release revisits retained outputs, including
+unchanged files; equal file size does not prove equal content. Large accumulated
+output directories may reach the pass limits before all files are mirrored.
+
 Create returns only after the SDK readiness check and DeerFlow's
 `/mnt/user-data/{workspace,uploads,outputs}` bootstrap succeed. A bootstrap
 failure explicitly destroys the newly created remote sandbox.
@@ -57,7 +108,15 @@ The full DeerFlow surface is implemented:
 
 - `execute_command` forwards per-call environment variables and positive
   wall-clock timeouts through `RunCommandOpts`, preserving stdout, stderr, and
-  non-zero exit information in DeerFlow's string result.
+  non-zero exit information in DeerFlow's string result. An explicit
+  `CommandExecError` with value `context deadline exceeded` and no numeric
+  exit code ends with `Error: command timed out` and `Exit Code: 124`, keeping
+  any partial output. Transport exceptions and other missing-code errors keep
+  their existing error reporting. Numeric exits, including signal termination
+  (`-1`), keep their own code: a signal-only event does not identify whether a
+  command deadline or another kill caused it. Servers that expose only that
+  signal status need additional deadline information before it can safely be
+  normalized to 124.
 - Text and binary file operations use OpenSandbox's native filesystem API.
   Append is serialized as a read-modify-write because SDK 0.1.x has no append
   primitive.

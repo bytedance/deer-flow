@@ -906,7 +906,9 @@ test.describe("Thread history", () => {
       `a[href='/workspace/chats/${MOCK_THREAD_ID}']`,
     );
     await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
-    await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
+    await expect(
+      sidebarThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
 
     await page.goto("/workspace/chats");
 
@@ -917,5 +919,8 @@ test.describe("Thread history", () => {
       timeout: 15_000,
     });
     await expect(mainThread.getByText("Feishu", { exact: true })).toBeVisible();
+    await expect(
+      mainThread.getByRole("img", { name: "From Feishu" }),
+    ).toBeVisible();
   });
 });

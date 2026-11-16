@@ -13,7 +13,7 @@ import pytest
 from deerflow.config.paths import Paths
 from deerflow.skills.installer import SkillSecurityScanError
 from deerflow.skills.security_scanner import ScanResult
-from deerflow.skills.storage import reset_skill_storage, reset_user_skill_storage
+from deerflow.skills.storage import get_or_new_user_skill_storage, reset_skill_storage, reset_user_skill_storage, user_should_see_legacy_skills
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SkillCategory
@@ -101,6 +101,33 @@ class TestPathRedirection:
 
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"
+
+
+class TestFactoryContainerPath:
+    """get_or_new_user_skill_storage must mount skills at the configured root,
+    same as the public-storage factory."""
+
+    def test_factory_honors_configured_container_path(self, base_dir: Path, skills_root: Path, config):
+        config.skills.container_path = "/custom/skills/root"
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage("test-user", app_config=config)
+        assert storage.get_container_root() == "/custom/skills/root"
+
+    def test_factory_explicit_container_path_wins(self, base_dir: Path, skills_root: Path, config):
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            with patch("deerflow.config.paths._paths", None):
+                storage = get_or_new_user_skill_storage("test-user", app_config=config, container_path="/explicit/root")
+        assert storage.get_container_root() == "/explicit/root"
+
+    def test_legacy_visibility_kwargs_branch_seeds_container_path(self, config):
+        """user_should_see_legacy_skills must not fall back to the default root
+        when a caller passes kwargs while a custom root is configured."""
+        config.skills.container_path = "/custom/skills/root"
+        with patch("deerflow.skills.storage.UserScopedSkillStorage") as mock_storage_cls:
+            mock_storage_cls.return_value.load_skills.return_value = []
+            assert user_should_see_legacy_skills("test-user", app_config=config) is False
+        assert mock_storage_cls.call_args.kwargs["container_path"] == "/custom/skills/root"
 
 
 class TestWriteAndRead:
@@ -858,3 +885,40 @@ class TestInstallScanConfigParity:
 
         assert seen, "the LLM scan should have run for the installed SKILL.md"
         assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"
+
+
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_prompt_skill_catalog_preserves_user_scope_with_optional_config(base_dir, skills_root, config, monkeypatch, explicit_config):
+    from collections import OrderedDict
+
+    from deerflow.agents.lead_agent import prompt
+    from deerflow.skills.mutations.guard import owner_is_managed
+
+    paths = Paths(base_dir=base_dir)
+    monkeypatch.setattr("deerflow.config.paths._paths", paths)
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt, "_enabled_skills_by_config_cache", OrderedDict())
+    for root, name in [(skills_root / "public", "shared"), (paths.user_custom_skills_dir("alice"), "alice-only"), (paths.user_custom_skills_dir("bob"), "bob-only")]:
+        folder = root / name
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_text(_skill_content(name), encoding="utf-8")
+    public = LocalSkillStorage(host_path=str(skills_root)).load_skills(enabled_only=True)
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", public)
+
+    for owner in ("alice", "bob"):
+        assert not owner_is_managed(owner)
+        skills = prompt.get_enabled_skills_for_config(app_config=config if explicit_config else None, user_id=owner)
+        assert {skill.name for skill in skills} == {"shared", f"{owner}-only"}
+
+
+def test_prompt_without_config_or_user_keeps_nonblocking_global_cache(monkeypatch):
+    from deerflow.agents.lead_agent import prompt
+
+    cached = [SimpleNamespace(name="cached")]
+    monkeypatch.setattr(prompt, "_enabled_skills_cache", cached)
+
+    def unexpected_storage(**_kwargs):
+        pytest.fail("Global cached access must not synchronously load storage")
+
+    monkeypatch.setattr(prompt, "get_or_new_skill_storage", unexpected_storage)
+    assert prompt.get_enabled_skills_for_config() == cached

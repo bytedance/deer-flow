@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import socket
 import time
 import uuid
@@ -29,10 +30,19 @@ from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import BaseMessage
 from pydantic import PrivateAttr
 
+from deerflow.models.credential_loader import OAUTH_ANTHROPIC_BETAS
+from deerflow.utils.retry_after import bounded_retry_after_ms, parse_retry_after_date_ms
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
 THINKING_BUDGET_RATIO = 0.8
+MIN_THINKING_BUDGET_TOKENS = 1024
+INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
+# Manual interleaving is supported by Sonnet 4/4.5/4.6 and Opus 4/4.1/4.5,
+# including the 4-0 aliases and dated model IDs. Haiku 4.5 and Opus 4.6
+# accept the beta header but do not interleave in manual thinking mode.
+_MANUAL_INTERLEAVED_MODEL = re.compile(r"claude-(?:sonnet-4(?:-[056])?|opus-4(?:-[015])?)(?:-\d{8})?")
 
 # Billing header required by Anthropic API for OAuth token access.
 # Must be the first system prompt block. Format mirrors Claude Code CLI.
@@ -71,12 +81,18 @@ class ClaudeChatModel(ChatAnthropic):
         from pydantic import SecretStr
 
         from deerflow.models.credential_loader import (
-            OAUTH_ANTHROPIC_BETAS,
             is_oauth_token,
             load_claude_code_credential,
         )
+        from deerflow.models.request_admission import RequestAdmission
 
         self._validate_retry_config()
+        if isinstance(self.rate_limiter, RequestAdmission):
+            # These wrapper retries, like SDK retries, bypass BaseChatModel's
+            # admission hook. Leave paced retries to the LLM middleware.
+            if self.retry_max_attempts != 1:
+                logger.warning("Request admission enabled; ignoring configured retry_max_attempts=%d; provider retries are handled by middleware", self.retry_max_attempts)
+            self.retry_max_attempts = 1
 
         # Extract actual key value (SecretStr.str() returns '**********')
         current_key = ""
@@ -143,6 +159,7 @@ class ClaudeChatModel(ChatAnthropic):
 
         if self._is_oauth:
             self._apply_oauth_billing(payload)
+            self._apply_oauth_betas(payload)
 
         if self.enable_prompt_caching:
             self._apply_prompt_caching(payload)
@@ -194,6 +211,43 @@ class ClaudeChatModel(ChatAnthropic):
                 }
             )
 
+    @staticmethod
+    def _apply_oauth_betas(payload: dict) -> None:
+        """Keep the OAuth betas in a request that sends its own ``betas``.
+
+        ``model_post_init`` puts the OAuth betas in the client's default
+        ``anthropic-beta`` header, but the SDK sends a request's ``betas`` as
+        that header instead of the default. A request carries ``betas`` when
+        they are configured or passed per call, and langchain-anthropic adds
+        them for server tools, MCP servers and task budgets. Without
+        ``oauth-2025-04-20`` Anthropic rejects the Bearer token, so the OAuth
+        betas go first in any such list, including an empty one. Requests
+        without ``betas`` or a beta header keep the default header.
+
+        An ``anthropic-beta`` in the request's ``extra_headers`` replaces both
+        the default and the ``betas`` header, so it gets the same merge.
+
+        The list and the headers are rebuilt rather than changed in place: the
+        payload's ``betas`` can be ``self.betas`` itself, and its
+        ``extra_headers`` can be the dict in ``self.model_kwargs``.
+        """
+        oauth_betas = OAUTH_ANTHROPIC_BETAS.split(",")
+
+        def with_oauth_betas(betas: Any) -> list:
+            return [*oauth_betas, *(beta for beta in betas if beta not in oauth_betas)]
+
+        betas = payload.get("betas")
+        if betas is not None:
+            payload["betas"] = with_oauth_betas(betas)
+
+        extra_headers = payload.get("extra_headers")
+        if isinstance(extra_headers, dict):
+            headers = dict(extra_headers)
+            for key, value in extra_headers.items():
+                if key.lower() == "anthropic-beta" and isinstance(value, str):
+                    headers[key] = ",".join(with_oauth_betas(beta.strip() for beta in value.split(",") if beta.strip()))
+            payload["extra_headers"] = headers
+
     def _apply_prompt_caching(self, payload: dict) -> None:
         """Apply ephemeral cache_control to system, recent messages, and last tool definition.
 
@@ -201,6 +255,9 @@ class ClaudeChatModel(ChatAnthropic):
         enforced by both the Anthropic API and AWS Bedrock.  Breakpoints are
         placed on the *last* eligible blocks because later breakpoints cover a
         larger prefix and yield better cache hit rates.
+
+        Thinking and redacted-thinking blocks cannot carry cache_control.
+        Preserve them in the cached prefix, but exclude them as breakpoints.
 
         The budget covers the whole request, so markers already present are
         dropped first.  Checkpoints written before breakpoints were placed on
@@ -245,7 +302,7 @@ class ClaudeChatModel(ChatAnthropic):
             content = msg.get("content")
             if isinstance(content, list):
                 for index, block in enumerate(content):
-                    if isinstance(block, dict):
+                    if isinstance(block, dict) and block.get("type") not in ("thinking", "redacted_thinking"):
                         candidates.append((content, index))
             elif isinstance(content, str) and content:
                 msg["content"] = [{"type": "text", "text": content}]
@@ -261,18 +318,45 @@ class ClaudeChatModel(ChatAnthropic):
         for container, index in candidates[-MAX_CACHE_BREAKPOINTS:]:
             container[index] = {**container[index], "cache_control": {"type": "ephemeral"}}
 
+    def _uses_manual_interleaved_thinking(self, payload: dict) -> bool:
+        """Resolve the beta header with the Anthropic SDK's request precedence."""
+        if not payload.get("tools") or not _MANUAL_INTERLEAVED_MODEL.fullmatch(payload.get("model", self.model)):
+            return False
+
+        headers = dict(self.default_headers or {})
+        betas = payload.get("betas")
+        if isinstance(betas, (list, tuple)):
+            headers["anthropic-beta"] = ",".join(str(beta) for beta in betas)
+        headers.update(payload.get("extra_headers") or {})
+        return any(INTERLEAVED_THINKING_BETA in (beta.strip() for beta in value.split(",")) for key, value in headers.items() if key.lower() == "anthropic-beta" and isinstance(value, str))
+
     def _apply_thinking_budget(self, payload: dict) -> None:
-        """Auto-allocate thinking budget (80% of max_tokens)."""
+        """Validate manual thinking and allocate an unset budget (80% of max_tokens)."""
         thinking = payload.get("thinking")
         if not thinking or not isinstance(thinking, dict):
             return
         if thinking.get("type") != "enabled":
             return
-        if thinking.get("budget_tokens"):
+        interleaved = self._uses_manual_interleaved_thinking(payload)
+        max_tokens = payload.get("max_tokens", 8192)
+        minimum_max_tokens = 0 if interleaved else MIN_THINKING_BUDGET_TOKENS
+        if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= minimum_max_tokens:
+            raise ValueError(f"Claude extended thinking requires integer max_tokens > {minimum_max_tokens}; got {max_tokens}")
+
+        budget_tokens = thinking.get("budget_tokens")
+        if budget_tokens is not None:
+            if not isinstance(budget_tokens, int) or isinstance(budget_tokens, bool) or budget_tokens < MIN_THINKING_BUDGET_TOKENS or (not interleaved and budget_tokens >= max_tokens):
+                upper_bound = "" if interleaved else f" and strictly less than max_tokens ({max_tokens})"
+                raise ValueError(f"Claude extended thinking requires budget_tokens to be an integer at least {MIN_THINKING_BUDGET_TOKENS}{upper_bound}; got {budget_tokens}")
             return
 
-        max_tokens = payload.get("max_tokens", 8192)
-        thinking["budget_tokens"] = int(max_tokens * THINKING_BUDGET_RATIO)
+        payload["thinking"] = {
+            **thinking,
+            "budget_tokens": max(
+                MIN_THINKING_BUDGET_TOKENS,
+                int(max_tokens * THINKING_BUDGET_RATIO),
+            ),
+        }
 
     @staticmethod
     def _strip_cache_control(payload: dict) -> None:
@@ -390,8 +474,12 @@ class ClaudeChatModel(ChatAnthropic):
             retry_after = error.response.headers.get("Retry-After")
             if retry_after:
                 try:
-                    total_ms = int(retry_after) * 1000
-                except (ValueError, TypeError):
-                    pass
+                    hint_ms = bounded_retry_after_ms(int(retry_after) * 1000)
+                    if hint_ms is not None:
+                        total_ms = hint_ms
+                except (ValueError, TypeError, OverflowError):
+                    hint_ms = parse_retry_after_date_ms(retry_after, now=time.time())
+                    if hint_ms is not None:
+                        total_ms = hint_ms
 
         return total_ms

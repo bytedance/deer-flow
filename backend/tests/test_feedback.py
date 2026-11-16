@@ -4,8 +4,11 @@ Uses temp SQLite DB for ORM tests.
 """
 
 import pytest
+from _repository_race_helpers import miss_select_factory
+from sqlalchemy.exc import IntegrityError
 
-from deerflow.persistence.feedback import FeedbackRepository
+from deerflow.persistence.feedback import FeedbackAlreadyExistsError, FeedbackRepository
+from deerflow.persistence.feedback.sql import _UPSERT_MAX_ATTEMPTS
 
 
 async def _make_feedback_repo(tmp_path):
@@ -63,6 +66,41 @@ class TestFeedbackRepository:
         record = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="user-1")
         assert record["user_id"] == "user-1"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_twice_for_same_run_and_user_raises_already_exists(self, tmp_path):
+        """A second create for one (thread, run, user) raises a domain error, not a raw IntegrityError."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1", message_id="msg-a")
+            with pytest.raises(FeedbackAlreadyExistsError):
+                await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="u1", message_id="msg-b")
+
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first["feedback_id"], 1)]
+            # The session was rolled back, so the repository keeps working.
+            other = await repo.create(run_id="r1", thread_id="t1", rating=-1, user_id="u2")
+            assert other["user_id"] == "u2"
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_create_reraises_integrity_errors_other_than_the_run_user_key(self, tmp_path, monkeypatch):
+        """A violation that is not the (thread, run, user) key, e.g. a feedback_id collision, is not reported as 'already exists'."""
+        import uuid
+        from types import SimpleNamespace
+
+        from deerflow.persistence.feedback import sql as feedback_sql
+
+        fixed_id = uuid.UUID("00000000-0000-4000-8000-000000000001")
+        monkeypatch.setattr(feedback_sql, "uuid", SimpleNamespace(uuid4=lambda: fixed_id))
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            await repo.create(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            with pytest.raises(IntegrityError):
+                await repo.create(run_id="r2", thread_id="t1", rating=1, user_id="u2")
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_create_invalid_rating_zero(self, tmp_path):
@@ -172,6 +210,47 @@ class TestFeedbackRepository:
         assert second["rating"] == -1
         assert second["comment"] == "changed my mind"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_retries_as_update_when_concurrent_insert_wins(self, tmp_path):
+        """A losing first-submission INSERT updates the winner's row instead of raising IntegrityError."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf, _ = miss_select_factory(real_factory)
+            try:
+                second = await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1", comment="second tab")
+            finally:
+                repo._sf = real_factory
+
+            assert second["feedback_id"] == first["feedback_id"]
+            assert second["rating"] == -1
+            assert second["comment"] == "second tab"
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [row["feedback_id"] for row in rows] == [first["feedback_id"]]
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_upsert_raises_the_integrity_error_once_retries_are_exhausted(self, tmp_path):
+        """If every attempt still collides, the original IntegrityError propagates instead of being swallowed."""
+        repo = await _make_feedback_repo(tmp_path)
+        try:
+            first = await repo.upsert(run_id="r1", thread_id="t1", rating=1, user_id="u1")
+            real_factory = repo._sf
+            repo._sf, sessions = miss_select_factory(real_factory, misses=None)
+            try:
+                with pytest.raises(IntegrityError, match="feedback.thread_id, feedback.run_id, feedback.user_id"):
+                    await repo.upsert(run_id="r1", thread_id="t1", rating=-1, user_id="u1")
+            finally:
+                repo._sf = real_factory
+
+            assert [session.missed for session in sessions] == [_UPSERT_MAX_ATTEMPTS]
+            rows = await repo.list_by_run("t1", "r1", user_id="u1")
+            assert [(row["feedback_id"], row["rating"]) for row in rows] == [(first["feedback_id"], 1)]
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_upsert_different_users_separate(self, tmp_path):

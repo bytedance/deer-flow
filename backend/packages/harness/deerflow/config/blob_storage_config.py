@@ -33,7 +33,8 @@ class BlobStorageConfig(BaseModel):
         description=(
             "Blob store backend selector. Either a registered backend name "
             "(matching a `storage/backends/<name>/` folder that exposes "
-            "`STORE_CLASS`, e.g. `local_fs`) or a dotted import path to a "
+            "`STORE_CLASS`, e.g. `local_fs`) or an import path (`module.Class` "
+            "or `module:Class`, including single-file modules) to a "
             "`BlobStore` subclass. The factory resolves this at "
             "`get_blob_store()` time and raises `ValueError` on failure "
             "(fail-fast: blobs are persistent state, so an unresolved backend "

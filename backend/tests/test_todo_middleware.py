@@ -1,20 +1,26 @@
 """Tests for TodoMiddleware context-loss detection."""
 
+import ast
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 from langchain.agents.middleware.types import ModelRequest
+from langchain.tools import tool
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import (
     ModelLengthFinishReasonMiddleware,
 )
+from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
 from deerflow.agents.middlewares.todo_middleware import (
     TODO_REMINDER_MESSAGE_NAME,
     TodoMiddleware,
@@ -216,6 +222,12 @@ def _ai_no_tool_calls():
     return AIMessage(content="I'm done!")
 
 
+def _ai_stopped_by(stop_reason):
+    """The response a guard leaves behind: provider stops also mark the message."""
+    marker = {"safety_capped": "safety_termination", "model_length_capped": "model_length_termination"}.get(stop_reason)
+    return AIMessage(content="I'm done!", additional_kwargs={marker: {"suppressed_tool_call_count": 0}} if marker else {})
+
+
 def _ai_with_invalid_tool_calls():
     return AIMessage(
         content="",
@@ -306,6 +318,105 @@ class TestToolCallIntentOrError:
 
 
 class TestAfterModel:
+    def test_all_middleware_stop_reason_writes_have_an_explicit_todo_policy(self):
+        middleware_dir = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/agents/middlewares"
+        stamped_reasons = set()
+        for source in sorted(middleware_dir.glob("*.py")):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+            constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign) for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if not isinstance(target, ast.Subscript) or not isinstance(target.slice, ast.Constant) or target.slice.value != "stop_reason":
+                        continue
+                    # This copies a child result into a ledger entry; it does
+                    # not stamp the current run's runtime.context.
+                    if source.name == "delegation_ledger.py" and isinstance(target.value, ast.Name) and target.value.id == "entry":
+                        continue
+                    value = constants.get(node.value.id) if isinstance(node.value, ast.Name) else node.value
+                    assert isinstance(value, ast.Constant) and isinstance(value.value, str), f"Classify stop_reason writer at {source.name}:{node.lineno}"
+                    stamped_reasons.add(value.value)
+
+        # The subagent budget only removes task calls; the lead may still
+        # complete its work using other tools. Every other writer is terminal.
+        nonterminal_reasons = {"subagent_limit_capped"}
+        assert nonterminal_reasons <= stamped_reasons
+        policy = TodoMiddleware().release_policy_parameters()
+        assert set(policy["completion_reminder_hard_stop_reasons"]) == stamped_reasons - nonterminal_reasons
+
+    @pytest.mark.parametrize("marker", ["safety_termination", "model_length_termination"])
+    @pytest.mark.parametrize("context", [None, {}, {"stop_reason": "custom_stop"}])
+    def test_termination_marker_suppresses_reminders_without_recognized_context(self, marker, context):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context = context
+        state = {"messages": [AIMessage(content="partial response", additional_kwargs={marker: {"suppressed_tool_call_count": 0}})], "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) is None
+        assert mw._pending_completion_reminders == {}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["loop_capped", "token_capped", "safety_capped", "model_length_capped"])
+    def test_recognized_stop_reason_suppresses_completion_reminders(self, invoke_async, stop_reason):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_stopped_by(stop_reason)], "todos": _incomplete_todos()}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result is None
+        assert mw._pending_completion_reminders == {}
+        assert mw._completion_reminder_counts == {}
+        assert state["todos"] == _incomplete_todos()
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["loop_capped", "token_capped", "safety_capped", "model_length_capped"])
+    def test_hard_stop_takes_precedence_over_base_jump(self, monkeypatch, invoke_async, stop_reason):
+        base_hook = MagicMock(return_value={"jump_to": "model"})
+        monkeypatch.setattr(TodoListMiddleware, "after_model", base_hook)
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        # Preserve normal parent behavior, but never let it override a hard stop.
+        def after_model():
+            return asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert after_model() == {"jump_to": "model"}
+        base_hook.assert_called_once()
+        base_hook.reset_mock()
+        runtime.context["stop_reason"] = stop_reason
+        state["messages"] = [_ai_stopped_by(stop_reason)]
+        assert after_model() is None
+        base_hook.assert_not_called()
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("stop_reason", ["safety_capped", "model_length_capped"])
+    def test_earlier_provider_stop_in_context_keeps_completion_reminders(self, invoke_async, stop_reason):
+        # Goal continuation turns share the run's context, which keeps the first
+        # cap for the run record. A complete later response is not capped.
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        result = asyncio.run(mw.aafter_model(state, runtime)) if invoke_async else mw.after_model(state, runtime)
+
+        assert result == {"jump_to": "model"}
+        assert mw._completion_reminder_count_for_runtime(runtime) == 1
+
+    @pytest.mark.parametrize("stop_reason", [None, "custom_stop", "subagent_limit_capped", [], {}])
+    def test_unrecognized_stop_reason_keeps_completion_reminders(self, stop_reason):
+        mw = TodoMiddleware()
+        runtime = _make_runtime()
+        runtime.context["stop_reason"] = stop_reason
+        state = {"messages": [_ai_no_tool_calls()], "todos": _incomplete_todos()}
+
+        assert mw.after_model(state, runtime) == {"jump_to": "model"}
+
     def test_returns_none_when_agent_still_using_tools(self):
         mw = TodoMiddleware()
         state = {
@@ -608,7 +719,173 @@ class TestWrapModelCall:
         assert mw._completion_reminder_counts == {}
 
 
+@pytest.fixture
+def production_chain_config(tmp_path, monkeypatch):
+    from deerflow.config.app_config import AppConfig, pop_current_app_config, push_current_app_config
+    from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
+
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    # A missing ambient config must not be masked by a developer's checkout.
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "missing-config.yaml"))
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGCHAIN_TRACING_V2", "false")
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider._default_sandbox_provider", None)
+    monkeypatch.setattr("deerflow.sandbox.local.local_sandbox_provider._singleton", None)
+    app_config = AppConfig.model_validate(
+        {
+            "models": [{"name": "offline", "use": "langchain_openai:ChatOpenAI", "model": "offline"}],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "allow_host_bash": False},
+            "skills": {"path": str(tmp_path / "skills")},
+            "memory": {"enabled": False},
+            "title": {"enabled": False},
+            "summarization": {"enabled": False},
+        }
+    )
+    # Sandbox lifecycle hooks resolve get_app_config() at invocation time,
+    # independently of the explicit config passed to build_middlewares().
+    # The runtime binding propagates through both graph and worker-thread calls.
+    push_current_app_config(app_config)
+    try:
+        yield app_config
+    finally:
+        try:
+            shutdown_sandbox_provider()
+        finally:
+            pop_current_app_config()
+
+
 class TestTodoMiddlewareAgentGraphIntegration:
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("response_kind", ["tool", "blank", "partial_text"])
+    def test_production_chain_stops_after_safety_response(self, production_chain_config, invoke_async, response_kind):
+        from deerflow.agents.lead_agent.agent import build_middlewares
+
+        executed = []
+
+        @tool
+        def record_action(marker: str) -> str:
+            """Record a harmless action in memory."""
+            executed.append(marker)
+            return marker
+
+        filtered = AIMessage(
+            id="filtered-response",
+            content="Partial report." if response_kind == "partial_text" else "",
+            response_metadata={"finish_reason": "content_filter"},
+            tool_calls=[{"name": "record_action", "args": {"marker": "filtered"}, "id": "filtered-call"}] if response_kind == "tool" else [],
+        )
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                filtered,
+                AIMessage(content="", tool_calls=[{"name": "record_action", "args": {"marker": "after-stop"}, "id": "later-call"}]),
+                AIMessage(content="final"),
+            ]
+        )
+        middlewares = build_middlewares({"configurable": {"is_plan_mode": True}}, model_name="offline", app_config=production_chain_config, memory_enabled=False, available_skills=set())
+        graph = create_agent(model=model, tools=[record_action], middleware=middlewares, state_schema=ThreadState)
+        todos = _incomplete_todos()
+        context = {"thread_id": "production-safety-thread", "run_id": "production-safety-run"}
+        state = {"messages": [("user", "Finish the report.")], "todos": todos}
+
+        result = asyncio.run(graph.ainvoke(state, context=context)) if invoke_async else graph.invoke(state, context=context)
+
+        assert len(model.seen_messages) == 1
+        assert executed == []
+        assert context["stop_reason"] == "safety_capped"
+        final = result["messages"][-1]
+        assert final.additional_kwargs["safety_termination"]
+        assert final.content
+        assert not final.tool_calls
+        assert result["todos"] == todos
+        if response_kind == "partial_text":
+            assert final.content == filtered.content
+        todo_mw = next(mw for mw in middlewares if isinstance(mw, TodoMiddleware))
+        assert todo_mw._pending_completion_reminders == {}
+        assert todo_mw._completion_reminder_counts == {}
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize("guard_kind", ["loop", "token", "safety", "model_length"])
+    @pytest.mark.parametrize("pending", [True, False], ids=["unfinished", "completed"])
+    def test_run_hard_stop_does_not_reengage_todos(self, invoke_async, guard_kind, pending):
+        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
+        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
+        from deerflow.config.token_budget_config import TokenBudgetConfig
+
+        executed = []
+
+        @tool
+        def record_action(marker: str) -> str:
+            """Record a harmless action in memory."""
+            executed.append(marker)
+            return marker
+
+        def action(marker, call_id, tokens=10):
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": "record_action", "args": {"marker": marker}, "id": call_id}],
+                usage_metadata={"input_tokens": tokens, "output_tokens": 0, "total_tokens": tokens},
+            )
+
+        todos = [{"content": "Record the requested actions", "status": "pending" if pending else "completed"}]
+        blocked_action = action("repeated", "blocked", tokens=1000 if guard_kind == "token" else 10)
+        if guard_kind in ("safety", "model_length"):
+            blocked_action.response_metadata = {"finish_reason": "content_filter" if guard_kind == "safety" else "length"}
+        model = _CapturingFakeMessagesListChatModel(
+            responses=[
+                AIMessage(content="", tool_calls=[{"name": "write_todos", "args": {"todos": todos}, "id": "todos-start"}]),
+                action("repeated", "first"),
+                blocked_action,
+                # A different action makes unintended post-stop execution observable.
+                action("after-stop", "after-stop"),
+                AIMessage(content="final answer"),
+                AIMessage(content="final answer"),
+                AIMessage(content="final answer"),
+            ]
+        )
+        todo_mw = TodoMiddleware()
+        guards = {
+            "loop": LoopDetectionMiddleware(warn_threshold=2, hard_limit=2),
+            "token": TokenBudgetMiddleware(TokenBudgetConfig(enabled=True, max_tokens=1000)),
+            "safety": SafetyFinishReasonMiddleware(),
+            "model_length": ModelLengthFinishReasonMiddleware(),
+        }
+        guard = guards[guard_kind]
+        # Production registers Todo before the guards; after_model runs in reverse.
+        graph = create_agent(model=model, tools=[record_action], middleware=[todo_mw, guard], state_schema=ThreadState, checkpointer=InMemorySaver())
+        config = {"configurable": {"thread_id": "hard-stop-thread"}, "recursion_limit": 100}
+        context = {"thread_id": "hard-stop-thread", "run_id": "hard-stop-run"}
+        state = {"messages": [("user", "Record actions and track todos.")]}
+
+        def invoke(state, context):
+            return asyncio.run(graph.ainvoke(state, context=context, config=config)) if invoke_async else graph.invoke(state, context=context, config=config)
+
+        result = invoke(state, context)
+
+        assert context["stop_reason"] == f"{guard_kind}_capped"
+        assert executed == ["repeated"]
+        assert len(model.seen_messages) == 3
+        # Pin the real producers to Todo's declared policy, without importing
+        # runtime Goal policy (which currently covers only loop/token).
+        assert context["stop_reason"] in todo_mw.release_policy_parameters()["completion_reminder_hard_stop_reasons"]
+        assert result["todos"] == todos
+        assert not result["messages"][-1].tool_calls
+        assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
+        assert todo_mw._pending_completion_reminders == {}
+        snapshot = graph.get_state(config)
+        assert snapshot.next == ()
+        assert snapshot.values["todos"] == todos
+
+        if pending:
+            # Restore the same thread from its checkpoint without resupplying Todo.
+            # The old cap must not disable the new run or recount historical usage.
+            next_context = {"thread_id": "hard-stop-thread", "run_id": "next-run"}
+            next_result = invoke({"messages": [("user", "Continue the unfinished task.")]}, next_context)
+            assert "stop_reason" not in next_context
+            assert executed == ["repeated", "after-stop"]
+            assert any(_todo_completion_reminders(messages) for messages in model.seen_messages[3:])
+            assert next_result["todos"] == todos
+
     def test_reuses_thread_state_todos_schema_in_real_agent_graph(self):
         mw = TodoMiddleware()
         model = _CapturingFakeMessagesListChatModel(
@@ -761,6 +1038,45 @@ class TestTodoMiddlewareAgentGraphIntegration:
         # the second reminder: the retry did not spend the two-reminder cap.
         assert [len(_todo_completion_reminders(messages)) for messages in model.seen_messages] == [0, 0, 1, 1, 1]
         assert result["messages"][-1].content == "premature final 3"
+
+    @pytest.mark.parametrize("invoke_async", [False, True], ids=["sync", "async"])
+    @pytest.mark.parametrize(
+        "content,response_metadata,additional_kwargs",
+        [
+            ("partial answer", {"finish_reason": "length"}, {}),
+            ("partial answer", {"stop_reason": "max_tokens"}, {}),
+            ([{"type": "text", "text": "partial answer"}], {"finish_reason": "MAX_TOKENS"}, {}),
+            ("partial answer", {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}, {}),
+            ("partial answer", {}, {"finish_reason": "length"}),
+        ],
+        ids=["openai", "anthropic", "gemini-blocks", "responses", "additional-kwargs"],
+    )
+    def test_text_only_length_cap_does_not_reengage_todos(self, invoke_async, content, response_metadata, additional_kwargs):
+        todo_mw = TodoMiddleware()
+        capped_message = AIMessage(content=content, response_metadata=response_metadata, additional_kwargs=additional_kwargs)
+        model = _CapturingFakeMessagesListChatModel(responses=[capped_message])
+        graph = create_agent(
+            model=model,
+            tools=[],
+            middleware=[todo_mw, ModelLengthFinishReasonMiddleware()],
+            state_schema=ThreadState,
+        )
+        todos = [{"content": "Finish the report", "status": "in_progress"}]
+        state = {"messages": [("user", "write the report")], "todos": todos}
+        context = {"thread_id": "text-cap-thread", "run_id": "text-cap-run"}
+
+        result = asyncio.run(graph.ainvoke(state, context=context)) if invoke_async else graph.invoke(state, context=context)
+
+        assert len(model.seen_messages) == 1
+        final_ai = result["messages"][-1]
+        assert final_ai.content == content
+        assert final_ai.response_metadata == response_metadata
+        assert final_ai.additional_kwargs["model_length_termination"]["suppressed_tool_call_count"] == 0
+        assert all(final_ai.additional_kwargs[key] == value for key, value in additional_kwargs.items())
+        assert "model_length_termination" not in capped_message.additional_kwargs
+        assert result["todos"] == todos
+        assert todo_mw._pending_completion_reminders == {}
+        assert not any(_todo_completion_reminders(messages) for messages in model.seen_messages)
 
     def test_length_capped_write_file_does_not_reengage_todos(self):
         """Reproduces the incident (thread b1723286): model emits a write_file
@@ -933,3 +1249,36 @@ class TestAwrapModelCall:
 
         assert [len(_todo_completion_reminders(messages)) for messages in sent] == [1, 1]
         assert mw._completion_reminder_count_for_runtime(runtime) == 1
+
+
+class TestMalformedStoredTodos:
+    """State is a boundary: a stored value need not match the write_todos shape.
+
+    ``todos`` is a reducer channel that checkpoint writes and direct integrations
+    can Overwrite directly, so the middleware must not assume every entry is a
+    mapping. One unknown shape used to raise on every model call of the thread.
+    """
+
+    def test_before_model_ignores_entries_it_cannot_render(self):
+        mw = TodoMiddleware()
+        state = {"messages": [HumanMessage(content="hi")], "todos": ["oops", {"content": "Keep me"}]}
+        result = mw.before_model(state, _make_runtime())
+        content = result["messages"][0].content
+        assert "Keep me" in content
+        assert "oops" not in content
+
+    def test_after_model_keeps_guarding_for_the_usable_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": ["oops", {"content": "Keep me", "status": "pending"}]}
+        assert mw.after_model(state, _make_runtime()) == {"jump_to": "model"}
+
+    def test_after_model_ignores_malformed_siblings_of_completed_entries(self):
+        mw = TodoMiddleware()
+        state = {"messages": [AIMessage(content="final")], "todos": [{"content": "Done", "status": "completed"}, "junk"]}
+        assert mw.after_model(state, _make_runtime()) is None
+
+    @pytest.mark.parametrize("todos", [{"content": "x"}, "oops", 5])
+    def test_todos_that_are_not_a_list_allow_a_clean_exit(self, todos):
+        mw = TodoMiddleware()
+        assert mw.after_model({"messages": [AIMessage(content="final")], "todos": todos}, _make_runtime()) is None
+        assert mw.before_model({"messages": [HumanMessage(content="hi")], "todos": todos}, _make_runtime()) is None

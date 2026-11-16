@@ -168,7 +168,9 @@ def test_fresh_gateway_boot_recovers_self_stop_once_after_running_snapshot(tmp_p
                 await recovered_app.state.scheduled_task_service.run_once(now=due + timedelta(days=1))
                 assert len(await recovered_app.state.scheduled_task_run_repo.list_by_task(task_id)) == 1
                 await recovered_app.state.scheduled_task_service.handle_run_completion(old_record)
-                assert await recovered_app.state.scheduled_task_repo.get(task_id, user_id=DEFAULT_USER_ID) == paused
+                # The GET response adds derived run state to the stored row.
+                stored = {key: value for key, value in paused.items() if key not in {"automatic_runs_used", "active_run_status"}}
+                assert await recovered_app.state.scheduled_task_repo.get(task_id, user_id=DEFAULT_USER_ID) == stored
                 assert await recovered_app.state.scheduled_task_run_repo.list_by_task(task_id) == history
                 return history[0]
 

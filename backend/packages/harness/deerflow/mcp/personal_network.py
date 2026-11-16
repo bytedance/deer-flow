@@ -2,6 +2,7 @@
 
 import asyncio
 import ipaddress
+import ssl
 
 import httpx
 
@@ -24,11 +25,18 @@ def _public_addresses(url: httpx.URL) -> list[str]:
 
 class _PersonalTransport(httpx.AsyncBaseTransport):
     def __init__(self):
-        self._ssl_context = httpx.create_ssl_context(trust_env=False)
+        self._ssl_context: ssl.SSLContext | None = None
+        self._ssl_context_lock = asyncio.Lock()
         self._transports: dict[tuple[bytes, bytes, int | None], httpx.AsyncHTTPTransport] = {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         addresses = await asyncio.to_thread(_public_addresses, request.url)
+        # The synchronous client factory can run on the event loop. Load TLS
+        # trust lazily off-loop, sharing one context across concurrent requests.
+        if self._ssl_context is None:
+            async with self._ssl_context_lock:
+                if self._ssl_context is None:
+                    self._ssl_context = await asyncio.to_thread(httpx.create_ssl_context, trust_env=False)
         origin = (request.url.raw_scheme, request.url.raw_host, request.url.port)
         # Pin TCP to the vetted IP, but isolate pools by original origin so two
         # names sharing an IP cannot reuse a connection authenticated for one.

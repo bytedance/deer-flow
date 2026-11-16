@@ -14,6 +14,14 @@ import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import type { ArtifactEntry } from "@/core/threads/types";
 
+import { FlipDisplay as StaticFlipDisplay } from "../../../helpers/flip-display";
+
+rs.mock("@/components/workspace/flip-display", () => ({
+  FlipDisplay: (props: Parameters<typeof StaticFlipDisplay>[0]) => (
+    <StaticFlipDisplay {...props} />
+  ),
+}));
+
 rs.mock("@/components/workspace/artifacts", () => ({
   useArtifacts: () => ({ setOpen: () => undefined, select: () => undefined }),
 }));
@@ -100,9 +108,11 @@ describe("generic tool details", () => {
             { id: "call-2", name: "mcp_lookup", args: {} },
           ],
         } as Message,
+        tool("first call failed", "error"),
       ]),
     );
     fireEvent.click(screen.getByRole("button", { name: "1 more step" }));
+    expect(screen.getAllByText("Failed", { exact: true })).toHaveLength(1);
     fireEvent.click(
       screen.getByRole("button", { name: "Tool details: mcp_lookup (call-2)" }),
     );
@@ -174,7 +184,10 @@ describe("generic tool details", () => {
     render(
       group([
         tool(""),
-        tool('{"reason":"denied"}', "error"),
+        {
+          ...tool('{"reason":"denied"}'),
+          additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+        } as Message,
         call,
         tool("later result"),
       ]),
@@ -253,6 +266,67 @@ describe("generic tool details", () => {
       }),
     ).toBeNull();
   });
+});
+
+it.each(["bash", "read_file", "mcp_lookup"])(
+  "shows explicit %s failures without adding normal-mode details",
+  (name) => {
+    const invocation = {
+      ...call,
+      tool_calls: [
+        {
+          id: "call-1",
+          name,
+          args: {
+            description: "Requested operation",
+            path: "/mnt/user-data/workspace/input.txt",
+          },
+        },
+      ],
+    } as Message;
+    const { rerender } = render(
+      group(
+        [
+          invocation,
+          {
+            ...tool("provider denied"),
+            additional_kwargs: { deerflow_tool_meta: { status: "error" } },
+          } as Message,
+        ],
+        false,
+      ),
+    );
+    expect(screen.getByText("Failed", { exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Tool details:/ })).toBeNull();
+    for (const result of [
+      undefined,
+      tool('{"error":"ordinary document data"}'),
+      {
+        ...tool("limited results"),
+        additional_kwargs: {
+          deerflow_tool_meta: { status: "partial_success" },
+        },
+      } as Message,
+    ]) {
+      rerender(group(result ? [invocation, result] : [invocation], false));
+      expect(screen.queryByText("Failed", { exact: true })).toBeNull();
+    }
+  },
+);
+
+it("does not announce scheduler success when a received object is marked as failed", () => {
+  const invocation = {
+    ...call,
+    tool_calls: [
+      { id: "call-1", name: "schedule_task", args: { action: "create" } },
+    ],
+  } as Message;
+  render(group([invocation, tool("{}", "error")], false));
+  expect(
+    screen.getByText("The scheduled task change didn't go through"),
+  ).toBeTruthy();
+  expect(screen.queryByText("Scheduled a task")).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Tool details:/ })).toBeNull();
 });
 
 it.each([

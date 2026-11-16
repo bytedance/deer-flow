@@ -29,15 +29,16 @@ A subagent's report is its **self-report**. DeerFlow layers three kinds of check
 
 ### Cap reasons: stop_reason
 
-Three guards can end a run early. The run usually still counts as `completed`; when no usable output exists it is `failed` and keeps the same `stop_reason`:
+Four guards can end a run early. The run usually still counts as `completed`; when no usable output exists it is `failed` and keeps the same `stop_reason`:
 
 | `subagent_stop_reason` | Trigger                          | Result text                                                          |
 | ---------------------- | -------------------------------- | -------------------------------------------------------------------- |
 | `turn_capped`          | `max_turns` exhausted            | `Task Succeeded (capped: turn budget). Result: ...`                  |
 | `token_capped`         | `token_budget` hard stop reached | `Task Succeeded (capped: token budget). Result: ...`                 |
 | `loop_capped`          | Loop-detection hard stop         | `Task Succeeded (capped: repeated tool-call loop). Result: ...`      |
+| `model_length_capped`  | Provider output-length limit     | `Task Succeeded (capped: model output length limit). Result: ...`    |
 
-A capped report is a **partial result**: the tool calls of the final turn were stripped and the model was forced to answer. When the turn budget runs out with no usable text at all, the status is `failed` and the text reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. The legacy `max_turns_reached` status maps to `turn_capped` on read.
+A capped report is a **partial result**: the tool calls of the final turn were stripped and the model was forced to answer. For `model_length_capped`, the provider cut the final response at its output limit (`finish_reason=length` or an equivalent signal); any tool call in that response is dropped instead of executed. When the turn budget runs out with no usable text at all, the status is `failed` and the text reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. The legacy `max_turns_reached` status maps to `turn_capped` on read.
 
 ### How failure is decided
 

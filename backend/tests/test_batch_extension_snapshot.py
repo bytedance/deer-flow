@@ -65,7 +65,9 @@ async def test_batch_keeps_its_construction_snapshot(monkeypatch, _subagent_env,
     def assemble(**kwargs):
         kwargs["include_mcp"] = False
         tools = real_assembly(**kwargs)
-        captured["tool_names"] = [t.name for t in tools]
+        # This test isolates extension snapshots; the run-status built-in is
+        # assembled independently of the monkeypatched BUILTIN_TOOLS list.
+        captured["tool_names"] = [t.name for t in tools if t.name != "inspect_run_status"]
         return tools
 
     monkeypatch.setattr("deerflow.tools.get_available_tools", assemble)
@@ -93,7 +95,7 @@ async def test_batch_keeps_its_construction_snapshot(monkeypatch, _subagent_env,
     monkeypatch.setattr(_subagent_env.SubagentExecutor, "_create_agent", create)
     try:
         set_loaded_extensions(b if replacement else a)
-        await service._execute_item(item)
+        await service._execute_item(item, lease_owner="original-claim")
         assert repo.finalize_item.await_args.kwargs["succeeded"]
         if late_replace:
             set_loaded_extensions(b)
@@ -107,7 +109,7 @@ async def test_batch_keeps_its_construction_snapshot(monkeypatch, _subagent_env,
         original_spec = deepcopy(item["batch"]["execution_spec"])
         restarted = service_module.SubagentBatchService(repository=repo, config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(), app_config=config, extensions=b)
         set_loaded_extensions(a)
-        await restarted._execute_item(item)
+        await restarted._execute_item(item, lease_owner="restarted-claim")
         executor = _subagent_env.SubagentExecutor(**captured["executor_kwargs"])
         result = await executor._aexecute("identify")
         assert result.status == _subagent_env.SubagentStatus.COMPLETED, result.error

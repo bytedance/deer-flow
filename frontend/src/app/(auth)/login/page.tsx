@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useTheme } from "next-themes";
-import { useEffect, useState } from "react";
+import { useEffect, useContext, useState } from "react";
 
 import { RememberSessionOption } from "@/components/auth/remember-session-option";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { AuthDisabledContext, useAuth } from "@/core/auth/AuthProvider";
+import { isValidEmail } from "@/core/auth/email";
 import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
@@ -47,11 +48,17 @@ export default function LoginPage() {
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
+  // Direct auth-page entry with a suspended session: the layout hands the
+  // SSR account_disabled verdict down through context — the only place the
+  // reason is known before a (deliberately generic) login attempt.
+  const ssrDisabled = useContext(AuthDisabledContext);
   const [error, setError] = useState(
     errorParam
       ? (t.login.errors[errorParam as keyof typeof t.login.errors] ??
           t.login.authFailed)
-      : "",
+      : ssrDisabled
+        ? t.login.errors.account_disabled
+        : "",
   );
   // Soft hint shown after a failed login when SSO is configured: an SSO-only
   // account has no local password, so the backend returns a generic
@@ -74,10 +81,11 @@ export default function LoginPage() {
     setupStatusPhase === "unavailable" ||
     (setupStatusAttempt > 0 && setupStatusPhase === "checking");
 
-  // Redirect if already authenticated (client-side, post-login)
+  // Redirect if already authenticated. Replace, so Back does not return to a
+  // sign-in page that immediately redirects again.
   useEffect(() => {
     if (isAuthenticated) {
-      router.push(redirectPath);
+      router.replace(redirectPath);
     }
   }, [isAuthenticated, redirectPath, router]);
 
@@ -145,14 +153,31 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setShowSsoHint(false);
-    setLoading(true);
 
     if (!isLogin && !regularSignupAllowed) {
       setError(t.login.adminSetupRequiredDescription);
-      setLoading(false);
       return;
     }
 
+    // The form is `noValidate`, so the browser no longer rejects addresses
+    // its `type="email"` rule dislikes (e.g. a non-ASCII local part, which
+    // the backend accepts — #7488). Apply the permissive JS check instead.
+    const address = email.trim();
+    if (!isValidEmail(address)) {
+      setError(t.login.errors.invalid_email);
+      return;
+    }
+
+    if (password.length < (isLogin ? 6 : 8)) {
+      setError(
+        isLogin
+          ? t.login.errors.password_too_short
+          : t.login.errors.registration_password_too_short,
+      );
+      return;
+    }
+
+    setLoading(true);
     try {
       const endpoint = isLogin
         ? "/api/v1/auth/login/local"
@@ -161,9 +186,9 @@ export default function LoginPage() {
         ? new URLSearchParams({
             password,
             remember_me: String(rememberMe),
-            username: email,
+            username: address,
           })
-        : JSON.stringify({ email, password, remember_me: rememberMe });
+        : JSON.stringify({ email: address, password, remember_me: rememberMe });
 
       const headers: HeadersInit = isLogin
         ? { "Content-Type": "application/x-www-form-urlencoded" }
@@ -179,7 +204,15 @@ export default function LoginPage() {
       if (!res.ok) {
         const data = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        // account_disabled is the one code with user-facing copy of its own
+        // (#4063 gap 3): the backend message is not localized. Login-only:
+        // sign-up keeps the backend message verbatim so a suspended
+        // account's email cannot be probed through the register surface.
+        setError(
+          isLogin && authError.code === "account_disabled"
+            ? t.login.errors.account_disabled
+            : authError.message,
+        );
         // On a failed login with SSO configured, surface a hint pointing at the
         // SSO buttons — the "wrong password" may really mean "this is an SSO account".
         if (isLogin && ssoProviders.length > 0) {
@@ -188,7 +221,7 @@ export default function LoginPage() {
         return;
       }
 
-      saveRememberLoginPreference({ email, rememberMe });
+      saveRememberLoginPreference({ email: address, rememberMe });
 
       // Both login and register set a cookie — redirect to workspace
       router.push(redirectPath);
@@ -198,6 +231,16 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
+
+  // A signed-in session is already on its way to `redirectPath` (see the
+  // effect above), so it never sees the sign-in form.
+  if (isAuthenticated) {
+    return (
+      <div className="bg-background flex min-h-screen items-center justify-center">
+        <p className="text-muted-foreground text-sm">{t.login.pleaseWait}</p>
+      </div>
+    );
+  }
 
   const actualTheme = theme === "system" ? resolvedTheme : theme;
 
@@ -262,7 +305,7 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-2">
+        <form onSubmit={handleSubmit} noValidate className="space-y-2">
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
               {t.login.email}

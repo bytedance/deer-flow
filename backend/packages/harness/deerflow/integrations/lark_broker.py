@@ -11,8 +11,8 @@ loopback. The sandbox gets a tiny ``lark-cli`` shim on ``PATH`` that forwards
 argv/stdin to the broker, so the raw credential files never exist in the sandbox
 filesystem.
 
-Everything here is Python-3-stdlib only so the same module can run inside the
-minimal broker sidecar image without extra dependencies.
+The broker and its bundled DeerFlow utility modules use only Python's standard
+library, so the minimal sidecar needs no third-party Python packages.
 """
 
 from __future__ import annotations
@@ -24,11 +24,17 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+# Keep the standalone image's Python COPY list in sync with this import and its
+# transitive dependencies: docker/lark-cli-broker/Dockerfile.
+from deerflow.utils.atomic_write import cleanup_failed_atomic_write
 
 logger = logging.getLogger(__name__)
 
@@ -461,6 +467,31 @@ def serve(config: BrokerConfig) -> ThreadingHTTPServer:
     return server
 
 
+def _write_text_atomically(path: str, content: str, *, mode: int) -> None:
+    """Publish complete *content* and its final *mode* together at *path*.
+
+    Set permissions on the temporary file before fsync and ``os.replace`` so
+    an interrupted install cannot publish a non-executable launcher. A write,
+    permission, or publish failure leaves the previous file untouched.
+    """
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp")
+    temporary = Path(temporary_name)
+    try:
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The file object now owns the descriptor.
+        with handle:
+            handle.write(content)
+            handle.flush()
+            os.chmod(temporary, mode)
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        cleanup_failed_atomic_write(temporary, fd)
+        raise
+
+
 def install_shim(dest_dir: str, *, version: str | None = None) -> str:
     """Write the launcher + shim + runtime marker into the sandbox runtime dir.
 
@@ -481,16 +512,11 @@ def install_shim(dest_dir: str, *, version: str | None = None) -> str:
     bin_dir = os.path.join(dest, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     shim_body = os.path.join(bin_dir, LARK_CLI_BROKER_SHIM_FILENAME)
-    with open(shim_body, "w", encoding="utf-8") as handle:
-        handle.write(LARK_CLI_BROKER_SHIM_SCRIPT)
-    os.chmod(shim_body, 0o755)
+    _write_text_atomically(shim_body, LARK_CLI_BROKER_SHIM_SCRIPT, mode=0o755)
     launcher = os.path.join(bin_dir, "lark-cli")
-    with open(launcher, "w", encoding="utf-8") as handle:
-        handle.write(render_launcher_script(shim_body))
-    os.chmod(launcher, 0o755)
+    _write_text_atomically(launcher, render_launcher_script(shim_body), mode=0o755)
     marker = os.path.join(dest, ".deerflow-lark-cli-runtime.json")
-    with open(marker, "w", encoding="utf-8") as handle:
-        json.dump({"version": version or "unknown", "kind": "shim"}, handle)
+    _write_text_atomically(marker, json.dumps({"version": version or "unknown", "kind": "shim"}), mode=0o644)
     return launcher
 
 

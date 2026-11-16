@@ -21,17 +21,14 @@ def compare_snapshots(
     limits: WorkspaceChangeLimits | None = None,
 ) -> WorkspaceChangeResult:
     resolved_limits = limits or WorkspaceChangeLimits()
-    all_paths = sorted(set(before.files) | set(after.files))
     changes: list[WorkspaceFileChange] = []
     created = modified = deleted = symlink_created = additions = deletions = 0
     total_diff_bytes = 0
     truncated = before.truncated or after.truncated
 
-    for path in all_paths:
+    for path in sorted(get_changed_paths(before, after)):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
-        if before_file and after_file and _same_file(before_file, after_file):
-            continue
 
         status = _status(before_file, after_file)
         if status == "created":
@@ -103,18 +100,46 @@ def get_changed_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> se
     for path in set(before.files) | set(after.files):
         before_file = before.files.get(path)
         after_file = after.files.get(path)
+        # Absence from a partial scan does not prove creation or deletion.
+        if (before_file is None and before.truncated) or (after_file is None and after.truncated):
+            continue
         if before_file and after_file and _same_file(before_file, after_file):
             continue
         changed.add(path)
     return changed
 
 
+#: Virtual prefix of the outputs workspace root. Shared with ``recorder.py`` so
+#: the delivery filter below cannot silently drift from the scanner's paths.
+OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs"
+
+
+def _is_hidden_output_path(path: str) -> bool:
+    """Whether any segment below the outputs root starts with a dot.
+
+    Scheduled tasks and agents keep working state under outputs (a cursor or
+    state JSON, a ``.work/`` scratch tree). Those files are not deliverables, so
+    they must not make an otherwise finished run fail delivery verification.
+    """
+    prefix = f"{OUTPUTS_VIRTUAL_PREFIX}/"
+    if not path.startswith(prefix):
+        return False
+    return any(segment.startswith(".") for segment in path[len(prefix) :].split("/") if segment)
+
+
 def get_changed_output_paths(before: WorkspaceSnapshot, after: WorkspaceSnapshot) -> list[str]:
-    """Return created or modified regular files under the outputs root."""
+    """Return regular output changes established by the bounded snapshots.
+
+    Paths absent from a truncated before snapshot are omitted, including
+    genuinely new files; modifications observed in both snapshots are retained.
+    Hidden paths are working state, not deliverables. The worker's delivery
+    check relies on this list and is skipped when it is empty, so an empty
+    result does not prove that the run produced no outputs.
+    """
     paths: list[str] = []
     for path in sorted(get_changed_paths(before, after)):
         snapshot = after.files.get(path)
-        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink:
+        if snapshot is not None and snapshot.root == "outputs" and not snapshot.symlink and not _is_hidden_output_path(path):
             paths.append(path)
     return paths
 
@@ -198,7 +223,11 @@ def _snapshot_text(file: FileSnapshot | None) -> str | None:
         return file.text
     if file.text_path:
         try:
-            with open(file.text_path, encoding="utf-8") as cached:
+            # The cache is published byte-exactly (the scanner pins
+            # newline="\n"), so read it back without newline translation:
+            # universal newlines would silently rewrite a decoded CRLF
+            # snapshot into LF text and corrupt the served content.
+            with open(file.text_path, encoding="utf-8", newline="") as cached:
                 return cached.read()
         except OSError:
             return None

@@ -13,7 +13,7 @@ from deerflow.models import openai_codex_provider as provider
 from deerflow.models.credential_loader import CodexCliCredential
 
 
-class EventStream(httpx.SyncByteStream):
+class EventStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     def __init__(self, events: list[dict], tail_error: Exception | None = None):
         self.events = events
         self.tail_error = tail_error
@@ -30,6 +30,13 @@ class EventStream(httpx.SyncByteStream):
     def close(self) -> None:
         self.closed = True
 
+    async def __aiter__(self):
+        for chunk in self:
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.close()
+
 
 @pytest.fixture
 def model(monkeypatch):
@@ -40,6 +47,7 @@ def model(monkeypatch):
 @pytest.fixture
 def serve_events(monkeypatch):
     client_class = httpx.Client
+    async_client_class = httpx.AsyncClient
 
     def install(events: list[dict], *, tail_error: Exception | None = None, status_code: int = 200):
         stream = EventStream(events, tail_error)
@@ -51,6 +59,7 @@ def serve_events(monkeypatch):
 
         transport = httpx.MockTransport(handle)
         monkeypatch.setattr(provider.httpx, "Client", lambda **kwargs: client_class(transport=transport, **kwargs))
+        monkeypatch.setattr(provider.httpx, "AsyncClient", lambda **kwargs: async_client_class(transport=transport, **kwargs))
         return stream, requests
 
     return install
@@ -209,5 +218,67 @@ def test_completed_response_recovers_tool_calls_and_reasoning_before_closing(mod
 
     assert result.tool_calls == [{"type": "tool_call", "name": "save_report", "id": "call-report", "args": {"name": "report.md"}}]
     assert result.additional_kwargs["reasoning_content"] == "Save the completed report"
+    assert stream.closed
+    assert not stream.read_past_events
+
+
+@pytest.mark.parametrize("usage_shape", ["null", "omitted", "empty"])
+@pytest.mark.parametrize("output_kind", ["text", "tool", "mixed"])
+@pytest.mark.parametrize("recover_streamed_output", [False, True])
+def test_completed_response_without_usage_preserves_output(model, serve_events, usage_shape, output_kind, recover_streamed_output):
+    tool_call = {"type": "function_call", "name": "save_report", "call_id": "call-report", "arguments": '{"name": "report.md"}'}
+    reasoning = {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Save the completed report"}]}
+    items = {
+        "text": [message_item("Report ready")],
+        "tool": [tool_call],
+        "mixed": [reasoning, message_item("Report ready"), tool_call],
+    }[output_kind]
+    response = {"id": "resp-no-usage", "status": "completed", "model": "gpt-5.4", "output": [] if recover_streamed_output else items}
+    if usage_shape != "omitted":
+        response["usage"] = None if usage_shape == "null" else {}
+    events = [{"type": "response.output_item.done", "output_index": index, "item": item} for index, item in enumerate(items)] if recover_streamed_output else []
+    events.append({"type": "response.completed", "response": response})
+    stream, requests = serve_events(events, tail_error=httpx.ReadTimeout("Connection stayed open after completion"))
+
+    result = model.invoke([HumanMessage(content="Prepare a report")])
+
+    assert result.content == ("Report ready" if output_kind != "tool" else "")
+    expected_calls = [{"type": "tool_call", "name": "save_report", "id": "call-report", "args": {"name": "report.md"}}] if output_kind != "text" else []
+    assert result.tool_calls == expected_calls
+    assert result.invalid_tool_calls == []
+    assert result.additional_kwargs == ({"reasoning_content": "Save the completed report"} if output_kind == "mixed" else {})
+    assert result.usage_metadata is None
+    assert result.response_metadata["usage"] == {}
+    assert result.response_metadata["model"] == "gpt-5.4"
+    assert result.response_metadata["token_usage"] == {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    assert len(requests) == 1
+    assert stream.closed
+    assert not stream.read_past_events
+
+
+@pytest.mark.asyncio
+async def test_async_completed_response_without_usage_preserves_output(model, serve_events):
+    stream, requests = serve_events([{"type": "response.completed", "response": {"status": "completed", "output": [message_item("Report ready")], "usage": None}}])
+
+    result = await model.ainvoke([HumanMessage(content="Prepare a report")])
+
+    assert result.content == "Report ready"
+    assert result.usage_metadata is None
+    assert result.response_metadata["usage"] == {}
+    assert len(requests) == 1
+    assert stream.closed
+    assert not stream.read_past_events
+
+
+@pytest.mark.parametrize("tokens", [0, 7])
+def test_completed_response_usage_mapping_preserves_counts(model, serve_events, tokens):
+    usage = {"input_tokens": tokens, "output_tokens": tokens, "total_tokens": 2 * tokens, "input_tokens_details": {"cached_tokens": tokens}, "output_tokens_details": {"reasoning_tokens": tokens}}
+    stream, _ = serve_events([{"type": "response.completed", "response": {"status": "completed", "output": [message_item("Report ready")], "usage": usage}}])
+
+    result = model.invoke([HumanMessage(content="Prepare a report")])
+
+    assert result.usage_metadata == {"input_tokens": tokens, "output_tokens": tokens, "total_tokens": 2 * tokens, "input_token_details": {"cache_read": tokens}, "output_token_details": {"reasoning": tokens}}
+    assert result.response_metadata["usage"] == usage
+    assert result.response_metadata["token_usage"] == {"prompt_tokens": tokens, "completion_tokens": tokens, "total_tokens": 2 * tokens}
     assert stream.closed
     assert not stream.read_past_events

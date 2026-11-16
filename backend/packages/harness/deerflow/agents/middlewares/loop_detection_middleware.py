@@ -109,6 +109,17 @@ _UI_NARRATION_TOOLS = frozenset({"bash", "ls", "glob", "grep"})
 
 type _RunScopeKey = tuple[str, str | None]
 
+# Deeply nested args cannot be serialized for a key; they collapse to one opaque key.
+_UNSERIALIZABLE_ARGS = "<unserializable>"
+
+
+def _stable_args_key(value: object) -> str | None:
+    """Serialize opaque args for a stable key, or None past the recursion limit."""
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError, RecursionError):
+        return None
+
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     """Normalize tool call args to a dict plus an optional fallback key.
@@ -123,17 +134,17 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     if isinstance(raw_args, str):
         try:
             parsed = json.loads(raw_args)
-        except (TypeError, ValueError, json.JSONDecodeError):
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             return {}, raw_args
 
         if isinstance(parsed, dict):
             return parsed, None
-        return {}, json.dumps(parsed, sort_keys=True, default=str)
+        return {}, _stable_args_key(parsed)
 
     if raw_args is None:
         return {}, None
 
-    return {}, json.dumps(raw_args, sort_keys=True, default=str)
+    return {}, _stable_args_key(raw_args)
 
 
 def _coerce_line_number(value: object) -> int | None:
@@ -181,6 +192,11 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     """Derive a stable key from the args that change what a call does."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
+        if not isinstance(path, str):
+            # Formatting a nested structure into the key calls repr(), which
+            # recurses past the limit for the same payloads _stable_args_key
+            # already treats as opaque.
+            path = _stable_args_key(path) or _UNSERIALIZABLE_ARGS
         start_line, end_line = _normalized_read_range(args)
         return f"{path}:{start_line}-{end_line if end_line is not None else _OPEN_ENDED_READ}"
 
@@ -190,7 +206,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     if name in {"write_file", "str_replace"}:
         if fallback_key is not None:
             return fallback_key
-        return json.dumps(args, sort_keys=True, default=str)
+        return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
     if fallback_key is not None:
         return fallback_key
@@ -203,7 +219,7 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     # call look new (#1905).
     if name in _UI_NARRATION_TOOLS:
         args = {field: value for field, value in args.items() if field != "description"}
-    return json.dumps(args, sort_keys=True, default=str)
+    return _stable_args_key(args) or _UNSERIALIZABLE_ARGS
 
 
 def _hash_tool_calls(tool_calls: list[dict]) -> str:
@@ -227,11 +243,32 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     return hashlib.md5(blob.encode()).hexdigest()[:12]
 
 
-_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
-
-_TOOL_FREQ_WARNING_MSG = (
-    "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
+# Warn-level messages ask the agent to wrap up, but must not make it drop work
+# it was asked to persist: a subagent whose task names an output file would
+# otherwise stop *all* tool calls, including the write that delivers its
+# result, and finish as "completed" with nothing on disk. So the wrap-up
+# allows a bounded save/read/retry before the final answer, without reusing
+# a looping writer or bypassing the read-before-write gate. It also names
+# present_files: an agent told only to stop calling tools skipped presenting
+# outputs it had already created, so the run failed its delivery check. The
+# hard-stop path below is unchanged (it strips tool calls).
+_WRAP_UP_INSTRUCTIONS = (
+    "If your task asks you to save results to a file, first write what you have collected so far to that file "
+    "with a file-writing tool (for example write_file, unless it is the looping tool). "
+    "If the writer is itself looping, use a different available file-writing tool. "
+    "If a save is blocked by a read-before-write check, read the target file and retry the save once. "
+    "Do not use a tool that this warning tells you to stop, or repeat a failed save loop. "
+    "If no permitted save path is available or the retry fails, include the collected results in your final answer "
+    "and state that the file was not saved. "
+    "If present_files is available, present the files you already created in /mnt/user-data/outputs "
+    "with one present_files call before answering, unless it is the looping tool. "
+    "Then stop calling tools and produce your final answer. "
+    "If you cannot complete the task, summarize what you accomplished so far."
 )
+
+_WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop repeating them and wrap up now. " + _WRAP_UP_INSTRUCTIONS
+
+_TOOL_FREQ_WARNING_MSG = "[LOOP DETECTED] You have called {tool_name} {count} times without producing a final answer. Stop calling {tool_name} and wrap up now. " + _WRAP_UP_INSTRUCTIONS
 
 _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. Producing final answer with results collected so far."
 

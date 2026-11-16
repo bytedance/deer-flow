@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import threading
 from contextlib import asynccontextmanager
@@ -32,8 +33,10 @@ from deerflow.persistence.thread_meta import (
 )
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime import ConflictError, ThreadOperationKind
+from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY
+from deerflow.runtime.goal import build_goal_outcome, build_goal_state, write_thread_goal
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.uploads.companions import companion_names, register_companion, resolve_companion
 from deerflow.utils.file_outline import extract_outline_for_file
@@ -143,6 +146,68 @@ def test_compact_rejects_run_owned_by_another_worker(monkeypatch) -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Thread has a run in flight. Compact after the run finishes."
+
+
+@pytest.mark.parametrize(
+    ("method", "suffix", "payload"),
+    [
+        ("put", "/goal", {"objective": "ship safely"}),
+        ("delete", "/goal", None),
+        ("post", "/state", {"values": {"title": "must not write"}}),
+    ],
+)
+def test_pending_approval_guard_uses_effective_checkpoint_access(monkeypatch, method, suffix, payload) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = f"approval-accessor-{method}-{suffix.strip('/')}"
+    accessor = SimpleNamespace()
+    read_config = {"configurable": {"thread_id": thread_id}}
+    guard = AsyncMock(side_effect=HTTPException(status_code=409, detail="approval_pending"))
+    builder = AsyncMock(return_value=(accessor, read_config))
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", builder)
+
+    with (
+        patch("app.gateway.hitl_approval.reject_new_run_when_approval_pending", guard),
+        TestClient(app) as client,
+    ):
+        assert client.post("/api/threads", json={"thread_id": thread_id}).status_code == 200
+        response = client.request(method.upper(), f"/api/threads/{thread_id}{suffix}", json=payload)
+
+    assert response.status_code == 409, response.text
+    if suffix == "/state":
+        assert guard.await_args.kwargs == {}
+        builder.assert_not_awaited()
+    else:
+        assert guard.await_args.kwargs["accessor"] is accessor
+        assert guard.await_args.kwargs["read_config"] is read_config
+
+
+def test_compact_pending_approval_guard_uses_raw_checkpoint_signal(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "approval-accessor-compact"
+    accessor = SimpleNamespace()
+    read_config = {"configurable": {"thread_id": thread_id}}
+    guard = AsyncMock(side_effect=HTTPException(status_code=409, detail="approval_pending"))
+    monkeypatch.setattr(threads, "build_checkpoint_state_mutation_accessor", lambda *_args, **_kwargs: (accessor, read_config))
+
+    with (
+        patch("app.gateway.hitl_approval.reject_new_run_when_approval_pending", guard),
+        TestClient(app) as client,
+    ):
+        assert client.post("/api/threads", json={"thread_id": thread_id}).status_code == 200
+        response = client.post(f"/api/threads/{thread_id}/compact", json={"force": True})
+
+    assert response.status_code == 409, response.text
+    assert guard.await_args.kwargs == {}
+
+
+@pytest.mark.anyio
+async def test_hitl_helpers_degrade_when_app_state_is_absent() -> None:
+    from app.gateway.hitl_approval import find_pending_interrupts, has_waiting_for_input_run, mark_approval_answered
+
+    request = SimpleNamespace()
+    assert await has_waiting_for_input_run(request, "thread-1") is False
+    assert await find_pending_interrupts(request, "thread-1") == {}
+    await mark_approval_answered(request, "thread-1")
 
 
 def test_update_state_rejects_run_owned_by_another_worker(monkeypatch) -> None:
@@ -522,6 +587,102 @@ def _persistence_cleanup_app(tmp_path, *, run_store, event_store, feedback_repo)
     app.state.feedback_repo = feedback_repo
     app.include_router(threads.router)
     return app
+
+
+def test_delete_thread_evicts_this_workers_in_memory_run_registry(tmp_path):
+    """Deleting a thread must drop the runs this worker still holds in memory.
+
+    ``RunStore.delete_by_thread`` removes the durable rows, but ``RunManager``
+    keeps its own process-local copies and answers ``get()`` / ``list_by_thread()``
+    from them before consulting the store. Without an eviction the deleted
+    thread's runs — including ``kwargs`` with the user's prompt — stay readable
+    through ``GET /api/threads/{id}/runs`` until the Gateway restarts, while the
+    thread itself already answers 404.
+    """
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    paths = Paths(tmp_path)
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+
+    async def _seed() -> str:
+        record = await run_manager.create_or_reject("thread-runs-gone")
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        return record.run_id
+
+    run_id = asyncio.run(_seed())
+    assert asyncio.run(run_manager.get(run_id)) is not None
+
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=1)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = make_authed_test_app()
+    app.state.run_manager = run_manager
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            response = client.delete("/api/threads/thread-runs-gone")
+
+    assert response.status_code == 200, response.text
+    # The durable row is gone, so the in-memory copy is the only remaining
+    # answer — and it must be gone too.
+    assert asyncio.run(run_store.list_by_thread("thread-runs-gone", user_id=None)) == []
+    assert asyncio.run(run_manager.get(run_id)) is None
+    assert asyncio.run(run_manager.list_by_thread("thread-runs-gone", user_id=None)) == []
+    assert "thread-runs-gone" not in run_manager._runs_by_thread
+
+
+def test_deleted_thread_runs_are_no_longer_readable_over_http(tmp_path):
+    """The reported sequence: delete 200 → runs list ``[]`` → single run 404."""
+    from deerflow.runtime import RunManager, RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    paths = Paths(tmp_path)
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+
+    async def _seed() -> str:
+        record = await run_manager.create_or_reject("thread-http-gone", kwargs={"input": {"messages": [{"role": "user", "content": "probe-marker-1"}]}})
+        await run_manager.set_status(record.run_id, RunStatus.success)
+        return record.run_id
+
+    run_id = asyncio.run(_seed())
+
+    event_store = MagicMock()
+    event_store.delete_by_thread = AsyncMock(return_value=1)
+    feedback_repo = MagicMock()
+    feedback_repo.delete_by_thread = AsyncMock(return_value=0)
+
+    app = make_authed_test_app()
+    app.state.run_manager = run_manager
+    app.state.run_store = run_store
+    app.state.run_event_store = event_store
+    app.state.feedback_repo = feedback_repo
+    app.include_router(threads.router)
+    app.include_router(thread_runs.router)
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=paths):
+        with TestClient(app) as client:
+            before = client.get("/api/threads/thread-http-gone/runs")
+            assert before.status_code == 200, before.text
+            assert [row["run_id"] for row in before.json()] == [run_id]
+
+            deleted = client.delete("/api/threads/thread-http-gone")
+            assert deleted.status_code == 200, deleted.text
+
+            listing = client.get("/api/threads/thread-http-gone/runs")
+            single = client.get(f"/api/threads/thread-http-gone/runs/{run_id}")
+
+    assert listing.status_code == 200, listing.text
+    assert listing.json() == []
+    assert single.status_code == 404, single.text
 
 
 def test_delete_thread_route_cleans_persisted_records(tmp_path):
@@ -1125,11 +1286,26 @@ def test_fast_path_trusted_claim_does_not_take_over_owned_row() -> None:
     assert final_record["user_id"] == "owner-a"
 
 
-def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
+def test_insert_race_concurrent_trusted_claims_have_one_winner(monkeypatch) -> None:
     from sqlalchemy.exc import IntegrityError
 
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
     from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
+    from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+
+    # These INSERTs represent separate Gateways: they share SQL rows but have
+    # distinct process-local lifecycle locks. Same-Gateway serialization is
+    # covered with the real stores in test_thread_create_idempotency.py.
+    worker_locks = [AsyncKeyedLockTable[str](), AsyncKeyedLockTable[str]()]
+    lock_calls = 0
+
+    def worker_thread_lock(thread_id):
+        nonlocal lock_calls
+        lock_calls += 1
+        assert lock_calls <= len(worker_locks), f"expected two simulated Gateway lock acquisitions, got {lock_calls}"
+        return worker_locks[lock_calls - 1].hold(thread_id)
+
+    monkeypatch.setattr(threads, "goal_thread_lock", worker_thread_lock)
 
     class _ConcurrentInsertRaceStore(MemoryThreadMetaStore):
         def __init__(self):
@@ -1182,7 +1358,13 @@ def test_insert_race_concurrent_trusted_claims_have_one_winner() -> None:
     assert winners == [final_record["user_id"]]
     assert final_record["user_id"] in owners
     assert len(failures) == 1
-    assert failures[0].status_code == 500
+    # The losing request now hits the unscoped duplicate-key recovery path and
+    # resolves the surviving (legacy, owner-less) row as a 404 ownership
+    # conflict rather than a 500, while the single-winner assertions above and
+    # the non-disclosing detail below are preserved.
+    assert failures[0].status_code == 404
+    assert failures[0].detail == "Thread not found"
+    assert all(not table._entries_by_loop for table in worker_locks)
 
 
 def test_create_thread_maps_memory_owner_conflict_to_404() -> None:
@@ -1219,6 +1401,42 @@ def test_create_thread_does_not_swallow_non_integrity_errors() -> None:
 
     with TestClient(app) as client:
         response = client.post("/api/threads", json={"thread_id": "broken-thread", "metadata": {}})
+
+    assert response.status_code == 500, response.text
+
+
+def test_create_thread_keeps_real_integrity_failure_as_500() -> None:
+    """A duplicate-key ``IntegrityError`` with no surviving row stays a 500.
+
+    The recovery path rescues the idempotency race only when a row now exists;
+    an ``IntegrityError`` that coincides with no readable row — a genuine
+    constraint violation unrelated to the caller-chosen id — must still surface
+    as a 500 rather than being collapsed into the ownership-conflict 404. This
+    pins the fall-through branch that the unscoped duplicate-key read would
+    otherwise silently convert into a 404.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    app, store, _checkpointer = _build_thread_app()
+
+    class _IntegrityFailureNoSurvivingRowStore(_PermissiveThreadMetaStore):
+        async def create(self, thread_id, *, assistant_id=None, user_id=None, display_name=None, metadata=None, project_id=None):  # type: ignore[override]
+            raise IntegrityError(
+                "INSERT INTO threads_meta",
+                {},
+                Exception("UNIQUE constraint failed: threads_meta.thread_id"),
+            )
+
+        async def get(self, thread_id, *, user_id=None):  # type: ignore[override]
+            # No row survives the failed insert, so the unscoped duplicate-key
+            # read returns nothing and the route must not treat this as a
+            # cross-owner conflict.
+            return None
+
+    app.state.thread_store = _IntegrityFailureNoSurvivingRowStore(store)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "integrity-no-row", "metadata": {}})
 
     assert response.status_code == 500, response.text
 
@@ -1267,8 +1485,49 @@ def test_goal_status_and_clear_round_trip() -> None:
     assert "goal" not in state_response.json()["values"]
 
 
+@pytest.mark.parametrize("method", ["put", "delete"])
+@pytest.mark.parametrize("failure_source", ["accessor", "approval_guard"])
+@pytest.mark.parametrize(
+    ("error_type", "expected_status"),
+    [
+        (CheckpointModeMismatchError, 409),
+        (CheckpointModeReconfigurationError, 503),
+    ],
+)
+def test_goal_mutations_map_checkpoint_mode_errors(monkeypatch, method, failure_source, error_type, expected_status) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = f"goal-mode-{method}-{failure_source}-{expected_status}"
+    read_config = {"configurable": {"thread_id": thread_id}}
+    error = error_type("checkpoint mode unavailable")
+    builder = AsyncMock(
+        side_effect=error if failure_source == "accessor" else None,
+        return_value=(SimpleNamespace(), read_config),
+    )
+    guard = AsyncMock(side_effect=error if failure_source == "approval_guard" else None)
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", builder)
+
+    with (
+        patch("app.gateway.hitl_approval.reject_new_run_when_approval_pending", guard),
+        TestClient(app) as client,
+    ):
+        response = client.request(
+            method.upper(),
+            f"/api/threads/{thread_id}/goal",
+            json={"objective": "Ship safely"} if method == "put" else None,
+        )
+
+    assert response.status_code == expected_status, response.text
+    expected_detail = f"Thread {thread_id}: {error}" if expected_status == 409 else str(error)
+    assert response.json()["detail"] == expected_detail
+    if failure_source == "accessor":
+        guard.assert_not_awaited()
+
+
 def test_goal_mutations_reject_run_owned_by_another_worker() -> None:
     """PUT and DELETE goal writes share the durable thread-operation boundary."""
+    import httpx
+
+    from app.channels.manager import ChannelManager
     from deerflow.runtime import RunManager, RunStatus
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -1301,6 +1560,14 @@ def test_goal_mutations_reject_run_owned_by_another_worker() -> None:
 
     assert put_response.status_code == 409, put_response.text
     assert delete_response.status_code == 409, delete_response.text
+    assert put_response.json()["detail"] == "Thread has a run in flight. Set the goal after the run finishes."
+    assert delete_response.json()["detail"] == "Thread has a run in flight. Clear the goal after the run finishes."
+    # The real Gateway errors must remain recognizable by the IM busy reply.
+    for response in (put_response, delete_response):
+        with pytest.raises(httpx.HTTPStatusError) as rejected:
+            response.raise_for_status()
+        assert ChannelManager._is_goal_in_flight_error(rejected.value), response.request.method
+
     assert goal_response.status_code == 200, goal_response.text
     assert goal_response.json()["goal"]["objective"] == "Original goal"
 
@@ -1519,7 +1786,8 @@ def test_get_thread_status_uses_raw_pending_writes_for_materialized_checkpoint()
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "idle"
-    assert requested_configs == [snapshot.config]
+    assert requested_configs[0] == snapshot.config
+    assert requested_configs[-1]["configurable"].get("checkpoint_id") is None
 
 
 @pytest.mark.parametrize("stored_status", ["running", "error"])
@@ -1816,6 +2084,141 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
     assert entries, "expected at least one history entry"
     for entry in entries:
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
+
+
+def test_get_thread_state_projects_pending_interrupt_tasks(monkeypatch) -> None:
+    from langgraph.types import Interrupt
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-head-interrupt"
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = SimpleNamespace(
+        values={},
+        config={"configurable": {**config["configurable"], "checkpoint_id": "checkpoint-head"}},
+        parent_config=None,
+        metadata={"created_at": "2026-10-26T01:02:03+00:00"},
+        next=("approval",),
+        tasks=(SimpleNamespace(id="task-head", name="approval"),),
+        created_at="2026-10-26T01:02:03+00:00",
+    )
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    interrupt = Interrupt(value={"kind": "hitl_approval"}, id="interrupt-head")
+    fallback_interrupt = Interrupt(value={"kind": "hitl_approval", "request_id": "approval-store-only"}, id="approval-store-only")
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
+    find_pending = AsyncMock(return_value={"task-head": [interrupt], "paused-run": [fallback_interrupt]})
+    monkeypatch.setattr(threads, "find_pending_interrupts", find_pending)
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tasks"] == [
+        {
+            "id": "task-head",
+            "name": "approval",
+            "interrupts": [{"value": {"kind": "hitl_approval"}, "id": "interrupt-head"}],
+        },
+        {
+            "id": "paused-run",
+            "name": "",
+            "interrupts": [{"value": {"kind": "hitl_approval", "request_id": "approval-store-only"}, "id": "approval-store-only"}],
+        },
+    ]
+    assert find_pending.await_args.kwargs["snapshot"] is snapshot
+
+
+def test_get_thread_state_serializes_run_store_fallback_interrupt(monkeypatch) -> None:
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-run-store-interrupt"
+    payload = {"kind": "hitl_approval", "request_id": "approval-store-only"}
+    run_store = MemoryRunStore()
+    asyncio.run(
+        run_store.put(
+            "paused-run",
+            thread_id=thread_id,
+            status="waiting_for_input",
+            metadata={"hitl_approval": payload},
+        )
+    )
+    app.state.run_store = run_store
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = SimpleNamespace(
+        values={},
+        config={"configurable": {**config["configurable"], "checkpoint_id": "checkpoint-head"}},
+        parent_config=None,
+        metadata={},
+        next=(),
+        tasks=(),
+        created_at=None,
+    )
+    accessor = SimpleNamespace(aget=AsyncMock(return_value=snapshot))
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
+
+    with TestClient(app) as client:
+        response = client.get(f"/api/threads/{thread_id}/state")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tasks"] == [
+        {
+            "id": "paused-run",
+            "name": "",
+            "interrupts": [{"value": payload, "id": "approval-store-only"}],
+        }
+    ]
+
+
+def test_get_thread_history_projects_head_interrupt_tasks_and_created_at(monkeypatch) -> None:
+    from langgraph.types import Interrupt
+
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "history-head-interrupt"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    def snapshot(checkpoint_id, created_at, task_id):
+        return SimpleNamespace(
+            values={},
+            config={"configurable": {**config["configurable"], "checkpoint_id": checkpoint_id}},
+            parent_config=None,
+            metadata={"created_at": created_at},
+            next=(),
+            tasks=(SimpleNamespace(id=task_id, name="approval"),),
+            created_at=created_at,
+        )
+
+    snapshots = [
+        snapshot("checkpoint-head", "2026-10-26T01:02:03+00:00", "task-head"),
+        snapshot("checkpoint-old", "2026-10-25T01:02:03+00:00", "task-old"),
+    ]
+    accessor = SimpleNamespace(ahistory=AsyncMock(return_value=snapshots))
+    interrupt = Interrupt(value={"kind": "hitl_approval"}, id="interrupt-head")
+    fallback_interrupt = Interrupt(value={"kind": "hitl_approval", "request_id": "approval-store-only"}, id="approval-store-only")
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, config)))
+    find_pending = AsyncMock(return_value={"task-head": [interrupt], "paused-run": [fallback_interrupt]})
+    monkeypatch.setattr(threads, "find_pending_interrupts", find_pending)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 2})
+
+    assert response.status_code == 200, response.text
+    head, older = response.json()
+    assert head["created_at"] == "2026-10-26T01:02:03+00:00"
+    assert older["created_at"] == "2026-10-25T01:02:03+00:00"
+    assert head["tasks"] == [
+        {
+            "id": "task-head",
+            "name": "approval",
+            "interrupts": [{"value": {"kind": "hitl_approval"}, "id": "interrupt-head"}],
+        },
+        {
+            "id": "paused-run",
+            "name": "",
+            "interrupts": [{"value": {"kind": "hitl_approval", "request_id": "approval-store-only"}, "id": "approval-store-only"}],
+        },
+    ]
+    assert older["tasks"] == [{"id": "task-old", "name": "approval"}]
+    assert find_pending.await_args.kwargs["snapshot"] is snapshots[0]
 
 
 def test_get_thread_history_associates_tool_messages_from_checkpoint_turn() -> None:
@@ -2684,6 +3087,17 @@ def test_get_thread_history_injects_turn_duration_once_per_run() -> None:
     assert replayed[2]["additional_kwargs"]["turn_duration"] == 5
     assert "turn_duration" not in (replayed[3].get("additional_kwargs") or {})
     assert replayed[4]["additional_kwargs"]["turn_duration"] == 9
+
+
+def test_stamp_turn_duration_recovers_from_non_mapping_additional_kwargs(caplog) -> None:
+    from app.gateway.routers.thread_runs import stamp_turn_duration_on_last_ai
+
+    messages = [{"seq": 7, "run_id": "run-1", "type": "ai", "additional_kwargs": "legacy"}]
+    with caplog.at_level("WARNING", logger="app.gateway.routers.thread_runs"):
+        stamp_turn_duration_on_last_ai(messages, {"run-1": 4}, thread_id="thread-1")
+
+    assert messages[0]["additional_kwargs"] == {"turn_duration": 4}
+    assert any("thread thread-1" in record.message and "row seq 7" in record.message for record in caplog.records)
 
 
 # ── branch threads from completed assistant turns ─────────────────────────────
@@ -3739,6 +4153,162 @@ def test_update_thread_state_overwrite_into_never_written_channel(monkeypatch, m
         assert read_response.json()["values"]["goal"] == {"objective": "finish"}
 
 
+def _met_goal_record(reply_message_id: str | None = "a2") -> dict:
+    return build_goal_outcome(build_goal_state("ship the fix"), {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id=reply_message_id)
+
+
+def _record_met_goal(checkpointer, thread_id: str, record: dict) -> None:
+    asyncio.run(write_thread_goal(checkpointer, thread_id, None, as_node="goal_evaluator", outcome=record))
+
+
+def _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id) -> None:
+    created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+    assert created.status_code == 200, created.text
+    asyncio.run(_seed_extension_source(checkpointer, custom_factory, mode, thread_id))
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_carries_goal_state_without_messages(monkeypatch, mode) -> None:
+    """useStream rebuilds thread values from the head, so a goal set on /chats/new
+    and a met-goal record must be there even before any message exists."""
+    app, _store, checkpointer = _build_thread_app()
+    _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-head-{mode}"
+    record = _met_goal_record(None)
+
+    with TestClient(app) as client:
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        set_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, record)
+        met_history = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10}).json()
+
+    assert set_head == {"goal": goal_response.json()["goal"]}
+    assert met_history[0]["values"] == {"goal_outcome": record}
+    # Older entries stay title/thread_data only.
+    assert len(met_history) > 1
+    assert all(not {"goal", "goal_outcome"} & set(entry["values"]) for entry in met_history[1:])
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_history_head_skips_goal_state_that_is_not_active_or_achieved(monkeypatch, mode) -> None:
+    """POST /state stores an unbuilt goal; the head must not show it as a goal the backend ignores."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"malformed-goal-head-{mode}"
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        update_response = client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": {"objective": "finish"}}})
+        assert update_response.status_code == 200, update_response.text
+        malformed_goal_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _record_met_goal(checkpointer, thread_id, {**_met_goal_record(), "status": "cleared"})
+        unknown_outcome_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert "goal" not in malformed_goal_head
+    assert [message["id"] for message in malformed_goal_head["messages"]] == ["h1", "a1", "h2", "a2"]
+    assert "goal_outcome" not in unknown_outcome_head
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_goal_writes_drop_the_met_goal_record(monkeypatch, mode) -> None:
+    """PUT/DELETE /goal and a POST /state goal write must not leave an older 'goal met' behind."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"goal-outcome-writers-{mode}"
+    record = _met_goal_record()
+    writers = {
+        "put": lambda client: client.put(f"/api/threads/{thread_id}/goal", json={"objective": "next goal"}),
+        "delete": lambda client: client.delete(f"/api/threads/{thread_id}/goal"),
+        "state": lambda client: client.post(f"/api/threads/{thread_id}/state", json={"values": {"goal": None}}),
+    }
+    after = {}
+
+    with TestClient(app) as client:
+        _create_extension_thread(client, checkpointer, custom_factory, mode, thread_id)
+        for name, write in writers.items():
+            _record_met_goal(checkpointer, thread_id, record)
+            assert client.get(f"/api/threads/{thread_id}/state").json()["values"]["goal_outcome"] == record
+            response = write(client)
+            assert response.status_code == 200, response.text
+            after[name] = client.get(f"/api/threads/{thread_id}/state").json()["values"]
+        head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+    assert after["put"]["goal"]["objective"] == "next goal"
+    assert all(values.get("goal_outcome") is None for values in after.values())
+    assert "goal_outcome" not in head
+
+
+def _seed_turn(checkpointer, custom_factory, mode, thread_id, human_id: str, ai_id: str, **values) -> None:
+    accessor = CheckpointStateAccessor.bind(custom_factory(), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+    async def seed() -> None:
+        await accessor.aupdate(config, {"messages": [HumanMessage(id=human_id, content=f"question {human_id}")], **values}, as_node="model")
+        await accessor.aupdate(config, {"messages": [AIMessage(id=ai_id, content=f"answer {ai_id}")]}, as_node="model")
+
+    asyncio.run(seed())
+
+
+def _branch_head(client, thread_id: str, message_id: str) -> tuple[str, dict]:
+    branch_response = client.post(f"/api/threads/{thread_id}/branches", json={"message_id": message_id, "message_ids": [message_id]})
+    assert branch_response.status_code == 200, branch_response.text
+    branch_thread_id = branch_response.json()["thread_id"]
+    return branch_thread_id, client.post(f"/api/threads/{branch_thread_id}/history", json={"limit": 1}).json()[0]["values"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_from_the_met_turn_keeps_the_record_without_the_met_goal(monkeypatch, mode) -> None:
+    """The branch head is written onto the replay base from before the turn, where the
+    goal was still active; the branch keeps the record and its message ids, not the goal."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"met-goal-branch-{mode}"
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        goal_response = client.put(f"/api/threads/{thread_id}/goal", json={"objective": "ship the fix"})
+        assert goal_response.status_code == 200, goal_response.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2")
+        record = build_goal_outcome(goal_response.json()["goal"], {"satisfied": True, "blocker": "none", "reason": "Shipped."}, reply_message_id="a2")
+        _record_met_goal(checkpointer, thread_id, record)
+        branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+        branch_goal = client.get(f"/api/threads/{branch_thread_id}/goal").json()["goal"]
+
+    assert branch_head["goal_outcome"] == record
+    assert "goal" not in branch_head
+    assert branch_goal is None
+    assert [message["id"] for message in branch_head["messages"]] == ["h1", "a1", "h2", "a2"]
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_branch_does_not_take_an_older_met_goal_record_from_the_replay_base(monkeypatch, mode) -> None:
+    """A run-input goal clears the older record and a stand-down then drops the cleared
+    key, so only the replay base still holds that record; the branch must not revive it."""
+    app, _store, checkpointer = _build_thread_app()
+    custom_factory = _wire_extension_agent(monkeypatch, app, checkpointer, mode)
+    thread_id = f"older-record-branch-{mode}"
+    next_goal = build_goal_state("next goal")
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}, "assistant_id": "extension-agent"})
+        assert created.status_code == 200, created.text
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h1", "a1")
+        _record_met_goal(checkpointer, thread_id, _met_goal_record("a1"))
+        # normalize_input's shape for an external run-input goal.
+        _seed_turn(checkpointer, custom_factory, mode, thread_id, "h2", "a2", goal=next_goal, goal_outcome=None)
+        asyncio.run(write_thread_goal(checkpointer, thread_id, next_goal, as_node="goal_evaluator"))
+        source_head = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1}).json()[0]["values"]
+        _branch_thread_id, branch_head = _branch_head(client, thread_id, "a2")
+
+    assert source_head["goal"] == next_goal
+    assert "goal_outcome" not in source_head
+    assert branch_head["goal"] == next_goal
+    assert "goal_outcome" not in branch_head
+
+
 @pytest.mark.parametrize("mode", ["full", "delta"])
 def test_update_thread_state_preserves_agent_binding_for_manual_compaction(monkeypatch, mode) -> None:
     """A manual state rewrite must retain the state-producing agent policy."""
@@ -4237,6 +4807,233 @@ def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(mon
     assert body["values"]["artifacts"] == ["artifact-1"]
     assert body["values"]["title"] == "Renamed"
     assert body["next"] == []
+
+
+def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-checkpoint-object"
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(
+        request,
+        *,
+        thread_id,
+        as_node,
+        checkpoint_id=None,
+        checkpoint_ns="",
+    ):
+        return real_mutation_builder(
+            request,
+            thread_id=thread_id,
+            as_node=as_node,
+            checkpoint_id=checkpoint_id,
+            checkpoint_ns=checkpoint_ns,
+        )
+
+    monkeypatch.setattr(
+        threads,
+        "build_thread_checkpoint_state_mutation_accessor",
+        mutation_boundary,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+
+        first = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "First"}},
+        )
+        assert first.status_code == 200, first.text
+        first_checkpoint_id = first.json()["checkpoint_id"]
+
+        second = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"values": {"title": "Second"}},
+        )
+        assert second.status_code == 200, second.text
+        second_checkpoint_id = second.json()["checkpoint_id"]
+
+        forked = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={
+                "checkpoint_id": second_checkpoint_id,
+                "checkpoint": {
+                    "thread_id": thread_id,
+                    "checkpoint_ns": "",
+                    "checkpoint_id": first_checkpoint_id,
+                },
+                "values": {"title": "Forked from first"},
+            },
+        )
+
+    assert forked.status_code == 200, forked.text
+    assert forked.json()["parent_checkpoint_id"] == first_checkpoint_id
+    assert forked.json()["values"]["title"] == "Forked from first"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("include_checkpoint_id", [True, False])
+def test_update_thread_state_in_persisted_subgraph_namespace(monkeypatch, mode, include_checkpoint_id) -> None:
+    from langgraph.graph import StateGraph
+
+    from deerflow.agents.thread_state import get_thread_state_schema
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = mode
+    thread_id = f"state-subgraph-{mode}"
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"branch_title_sequence": 2}}).status_code == 200
+    schema = get_thread_state_schema(mode)
+    child = StateGraph(schema)
+    child.add_node("write_child", lambda state: {"title": "Child original"})
+    child.set_entry_point("write_child")
+    child.set_finish_point("write_child")
+    parent = StateGraph(schema)
+    parent.add_node("child", child.compile())
+    parent.set_entry_point("child")
+    parent.add_node("restore_root_title", lambda state: {"title": "Root original"})
+    parent.add_edge("child", "restore_root_title")
+    parent.set_finish_point("restore_root_title")
+    graph = parent.compile(checkpointer=checkpointer)
+    asyncio.run(graph.ainvoke({"title": "Root original"}, {"configurable": {"thread_id": thread_id}}))
+
+    namespaces = [ns for ns in checkpointer.storage[thread_id] if ns]
+    assert len(namespaces) == 1
+    namespace = namespaces[0]
+    selected = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}))
+    assert selected is not None
+    selected_id = selected.config["configurable"]["checkpoint_id"]
+    root_before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    asyncio.run(app.state.thread_store.update_display_name(thread_id, "Root original"))
+    metadata_before = asyncio.run(app.state.thread_store.get(thread_id))
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns=""):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns, state_schema=schema)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        checkpoint = {"thread_id": thread_id, "checkpoint_ns": namespace}
+        if include_checkpoint_id:
+            checkpoint["checkpoint_id"] = selected_id
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"checkpoint": checkpoint, "values": {"title": "Child updated"}},
+        )
+        root_response = client.get(f"/api/threads/{thread_id}/state")
+        search_response = client.post("/api/threads/search", json={})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["values"]["title"] == "Child updated"
+    assert response.json()["parent_checkpoint_id"] == selected_id
+    written = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}}))
+    assert written.config["configurable"]["checkpoint_id"] == response.json()["checkpoint_id"]
+    assert written.checkpoint["channel_values"]["title"] == "Child updated"
+    root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert root_after.config == root_before.config
+    assert root_after.checkpoint == root_before.checkpoint
+    assert root_response.status_code == 200, root_response.text
+    assert root_response.json()["values"]["title"] == "Root original"
+    assert asyncio.run(app.state.thread_store.get(thread_id)) == metadata_before
+    assert search_response.status_code == 200, search_response.text
+    entry = next(row for row in search_response.json() if row["thread_id"] == thread_id)
+    assert entry["values"]["title"] == "Root original"
+    assert entry["metadata"]["branch_title_sequence"] == 2
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("selector", ["omitted", "checkpoint", "checkpoint_id"])
+def test_update_thread_state_root_title_syncs_metadata(monkeypatch, mode, selector) -> None:
+    from deerflow.agents.thread_state import get_thread_state_schema
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = mode
+    thread_id = f"state-root-title-{mode}-{selector}"
+    schema = get_thread_state_schema(mode)
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns=""):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns, state_schema=schema)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": thread_id, "metadata": {"branch_title_sequence": 2}})
+        assert created.status_code == 200, created.text
+        checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+        checkpoint_id = checkpoint.config["configurable"]["checkpoint_id"]
+        body = {"values": {"title": "Renamed root"}}
+        if selector == "checkpoint":
+            body["checkpoint"] = {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}
+        elif selector == "checkpoint_id":
+            body["checkpoint_id"] = checkpoint_id
+        response = client.post(f"/api/threads/{thread_id}/state", json=body)
+        root_response = client.get(f"/api/threads/{thread_id}/state")
+        search_response = client.post("/api/threads/search", json={})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["values"]["title"] == "Renamed root"
+    assert response.json()["parent_checkpoint_id"] == checkpoint_id
+    assert root_response.status_code == 200, root_response.text
+    assert root_response.json()["values"]["title"] == "Renamed root"
+    record = asyncio.run(app.state.thread_store.get(thread_id))
+    assert record["display_name"] == "Renamed root"
+    assert "branch_title_sequence" not in record["metadata"]
+    assert search_response.status_code == 200, search_response.text
+    entry = next(row for row in search_response.json() if row["thread_id"] == thread_id)
+    assert entry["values"]["title"] == "Renamed root"
+    assert "branch_title_sequence" not in entry["metadata"]
+
+
+def test_update_thread_state_rejects_nonexistent_namespace_without_checkpoint_id(monkeypatch) -> None:
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "state-unknown-namespace"
+    namespace = "child:ghost"
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None, checkpoint_ns=""):
+        return gateway_services.build_checkpoint_state_mutation_accessor(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id, checkpoint_ns=checkpoint_ns)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+    with TestClient(app) as client:
+        assert client.post("/api/threads", json={"thread_id": thread_id, "metadata": {}}).status_code == 200
+        root_before = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={"checkpoint": {"thread_id": thread_id, "checkpoint_ns": namespace}, "values": {"title": "Must not be written"}},
+        )
+
+    assert response.status_code == 404, response.text
+    assert asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": namespace}})) is None
+    root_after = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert root_after.config == root_before.config
+    assert root_after.checkpoint == root_before.checkpoint
+
+
+def test_update_thread_state_rejects_checkpoint_object_for_another_thread() -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "state-checkpoint-thread-mismatch"
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/threads",
+            json={"thread_id": thread_id, "metadata": {}},
+        )
+        assert created.status_code == 200, created.text
+        response = client.post(
+            f"/api/threads/{thread_id}/state",
+            json={
+                "checkpoint": {
+                    "thread_id": "another-thread",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "not-used",
+                },
+                "values": {"title": "Must not be written"},
+            },
+        )
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == "checkpoint thread_id does not match request thread_id"
 
 
 @pytest.mark.parametrize("missing_checkpoint_id", ["does-not-exist", ""])
@@ -4830,3 +5627,252 @@ def test_task_notes_state_write_normalizes_and_replaces(monkeypatch, mode, fallb
         read = client.get("/api/threads/note-replacement/state")
         assert read.status_code == 200, read.text
         assert read.json()["values"]["task_notes"] == {"new": {"content": "keep backups", "source_ids": [], "authority": "model_report"}}
+
+
+# ---------------------------------------------------------------------------
+# Server-owned origin marker and per-user unread state (deerflow_origin)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reserved_metadata_drops_client_origin():
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    assert DEERFLOW_ORIGIN_KEY in threads._SERVER_RESERVED_METADATA_KEYS
+    assert threads._strip_reserved_metadata({DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "keep": 1}) == {"keep": 1}
+
+
+def test_create_and_patch_strip_a_client_supplied_origin() -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, checkpointer = _build_thread_app()
+    forged = {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}, "title": "mine"}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "origin-forge", "metadata": forged})
+        assert created.status_code == 200, created.text
+        assert created.json()["metadata"] == {"title": "mine"}
+        patched = client.patch("/api/threads/origin-forge", json={"metadata": {DEERFLOW_ORIGIN_KEY: {"kind": "im_channel"}}})
+        assert patched.status_code == 200, patched.text
+        assert DEERFLOW_ORIGIN_KEY not in patched.json()["metadata"]
+        fetched = client.post("/api/threads/search", json={"limit": 10})
+        assert all(DEERFLOW_ORIGIN_KEY not in item["metadata"] for item in fetched.json())
+
+    checkpoint = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": "origin-forge", "checkpoint_ns": ""}}))
+    assert DEERFLOW_ORIGIN_KEY not in checkpoint.metadata
+
+
+def test_create_thread_marks_a_host_origin_from_request_state() -> None:
+    """Only server code can set request.state.run_origin (an extension handle)."""
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, _store, _checkpointer = _build_thread_app()
+
+    @app.middleware("http")
+    async def host_origin(request, call_next):
+        request.state.run_origin = {"kind": "extension", "namespace": "community.teams"}
+        return await call_next(request)
+
+    with TestClient(app) as client:
+        response = client.post("/api/threads", json={"thread_id": "ext-thread", "metadata": {"title": "t"}})
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"title": "t", DEERFLOW_ORIGIN_KEY: {"kind": "extension", "namespace": "community.teams"}}
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        {"parents": "x"},
+        {"step": "zero"},
+        {"source": "loop", "writes": {"runtime_run_duration": {"run-1": 1.0}}},
+        {"counters_since_delta_snapshot": "x"},
+        {CHECKPOINT_AGENT_NAME_METADATA_KEY: "forged-agent"},
+    ],
+    ids=["parents", "step", "source-writes", "delta-counters", "agent-binding"],
+)
+def test_create_thread_keeps_server_checkpoint_metadata(monkeypatch, forged) -> None:
+    """Client metadata cannot supply the keys the server reads back from the root checkpoint.
+
+    A bad ``parents`` breaks every history read, a bad ``step`` or delta
+    counter breaks every later turn and state update, and a forged agent
+    binding is copied into the next state rewrite as if the server wrote it.
+    """
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.run_event_store = MemoryRunEventStore()
+    graph_factory = _wire_extension_agent(monkeypatch, app, checkpointer, "full")
+    config = {"configurable": {"thread_id": "forged-meta", "checkpoint_ns": ""}}
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "forged-meta", "metadata": {**forged, "title": "mine"}})
+        assert created.status_code == 200, created.text
+
+        root = asyncio.run(checkpointer.aget_tuple(config)).metadata
+        assert {key: root[key] for key in ("step", "source", "writes", "parents")} == {"step": -1, "source": "input", "writes": None, "parents": {}}
+        assert "counters_since_delta_snapshot" not in root
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in root
+        assert root["title"] == "mine"
+        for response in (client.get("/api/threads/forged-meta"), client.get("/api/threads/forged-meta/state"), client.post("/api/threads/forged-meta/history", json={})):
+            assert response.status_code == 200, response.text
+
+        updated = client.post("/api/threads/forged-meta/state", json={"values": {"title": "renamed"}})
+        assert updated.status_code == 200, updated.text
+        assert CHECKPOINT_AGENT_NAME_METADATA_KEY not in asyncio.run(checkpointer.aget_tuple(config)).metadata
+
+    graph = graph_factory()
+    graph.checkpointer = checkpointer
+    asyncio.run(graph.ainvoke({"messages": [HumanMessage(content="hi")]}, config))
+
+    with TestClient(app) as client:
+        history = client.post("/api/threads/forged-meta/history", json={})
+        assert history.status_code == 200, history.text
+        assert history.json()[-1]["metadata"]["step"] == -1
+        assert all(isinstance(entry["metadata"]["step"], int) for entry in history.json())
+
+
+def _unread_app(tmp_path, *, owner_check_passes: bool = True):
+    from uuid import UUID
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.run import RunRepository
+    from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+    from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
+
+    user = User(id=UUID("31f5a8c2-1d4e-4b6f-8a9c-0d1e2f3a4b5c"), email="unread@example.com", password_hash="x", system_role="user")
+    app = make_authed_test_app(user_factory=lambda: user, owner_check_passes=owner_check_passes, bind_current_user=True)
+    store = InMemoryStore()
+    app.state.store = store
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_manager = _ThreadTestRunManager()
+    app.state.thread_store = _PermissiveThreadMetaStore(store)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'unread.db'}")
+
+    async def _init():
+        async with engine.begin() as conn:
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+
+    asyncio.run(_init())
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    app.state.thread_read_repo = ThreadReadRepository(sf)
+    app.include_router(threads.router)
+    return app, store, RunRepository(sf), str(user.id), engine
+
+
+def test_search_items_carry_unread_until_the_thread_is_read(tmp_path) -> None:
+    from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY
+
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        for thread_id, metadata in (("sched-thread", {DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}}), ("chat-thread", {})):
+            await store.aput(THREADS_NS, thread_id, {"thread_id": thread_id, "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": metadata})
+        await runs.put("run-sched", thread_id="sched-thread", user_id=user_id, status="success", metadata={DEERFLOW_ORIGIN_KEY: {"kind": "schedule"}})
+        await runs.put("run-chat", thread_id="chat-thread", user_id=user_id, status="success", metadata={})
+
+    asyncio.run(_seed())
+    try:
+        with TestClient(app) as client:
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is True
+            assert items["chat-thread"]["unread"] is False
+
+            read = client.post("/api/threads/sched-thread/read")
+            assert read.status_code == 200, read.text
+            assert read.json() == {"unread": False, "read_version": 1}
+            items = {item["thread_id"]: item for item in client.post("/api/threads/search", json={"limit": 10}).json()}
+            assert items["sched-thread"]["unread"] is False
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_search_unread_is_null_without_sql_read_state() -> None:
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(store.aput(THREADS_NS, "t", {"thread_id": "t", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}}))
+    with TestClient(app) as client:
+        assert [item["unread"] for item in client.post("/api/threads/search", json={"limit": 10}).json()] == [None]
+
+
+def test_mark_read_on_another_users_thread_is_404(tmp_path) -> None:
+    app, _store, _runs, user_id, engine = _unread_app(tmp_path, owner_check_passes=False)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/threads/someone-elses/read")
+        assert response.status_code == 404
+        assert asyncio.run(app.state.thread_read_repo.read_version(user_id=user_id)) == 0
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_delete_thread_route_removes_read_markers(tmp_path) -> None:
+    app, store, runs, user_id, engine = _unread_app(tmp_path)
+
+    async def _seed():
+        await store.aput(THREADS_NS, "gone", {"thread_id": "gone", "status": "idle", "created_at": "2026-10-06T00:00:00+00:00", "updated_at": "2026-10-06T00:00:00+00:00", "metadata": {}})
+        await runs.put("run-gone", thread_id="gone", user_id=user_id, status="success", metadata={"deerflow_origin": {"kind": "schedule"}})
+        await app.state.thread_read_repo.mark_read(user_id=user_id, thread_id="gone")
+
+    asyncio.run(_seed())
+    app.state.run_event_store = MagicMock(delete_by_thread=AsyncMock())
+    app.state.run_store = runs
+    try:
+        with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+            assert client.delete("/api/threads/gone").status_code == 200
+        from deerflow.persistence.thread_reads import ThreadReadMarkerRow
+
+        async def _count():
+            async with app.state.thread_read_repo._sf() as session:
+                return await session.get(ThreadReadMarkerRow, (user_id, "gone"))
+
+        assert asyncio.run(_count()) is None
+    finally:
+        asyncio.run(engine.dispose())
+
+
+@pytest.mark.parametrize("delete_supported", [True, False], ids=["delete-raises", "delete-unsupported"])
+def test_delete_thread_route_keeps_owner_row_when_checkpoint_delete_fails(tmp_path, monkeypatch, caplog, delete_supported) -> None:
+    """A failed checkpoint delete must not leave a checkpoint-only thread behind.
+
+    Read routes treat a thread without a ``threads_meta`` row as an untracked
+    legacy thread open to every user, so dropping the row while the checkpoints
+    survive would publish the deleted conversation. The delete fails instead,
+    keeps the owner's row, and succeeds when the owner retries.
+    """
+    app = _build_project_threads_app(tmp_path)
+    owner, other = {"x-test-user": "user-a"}, {"x-test-user": "user-b"}
+    checkpointer = app.state.checkpointer
+
+    with patch("app.gateway.routers.threads.get_paths", return_value=Paths(tmp_path)), TestClient(app) as client:
+        thread_id = client.post("/api/threads", json={}, headers=owner).json()["thread_id"]
+        anyio.run(lambda: _write_checkpoint(checkpointer, thread_id, str(uuid6()), [HumanMessage(id="human-1", content="private question")], step=1))
+
+        with monkeypatch.context() as failed_checkpoint:
+            if delete_supported:
+                failed_checkpoint.setattr(checkpointer, "adelete_thread", AsyncMock(side_effect=RuntimeError("database is locked: /secret/checkpoints.db")))
+            else:
+                read_only_checkpointer = SimpleNamespace(aget_tuple=checkpointer.aget_tuple, alist=checkpointer.alist)
+                failed_checkpoint.setattr(app.state, "checkpointer", read_only_checkpointer)
+                readable = client.get(f"/api/threads/{thread_id}", headers=owner)
+                assert readable.status_code == 200, readable.text
+                assert readable.json()["values"]["messages"][0]["id"] == "human-1"
+            with caplog.at_level(logging.ERROR, logger=threads.logger.name):
+                failed = client.delete(f"/api/threads/{thread_id}", headers=owner)
+
+            assert failed.status_code == 500
+            assert failed.json() == {"detail": "Failed to delete thread checkpoints."}
+            assert any(record.levelno >= logging.ERROR and "Failed to delete checkpoints" in record.getMessage() for record in caplog.records)
+            assert anyio.run(lambda: app.state.thread_store.check_access(thread_id, "user-a", require_existing=True))
+            for read in (
+                lambda: client.get(f"/api/threads/{thread_id}", headers=other),
+                lambda: client.get(f"/api/threads/{thread_id}/state", headers=other),
+                lambda: client.post(f"/api/threads/{thread_id}/history", json={}, headers=other),
+                lambda: client.get(f"/api/threads/{thread_id}/goal", headers=other),
+            ):
+                assert read().status_code == 404
+
+        retried = client.delete(f"/api/threads/{thread_id}", headers=owner)
+
+        assert retried.status_code == 200, retried.text
+        assert anyio.run(lambda: checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})) is None
+        assert client.get(f"/api/threads/{thread_id}", headers=other).status_code == 404

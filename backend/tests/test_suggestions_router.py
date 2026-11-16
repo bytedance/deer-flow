@@ -46,23 +46,23 @@ def test_parse_json_string_list_rejects_non_list():
 
 def test_strip_think_blocks_removes_complete_block():
     text = "<think>\nreasoning here\n</think>\nanswer"
-    assert suggestions._strip_think_blocks(text) == "answer"
+    assert suggestions._strip_think_blocks_outside_json_strings(text) == "answer"
 
 
 def test_strip_think_blocks_is_case_insensitive():
     text = "<Think>reasoning</THINK>\nanswer"
-    assert suggestions._strip_think_blocks(text) == "answer"
+    assert suggestions._strip_think_blocks_outside_json_strings(text) == "answer"
 
 
 def test_strip_think_blocks_drops_unclosed_block():
     # Reasoning models truncated at max_tokens emit an unclosed <think>.
     text = "<think>\nreasoning that never finished because tokens ran out"
-    assert suggestions._strip_think_blocks(text) == ""
+    assert suggestions._strip_think_blocks_outside_json_strings(text) == ""
 
 
 def test_strip_think_blocks_keeps_text_without_think():
     text = '["a", "b"]'
-    assert suggestions._strip_think_blocks(text) == '["a", "b"]'
+    assert suggestions._strip_think_blocks_outside_json_strings(text) == '["a", "b"]'
 
 
 def test_parse_json_string_list_ignores_brackets_inside_think_block():

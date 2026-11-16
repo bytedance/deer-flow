@@ -20,6 +20,12 @@ export interface ChannelProvider {
   connection_status: string;
   credential_fields: ChannelCredentialField[];
   credential_values?: ChannelRuntimeConfigValues;
+  /**
+   * The app can receive scheduled-task updates through proactive push. This
+   * is a capability, not a notification preference. Older backends may omit it.
+   */
+  proactive_notifications?: boolean;
+  proactive_group_notifications?: boolean;
 }
 
 export interface ChannelProvidersResponse {

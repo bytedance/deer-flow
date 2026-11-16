@@ -13,7 +13,9 @@ import os
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_time_range import SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -32,14 +34,8 @@ _api_key_warned: set[str] = set()
 
 def _get_api_key(tool_name: str) -> str | None:
     config = get_app_config().get_tool_config(tool_name)
-    if config is not None:
-        api_key = config.model_extra.get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            return api_key.strip()
-    env_key = os.getenv("SOFYA_API_KEY")
-    if isinstance(env_key, str) and env_key.strip():
-        return env_key.strip()
-    return None
+    configured = resolve_api_key(config.model_extra.get("api_key")) if config is not None else None
+    return configured or resolve_api_key(os.getenv("SOFYA_API_KEY"))
 
 
 def _coerce_max_results(value: object, default: int = 5, max_allowed: int = _SOFYA_MAX_RESULTS) -> int:
@@ -117,14 +113,24 @@ def _clip(value: object, limit: int) -> str:
 
 
 def _response_results(data: dict) -> list[dict] | None:
-    """Return the result dicts of a Sofya response, or None if malformed."""
+    """Return the result dicts of a Sofya response, or None if malformed.
+
+    A missing or null ``results`` is an empty search. A non-list container, or a
+    non-empty list holding no objects, is malformed: the caller reports a format
+    error rather than "No results found", which would tell the agent the query
+    legitimately matched nothing.
+    """
     results = data.get("results")
     if results is None:
         return []
     if not isinstance(results, list):
         logger.error("Sofya returned an unexpected 'results' payload type: %s", type(results).__name__)
         return None
-    return [item for item in results if isinstance(item, dict)]
+    usable = [item for item in results if isinstance(item, dict)]
+    if results and not usable:
+        logger.error("Sofya returned 'results' with no usable result objects")
+        return None
+    return usable
 
 
 @tool("web_search", parse_docstring=True)
@@ -170,7 +176,7 @@ def web_search_tool(query: str, max_results: int | None = None, time_range: Sear
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("url", ""),
+            "url": safe_public_result_url(r.get("url")),
             # Page content when the result was read, the search snippet otherwise.
             # Capped so a normal search stays inline rather than being written to disk.
             "content": _clip(r.get("content") or r.get("description") or "", content_limit),

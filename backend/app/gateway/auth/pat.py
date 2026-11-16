@@ -77,6 +77,9 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/projects/[^/]+$")),
     (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/(archive|restore)$")),
     (frozenset({"GET"}), re.compile(r"^/api/projects/[^/]+/threads$")),
+    (frozenset({"GET", "PATCH"}), re.compile(r"^/api/projects/[^/]+/memory$")),
+    (frozenset({"DELETE"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+$")),
+    (frozenset({"POST"}), re.compile(r"^/api/projects/[^/]+/memory/[^/]+/promote$")),
     # Project document shelf (Phase 2 Slice B): enumerated per implemented
     # route — list/upload on the collection, content and trash on the item.
     (frozenset({"GET", "POST"}), re.compile(r"^/api/projects/[^/]+/documents$")),
@@ -225,6 +228,11 @@ async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, fr
         # The owning user was deleted or became unresolvable; the token is
         # dead even though its row survives (deleting a user revokes their
         # PATs, without needing a FK cascade).
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if getattr(user, "disabled", False):
+        # Operator-disabled account (#3462 gap 3): the token stays valid on
+        # disk but resolves nothing while the account is suspended; the same
+        # generic 401 keeps the verdict from serving as an oracle.
         raise HTTPException(status_code=401, detail="Invalid token")
     await pat_repo.touch_last_used(str(record["id"]))
     return user, frozenset(record.get("scopes") or ())

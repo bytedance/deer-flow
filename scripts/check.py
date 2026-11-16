@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -28,7 +30,13 @@ def run_command(command: list[str]) -> str | None:
     """Run a command and return trimmed stdout, or None on failure."""
     try:
         result = subprocess.run(
-            command, capture_output=True, text=True, check=True, shell=False
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+            shell=False,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
@@ -42,6 +50,9 @@ def run_pnpm_version() -> tuple[str | None, bool, str | None]:
             [sys.executable, str(PNPM_SCRIPT_PATH), "-v"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8:backslashreplace"},
             check=False,
             shell=False,
             cwd=FRONTEND_DIR,
@@ -184,4 +195,15 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Parsed here rather than inside main(): the dependency-check tests call
+    # main() in-process under pytest, whose argv must not reach argparse.
+    parser = argparse.ArgumentParser(
+        prog="python scripts/check.py",
+        description=(
+            "DeerFlow dependency check (make check): probes the host tools the "
+            "local development setup needs and prints install hints for the "
+            "missing ones. Takes no arguments."
+        ),
+    )
+    parser.parse_args()
     sys.exit(main())

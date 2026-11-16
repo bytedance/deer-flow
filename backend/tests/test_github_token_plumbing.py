@@ -29,7 +29,7 @@ from langgraph_sdk.errors import ConflictError
 
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
-from app.channels.store import ChannelStore
+from app.channels.store import JsonChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
@@ -39,9 +39,11 @@ def _new_aio_sandbox_with_session_state():
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _SessionCreationState
 
     sbx = AioSandbox.__new__(AioSandbox)
+    sbx._bash_slots = threading.BoundedSemaphore(50)
     sbx._session_creation_state_lock = threading.Lock()
     sbx._shell_session_creation_state = _SessionCreationState()
     sbx._bash_session_creation_state = _SessionCreationState()
+    sbx._default_shell_stopped = False
     return sbx
 
 
@@ -504,7 +506,7 @@ def _github_msg(installation_id: int | None = 140594274) -> InboundMessage:
 
 def _new_manager() -> ChannelManager:
     bus = MessageBus()
-    store = ChannelStore(path=Path("/tmp/nonexistent-store-test.json"))
+    store = JsonChannelStore(path=Path("/tmp/nonexistent-store-test.json"))
     return ChannelManager(bus=bus, store=store)
 
 

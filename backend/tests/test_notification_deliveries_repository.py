@@ -97,6 +97,18 @@ class TestNotificationDeliveryRepository:
         assert second == []
 
     @pytest.mark.anyio
+    async def test_claim_leaves_excluded_providers_pending_for_their_lease_holder(self, repo):
+        # Under the IM leader lease an instance that does not hold a provider's
+        # transport leaves its rows to the holder instead of claiming and parking them.
+        await repo.enqueue(**_enqueue_kwargs(provider="wecom"))
+        await repo.enqueue(**_enqueue_kwargs(provider="feishu", target="ou_owner"))
+
+        claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=10, exclude_providers=frozenset({"wecom"}))
+        assert [row["provider"] for row in claimed] == ["feishu"]
+        holder = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=10)
+        assert [(row["provider"], row["status"]) for row in holder] == [("wecom", "sending")]
+
+    @pytest.mark.anyio
     async def test_claim_respects_limit(self, repo):
         for index in range(3):
             await repo.enqueue(**_enqueue_kwargs(task_run_id=f"run-{index}"))

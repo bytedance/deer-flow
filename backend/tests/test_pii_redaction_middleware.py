@@ -6,7 +6,9 @@ that the rewrite is request-scoped without mutating the original request or
 messages, the tool-boundary allowlist, and the pinned detector registry.
 """
 
+import random
 import re
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -20,7 +22,11 @@ from pydantic import Field, ValidationError
 
 from deerflow.agents.middlewares.pii_redaction_middleware import (
     _DETECTORS,
+    _EMAIL_PATTERN,
     PiiRedactionMiddleware,
+    _iter_email_matches,
+    _redact_content,
+    _Redactor,
     redact_text,
 )
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
@@ -119,6 +125,58 @@ class TestDetectors:
         )
         assert messages[0].content == f"{EMAIL_ALICE} here"
         assert messages[1].content == f"reply to {EMAIL_ALICE}"
+
+    def test_glued_emails_are_both_redacted(self):
+        # Each second address starts inside the run the first one ended in.
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [HumanMessage("cc alice@example.com+bob@example.org, alice@example.com_carol@example.com")],
+        )
+        bob_glued = redact_text("+bob@example.org", _PII_CFG)
+        carol_glued = redact_text("_carol@example.com", _PII_CFG)
+        assert messages[0].content == f"cc {EMAIL_ALICE}{bob_glued}, {EMAIL_ALICE}{carol_glued}"
+
+    def test_email_scan_matches_the_reference_pattern(self):
+        rng = random.Random(3190)
+        corpus = ["a@b.cc+c@d.org", "a@b.cc+c@d.org_e@f.gh-g@h.ij", "x.y@a.b.cc.d@e.ff", "a@b.c", "@@a@b.cc", "a" * 64 + "@b.cc"]
+        for alphabet in ("ab.%+-_@xy1. Z", "a@.b-+", "aA1@.-_%+ ,;\n"):
+            corpus += ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40))) for _ in range(5000)]
+        for text in corpus:
+            expected = [match.span() for match in _EMAIL_PATTERN.finditer(text)]
+            assert [match.span() for match in _iter_email_matches(text)] == expected, text
+
+    @pytest.mark.parametrize(
+        "make_payload",
+        [
+            pytest.param(lambda n: "a" * n, id="letters"),
+            pytest.param(lambda n: ("0123456789abcdef" * n)[:n], id="hex"),
+            # One worst shape per other detector, so the AGENTS.md rule that
+            # every detector stays linear is pinned, not only stated.
+            pytest.param(lambda n: ("sk-ghp_xoxb-AIzaAKIA" * n)[:n], id="api-key-prefixes"),
+            pytest.param(lambda n: "1" * n, id="digits"),
+            pytest.param(lambda n: ("1 1-1." * n)[:n], id="digit-separators"),
+            pytest.param(lambda n: ("+1 (212) " * n)[:n], id="phone-prefixes"),
+            pytest.param(lambda n: ("ABCD123456" * n)[:n], id="rfc-letters-digits"),
+        ],
+    )
+    def test_redaction_stays_linear_on_whitespace_free_text(self, make_payload):
+        # The email scan was quadratic in the longest local-part run: 100 KB
+        # of hex took ~6 s on the event loop, on every model call. Assert the
+        # shape, not an absolute budget (see test_skill_review_core.py): the
+        # quadratic path takes ~4x per doubling, the linear one ~2x.
+        def timed(payload):
+            def once():
+                started = time.perf_counter()
+                redact_text(payload, _PII_CFG)
+                return time.perf_counter() - started
+
+            return min(once() for _ in range(5))
+
+        small_elapsed = timed(make_payload(32768))
+        large_elapsed = timed(make_payload(65536))
+
+        assert small_elapsed < 1.0, f"redaction took {small_elapsed:.2f}s"
+        assert large_elapsed / small_elapsed < 3, f"redaction looks superlinear: 32K took {small_elapsed:.4f}s, 64K took {large_elapsed:.4f}s"
 
     def test_openai_style_api_key_redacted(self):
         messages, _ = _run_model_call(
@@ -360,6 +418,35 @@ class TestModelCallBoundary:
         messages[0].content[1]["image_url"]["url"] = "https://example.com/mutated.png"
         assert original.content[1]["image_url"]["url"] == "https://example.com/a.png"
 
+    def test_json_block_payload_redacted_leafwise(self):
+        # Providers that serialize json blocks onto the text channel (MindIE)
+        # would otherwise ship the payload raw: the block has no text field.
+        original = HumanMessage(content=[{"type": "json", "json": {"email": "alice@example.com", "age": 30}}])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+        block = messages[0].content[0]
+        assert block == {"type": "json", "json": {"email": EMAIL_ALICE, "age": 30}}
+        assert "alice@example.com" not in str(block)
+        assert original.content[0]["json"]["email"] == "alice@example.com"
+
+    def test_json_block_nested_strings_redacted_keys_preserved(self):
+        payload = {"user": {"contacts": ["alice@example.com", {"phone": "13800138000"}], "score": 9}}
+        original = HumanMessage(content=[{"type": "json", "json": payload}])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+        assert messages[0].content[0]["json"] == {"user": {"contacts": [EMAIL_ALICE, {"phone": PHONE_CN}], "score": 9}}
+
+    def test_json_block_without_pii_keeps_original_reference(self):
+        block = {"type": "json", "json": {"temperature": 21}}
+        content, changed = _redact_content([block], _Redactor(_make_middleware()._detectors, _TOKEN_SECRET))
+        assert changed is False
+        assert content[0] is block
+
+    def test_json_block_double_encoded_string_redacted(self):
+        # A string leaf holding serialized JSON is still just text to the
+        # detectors; the regex scan must reach inside it.
+        original = HumanMessage(content=[{"type": "json", "json": {"payload": '{"email": "alice@example.com"}'}}])
+        messages, _ = _run_model_call(_make_middleware(), [original])
+        assert messages[0].content[0]["json"]["payload"] == f'{{"email": "{EMAIL_ALICE}"}}'
+
 
 # ---------------------------------------------------------------------------
 # Tool boundary
@@ -397,6 +484,50 @@ class TestToolBoundary:
         tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
         final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
         assert final.content == EMAIL_ALICE
+
+    def test_mcp_structured_json_fields_are_redacted_recursively(self):
+        result = ToolMessage(
+            content=[
+                {
+                    "type": "json",
+                    "json": {
+                        "contact": {"email": "alice@example.com"},
+                        "phone_numbers": ["13800138000"],
+                    },
+                }
+            ],
+            tool_call_id="call_structured",
+            name="fetch_url",
+        )
+        tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
+
+        final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
+
+        payload = final.content[0]["json"]
+        assert payload["contact"]["email"] == EMAIL_ALICE
+        assert payload["phone_numbers"] == [PHONE_CN]
+        assert "alice@example.com" not in str(final.content)
+        assert "13800138000" not in str(final.content)
+        assert result.content[0]["json"]["contact"]["email"] == "alice@example.com"
+
+    def test_mcp_structured_json_keys_are_redacted_recursively(self):
+        result = ToolMessage(
+            content=[
+                {
+                    "type": "json",
+                    "json": {"alice@example.com": {"status": "active"}},
+                }
+            ],
+            tool_call_id="call_structured_key",
+            name="fetch_url",
+        )
+        tool = SimpleNamespace(metadata={MCP_TOOL_METADATA_KEY: True})
+
+        final = _run_tool_call(_make_middleware(), "fetch_url", result, tool=tool)
+
+        payload = final.content[0]["json"]
+        assert list(payload) == [EMAIL_ALICE]
+        assert "alice@example.com" not in str(final.content)
 
     def test_command_result_passthrough(self):
         result = Command(update={"events": ["alice@example.com"]})
@@ -442,6 +573,19 @@ class TestToolBoundary:
         _run_tool_call(_make_middleware(), "web_search", result)
         assert result.content == "alice@example.com"
 
+    def test_remote_tool_json_block_result_redacted_and_stamped(self):
+        result = ToolMessage(
+            content=[{"type": "json", "json": {"row": {"email": "alice@example.com"}}}],
+            tool_call_id="call_1",
+            name="web_fetch",
+        )
+        final = _run_tool_call(_make_middleware(), "web_fetch", result)
+        assert final.content[0]["json"] == {"row": {"email": EMAIL_ALICE}}
+        transforms = final.additional_kwargs["deerflow_tool_transforms"]
+        assert transforms[-1]["kind"] == "pii_redaction"
+        # The original message is untouched.
+        assert result.content[0]["json"]["row"]["email"] == "alice@example.com"
+
     def test_command_placeholder_numbering_continues_across_messages(self):
         # One redactor spans the whole Command result, so placeholder numbers
         # stay continuous across the ToolMessages it carries (review follow-up).
@@ -467,6 +611,40 @@ class TestToolBoundary:
         )
         assert first.content == EMAIL_ALICE
         assert second.content == EMAIL_BOB_COM
+
+
+# ---------------------------------------------------------------------------
+# Provider channel: MindIE json serialization must inherit redaction
+# ---------------------------------------------------------------------------
+
+
+class TestMindieJsonChannel:
+    def test_redacted_user_json_block_remains_dropped_by_mindie(self):
+        # User JSON still participates in redaction for other providers;
+        # MindIE renders JSON only in tool results.
+        from deerflow.models.mindie_provider import _fix_messages
+
+        messages, _ = _run_model_call(
+            _make_middleware(),
+            [HumanMessage(content=[{"type": "text", "text": "keep user text"}, {"type": "json", "json": {"email": "alice@example.com"}}])],
+        )
+        assert messages[0].content[1]["json"]["email"] == EMAIL_ALICE
+        fixed = _fix_messages(messages)
+        assert fixed[0].content == "keep user text"
+
+    @pytest.mark.parametrize("payload", [{"row": "alice@example.com"}, {"alice@example.com": {"status": "active"}}], ids=["value", "key"])
+    def test_redacted_tool_json_block_stays_redacted_through_mindie_serialization(self, payload):
+        from deerflow.models.mindie_provider import _fix_messages
+
+        result = ToolMessage(
+            content=[{"type": "json", "json": payload}],
+            tool_call_id="c1",
+            name="web_fetch",
+        )
+        redacted = _run_tool_call(_make_middleware(), "web_fetch", result)
+        fixed = _fix_messages([redacted])
+        assert "alice@example.com" not in fixed[0].content
+        assert EMAIL_ALICE in fixed[0].content
 
 
 # ---------------------------------------------------------------------------

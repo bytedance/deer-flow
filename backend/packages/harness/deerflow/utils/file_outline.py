@@ -47,6 +47,9 @@ _TRUNCATION_MARKER = "… (truncated)"
 # the line is an info string when opening, or whitespace only when closing.
 _CODE_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 
+# HTML comment blocks end on the first line containing -->.
+_HTML_COMMENT_START_RE = re.compile(r"^ {0,3}<!--")
+
 # ATX headings require 1-6 hashes and a space/tab separator (or end of line).
 # Match the original indentation so indented code cannot become a heading.
 _ATX_HEADING_RE = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+(.*))?$")
@@ -70,7 +73,8 @@ def _clean_bold_title(raw: str) -> str:
 
     pymupdf4llm sometimes emits adjacent bold spans as ``**A** **B**`` instead
     of a single ``**A B**`` block.  This helper merges those fragments and then
-    strips the outermost ``**...**`` wrapper so the caller gets plain text.
+    strips a whole-title ``**...**`` wrapper. Mixed bold/plain text keeps its
+    delimiters rather than losing the ends of separate spans.
 
     Examples::
 
@@ -80,9 +84,10 @@ def _clean_bold_title(raw: str) -> str:
     """
     # Merge adjacent bold spans: "** **" → " "
     merged = re.sub(r"\*\*\s*\*\*", " ", raw).strip()
-    # Strip outermost **...** if the whole string is wrapped
+    # Strip one whole-title wrapper, not the ends of separate bold spans.
     if m := re.fullmatch(r"\*\*(.+?)\*\*", merged, re.DOTALL):
-        return m.group(1).strip()
+        if "**" not in m.group(1):
+            return m.group(1).strip()
     return merged
 
 
@@ -126,15 +131,23 @@ def extract_outline(md_path: Path) -> list[dict]:
     outline: list[dict] = []
     fence_char = ""
     fence_length = 0
+    in_html_comment = False
     try:
         with md_path.open(encoding="utf-8-sig") as f:
             for lineno, line in enumerate(f, 1):
+                if in_html_comment:
+                    in_html_comment = "-->" not in line
+                    continue
+
                 fence = _CODE_FENCE_RE.match(line.rstrip("\r\n"))
                 if fence_char:
                     if fence:
                         marker, suffix = fence.groups()
                         if marker[0] == fence_char and len(marker) >= fence_length and not suffix.strip(" \t"):
                             fence_char = ""
+                    continue
+                if _HTML_COMMENT_START_RE.match(line):
+                    in_html_comment = "-->" not in line
                     continue
                 if fence:
                     marker, info = fence.groups()

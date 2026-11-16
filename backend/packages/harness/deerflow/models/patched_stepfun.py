@@ -15,12 +15,13 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from langchain_openai import ChatOpenAI
 
 from deerflow.models.assistant_payload_replay import (
     restore_assistant_payloads,
     restore_reasoning_content,
 )
+from deerflow.models.openai_response import GuardedChatOpenAI
+from deerflow.models.reasoning_capture import typed_choice_message, with_reasoning_content
 
 _MISSING = object()
 
@@ -54,26 +55,7 @@ def _extract_reasoning(value: Any) -> str | object:
     return _MISSING
 
 
-def _with_reasoning_content(message: AIMessage | AIMessageChunk, reasoning: str) -> AIMessage | AIMessageChunk:
-    """Return a copy of *message* with reasoning_content stored in additional_kwargs."""
-    additional_kwargs = dict(message.additional_kwargs)
-    if additional_kwargs.get("reasoning_content") != reasoning:
-        additional_kwargs["reasoning_content"] = reasoning
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
-
-
-def _get_typed_choice_message(response: Any, index: int) -> Any:
-    """Extract the SDK-typed choice message at *index*, if available."""
-    choices = getattr(response, "choices", None)
-    if choices is None:
-        return None
-    try:
-        return choices[index].message
-    except (AttributeError, IndexError, TypeError):
-        return None
-
-
-class PatchedChatStepFun(ChatOpenAI):
+class PatchedChatStepFun(GuardedChatOpenAI):
     """ChatOpenAI with full reasoning support for StepFun models.
 
     Captures ``reasoning`` / ``reasoning_content`` from both streaming and
@@ -101,6 +83,10 @@ class PatchedChatStepFun(ChatOpenAI):
         """Restore ``reasoning_content`` on historical assistant messages."""
         original_messages = self._convert_input(input_).to_messages()
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # StepFun documents max_tokens; ChatOpenAI emits the newer OpenAI name.
+        # Preserve the configured output bound on probes and ordinary chat calls.
+        if "max_completion_tokens" in payload:
+            payload["max_tokens"] = payload.pop("max_completion_tokens")
 
         restore_assistant_payloads(
             payload.get("messages", []),
@@ -133,7 +119,7 @@ class PatchedChatStepFun(ChatOpenAI):
             reasoning = _extract_reasoning(delta)
             if reasoning is not _MISSING and isinstance(generation_chunk.message, AIMessageChunk):
                 generation_chunk = ChatGenerationChunk(
-                    message=_with_reasoning_content(generation_chunk.message, reasoning),
+                    message=with_reasoning_content(generation_chunk.message, reasoning),
                     generation_info=generation_chunk.generation_info,
                 )
 
@@ -158,14 +144,14 @@ class PatchedChatStepFun(ChatOpenAI):
             reasoning = _extract_reasoning(choice_message)
 
             if reasoning is _MISSING and not isinstance(response, dict):
-                reasoning = _extract_reasoning(_get_typed_choice_message(response, index))
+                reasoning = _extract_reasoning(typed_choice_message(response, index))
 
             message = generation.message
             if reasoning is not _MISSING and isinstance(message, AIMessage):
                 if patched_generations is None:
                     patched_generations = list(result.generations)
                 patched_generations[index] = ChatGeneration(
-                    message=_with_reasoning_content(message, reasoning),
+                    message=with_reasoning_content(message, reasoning),
                     generation_info=generation.generation_info,
                 )
 

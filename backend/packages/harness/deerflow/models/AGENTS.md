@@ -1,143 +1,104 @@
-### Model Factory (`packages/harness/deerflow/models/factory.py`)
+# Models (`deerflow/models/`)
 
-Request-admission waits follow the next scheduled admission and configured
-interval, capped at 50 ms; the cap must not become a minimum poll interval that
-limits high-RPM throughput. Local `AdmissionError` is structurally non-retriable
-in LLM error handling regardless of its message text. Immediate admission and
-joining the blocking FIFO are one lock-protected decision: do not split the
-fast-path permit check from queue insertion, or an older caller can be overtaken
-while handing off to the wait queue.
+The model factory, the reasoning capability contract, request admission, and the
+provider adapters (Claude, Codex, vLLM, MindIE, OpenAI-compatible). The managed
+shared-model catalog lives in `config/managed_models.py`. Model fields and their
+defaults are in the config models and `config.example.yaml`; see
+[the config guide](../config/AGENTS.md).
 
-- `create_chat_model(name, thinking_enabled)` instantiates LLM from config via reflection
-- Supports `thinking_enabled` flag with per-model `when_thinking_enabled` / `when_thinking_disabled` overrides; on both the legacy and the contract path every template and every synthesized `extra_body` payload goes through `_merge_thinking_payload` (the native-Anthropic disable assigns the top-level `thinking` mapping outright — a tagged union keyed by `type`): keys are never removed (a template can only add or override; nested mappings inherit the profile's other keys), template wins on conflicts, so a template's `extra_body` never clobbers sibling keys such as `extra_body.tool_stream`. Corollary: a disable template cannot clear a key the profile sets, so enable-only keys such as `extra_body.thinking.budget_tokens` belong in `when_thinking_enabled`, never in the base `extra_body`. Templates are deep-copied as they are merged, so constructor kwargs never alias the cached `ModelConfig`. The vLLM switch has two spellings (`_VLLM_THINKING_SWITCHES`: legacy `thinking` alias, `enable_thinking`); when a profile spells it differently from the payload, the payload's value is mirrored onto the profile's spelling rather than deleting or canonicalizing it — `VllmChatModel` collapses the pair to `enable_thinking`, other OpenAI-compatible classes send both, and either way the server reads the template's intent. Do not canonicalize `thinking` → `enable_thinking` in the factory: chat templates differ on which key they honor, and only `VllmChatModel` opts into that remap
-- Supports vLLM-style thinking toggles via `when_thinking_enabled.extra_body.chat_template_kwargs.enable_thinking` for Qwen reasoning models, while normalizing legacy `thinking` configs for backward compatibility
-- A per-request `reasoning_effort` kwarg (the regular, non-bootstrap lead-agent build passes it even when `None`) is popped from `kwargs` and layered like `model_overrides`: a non-`None` value replaces the profile's, and the thinking transforms applied afterwards (`when_thinking_enabled`, `when_thinking_disabled`, the `extra_body.thinking` disable path) still decide the final value. Never let a key reach the constructor through both `kwargs` and the profile settings — Python raises `got multiple values for keyword argument` and the lead agent cannot be built for that model. Codex checks the requested level itself. Pinned by `tests/test_model_factory.py` and `tests/test_lead_agent_model_resolution.py`
-- Supports `supports_vision` flag for image understanding models
-- Config values starting with `$` resolved as environment variables
-- Missing provider modules surface actionable install hints from reflection resolvers (for example `uv add langchain-google-genai`)
-- Optional `models[].request_admission` attaches a process-shared `BaseRateLimiter` at the model factory. Identical explicit groups share one FIFO across model instances, threads and event loops; implicit groups use the configured model name. Policies are immutable once registered and conflicting settings fail construction. A monotonic minimum interval spaces requests without idle-time burst credit; bounded waiters poll without occupying executor threads and unregister in `finally`. The factory strips the policy from provider kwargs and sets exposed SDK `max_retries=0` so middleware retries re-enter admission. This limits model invocations, not tokens or a distributed provider account; custom providers bypassing BaseChatModel hooks are outside the contract. Tests: `test_model_request_admission.py` and `test_model_request_admission_fifo_atomic.py`.
+## Verify
 
-### Reasoning Capability Contract (`packages/harness/deerflow/models/reasoning.py`)
+```bash
+cd backend
+python -m pytest tests -q -k "model or provider or codex or claude or mindie or vllm or reasoning or admission"
+make test-blocking-io
+```
 
-Mapping-valued `ModelConfig.reasoning` (issue #5073) is an optional declarative contract beside
-the legacy `supports_thinking` / `supports_reasoning_effort` booleans: thinking
-`unsupported | optional | required`, `on_disable_request` (`keep_enabled` or
-`reject`, required-thinking only), the payload `dialect` (`auto` infers it from
-`when_thinking_enabled`), the reasoning `history` requirement, and an `effort`
-vocabulary with `default`, generic-value `aliases`, and a serialization `path`.
-A boolean or level-string `reasoning` (`true` / `false`, or `low|medium|high` for
-gpt-oss style models) remains a native ChatOllama provider setting; the factory
-forwards it on the legacy path, and the assembly descriptor keeps it — like a
-declared contract's `dialect` / `history` — inside `model_parameters` so
-request-affecting reasoning settings move the fingerprint. When the block is
-present the booleans are derived from it and contradictory
-profiles fail at config load (`required` + `when_thinking_disabled`, `unsupported`
-+ an enable template, a `default` outside `values`, an explicit boolean that
-disagrees, an effort value at `effort.path` in the profile or in the
-`when_thinking_*` / `thinking` templates that the contract rejects, a `path` that
-is not a dotted identifier or would overwrite a whole mapping, or a stale
-`reasoning_effort` key beside a custom effort path). The factory strips a
-generic effort key from runtime overrides for custom-path contracts. `default` also
-governs callers that never choose an effort (summarization, title, subagents), so
-shipped profiles keep it below the provider's deepest level.
+Provider tests drive the public sync and async calls through an offline HTTP
+transport, so they check the payload that DeerFlow sends.
 
-`resolve_reasoning_contract` turns any profile (legacy or declared) into an
-immutable `ReasoningContract`, `resolve_reasoning_request` applies a caller's
-generic `thinking_enabled` / `reasoning_effort` to it, and
-`reasoning_capabilities_payload` projects it for `/api/models` and
-`DeerFlowClient` (`reasoning` object, `source: legacy|contract`).
-`create_chat_model` is the single enforcement point for every caller (lead agent,
-subagents, summarization, title, one-shot utilities): a required-thinking model
-never enters the disable branch, effort is mapped through aliases or the default
-and otherwise dropped, and `dialect` synthesizes the on/off payload when no
-template exists. Legacy profiles (no mapping-valued `reasoning:` contract) keep the historical path
-byte-for-byte, including the synthesized `reasoning_effort=minimal` on the
-OpenAI-compatible disable path. The lead agent and the subagent descriptor resolve
-the same policy first so run metadata reports the effective values. Design note:
-`docs/plans/2026-09-23-reasoning-capability-contract.md`; tests:
-`tests/test_reasoning_contract.py`, the contract section of
-`tests/test_model_factory.py`, `tests/test_models_router_reasoning.py`.
+## Factory and reasoning
 
-### CLI credential files (`packages/harness/deerflow/models/credential_loader.py`)
+- **`create_chat_model` is the one place a model is built.** The lead agent,
+  titles, summarization, subagents and the Gateway probe all call it, so the
+  reasoning contract and request admission apply to every caller. A second
+  construction path would skip both.
+- **A declared `reasoning.effort.path` is the only way effort is serialized.** A
+  leftover `reasoning_effort` key on such a profile is rejected, because two
+  serializations of one setting can disagree on the wire.
+- **Thinking templates add or override keys and never remove one.** The disable
+  path treats a null template value as absent, so the native and vLLM fallbacks
+  still apply.
+- **`aliases` is presentation metadata.** It is stripped before provider kwargs
+  are built. An explicit user model choice is authorized as given and is not
+  replaced by the default when it is denied.
+- **A missing provider module raises an install hint**, not a bare import error.
 
-CLI credential JSON uses `utf-8-sig` for locale-independent reads with optional
-BOM. Decode failures follow the existing unreadable-source path, preserving
-Claude's override-to-default fallback. Doctor's mirrored JSON reader must accept
-the same optional BOM. Tests: `test_credential_file_encoding.py`.
+## Request admission and retries
 
-### Codex tool-call/result serialization (`packages/harness/deerflow/models/openai_codex_provider.py`)
+- **Admission is first-in, first-out across model instances, threads and event
+  loops.** Taking a free permit and joining the wait queue are one decision under
+  one lock. If they are split, a new caller overtakes an older one.
+- **The wait cap is an upper bound.** It must not become a minimum poll interval,
+  which would limit throughput at a high request rate.
+- **A local `AdmissionError` is never retried**, whatever its message says.
+- **A paced model retries in one layer only.** With request admission, the Claude
+  and Codex wrappers and the SDK make a single attempt, and middleware retries
+  re-enter admission. Log a warning when this lowers a configured attempt count.
+  Unpaced models keep their own retry policy.
+- **`Retry-After` goes through `utils.retry_after`.** HTTP dates are read as UTC,
+  a past date means zero, and the delay is bounded.
 
-`_convert_messages` uses `_is_valid_call_id` for both assistant tool calls
-(including `invalid_tool_calls`) and tool results, omitting empty or
-whitespace-only call IDs even when direct provider use bypasses middleware repair.
-Non-blank IDs remain byte-for-byte unchanged so calls and results keep their
-correlation; serialization does not trim IDs or rewrite the input messages.
-Each omitted tool result emits a warning with its normalized content length;
-the warning never includes the result content.
-Coverage: `tests/test_codex_provider.py`.
+## Provider wire rules
 
-### Codex SSE termination (`packages/harness/deerflow/models/openai_codex_provider.py`)
+- **A non-blank tool-call ID is sent unchanged, byte for byte.** Calls and results
+  are paired by that ID. A warning about a repaired ID never includes result
+  content.
+- **An empty `choices` list becomes `EmptyModelResponseError`** before LangChain
+  indexes it. Every OpenAI-compatible adapter keeps `OpenAIEmptyChoicesMixin`.
+- **A completed response with null or empty usage keeps its text.**
+- **A terminal stream error returns no partial output.** The caller must not take
+  a truncated answer for a finished one.
+- **Cancelling a Codex async call closes its HTTP stream.** Async generation owns
+  an HTTPX async stream, not an executor-backed sync request. Load TLS trust
+  off-loop, keep retry sleeps cancellable, and drain the client close across
+  repeated cancellation. `test_codex_cancellation.py` observes real loopback EOF
+  before fixture release.
+- **MindIE requests `stream=False` and simulates streaming**, and its XML tool
+  calls and numeric arguments are parsed in the adapter.
+- **Claude prompt caching copies before it marks.** The request payload shares
+  blocks and tool dicts with the caller, and a `cache_control` marker written in
+  place is checkpointed with the thread. Strip stored markers on every request,
+  with caching on or off.
+- **`thinking` and `redacted_thinking` blocks take no cache marker.** Anthropic
+  rejects one there. Keep their content, signature and order, so a later
+  breakpoint still covers them.
+- **Claude OAuth betas lead any request `betas` and any `anthropic-beta` in
+  `extra_headers`.** They sit in the client's default header, but request
+  `betas` replace that header and `extra_headers` replace both, and Anthropic
+  rejects the Bearer token without `oauth-2025-04-20`. Build a new list and a
+  new header dict, because the payload can hold the model's own `betas` and
+  `model_kwargs`.
 
-`response.completed` ends stream consumption immediately, before transport EOF;
-retain the output-item recovery path for empty completed output. Terminal
-`response.failed`, `response.incomplete`, and `error` events raise with their
-error code/message or incomplete reason, closing the response and client without
-returning partial output. Non-object error details or response containers are
-reported as text instead of raising `AttributeError`. SSE failures do not enter
-the HTTP-status retry loop.
-Offline HTTP-stream coverage: `tests/test_codex_stream_terminal_events.py`.
+## Credentials
 
-### Claude Code Credentials (`packages/harness/deerflow/models/credential_loader.py`)
+- **CLI credential files are read per model instance**, and models are built
+  fresh for each run, so a refreshed login applies to the next run. Read the JSON
+  with or without a BOM.
 
-- `ClaudeChatModel.model_post_init` calls `load_claude_code_credential()` for every instance, and `create_chat_model` builds fresh instances per run (lead agent, title, summarization, subagents)
-- `$CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a one-shot handoff: a pipe returns EOF and a file keeps its advanced offset. `_read_secret_from_file_descriptor` therefore caches a non-empty secret per `(env_var, fd)` under a lock held across the read. Do not drop the cache or the lock — later instances would get no credential, and the Anthropic SDK raises `TypeError: Could not resolve authentication method` before sending. Empty reads, `OSError`, and UTF-8 decode failures are not cached; unreadable handoffs return `None` so the loader can try credential files. Warnings must not include token contents. The key is the descriptor number on purpose — a closed handoff keeps serving its token, and a secret placed on a recycled number in-process is not re-read unless the cache is cleared. The cache is per process, so a new process (e.g. a uvicorn `--reload` worker) cannot recover a drained descriptor. Pinned by `tests/test_credential_loader.py` and `tests/test_claude_fd_encoding.py`, including two-instance `ClaudeChatModel` tests
+## Managed shared models
 
-### Claude Prompt Caching (`packages/harness/deerflow/models/claude_provider.py`)
-
-- The request payload shares objects with the caller: langchain-anthropic forwards Claude-native blocks (an image or document with a `source`, search results) and list-form system blocks by reference, and a reused tool binding passes its own tool dicts (the lead agent re-binds per call, so its tool dicts are fresh). Writing `cache_control` in place checkpointed the markers with the thread's messages, and the stale ones pushed every later request past the 4-breakpoint limit
-- Every request goes through `_strip_cache_control`, with caching on or off, so markers stored by older checkpoints never reach the API. It copies a marked block without its marker and replaces the system, message, content and tool lists and every message dict with copies; langchain-anthropic already builds fresh message dicts and content lists, so that part is defensive
-- `_apply_prompt_caching` must call `_strip_cache_control` first: it then replaces slots in those payload-owned lists with marked copies and writes `msg["content"]` on copied message dicts, placing at most four breakpoints. Pinned by `tests/test_claude_provider_prompt_caching.py`
-
-### vLLM Provider (`packages/harness/deerflow/models/vllm_provider.py`)
-
-- `VllmChatModel` subclasses `langchain_openai:ChatOpenAI` for vLLM 0.19.0 OpenAI-compatible endpoints
-- Preserves vLLM's non-standard assistant `reasoning` field on full responses, streaming deltas, and follow-up tool-call turns, falling back to the legacy `reasoning_content` wire field when `reasoning` is absent or null (a payload carrying both keeps `reasoning`); `_pick_reasoning` owns this precedence across all three paths and preserves empty-string `reasoning` rather than falling back
-- Designed for configs that enable thinking through `extra_body.chat_template_kwargs.enable_thinking` on vLLM 0.19.0 Qwen reasoning models, while accepting the older `thinking` alias
-- `cumulative_stream_usage` is an opt-in model setting (default `false`) for endpoints that repeat cumulative token totals on each streaming chunk. The provider converts snapshots to deltas only when a stable completion id is present, isolates interleaved streams by id, and leaves the original usage untouched otherwise. Per-model tracking is lock-protected and cleared on the trailing empty-`choices` frame whether or not that frame carries usage. A soft cap of 1024 ids evicts only entries idle for at least one hour; active streams may temporarily exceed the cap so eviction cannot corrupt their deltas. Regression coverage lives in `tests/test_vllm_provider.py`.
-
-### Managed shared models (`config/managed_models.py`)
-
-`ManagedModelStore` persists a Fernet-encrypted catalog plus its generated local key
-under `runtime_home()/managed-models`. Files are atomically replaced with temporary
-file permissions; complete read/modify/write transactions hold the process lock and
-cross-process sidecar lock. Missing keys and invalid catalogs fail closed. Backups
-and shared deployments must include both files. SQL storage does not replicate this
-catalog. Admin-supplied endpoints can address local providers; only trusted admins
-may create or probe them.
-
-`get_app_config()` and `reload_app_config()` merge enabled managed models after YAML
-profiles, with YAML names winning conflicts. A cached effective snapshot uses the
-base config identity and content signatures of both files. Never mutate a previously
-returned AppConfig: runtime-scoped and explicitly injected configurations remain
-authoritative. `_managed_model_names` is private source metadata, not provider kwargs.
-Direct `AppConfig.from_file()` continues to read only operator configuration.
-
-`config/managed_model_providers.py` owns endpoint detection and provider defaults.
-Managed profiles normally use `langchain_openai:ChatOpenAI`. Official HTTPS
-`api.deepseek.com` endpoints (default port, root or `/v1` path) instead resolve to
-`PatchedChatDeepSeek` with explicit thinking on/off settings and reasoning-effort
-support. Resolve from the parsed endpoint, never a model-name substring; proxies,
-lookalike hosts and other paths retain the generic contract. This is derived runtime
-configuration: no catalog migration or new API fields. The native `api_base` field
-preserves the administrator's endpoint; the adapter preserves `reasoning_content`
-and sends `max_tokens` rather than OpenAI's `max_completion_tokens`.
-
-Full updates require the current revision; omission means create, an omitted API
-key retains the saved key and an empty string clears it. Never serialize SecretStr
-masking as a saved key. Read APIs return `has_api_key`, never a credential.
-The Gateway probe constructs the resolved class off-loop and applies the profile's
-`when_thinking_disabled` settings to its bounded forced-tool request. It does not
-repeat provider selection or persist the probe override.
-Tests: `test_managed_models.py`, `test_managed_deepseek.py` (real SDK serialization
-with an HTTP double), opt-in `test_managed_deepseek_live.py`, and
-`tests/blocking_io/test_managed_models.py`.
+- **The catalog is two files**: the encrypted catalog and its generated key, under
+  `runtime_home()/managed-models`. A backup or a shared deployment needs both. SQL
+  storage does not replicate them. A missing key or an invalid catalog fails
+  closed.
+- **Managed models are merged after the YAML profiles, and a YAML name wins.** The
+  merge happens in `get_app_config()` and `reload_app_config()` only. Runtime-scoped
+  and explicitly injected configurations are left as given, and an `AppConfig`
+  that was already returned is never mutated.
+- **`config/managed_model_providers.py` is the only provider registry.** Do not
+  infer an adapter from a substring of the model name.
+- **A full update needs the current revision**, and a response reports
+  `has_api_key`, never the credential.
+- **Only trusted admins create or probe a managed model.** An admin-supplied
+  endpoint can address a host on the local network.

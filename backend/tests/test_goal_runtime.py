@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from deerflow.runtime import goal
+from deerflow.runtime.checkpoint_state import CheckpointStateAccessor, build_state_mutation_graph
 
 
 def test_build_goal_state_defaults_to_claude_stop_hook_cap():
@@ -364,12 +366,29 @@ def test_format_visible_conversation_keeps_a_long_request_whole_when_it_fits():
     assert lines[1] == f"User: {request}"
 
 
+def test_format_visible_conversation_uses_spare_budget_for_long_user_input_at_the_cap():
+    request = "Review the supplied data. " + "x" * 5000 + " IMPORTANT SOURCE ROW: 314159 "
+    request += "y" * (10000 - len(request))
+    answer = "The result is " + "a" * (goal.MAX_GOAL_CONVERSATION_CHARS - len(f"User: {request}\n\nAssistant: The result is  done.")) + " done."
+    assert len(f"User: {request}\n\nAssistant: {answer}") == goal.MAX_GOAL_CONVERSATION_CHARS
+
+    for text in (answer, answer.replace("The result", "The  result", 1)):
+        formatted = goal.format_visible_conversation([HumanMessage(content=request), AIMessage(content=text)])
+        lines = _evidence_lines(formatted)
+        # Crossing the cap by one character must not discard most of the input
+        # while leaving room unused. Preserve the selected recent answer too.
+        assert "IMPORTANT SOURCE ROW: 314159" in lines[0]
+        assert len(lines[0]) >= 9900
+        assert lines[-1] == f"Assistant: {text}"
+        assert len(formatted) >= goal.MAX_GOAL_CONVERSATION_CHARS - 64
+
+
 def test_format_visible_conversation_shortens_a_request_that_does_not_fit():
     request = "Build the table. " + "r" * 5000
     lines = _evidence_lines(goal.format_visible_conversation(_report_run(request)))
 
     assert lines[0].startswith("User: Build the table. ") and lines[0].endswith(" more chars]")
-    assert len(lines[0]) < goal.MAX_GOAL_REQUEST_CHARS + 40
+    assert len(lines[0]) < len(f"User: {request}")
 
 
 def test_format_visible_conversation_marks_the_cut_when_no_request_is_in_the_window():
@@ -462,6 +481,28 @@ def test_make_goal_continuation_message_is_hidden_from_ui():
     assert "Tests have not run" in message.content
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("metadata", "answer", "extra", "retryable"),
+    [
+        ({"finish_reason": "stop"}, '{"satisfied":', {}, True),
+        ({"stop_reason": "end_turn"}, '{"satisfied": "yes"}', {}, True),
+        ({"status": "completed", "finish_reason": "length"}, '{"satisfied":', {}, False),
+        ({"finish_reason": "content_filter"}, "refused", {}, False),
+        ({"stop_reason": "refusal"}, "refused", {}, False),
+        ({}, '{"satisfied":', {}, False),
+        ({"finish_reason": "stop"}, "", {"refusal": "Not allowed"}, False),
+        ({"finish_reason": "stop"}, [{"type": "refusal", "refusal": "Not allowed"}], {}, False),
+    ],
+)
+async def test_evaluator_format_retry_requires_a_normal_completion(metadata, answer, extra, retryable):
+    model = SimpleNamespace(ainvoke=AsyncMock(return_value=AIMessage(content=answer, response_metadata=metadata, additional_kwargs=extra)))
+    with pytest.raises(ValueError) as error:
+        await goal.evaluate_goal_completion(goal.build_goal_state("Report"), [HumanMessage(content="Report"), AIMessage(content="Done")], model=model)
+    assert isinstance(error.value, goal.GoalEvaluationFormatError) is retryable
+    model.ainvoke.assert_awaited_once()
+
+
 def test_evaluate_goal_completion_uses_non_thinking_model(monkeypatch):
     fake_model = MagicMock()
     fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": true, "reason": "Done", "evidence_summary": "Done"}'))
@@ -517,6 +558,17 @@ def test_evaluate_goal_completion_shows_tool_evidence_to_the_evaluator():
     assert "use blocker needs_user_input" in system_message.content
     assert 'Tool result (write_file): "OK"' in human_message.content
     assert 'Tool result (present_files): "Successfully presented files"' in human_message.content
+
+
+def test_evaluator_does_not_treat_async_registration_as_completion():
+    fake_model = MagicMock()
+    fake_model.ainvoke = AsyncMock(return_value=SimpleNamespace(content='{"satisfied": false, "blocker": "external_wait", "reason": "The result is still pending", "evidence_summary": "Registered only"}'))
+
+    asyncio.run(goal.evaluate_goal_completion(goal.build_goal_state("Produce and deliver the final report"), _file_task_messages(), model=fake_model))
+
+    system_message, _ = fake_model.ainvoke.await_args.args[0]
+    assert "Registering a Batch, job, task, or scheduled continuation is not evidence that the objective is complete" in system_message.content
+    assert "actual requested result or artifact must exist or be delivered" in system_message.content
 
 
 def test_evaluate_goal_completion_injects_langfuse_metadata(monkeypatch):
@@ -647,6 +699,103 @@ def test_latest_visible_assistant_signature_tracks_last_ai_evidence():
     assert goal.latest_visible_assistant_signature([HumanMessage(content="only human"), hidden]) == ""
 
 
+def test_latest_visible_assistant_message_id_skips_replies_without_text():
+    """The goal_outcome anchor is the reply the visible signature keys on."""
+    messages = [
+        HumanMessage(id="h1", content="Write the report"),
+        AIMessage(id="a1", content="The report is ready.", tool_calls=[{"id": "call-1", "name": "present_files", "args": {}}]),
+        ToolMessage(id="t1", content="presented", tool_call_id="call-1"),
+        AIMessage(id="a2", content="", tool_calls=[{"id": "call-2", "name": "ls", "args": {}}]),
+        ToolMessage(id="t2", content="report.md", tool_call_id="call-2"),
+        AIMessage(id="a3", content=""),
+        AIMessage(id="a4", content="hidden", additional_kwargs={"hide_from_ui": True}),
+    ]
+
+    assert goal.latest_visible_assistant_message_id(messages) == "a1"
+    assert goal.latest_visible_assistant_signature(messages) == goal.latest_visible_assistant_signature(messages[:2])
+    assert goal.latest_visible_assistant_message_id(messages[:1]) is None
+    assert goal.latest_visible_assistant_message_id([AIMessage(id="", content="Done.")]) is None
+
+
+def test_build_goal_outcome_records_the_met_goal_instance():
+    met_goal = {**goal.build_goal_state("Ship it", max_continuations=3, now="2026-10-07T00:00:00Z"), "continuation_count": 2}
+    evaluation = goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped.", evidence_summary="Release notes posted.", relied_on_assumption=True)
+
+    assert goal.build_goal_outcome(met_goal, evaluation, reply_message_id="a9", now="2026-10-07T01:00:00Z") == {
+        "status": "achieved",
+        "objective": "Ship it",
+        "goal_created_at": "2026-10-07T00:00:00Z",
+        "achieved_at": "2026-10-07T01:00:00Z",
+        "continuation_count": 2,
+        "max_continuations": 3,
+        "reason": "Shipped.",
+        "relied_on_assumption": True,
+        "reply_message_id": "a9",
+    }
+    # Only a real True counts as relying on an assumption.
+    assert goal.build_goal_outcome(met_goal, {**evaluation, "relied_on_assumption": "false"}, reply_message_id=None)["relied_on_assumption"] is False
+    with pytest.raises(ValueError):
+        goal.build_goal_outcome(met_goal, {**evaluation, "satisfied": False}, reply_message_id=None)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_write_thread_goal_keeps_goal_outcome_only_on_the_clearing_write(mode):
+    """Only the clear of a met goal writes the record; every other goal write drops it."""
+    checkpointer = InMemorySaver()
+    accessor = CheckpointStateAccessor.bind(build_state_mutation_graph("seed", mode), checkpointer, mode=mode)
+    config = {"configurable": {"thread_id": "outcome-thread", "checkpoint_ns": ""}}
+    met_goal = goal.build_goal_state("Ship it")
+    record = goal.build_goal_outcome(met_goal, goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id="a1")
+
+    async def materialized():
+        return (await accessor.aget(config)).values
+
+    async def scenario():
+        await accessor.aupdate(config, {"messages": [HumanMessage(id="h1", content="Ship it"), AIMessage(id="a1", content="Shipped.")]}, as_node="seed")
+        await goal.write_thread_goal(checkpointer, "outcome-thread", met_goal)
+        published = await goal.write_thread_goal(checkpointer, "outcome-thread", None, as_node="goal_evaluator", outcome=record)
+        cleared = await checkpointer.aget_tuple(config)
+        after_clear = await materialized()
+        await goal.write_thread_goal(checkpointer, "outcome-thread", goal.build_goal_state("Next goal"))
+        after_set = await materialized()
+        await goal.write_thread_goal(checkpointer, "outcome-thread", None, outcome=record)
+        await goal.write_thread_goal(checkpointer, "outcome-thread", None)
+        return published, cleared, after_clear, after_set, await materialized()
+
+    published, cleared, after_clear, after_set, after_plain_clear = asyncio.run(scenario())
+
+    assert published["goal_outcome"] == record
+    assert "goal" not in published
+    assert cleared.metadata["writes"] == {"goal_evaluator": {"goal": None, "goal_outcome": record}}
+    assert after_clear["goal_outcome"] == record
+    assert "goal" not in after_clear
+    assert [message.id for message in after_clear["messages"]] == ["h1", "a1"]
+    assert after_set["goal"]["objective"] == "Next goal"
+    assert "goal_outcome" not in after_set
+    assert "goal_outcome" not in after_plain_clear
+    assert "goal" not in after_plain_clear
+    # The returned values are a snapshot, not the caller's record.
+    record["reason"] = "Edited later."
+    assert published["goal_outcome"]["reason"] == "Shipped."
+
+
+def test_write_thread_goal_leaves_threads_without_a_record_unchanged():
+    checkpointer = InMemorySaver()
+    active = goal.build_goal_state("Ship it")
+    record = goal.build_goal_outcome(active, goal.GoalEvaluation(satisfied=True, blocker="none", reason="Shipped."), reply_message_id=None)
+
+    async def scenario():
+        await goal.write_thread_goal(checkpointer, "plain-thread", active, create_if_missing=True)
+        with pytest.raises(ValueError):
+            await goal.write_thread_goal(checkpointer, "plain-thread", active, outcome=record)
+        return await checkpointer.aget_tuple({"configurable": {"thread_id": "plain-thread", "checkpoint_ns": ""}})
+
+    written = asyncio.run(scenario())
+
+    assert "goal_outcome" not in written.checkpoint["channel_versions"]
+    assert written.metadata["writes"] == {"goal": {"goal": active}}
+
+
 def test_no_progress_count_keys_on_evidence_not_volatile_free_text():
     """The breaker must survive the evaluator rewording its reason.
 
@@ -684,3 +833,34 @@ def test_parse_goal_command_set_trims_and_preserves_objective():
     assert goal.parse_goal_command("  finish the work  ") == goal.GoalCommand("set", "finish the work")
     # A multi-word objective that merely starts with an alias is a set, not a clear.
     assert goal.parse_goal_command("clear the build cache") == goal.GoalCommand("set", "clear the build cache")
+
+
+def test_parse_goal_command_from_chat_without_guidance():
+    assert goal.parse_goal_command("from-chat") == goal.GoalCommand("from_chat", "")
+    assert goal.parse_goal_command("  from-chat  ") == goal.GoalCommand("from_chat", "")
+
+
+def test_parse_goal_command_from_chat_with_guidance():
+    assert goal.parse_goal_command("from-chat focus on the vendor total") == goal.GoalCommand("from_chat", "focus on the vendor total")
+    # Guidance keeps its inner spacing and is trimmed at the edges.
+    assert goal.parse_goal_command("from-chat   keep  both totals ") == goal.GoalCommand("from_chat", "keep  both totals")
+
+
+def test_parse_goal_command_from_chat_is_case_insensitive():
+    for form in ("FROM-CHAT", "From-Chat", "  FrOm-ChAt  hint"):
+        command = goal.parse_goal_command(form)
+        assert command.kind == "from_chat"
+
+
+def test_parse_goal_command_from_chat_exact_token_only():
+    # Longer or glued tokens are literal objectives, not the from-chat mode.
+    assert goal.parse_goal_command("from-chatting is fun") == goal.GoalCommand("set", "from-chatting is fun")
+    assert goal.parse_goal_command("from-chatx") == goal.GoalCommand("set", "from-chatx")
+    assert goal.parse_goal_command("build from-chat reports") == goal.GoalCommand("set", "build from-chat reports")
+
+
+def test_parse_goal_command_existing_forms_unchanged_with_from_chat():
+    # The three pre-existing forms keep their exact semantics.
+    assert goal.parse_goal_command("") == goal.GoalCommand("status")
+    assert goal.parse_goal_command("clear") == goal.GoalCommand("clear")
+    assert goal.parse_goal_command("ship it") == goal.GoalCommand("set", "ship it")

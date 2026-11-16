@@ -48,10 +48,72 @@ async def _drain(bus: MessageBus) -> list[InboundMessage]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("configured_repo, payload_repo", [("Acme/Widget", "acme/widget"), ("acme/widget", "Acme/Widget")])
+async def test_fanout_matches_repository_case_insensitively(base_dir: Path, configured_repo: str, payload_repo: str) -> None:
+    """GitHub repository names identify the same repository regardless of case."""
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {"name": "reviewer", "github": {"bindings": [{"repo": configured_repo, "triggers": {"issues": {"actions": ["opened"]}}}]}},
+    )
+    bus = MessageBus()
+    result = await fanout_event(
+        bus,
+        "issues",
+        "delivery-mixed-case",
+        {
+            "action": "opened",
+            "issue": {"number": 7, "user": {"login": "alice"}, "title": "Bug", "body": "Details"},
+            "repository": {"full_name": payload_repo},
+            "sender": {"login": "alice"},
+        },
+    )
+    assert result["fired_agents"] == ["reviewer"]
+    messages = await _drain(bus)
+    assert len(messages) == 1
+    assert messages[0].chat_id == payload_repo
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event, object_key", [("issues", "issue"), ("pull_request", "pull_request")])
+@pytest.mark.parametrize("author, sender, should_fire", [("owner", "other", False), ("other", "owner", True)])
+async def test_allow_authors_uses_update_sender(base_dir: Path, event: str, object_key: str, author: str, sender: str, should_fire: bool) -> None:
+    """Editing another user's issue/PR must use the editor's mention exemption."""
+    _write_agent(
+        base_dir,
+        "default",
+        "reviewer",
+        {
+            "name": "reviewer",
+            "github": {"bindings": [{"repo": "a/b", "triggers": {event: {"actions": ["edited"], "require_mention": True, "allow_authors": ["owner"]}}}]},
+        },
+    )
+    bus = MessageBus()
+    result = await fanout_event(
+        bus,
+        event,
+        "delivery-edited",
+        {
+            "action": "edited",
+            object_key: {"number": 7, "user": {"login": author}, "title": "Updated title", "body": "No mention"},
+            "repository": {"full_name": "a/b"},
+            "sender": {"login": sender},
+        },
+    )
+    assert result["matched_agents"] == ["reviewer"]
+    assert result["fired_agents"] == (["reviewer"] if should_fire else [])
+    messages = await _drain(bus)
+    assert len(messages) == int(should_fire)
+    if messages:
+        assert messages[0].user_id == sender
+
+
+@pytest.mark.asyncio
 async def test_fanout_redelivery_progresses_beyond_queue_sized_prefix(base_dir: Path) -> None:
     """A redelivery must not keep failing on the same queue-sized prefix."""
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     agent_names = {"alpha", "bravo", "charlie"}
     for name in agent_names:
@@ -75,7 +137,7 @@ async def test_fanout_redelivery_progresses_beyond_queue_sized_prefix(base_dir: 
     bus = MessageBus(inbound_queue_maxsize=1)
     manager = ChannelManager(
         bus=bus,
-        store=ChannelStore(path=base_dir / "fanout-store.json"),
+        store=JsonChannelStore(path=base_dir / "fanout-store.json"),
         max_concurrency=1,
     )
     handled: list[str] = []
@@ -1240,9 +1302,9 @@ async def test_dedupe_identity_distinguishes_same_agent_name_across_users(base_d
     # differ: neither user's message is treated as a duplicate of the
     # other inside the same ChannelManager dedupe window.
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
-    manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=base_dir / "dedupe-store.json"))
     assert await manager._is_duplicate_inbound(by_owner["alice"]) is False
     assert await manager._is_duplicate_inbound(by_owner["bob"]) is False
 
@@ -1265,7 +1327,7 @@ async def test_missing_delivery_header_leaves_dedupe_open(base_dir: Path) -> Non
     (willem-bd, PR #4104 review).
     """
     from app.channels.manager import ChannelManager
-    from app.channels.store import ChannelStore
+    from app.channels.store import JsonChannelStore
 
     bus = MessageBus()
     _write_agent(base_dir, "default", "reviewer", {"name": "reviewer", "github": {"bindings": [{"repo": "a/b", "triggers": {"pull_request": {"actions": ["opened"]}}}]}})
@@ -1275,7 +1337,7 @@ async def test_missing_delivery_header_leaves_dedupe_open(base_dir: Path) -> Non
         "repository": {"full_name": "a/b"},
         "sender": {"login": "u"},
     }
-    manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=base_dir / "dedupe-store.json"))
+    manager = ChannelManager(bus=MessageBus(), store=JsonChannelStore(path=base_dir / "dedupe-store.json"))
 
     await fanout_event(bus, "pull_request", "", payload)
     (first,) = await _drain(bus)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +13,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage, conver
 
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.message_utils import is_genuine_user_message
+from deerflow.utils.messages import SUBAGENT_RESULT_MESSAGE_NAME
+
+logger = logging.getLogger(__name__)
 
 SNAPSHOT_SYSTEM_NOTE = (
     "## Parent conversation snapshot\n"
@@ -25,7 +30,10 @@ SNAPSHOT_SYSTEM_NOTE = (
 # Keep media as input blocks so vision/audio-capable child models can still use
 # the retained conversation. Provider reasoning/signature and tool-use blocks
 # are deliberately excluded; tool calls are rendered separately as inert text.
-_MEDIA_BLOCK_TYPES = frozenset({"image", "image_url", "audio", "input_audio", "video", "file", "document"})
+# A tuple, not a frozenset: block types are probed by equality because
+# `type: []` / `type: {}` are legal JSON from a provider, and hashing an
+# unhashable value would raise TypeError instead of skipping the block.
+_MEDIA_BLOCK_TYPES = ("image", "image_url", "audio", "input_audio", "video", "file", "document")
 
 
 def _neutralize_document_content_block(block: Any) -> Any:
@@ -77,8 +85,20 @@ def _is_conversation_message(message: Any) -> bool:
     if isinstance(message, HumanMessage):
         # Hidden clarification responses are user input; memory/todo reminders
         # and other framework-injected HumanMessages are not.
-        return is_genuine_user_message(message)
+        return is_genuine_user_message(message) or _is_steered_subagent_report(message)
     return isinstance(message, (AIMessage, ToolMessage)) and not message.additional_kwargs.get("hide_from_ui")
+
+
+def _is_steered_subagent_report(message: HumanMessage) -> bool:
+    """Return True for the hidden report a Steer delivers after freeing the turn.
+
+    ``RunInputControl.wait_tool`` ends the parent turn with a "result is
+    pending" ``task`` result and appends the real report later as this hidden
+    message. It is framework-delivered conversation data, not parent authority:
+    the next delegation must inherit it, because the visible ``task`` result
+    stays pending in the retained history.
+    """
+    return message.name == SUBAGENT_RESULT_MESSAGE_NAME and bool(message.content)
 
 
 @dataclass(frozen=True)
@@ -93,10 +113,10 @@ class ParentContextSnapshot:
 
         A single background HumanMessage avoids replaying parent tool protocol
         frames into child receipts, step events, skill policy, or turn budgets.
-        Runtime state, parent system instructions, hidden framework messages,
-        artifacts and message metadata never cross this boundary. No extra
-        truncation hides retained history; the caller opts into its input-token
-        cost and normal child compaction.
+        Runtime state, parent system instructions, unrelated hidden framework
+        messages, artifacts and message metadata never cross this boundary.
+        No extra truncation hides retained history; the caller opts into its
+        input-token cost and normal child compaction.
         """
         blocks: list[dict[str, Any]] = []
 
@@ -112,11 +132,14 @@ class ParentContextSnapshot:
         # Providers may reuse call ids across turns. Match each result to the
         # preceding call, including hidden frames so their results cannot be
         # reassigned to a visible call. Only retained pairs count as completed.
-        call_positions: dict[str, int] = {}
+        call_positions: dict[str, int | None] = {}
         completed_calls: set[tuple[int, str]] = set()
         for index, message in enumerate(messages):
             if isinstance(message, AIMessage):
-                call_positions.update((call["id"], index) for call in message.tool_calls)
+                # A result cannot identify one of several calls with the same
+                # id in this message. Claim the id without completing any call,
+                # so it cannot fall back to an earlier occurrence either.
+                call_positions.update((call_id, index if count == 1 else None) for call_id, count in Counter(call["id"] for call in message.tool_calls).items())
             elif isinstance(message, ToolMessage):
                 call_index = call_positions.pop(message.tool_call_id, None)
                 if call_index is not None and call_index in retained_positions and index in retained_positions:
@@ -130,7 +153,7 @@ class ParentContextSnapshot:
                 if isinstance(block, str):
                     if block:
                         history.append({"type": "text", "text": neutralize_untrusted_tags(block)})
-                elif block.get("type") in {"text", "output_text"} and isinstance(block.get("text"), str):
+                elif block.get("type") in ("text", "output_text") and isinstance(block.get("text"), str):
                     history.append({"type": "text", "text": neutralize_untrusted_tags(block["text"])})
                 elif block.get("type") in _MEDIA_BLOCK_TYPES:
                     media = {key: value for key, value in block.items() if key != "cache_control"}
@@ -142,6 +165,11 @@ class ParentContextSnapshot:
                         history.append({"type": "text", "text": "[Historical media omitted: content could not be serialized. Do not assume its contents.]"})
                     else:
                         history.append(_neutralize_document_text(media) if media["type"] == "document" else media)
+                elif isinstance(block, dict) and not isinstance(block.get("type"), str):
+                    # A non-string type is a malformed block, not one of the
+                    # deliberate exclusions above, so say why it vanished
+                    # instead of degrading the child's history silently.
+                    logger.warning("skipping content block with non-string type %r", block.get("type"))
             if isinstance(message, AIMessage):
                 # Every tool needs a retained result, including ordinary calls
                 # executing alongside the current delegation.

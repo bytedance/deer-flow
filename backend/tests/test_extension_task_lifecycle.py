@@ -144,6 +144,66 @@ async def test_budget_exhaustion_mid_hook_logs_a_warning_not_a_traceback(caplog)
 
 
 @pytest.mark.asyncio
+async def test_budget_exhaustion_is_classified_without_a_clock_recheck(monkeypatch, caplog):
+    # ``BaseEventLoop._run_once`` runs a scheduled timeout up to one
+    # ``clock_resolution`` *early* (it compares each handle's ``_when`` against
+    # ``now + clock_resolution``), so on a coarse clock the budget can expire
+    # while ``loop.time()`` still sits strictly before ``deadline`` — the
+    # Windows behaviour in #6453. Freezing the clock the handler reads makes
+    # that race deterministic on every platform; the timeout itself still
+    # schedules against the real loop, exactly as it does in production.
+    class _FrozenClockLoop:
+        """Loop proxy whose ``time()`` never advances."""
+
+        def __init__(self, loop, frozen_at):
+            self._loop = loop
+            self._frozen_at = frozen_at
+
+        def time(self):
+            return self._frozen_at
+
+        def __getattr__(self, name):
+            return getattr(self._loop, name)
+
+    class _AsyncioWithFrozenLoop:
+        """The ``asyncio`` module, but reporting a frozen running loop."""
+
+        def __init__(self, module, loop):
+            self._module = module
+            self._loop = loop
+
+        def get_running_loop(self):
+            return self._loop
+
+        def __getattr__(self, name):
+            return getattr(self._module, name)
+
+    class _Hang:
+        async def on_task_stop(self, app_store, task_store, info, outcome):
+            await asyncio.sleep(10)
+
+    real_loop = asyncio.get_running_loop()
+    monkeypatch.setattr(
+        "deerflow.extensions.notify.asyncio",
+        _AsyncioWithFrozenLoop(asyncio, _FrozenClockLoop(real_loop, real_loop.time())),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.extensions.notify"):
+        await notify_task_stop(
+            _extensions(_Hang()),
+            ExtensionData("task-1"),
+            _info(),
+            TaskOutcome.COMPLETED,
+            timeout=0.02,
+        )
+
+    records = [record for record in caplog.records if record.name == "deerflow.extensions.notify"]
+    assert [record.levelno for record in records] == [logging.WARNING]
+    assert "timed out" in records[0].getMessage()
+    assert records[0].exc_info is None
+
+
+@pytest.mark.asyncio
 async def test_contributor_timeout_error_before_budget_is_a_hook_failure(caplog):
     # A TimeoutError the contributor raises on its own is not budget
     # exhaustion; it stays classified as a hook failure.

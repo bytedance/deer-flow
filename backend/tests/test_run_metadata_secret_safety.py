@@ -93,6 +93,19 @@ def test_redact_config_secrets_drops_trace_id_from_metadata_and_context():
     assert source["context"][DEERFLOW_TRACE_METADATA_KEY] == "forged-ctx"
 
 
+@pytest.mark.parametrize("section", ["context", "configurable"])
+@pytest.mark.parametrize("client", [{"name": "synthetic-client", "access_token": "synthetic-secret"}, "malformed-client", None, 42])
+def test_run_config_omits_client_without_mutating_request(section, client):
+    source = {section: {"client": client, "model_name": "kept"}, "metadata": {"client": "ordinary-metadata"}, "tags": ["kept"]}
+
+    redacted = redact_config_secrets(source)
+
+    assert redacted == {section: {"model_name": "kept"}, "metadata": {"client": "ordinary-metadata"}, "tags": ["kept"]}
+    assert "client" in source[section]
+    assert source[section]["client"] == client
+    assert redacted[section] is not source[section]
+
+
 def test_run_response_hides_historical_auth_token_without_mutating_record():
     legacy_metadata = {"auth_token": "legacy-secret", "token_usage": 7}
     record = RunRecord(

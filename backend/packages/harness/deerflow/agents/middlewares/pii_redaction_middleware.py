@@ -34,11 +34,16 @@ Scope model (mirrors the structural guardrails):
 * The memory-enqueue path is covered by the follow-up slice (#5577):
   ``redact_queued_messages`` (memory middleware) applies the same configured
   policy to the extraction payloads queued for the memory backend.
+* The hidden ``/goal`` continuation is a framework message this middleware
+  skips, so ``make_goal_continuation_message`` (``runtime/goal.py``) redacts
+  its objective, reason and evidence summary before the message is stored.
 * The compaction and durable-context seams run outside ``wrap_model_call``;
   :func:`redact_text` is the shared entry point they call, wired from
   SummarizationMiddleware (compaction input) and DurableContextMiddleware
   (reinjected ``summary_text``); TitleMiddleware redacts its complete user and
-  assistant fields before truncation and direct model invocation.
+  assistant fields before truncation and direct model invocation. The goal
+  evaluator (``runtime/goal.py``) likewise redacts whole messages before its
+  evidence caps, and its assembled input.
 
 Detector order is fixed and pinned by a regression test; email → api_key →
 national_id → credit_card → phone. Checksum-gated national IDs run *before*
@@ -54,7 +59,7 @@ import hashlib
 import hmac
 import logging
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from dataclasses import replace as dc_replace
@@ -150,9 +155,51 @@ class _Detector:
     name: str
     pattern: re.Pattern[str]
     validator: Callable[[str], bool] | None = None
+    # Replaces ``pattern.finditer`` when the pattern alone is too slow to scan
+    # with; it must yield exactly the matches ``pattern.sub`` would replace.
+    finditer: Callable[[str], Iterator[re.Match[str]]] | None = None
+
+    def sub(self, repl: Callable[[re.Match[str]], str], text: str) -> str:
+        if self.finditer is None:
+            return self.pattern.sub(repl, text)
+        pieces: list[str] = []
+        last = 0
+        for match in self.finditer(text):
+            pieces.append(text[last : match.start()])
+            pieces.append(repl(match))
+            last = match.end()
+        if not pieces:
+            return text
+        pieces.append(text[last:])
+        return "".join(pieces)
 
 
-_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+_EMAIL_LOCAL_CHARS = "A-Za-z0-9._%+-"
+_EMAIL_PATTERN = re.compile(rf"[{_EMAIL_LOCAL_CHARS}]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{{2,}}")
+# Scanning with _EMAIL_PATTERN is quadratic in the longest local-part run: each
+# start inside a whitespace-free run (a hex dump, a long token) consumes the
+# rest of the run before failing to find "@" (100 KB took ~6 s, on the event
+# loop, on every model call). The local part must reach the run's end, so a
+# match exists anywhere in a run only if it exists at the run's start, which is
+# all this spelling tries.
+# The group keeps the lookbehind on every alternative should the pattern grow one.
+_EMAIL_RUN_START_PATTERN = re.compile(rf"(?<![{_EMAIL_LOCAL_CHARS}])(?:{_EMAIL_PATTERN.pattern})")
+
+
+def _iter_email_matches(text: str) -> Iterator[re.Match[str]]:
+    """Yield the matches ``_EMAIL_PATTERN.sub`` replaces, in linear time."""
+    pos = 0
+    while match := _EMAIL_RUN_START_PATTERN.search(text, pos):
+        yield match
+        pos = match.end()
+        # ``sub`` also resumes where the previous match ended, which can be
+        # inside a run ("a@b.cc+c@d.org" holds two matches). The run-start
+        # lookbehind rejects that position, so match there anchored, after
+        # every match. A failure there fails for the rest of that run too.
+        while glued := _EMAIL_PATTERN.match(text, pos):
+            yield glued
+            pos = glued.end()
+
 
 _API_KEY_PATTERN = re.compile(
     r"\b(?:"
@@ -184,7 +231,7 @@ _NATIONAL_ID_PATTERN = re.compile(
 )
 
 _DETECTORS: tuple[_Detector, ...] = (
-    _Detector("email", _EMAIL_PATTERN),
+    _Detector("email", _EMAIL_PATTERN, finditer=_iter_email_matches),
     _Detector("api_key", _API_KEY_PATTERN),
     _Detector("national_id", _NATIONAL_ID_PATTERN, _national_id_valid),
     _Detector("credit_card", _CREDIT_CARD_PATTERN, _luhn_valid),
@@ -279,7 +326,7 @@ class _Redactor:
 
     def redact(self, text: str) -> str:
         for detector in self._detectors:
-            text = detector.pattern.sub(self._replacer(detector), text)
+            text = detector.sub(self._replacer(detector), text)
         return text
 
     def _replacer(self, detector: _Detector) -> Callable[[re.Match[str]], str]:
@@ -321,11 +368,12 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
     """Redact *content*, preserving its shape. Returns ``(content, changed)``.
 
     Handles the two shapes message content takes — plain ``str`` and a list of
-    content blocks. Blocks pass through untouched except for any string-valued
-    ``text`` field they carry: lenient downstream consumers (e.g. DeerMem's
-    ``format_conversation_for_update``) read ``p.get("text")`` regardless of
-    the block type, so a non-text block must not smuggle raw PII past the
-    helper. The input is never mutated.
+    content blocks. Blocks pass through untouched except for string-valued
+    ``text`` fields and structured ``json`` payloads. The latter is important
+    for MCP results: serializing a ``{"type": "json", "json": {...}}`` block
+    later must not bypass the PII boundary. Binary media fields are left alone
+    so redaction cannot corrupt an image or file payload. The input is never
+    mutated.
     """
     if isinstance(content, str):
         redacted = redactor.redact(content)
@@ -339,16 +387,52 @@ def _redact_content(content: object, redactor: _Redactor) -> tuple[object, bool]
             redacted = redactor.redact(block)
             changed = changed or redacted != block
             new_content.append(redacted)
-        elif isinstance(block, dict) and isinstance(block.get("text"), str):
-            redacted = redactor.redact(block["text"])
-            if redacted != block["text"]:
-                new_content.append({**block, "text": redacted})
-                changed = True
-            else:
-                new_content.append(block)
+        elif isinstance(block, dict):
+            updated_block = block
+            block_changed = False
+
+            if isinstance(block.get("text"), str):
+                redacted = redactor.redact(block["text"])
+                if redacted != block["text"]:
+                    updated_block = {**updated_block, "text": redacted}
+                    block_changed = True
+
+            if "json" in block:
+                redacted_json, json_changed = _redact_json_value(block["json"], redactor)
+                if json_changed:
+                    updated_block = {**updated_block, "json": redacted_json}
+                    block_changed = True
+
+            changed = changed or block_changed
+            new_content.append(updated_block)
         else:
             new_content.append(block)
     return new_content, changed
+
+
+def _redact_json_value(value: object, redactor: _Redactor) -> tuple[object, bool]:
+    """Redact string leaves in a structured JSON value without mutating it."""
+    if isinstance(value, str):
+        redacted = redactor.redact(value)
+        return redacted, redacted != value
+    if isinstance(value, list):
+        items: list[object] = []
+        changed = False
+        for item in value:
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            items.append(redacted_item)
+            changed = changed or item_changed
+        return items, changed
+    if isinstance(value, dict):
+        result: dict[object, object] = {}
+        changed = False
+        for key, item in value.items():
+            redacted_key = redactor.redact(key) if isinstance(key, str) else key
+            redacted_item, item_changed = _redact_json_value(item, redactor)
+            result[redacted_key] = redacted_item
+            changed = changed or item_changed or redacted_key != key
+        return result, changed
+    return value, False
 
 
 class PiiRedactionMiddleware(AgentMiddleware[AgentState]):

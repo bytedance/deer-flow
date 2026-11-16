@@ -91,3 +91,32 @@ def test_get_model_projects_reasoning(client):
     body = response.json()
     assert body["reasoning"]["thinking"] == "required"
     assert body["reasoning"]["effort"]["values"] == ["low", "high", "max"]
+
+
+def test_model_control_preview_does_not_change_config_or_create_a_run(client):
+    response = client.post("/api/models/resolve", json={"text": "这次用 legacy 帮我算一下"})
+    assert response.status_code == 200
+    assert response.json()["model_name"] == "legacy"
+    assert response.json()["scope"] == "turn"
+    assert client.get("/api/models").json()["models"][0]["name"] == "legacy"
+
+
+def test_model_control_unknown_version_is_not_replaced(client):
+    response = client.post("/api/models/resolve", json={"text": "这次用 opus v4 pro 帮我算一下"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["model_name"] is None
+
+
+def test_model_control_enforces_use_after_visibility(client, monkeypatch):
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(models_router, "get_optional_user_from_request", AsyncMock(return_value=object()))
+    monkeypatch.setattr(models_router, "_resolve_bound_owner_for_model_list", AsyncMock(return_value=None))
+    monkeypatch.setattr(models_router, "resolve_model_authorization", lambda *args, **kwargs: (None, None))
+
+    def deny(*args, **kwargs):
+        raise HTTPException(status_code=403, detail="Model denied")
+
+    monkeypatch.setattr(models_router, "authorize_model_use", deny)
+    assert client.post("/api/models/resolve", json={"text": "这次用 legacy 帮我算一下"}).status_code == 403

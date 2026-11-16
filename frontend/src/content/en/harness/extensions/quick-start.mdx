@@ -9,6 +9,22 @@ import { Callout, Steps } from "nextra/components";
 
 This chapter walks through a complete extension named `hello`. It contributes one middleware that times every tool call and logs a warning when a call is slower than a configured threshold. By the end you will have packaged it, unit-tested it without DeerFlow, installed it into a checkout, and seen it run.
 
+## Start from an existing example
+
+To adapt working code, start with `examples/deerflow-extension-example` for backend
+hooks or `examples/deerflow-extension-bookmarks` for a browser feature with backend
+actions and a model tool. The [example guide](https://github.com/bytedance/deer-flow/blob/main/examples/README.md)
+links their tests and installation steps. After preparing the backend environment,
+run the packaging check from the checkout root:
+
+```bash
+uv run --project backend --no-sync python scripts/check_extension.py /absolute/path/to/your-extension
+```
+
+It builds and checks a temporary wheel without importing the extension or changing
+deployment configuration. Continue with the example's tests and installed-feature
+verification. To build a minimal middleware from scratch, follow the tutorial below.
+
 ## Prerequisites
 
 - A DeerFlow checkout that runs with `make dev`. See [Quick Start](/docs/application/quick-start).

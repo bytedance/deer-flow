@@ -24,6 +24,11 @@ POST /api/threads/{thread_id}/uploads
 
 网关会在应用层限制上传规模，默认最多 10 个文件、单文件 50 MiB、单次请求总计 100 MiB。可通过 `config.yaml` 的 `uploads.max_files`、`uploads.max_file_size`、`uploads.max_total_size` 调整；前端会读取同一组限制并在选择文件时提示，超过限制时后端返回 `413 Payload Too Large`。
 
+文件接收或转换期间取消请求，会清理本次请求已创建的文件，不删除其他请求的文件。
+等待下一段上传数据时可直接取消；已经启动的文件操作或转换需要先完成并收回资源，
+因此取消可能等待这些操作结束。开始最终权限设置和沙箱同步后，主机文件按现有
+同步失败规则保留，重试前可先检查上传列表；同步完成或失败后才会释放请求的沙箱租约。
+
 文件名匹配 `.upload-*.part`（例如 `.upload-notes.part`）时，网关会返回 `400 Bad Request`，提示改名后重新上传。这是系统保留的临时文件命名规则；文件名按去掉目录后的 basename 判断，HTTP 检查在 Linux 上也同时识别 `/` 和 `\` 两种路径分隔符，例如 `folder\.upload-notes.part`。网关会先检查整批文件，再开始写入聊天的上传目录或获取沙箱，因此保留名称排在批次末尾也不会留下部分上传。聊天界面收到该错误后会提示用户，并停止本次消息发送。`.upload-notes.txt`、`notes.part` 和 `.env` 仍可上传。
 
 检查也会拒绝 Windows 去掉末尾点号或空格、忽略大小写后会变成保留名称的别名，例如 `.upload-notes.part.`、`.upload-notes.part `、`.UPLOAD-NOTES.PART` 和 `.Upload-NoTeS.Part .`。这项检查在所有主机上生效，HTTP 上传会在整批文件写入前返回 `400`，提示改名。
@@ -115,6 +120,8 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - PowerPoint (`.ppt`, `.pptx`)
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
+
+所有大小的文档都在线程池中解析，避免压缩后较小的 Office 文件长时间占用网关事件循环。取消上传时，会等待转换线程退出后再清理其临时原文件。
 
 转换后的 Markdown 文件会保存在同一目录下，通常使用原文件的主干名加 `.md`；若该名称已被占用，则追加 `_N` 后缀。上传响应中的 `markdown_file` 给出实际名称。
 

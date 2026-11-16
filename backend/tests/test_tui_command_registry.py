@@ -1,5 +1,7 @@
 """Tests for the slash-command registry (pure)."""
 
+import pytest
+
 from deerflow.skills.slash import RESERVED_SLASH_SKILL_NAMES
 from deerflow.tui.command_registry import (
     BUILTIN_COMMANDS,
@@ -76,6 +78,23 @@ def test_resolve_builtin_with_args():
     assert res.kind == "builtin"
     assert res.name == "resume"
     assert res.args == "thread-123"
+
+
+@pytest.mark.parametrize("separator", [" ", "\t", "\n", "\r\n", "\v", "\f", "\u0085", "\u00a0", "\u2003", "\u2028", "\u202f", "\u3000"])
+@pytest.mark.parametrize(("name", "kind"), [("resume", "builtin"), ("goal", "builtin"), ("tdd", "skill")])
+def test_resolve_whitespace_separated_command_preserves_multiline_args(separator, name, kind):
+    args = "First line\n    indented detail\nLast line"
+
+    res = resolve(f"/{name}{separator}{args}", skills=["tdd", "goal"])
+
+    assert res.kind == kind
+    assert res.name == name
+    assert res.args == args
+
+
+@pytest.mark.parametrize("text", ["/ tdd task", "/\ttdd task", "/\ntdd task", "/context\ncompact", "/missing\ntask"])
+def test_whitespace_does_not_admit_invalid_or_reserved_skill_commands(text):
+    assert resolve(text, skills=["tdd", "context"]).kind == "unknown"
 
 
 def test_resolve_skill_activation():

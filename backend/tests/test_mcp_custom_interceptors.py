@@ -3,6 +3,7 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.tools import get_mcp_tools
 
 
@@ -14,9 +15,17 @@ def _make_patches(*, interceptor_paths=None):
     mock_client = MagicMock()
     mock_client.get_tools = AsyncMock(return_value=[])
 
-    extra = {}
+    config_payload = {
+        "mcpServers": {
+            "test-server": {
+                "type": "http",
+                "url": "https://example.test/mcp",
+            }
+        }
+    }
     if interceptor_paths is not None:
-        extra["mcpInterceptors"] = interceptor_paths
+        config_payload["mcpInterceptors"] = interceptor_paths
+    extensions_config = ExtensionsConfig.model_validate(config_payload)
 
     return {
         "client_cls": patch(
@@ -25,10 +34,7 @@ def _make_patches(*, interceptor_paths=None):
         ),
         "from_file": patch(
             "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-            return_value=MagicMock(
-                model_extra=extra,
-                get_enabled_mcp_servers=MagicMock(return_value={}),
-            ),
+            return_value=extensions_config,
         ),
         "build_servers": patch(
             "deerflow.mcp.tools.build_servers_config",
@@ -74,8 +80,9 @@ def test_custom_interceptor_loaded_and_appended():
         asyncio.run(get_mcp_tools())
 
         interceptors = _get_interceptors(mock_cls)
-        assert len(interceptors) == 1
-        assert interceptors[0] is fake_interceptor
+        assert len(interceptors) == 2
+        assert interceptors[0].__name__ == "agent_auth_interceptor"
+        assert interceptors[1] is fake_interceptor
 
 
 def test_multiple_custom_interceptors():
@@ -105,9 +112,9 @@ def test_multiple_custom_interceptors():
         asyncio.run(get_mcp_tools())
 
         interceptors = _get_interceptors(mock_cls)
-        assert len(interceptors) == 2
-        assert interceptors[0] is interceptor_a
-        assert interceptors[1] is interceptor_b
+        assert len(interceptors) == 3
+        assert interceptors[1] is interceptor_a
+        assert interceptors[2] is interceptor_b
 
 
 def test_custom_interceptor_builder_returning_none_is_skipped():
@@ -124,7 +131,7 @@ def test_custom_interceptor_builder_returning_none_is_skipped():
     ):
         asyncio.run(get_mcp_tools())
 
-        assert len(_get_interceptors(mock_cls)) == 0
+        assert [i.__name__ for i in _get_interceptors(mock_cls)] == ["agent_auth_interceptor"]
 
 
 def test_custom_interceptor_resolve_error_logs_warning_and_continues():
@@ -172,7 +179,7 @@ def test_custom_interceptor_builder_exception_logs_warning_and_continues():
 
 
 def test_no_mcp_interceptors_field_is_safe():
-    """When mcpInterceptors is absent from config, no interceptors are added."""
+    """Without custom builders, the live protection guard remains installed."""
     p = _make_patches(interceptor_paths=None)
 
     with (
@@ -184,7 +191,7 @@ def test_no_mcp_interceptors_field_is_safe():
     ):
         asyncio.run(get_mcp_tools())
 
-        assert len(_get_interceptors(mock_cls)) == 0
+        assert [i.__name__ for i in _get_interceptors(mock_cls)] == ["agent_auth_interceptor"]
 
 
 def test_custom_interceptor_coexists_with_oauth_interceptor():
@@ -209,9 +216,9 @@ def test_custom_interceptor_coexists_with_oauth_interceptor():
         asyncio.run(get_mcp_tools())
 
         interceptors = _get_interceptors(mock_cls)
-        assert len(interceptors) == 2
+        assert len(interceptors) == 3
         assert interceptors[0] is oauth_fn
-        assert interceptors[1] is custom_fn
+        assert interceptors[2] is custom_fn
 
 
 def test_mcp_interceptors_single_string_is_normalized():
@@ -232,7 +239,8 @@ def test_mcp_interceptors_single_string_is_normalized():
     ):
         asyncio.run(get_mcp_tools())
 
-        assert len(_get_interceptors(mock_cls)) == 1
+        assert len(_get_interceptors(mock_cls)) == 2
+        assert _get_interceptors(mock_cls)[-1] is fake_interceptor
 
 
 def test_mcp_interceptors_invalid_type_logs_warning():
@@ -249,7 +257,7 @@ def test_mcp_interceptors_invalid_type_logs_warning():
     ):
         asyncio.run(get_mcp_tools())
 
-        assert len(_get_interceptors(mock_cls)) == 0
+        assert [i.__name__ for i in _get_interceptors(mock_cls)] == ["agent_auth_interceptor"]
         mock_warn.assert_called_once()
         assert "must be a list" in mock_warn.call_args[0][0]
 
@@ -269,6 +277,57 @@ def test_custom_interceptor_non_callable_return_logs_warning():
     ):
         asyncio.run(get_mcp_tools())
 
-        assert len(_get_interceptors(mock_cls)) == 0
+        assert [i.__name__ for i in _get_interceptors(mock_cls)] == ["agent_auth_interceptor"]
         mock_warn.assert_called_once()
         assert "non-callable" in mock_warn.call_args[0][0]
+
+
+def test_custom_interceptor_builder_runs_once_per_enabled_server():
+    """Builders are per server, so instances are never shared across servers.
+
+    Locks the F1 lifecycle contract (see ``docs/MCP_SERVER.md``): server-scoped
+    discovery builds interceptors from a single-server config view. If this ever
+    regresses to one shared instance per discovery, the F2 server-scoped cache
+    would hand a server a foreign interceptor instance.
+    """
+    built: list = []
+
+    def fake_builder():
+        async def interceptor(request, handler):
+            return await handler(request)
+
+        built.append(interceptor)
+        return interceptor
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpInterceptors": ["my_package.auth:build_interceptor"],
+            "mcpServers": {
+                "alpha": {"type": "http", "url": "https://alpha.example/mcp"},
+                "beta": {"type": "http", "url": "https://beta.example/mcp"},
+            },
+        }
+    )
+    clients: list[tuple[set[str], list]] = []
+
+    def make_client(connections, **kwargs):
+        client = MagicMock()
+        client.get_tools = AsyncMock(return_value=[])
+        clients.append((set(connections), kwargs.get("tool_interceptors") or []))
+        return client
+
+    with (
+        patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=config),
+        patch("langchain_mcp_adapters.client.MultiServerMCPClient", side_effect=make_client),
+        patch("deerflow.mcp.tools.get_initial_oauth_headers", new_callable=AsyncMock, return_value={}),
+        patch("deerflow.mcp.tools.build_oauth_tool_interceptor", return_value=None),
+        patch("deerflow.mcp.tools.resolve_variable", return_value=fake_builder),
+    ):
+        asyncio.run(get_mcp_tools())
+
+    assert len(built) == 2, f"builder ran {len(built)} times, expected once per server"
+    assert len(clients) == 2
+    per_client = [interceptors[-1] for _names, interceptors in clients]
+    assert per_client[0] is built[0]
+    assert per_client[1] is built[1]
+    assert per_client[0] is not per_client[1]

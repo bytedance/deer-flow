@@ -3,6 +3,7 @@ import "@/styles/globals.css";
 import { type Metadata } from "next";
 
 import { ThemeProvider } from "@/components/theme-provider";
+import { ArtifactDraftsProvider } from "@/core/artifacts/draft-context";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
 
 export const metadata: Metadata = {
@@ -21,7 +22,7 @@ export default function RootLayout({
     >
       <body>
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
-          {children}
+          <ArtifactDraftsProvider>{children}</ArtifactDraftsProvider>
         </ThemeProvider>
       </body>
     </html>

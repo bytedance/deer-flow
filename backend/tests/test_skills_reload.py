@@ -61,6 +61,16 @@ def _reset_prompt_cache_state() -> None:
         prompt_module._enabled_skills_refresh_version = 0
         prompt_module._enabled_skills_refresh_event.clear()
         prompt_module._enabled_skills_refresh_waiters.clear()
+    prompt_module._skills_cache_reset_tracker.reset()
+
+
+def _without_shared_config_path(monkeypatch) -> None:
+    """Pin the process-local fallback: no extensions config path, no shared marker.
+
+    The shared-config path (marker published, ``scope: shared_config``) is
+    covered by ``tests/test_skills_cache_shared_reset.py``.
+    """
+    monkeypatch.setattr(prompt_module, "resolve_shared_config_path", lambda: None)
 
 
 def test_admin_can_reload_skills(monkeypatch) -> None:
@@ -71,6 +81,7 @@ def test_admin_can_reload_skills(monkeypatch) -> None:
         calls += 1
 
     monkeypatch.setattr(skills_router, "refresh_skills_system_prompt_cache_async", _refresh)
+    _without_shared_config_path(monkeypatch)
     app = _make_app(system_role="admin")
 
     with TestClient(app) as client:
@@ -113,6 +124,7 @@ def test_reload_worker_failure_returns_500_preserves_last_good_cache_and_can_ret
         return recovered_skills
 
     monkeypatch.setattr(prompt_module, "_load_enabled_skills_sync", _load_enabled_skills)
+    _without_shared_config_path(monkeypatch)
     _reset_prompt_cache_state()
     with prompt_module._enabled_skills_lock:
         prompt_module._enabled_skills_cache = last_good_skills

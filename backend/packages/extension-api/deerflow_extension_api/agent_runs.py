@@ -11,11 +11,43 @@ AGENT_RUNS_CONTEXT_KEY = "__deerflow_extension_agent_runs"
 
 
 class AgentRunError(Exception):
-    """Host rejection with an HTTP-equivalent status (403, 404, 409, 422, 503)."""
+    """Host rejection with an HTTP-equivalent status (403, 404, 409, 412, 422, 503)."""
 
     def __init__(self, status_code: int, message: str):
         super().__init__(message)
         self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class ExecutionFence:
+    """Opaque execution generation, checked atomically with durable run admission.
+
+    The lease must exist in the host database and belong to this capability's
+    user and plugin namespace. Unsupported stores fail closed. This fences new
+    admission/cancellation, not arbitrary external effects from an admitted Agent.
+
+    SQL host schema contract: extension_execution_leases has the composite key
+    (namespace, resource_id), plus user_id, holder_id, epoch (BIGINT), and
+    expires_at (database-clock Unix seconds). Trusted operator-installed extensions
+    coordinate these rows through the shared host database. Advance epoch on each
+    takeover, retain tombstones, and serialize acquisition against row locks.
+    The host locks that row and checks user/holder/epoch/expiry inside admission
+    and cancellation transactions. A separate database or preflight check cannot
+    provide this contract. Fenced calls require heartbeat-enabled run ownership;
+    start additionally requires a cross-process stream bridge.
+    """
+
+    namespace: str
+    resource_id: str
+    holder_id: str
+    epoch: int
+
+    def __post_init__(self):
+        for value, maximum in ((self.namespace, 96), (self.resource_id, 128), (self.holder_id, 128)):
+            if not isinstance(value, str) or not value or len(value) > maximum:
+                raise ValueError("Invalid execution fence identity")
+        if type(self.epoch) is not int or not 1 <= self.epoch < 2**63:
+            raise ValueError("Invalid execution fence epoch")
 
 
 @dataclass(frozen=True)
@@ -44,15 +76,94 @@ class AgentRuns(Protocol):
         """
         ...
 
+    async def send_input(self, *, thread_id: str, run_id: str, text: str, mode: str, request_id: str, context: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Queue a new turn or steer the active Run; never change its model."""
+        ...
+
+    async def list_inputs(self, *, thread_id: str) -> dict[str, Any]:
+        """Read host-recorded input IDs/status, including across reconnects."""
+        ...
+
+    async def authorize_control(self, *, thread_id: str, run_id: str, clear_goal: bool = False) -> None:
+        """Recheck cancellation and optional Goal-write authority, without a write."""
+        ...
+
+    async def dispatch_input(self, *, thread_id: str, run_id: str, input_id: str) -> AgentRun:
+        """Dispatch a stored queued input after its Run, using ordinary admission."""
+        ...
+
+    async def configuration_evidence(self, *, thread_id: str, run_id: str) -> dict[str, Any]:
+        """Read immutable host evidence captured from this run's actual assembly.
+
+        Fails closed if the factory/host produced no evidence. No config re-read,
+        credentials, raw instructions or mutable thread-state fallback.
+        """
+        ...
+
+    async def validate_artifact_source(self, *, thread_id: str, run_id: str, idempotency_key: str) -> None:
+        """Require this plugin's executing keyed Run and safe output capture.
+
+        Checking the durable key also handles admission whose acknowledgement
+        has not yet reached the plugin. Caller-selected queue state is not proof.
+        """
+        ...
+
+    async def read_artifact(self, *, thread_id: str, path: str, expected_checkpoint_id: str | None = None) -> bytes:
+        """Read a bounded regular output file through owner authorization.
+
+        Returns at most 2 MiB, rejecting symlinks and concurrent mutations.
+        The caller must retain these bytes to create an immutable version.
+        With expected_checkpoint_id, reject a changed checkpoint under the same
+        durable reservation as the read. Remote reads require sandbox authority.
+        """
+        ...
+
+    async def import_artifact(self, *, thread_id: str, filename: str, content: bytes) -> dict[str, Any]:
+        """Place at most 2 MiB of retained bytes in an idle thread's uploads.
+
+        Requires a plugin-scoped handle and current thread-write authority.
+        The host selects a content-addressed filename and synchronizes remote
+        sandboxes. Identical calls reuse the copy; a changed destination is
+        rejected without overwriting it. Returns path, filename, sha256 and size.
+        Caller cancellation drains file/sandbox IO before releasing the thread.
+        """
+        ...
+
+    async def configuration_revision(self, *, assistant_ids: list[str], durable: bool = False) -> str:
+        """Opaque revision of declarative Agent/host configuration.
+
+        Revalidates the caller. Includes app/extensions config and Custom Agent
+        config/SOUL; excludes mutable memory, file contents referenced by tools,
+        provider state and effective per-run assembly. By default compare within
+        one host lifetime only. With durable=True, compare across restarts sharing the host
+        signing secret; secret rotation invalidates revisions. This retains no
+        grant and is an invalidation guard, not an assembly attestation.
+        """
+        ...
+
     async def create_thread(self, *, assistant_id: str = "lead_agent", thread_id: str | None = None, metadata: Mapping[str, Any] | None = None) -> str:
         """Create an owned thread, or return the caller's existing thread ID."""
         ...
 
-    async def start(self, *, thread_id: str, input: Mapping[str, Any], context: Mapping[str, Any] | None = None, idempotency_key: str | None = None) -> AgentRun:
+    async def start(
+        self,
+        *,
+        thread_id: str,
+        input: Mapping[str, Any],
+        context: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        execution_fence: ExecutionFence | None = None,
+        artifact_imports: list[dict[str, Any]] | None = None,
+    ) -> AgentRun:
         """Start or continue the thread's Agent with ordinary run admission.
 
         Scoped handles namespace local idempotency keys automatically. An active
-        run conflicts; start never implicitly cancels it.
+        run conflicts; start never implicitly cancels it. execution_fence is
+        host-only admission authority, never copied into Agent input/context.
+        artifact_imports contains up to four import receipts (path, filename,
+        sha256, size). A new run verifies the copies while holding admission,
+        before constructing its Agent. Idempotent retries reuse the original Run
+        without revalidating files that it may already have edited.
         """
         ...
 
@@ -79,8 +190,12 @@ class AgentRuns(Protocol):
         """
         ...
 
-    async def cancel(self, *, thread_id: str, run_id: str) -> None:
-        """Request interrupt, retaining checkpoints. Completion may be async."""
+    async def cancel(self, *, thread_id: str, run_id: str, execution_fence: ExecutionFence | None = None) -> None:
+        """Request interrupt, retaining checkpoints. Completion may be async.
+
+        With execution_fence, persist only under the live extension generation;
+        the existing run owner consumes the request. Unsupported hosts fail closed.
+        """
         ...
 
 

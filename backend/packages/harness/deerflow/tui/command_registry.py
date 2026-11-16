@@ -113,10 +113,9 @@ def resolve(text: str, skills: list[str] | None = None) -> Resolution:
     if not stripped.startswith("/"):
         return Resolution(kind="message", text=text)
 
-    body = stripped[1:]
-    name, _, args = body.partition(" ")
-    name = name.strip()
-    args = args.strip()
+    parts = stripped.split(maxsplit=1)
+    name = parts[0][1:]
+    args = parts[1].strip() if len(parts) > 1 else ""
 
     if not name:
         return Resolution(kind="unknown", name="")

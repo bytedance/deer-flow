@@ -22,7 +22,10 @@ from deerflow.persistence.projects import ProjectDocumentRepository, ProjectRepo
 from deerflow.projects.documents import add_staged_document, read_file_chunks, stage_document_bytes, stage_document_copy_for_attach
 from deerflow.utils.file_io import run_file_io as _real_run_file_io
 
-pytestmark = [pytest.mark.asyncio, pytest.mark.allow_blocking_io]
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.allow_blocking_io,
+]
 
 _USER = "u1"
 

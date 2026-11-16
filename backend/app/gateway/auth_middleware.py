@@ -9,6 +9,8 @@ owner filtering works automatically via the sentinel pattern.
 Fine-grained permission checks remain in authz.py decorators.
 """
 
+import logging
+import re
 from collections.abc import Callable
 
 from fastapi import HTTPException, Request, Response
@@ -28,7 +30,9 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
-from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.runtime.user_context import bind_authenticated_user, reset_current_user, set_current_user
+
+logger = logging.getLogger(__name__)
 
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
@@ -57,7 +61,11 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
 )
 
 
-def _is_public(path: str) -> bool:
+def _is_public(path: str, method: str = "GET") -> bool:
+    # A share token grants only these reads. Forks and any future write routes
+    # under /shares still pass through session authentication and permissions.
+    if method in {"GET", "HEAD"} and re.fullmatch(r"/api/shares/[A-Za-z0-9_-]{43}(?:/artifacts/.+)?", path):
+        return True
     stripped = path.rstrip("/")
     if stripped in _PUBLIC_EXACT_PATHS:
         return True
@@ -88,7 +96,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(get_request_route_path(request)):
+        if _is_public(get_request_route_path(request), request.method):
             return await call_next(request)
 
         internal_user = None
@@ -104,6 +112,35 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if owner_user_id:
                 owner_user_id = owner_user_id.strip()
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
+            if owner_user_id and not is_auth_disabled():
+                # The internal principal is synthesized from trusted headers
+                # without a users-row lookup, so suspension has no other chance
+                # to bite on this surface (#3462 gap 3): enforce it here, the
+                # one gate every owner-bound internal HTTP call (IM channel
+                # dispatch above all) passes through. Auth-disabled mode is
+                # exempt — its owner header carries the synthetic
+                # auth-disabled identity and no suspendable account exists.
+                # Owner ids without a users row stay allowed (a nonexistent
+                # account cannot be suspended), and a store that cannot be
+                # read cannot hold a suspension verdict either; run admission
+                # re-asserts the check when the row is readable.
+                from app.gateway.deps import get_local_provider
+
+                try:
+                    owner = await get_local_provider().get_user(owner_user_id)
+                except Exception:
+                    logger.warning("Internal-owner suspension check skipped: users lookup failed", exc_info=True)
+                    owner = None
+                if owner is not None and getattr(owner, "disabled", False):
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "detail": AuthErrorResponse(
+                                code=AuthErrorCode.ACCOUNT_DISABLED,
+                                message="Account disabled",
+                            ).model_dump()
+                        },
+                    )
 
         auth_source = AUTH_SOURCE_SESSION
         access_token = request.cookies.get("access_token")
@@ -175,6 +212,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 },
             )
 
+        # Browser extension pages are bound to the account that loaded their
+        # descriptor. Cookies can change in another tab before React observes it.
+        # This is a stale-view fence, not an authorization grant; CLI callers may
+        # omit it and all existing route/resource checks still apply.
+        expected_viewer = request.headers.get("x-deerflow-plugin-viewer")
+        if get_request_route_path(request).startswith("/api/extensions/") and expected_viewer is not None and expected_viewer != str(user.id):
+            return JSONResponse(status_code=409, content={"detail": "Account changed; reload this extension view."})
+
         # Stamp both request.state.user (for the contextvar pattern)
         # and request.state.auth (so @require_permission's "auth is
         # None" branch short-circuits instead of running the entire
@@ -194,6 +239,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:
-            return await call_next(request)
+            verified_user_id = str(user.id) if auth_source in {AUTH_SOURCE_SESSION, AUTH_SOURCE_PAT} else None
+            with bind_authenticated_user(verified_user_id):
+                return await call_next(request)
         finally:
             reset_current_user(token)

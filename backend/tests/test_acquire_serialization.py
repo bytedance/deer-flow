@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.acquire_serialization import AcquireSerializer, AcquireSerializerClosed
 from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
@@ -209,9 +209,10 @@ class TestClose:
         serializer = AcquireSerializer()
         serializer.close()
         serializer.close()
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(RuntimeError, match="closed") as error:
             with serializer.hold("k"):
                 pass
+        assert isinstance(error.value, AcquireSerializerClosed)
 
     @pytest.mark.asyncio
     async def test_close_does_not_invalidate_active_critical_section(self):
@@ -219,17 +220,19 @@ class TestClose:
         async with serializer.hold_async("k"):
             serializer.close()  # must not raise, must not break exit
         # New holders rejected afterwards:
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(RuntimeError, match="closed") as error:
             async with serializer.hold_async("k"):
                 pass
+        assert isinstance(error.value, AcquireSerializerClosed)
 
     @pytest.mark.asyncio
     async def test_executor_shutdown_between_checkout_and_schedule_reclaims_entry(self):
         serializer = AcquireSerializer()
         serializer._executor.shutdown(wait=False, cancel_futures=True)  # simulates close() landing mid-window
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(RuntimeError, match="closed") as error:
             async with serializer.hold_async("k"):
                 pass
+        assert isinstance(error.value, AcquireSerializerClosed)
         assert len(serializer._table) == 0
 
     @pytest.mark.asyncio
@@ -245,8 +248,9 @@ class TestClose:
             waiter = asyncio.create_task(_hold_once(serializer, "k"))
             await asyncio.sleep(0.1)  # let the waiter check out and queue its acquire
             serializer.close()
-            with pytest.raises(RuntimeError, match="closed"):
+            with pytest.raises(RuntimeError, match="closed") as error:
                 await waiter
+            assert isinstance(error.value, AcquireSerializerClosed)
             blocker.set()
             await occupied
         assert len(serializer._table) == 0

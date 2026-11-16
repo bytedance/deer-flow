@@ -8,32 +8,16 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_RESULTS = 5
-
-
-def _coerce_max_results(value: object) -> int:
-    """Normalize config/parameter values before passing them to DDGS."""
-    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
-        # int() accepts booleans and silently truncates a YAML value such as 3.5.
-        count = 0
-    else:
-        try:
-            count = int(value)  # type: ignore[call-overload]
-        except (TypeError, ValueError, OverflowError):
-            count = 0
-    if count <= 0:
-        logger.warning("Invalid DDG image search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
-        return DEFAULT_MAX_RESULTS
-    return count
-
 
 def _search_images(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     region: str = "wt-wt",
     safesearch: str = "moderate",
     size: str | None = None,
@@ -61,42 +45,39 @@ def _search_images(
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
+    except ImportError as exc:
+        raise RuntimeError("ddgs library not installed. Run: pip install ddgs") from exc
 
     ddgs = DDGS(timeout=30)
 
-    try:
-        kwargs = {
-            "region": region,
-            "safesearch": safesearch,
-            "max_results": max_results,
-        }
+    kwargs = {
+        "region": region,
+        "safesearch": safesearch,
+        "max_results": max_results,
+    }
 
-        if size:
-            kwargs["size"] = size
-        if color:
-            kwargs["color"] = color
-        if type_image:
-            kwargs["type_image"] = type_image
-        if layout:
-            kwargs["layout"] = layout
-        if license_image:
-            kwargs["license_image"] = license_image
+    if size:
+        kwargs["size"] = size
+    if color:
+        kwargs["color"] = color
+    if type_image:
+        kwargs["type_image"] = type_image
+    if layout:
+        kwargs["layout"] = layout
+    if license_image:
+        kwargs["license_image"] = license_image
 
-        results = ddgs.images(query, **kwargs)
-        return list(results) if results else []
-
-    except Exception as e:
-        logger.error(f"Failed to search images: {e}")
-        return []
+    # DDGS 9.14.1 can raise its "No results found." sentinel after a backend
+    # exceeds the dispatcher deadline. Only a returned empty collection proves
+    # an empty search; propagate every exception to the async error boundary.
+    results = ddgs.images(query, **kwargs)
+    return list(results) if results else []
 
 
 @tool("image_search", parse_docstring=True)
 async def image_search_tool(
     query: str,
-    max_results: int = 5,
+    max_results: int = DEFAULT_MAX_RESULTS,
     size: str | None = None,
     color: str | None = None,
     type_image: str | None = None,
@@ -112,6 +93,7 @@ async def image_search_tool(
     - Before generating fashion/clothing: search for style and detail references
 
     The returned image URLs can be used as reference images in image generation to significantly improve quality.
+    An error other than "No images found" means the search failed, not that the query has no matching images.
 
     Args:
         query: Search keywords describing the images you want to find. Be specific for better results (e.g., "Japanese woman street photography 1990s" instead of just "woman").
@@ -136,7 +118,7 @@ async def image_search_tool(
 
         return _search_images(
             query=query,
-            max_results=_coerce_max_results(resolved_max_results),
+            max_results=coerce_max_results(resolved_max_results, provider="DDG image search", logger=logger),
             size=size,
             color=color,
             type_image=type_image,
@@ -144,19 +126,35 @@ async def image_search_tool(
             license_image=license_image,
         )
 
-    results = await asyncio.to_thread(search_with_config)
+    try:
+        results = await asyncio.to_thread(search_with_config)
+    except Exception as exc:
+        logger.exception("Failed to search images")
+        return json.dumps({"error": f"DuckDuckGo image search failed: {type(exc).__name__}: {exc}", "query": query}, ensure_ascii=False)
 
     if not results:
         return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
 
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "image_url": r.get("image", ""),
-            "thumbnail_url": r.get("thumbnail", ""),
-        }
-        for r in results
-    ]
+    normalized_results = []
+    for row in results:
+        if not isinstance(row, dict):
+            continue
+        image_url = safe_public_result_url(row.get("image"))
+        thumbnail_url = safe_public_result_url(row.get("thumbnail"))
+        if not image_url and not thumbnail_url:
+            continue
+        title = row.get("title")
+        normalized_results.append(
+            {
+                "title": title if isinstance(title, str) else "",
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+                "source_url": safe_public_result_url(row.get("url")),
+            }
+        )
+
+    if not normalized_results:
+        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
 
     output = {
         "query": query,

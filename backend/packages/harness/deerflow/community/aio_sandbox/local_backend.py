@@ -14,10 +14,12 @@ import logging
 import os
 import platform
 import posixpath
+import re
 import secrets
 import shlex
 import socket
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,10 +36,25 @@ logger = logging.getLogger(__name__)
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
+def _parse_bash_capacity(config: dict) -> int:
+    value = _extract_container_environment(config, "AIO_BASH_MAX_SESSIONS")
+    try:
+        return max(0, int(value)) if value is not None else 50
+    except (TypeError, ValueError):
+        return 0
+
+
 class _ExistingRestrictedSandbox(RuntimeError):
     def __init__(self, info: SandboxInfo):
         super().__init__(f"restricted sandbox {info.sandbox_id} already exists")
         self.info = info
+
+
+@dataclass(eq=False)
+class _RestrictedProxyState:
+    """Track this call's proxy boundary, also identifying its cleanup entry."""
+
+    proxy_may_exist: bool = False
 
 
 @dataclass(frozen=True)
@@ -49,6 +66,8 @@ class _ContainerInspection:
     networks: frozenset[str]
     relay_token: str | None = None
     max_shell_sessions: int | None = None
+    max_bash_sessions: int | None = None
+    container_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,18 +107,24 @@ def _parse_docker_timestamp(raw: str) -> float:
         return 0.0
 
 
-def _extract_host_port(inspect_entry: dict, container_port: int) -> int | None:
+def _extract_host_port(inspect_entry: dict, container_port: int, *, include_stopped: bool = False) -> int | None:
     """Extract the host port mapped to ``container_port/tcp`` from a docker inspect entry.
 
-    Returns None if the container has no port mapping for that port.
+    Returns None if the container has no port mapping for that port. Teardown
+    may use configured bindings after Docker clears a stopped container's
+    active mappings; ordinary discovery still requires an active mapping.
     """
     try:
         ports = (inspect_entry.get("NetworkSettings") or {}).get("Ports") or {}
         bindings = ports.get(f"{container_port}/tcp") or []
+        if not bindings and include_stopped:
+            ports = (inspect_entry.get("HostConfig") or {}).get("PortBindings") or {}
+            bindings = ports.get(f"{container_port}/tcp") or []
         if bindings:
             host_port = bindings[0].get("HostPort")
             if host_port:
-                return int(host_port)
+                parsed = int(host_port)
+                return parsed if 0 < parsed <= 65535 else None
     except (ValueError, TypeError, AttributeError):
         pass
     return None
@@ -531,22 +556,59 @@ def _docker_resource_limit(env_name: str, default: str) -> str | None:
     return value
 
 
+# Docker's missing-resource scaffolding drifted in case across CLI releases:
+# v28 printed "Error: No such object: <name>" while v29 lowercases the
+# client-side form to "error: no such object: <name>". The daemon-side wrapper
+# ("Error response from daemon: ") is stable but normalized here as well.
+# Match the fixed scaffolding case-insensitively while capturing the resource
+# name for a byte-exact comparison, so Docker context names and unrelated
+# runtime failures containing "container"/"not found" can never pass.
+_DOCKER_NO_SUCH_CONTAINER_RE = re.compile(
+    r"(?:error(?: response from daemon)?: )?no such (?:object|container): (?P<name>.+)",
+    re.IGNORECASE,
+)
+_DOCKER_NO_SUCH_NETWORK_RE = re.compile(
+    r"(?:error(?: response from daemon)?: )?(?:no such network: (?P<named>.+)|network (?P<embedded>.+) not found)(?:\nexit status 1)?",
+    re.IGNORECASE,
+)
+
+
 def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
     """Return True only when stderr definitively says the container does not exist.
 
-    Docker reports "No such object" / "No such container". Apple Container
-    reports a generic "not found", so that phrase is only trusted when the
-    message also names the inspected container (or refers to a
-    container/object); transient failures whose text happens to contain
-    "not found" (e.g. "command not found", "context not found") must stay on
-    the raise path instead of being misread as a dead container.
+    Match the complete resource error and exact target, rather than searching
+    for "container" / "not found": Docker context names and runtime failures
+    can contain both. The Docker scaffolding is compared case-insensitively
+    (CLI v29 lowercases it) while the container name stays byte-exact.
+    Apple Container's missing-resource error must identify this container too;
+    its logical name is not proof of another missing file.
     """
-    message = stderr.lower()
-    if "no such object" in message or "no such container" in message:
+    message = (stderr or "").strip()
+    docker_match = _DOCKER_NO_SUCH_CONTAINER_RE.fullmatch(message)
+    if docker_match is not None and docker_match["name"] == container_name:
         return True
-    if "not found" not in message:
+    apple_errors = {
+        f"Error: container not found: {container_name}",
+        f'Error: notFound: "container not found: {container_name}"',
+        f'notFound: "container not found: {container_name}"',
+        # Preserve the older generic response only for the exact quoted target.
+        f'Error: not found: "{container_name}"',
+    }
+    return message in apple_errors
+
+
+def _is_no_such_network_error(stderr: str, network_name: str) -> bool:
+    """Accept Docker's complete missing-network response for this exact name.
+
+    Same contract as ``_is_no_such_container_error``: case-insensitive
+    scaffolding, byte-exact network name, full-message match. Docker CLI v29
+    may append exactly one ``exit status 1`` line; other diagnostics still fail.
+    """
+    message = (stderr or "").strip()
+    match = _DOCKER_NO_SUCH_NETWORK_RE.fullmatch(message)
+    if match is None:
         return False
-    return container_name.lower() in message or "container" in message or "object" in message
+    return (match["named"] or match["embedded"]) == network_name
 
 
 class LocalContainerBackend(SandboxBackend):
@@ -597,6 +659,17 @@ class LocalContainerBackend(SandboxBackend):
         self._network_config = network_config or {"mode": "open"}
         self._network_mode = str(self._network_config.get("mode", "open"))
         self._allow_synthetic_dns = False
+        # Teardown reservations serialize each generation. Different sandbox
+        # generations have independent entries; process restart also resets
+        # the process-local PortAllocator, so these need no durable storage.
+        self._pending_cleanup_ports: dict[str, tuple[str, int]] = {}
+        # Native Apple / legacy metadata and incomplete startup may lack a
+        # runtime generation. Tokens distinguish ownership of local reservations,
+        # never container identity;
+        # present-resource inspection must not inherit it. Name vacancy under
+        # the provider's teardown fences is its sole fallback release proof.
+        self._unknown_cleanup_ports: dict[str, dict[int, object]] = {}
+        self._pending_cleanup_ports_lock = threading.Lock()
         self._runtime = self._detect_runtime()
 
         if self._network_mode != "open":
@@ -648,7 +721,13 @@ class LocalContainerBackend(SandboxBackend):
         except (TypeError, ValueError):
             return False
         actual = inspection.max_shell_sessions if inspection.max_shell_sessions is not None else _AIO_DEFAULT_MAX_SHELL_SESSIONS
-        return actual >= required
+        if actual < required:
+            return False
+        # A reused container may predate the current Bash environment override.
+        # Never admit it using the new client's larger semaphore budget.
+        required_bash = int(self._environment.get("AIO_BASH_MAX_SESSIONS", "50"))
+        actual_bash = inspection.max_bash_sessions if inspection.max_bash_sessions is not None else 50
+        return actual_bash >= required_bash
 
     def _network_policy_digest(self) -> str:
         allow_domains = self._network_config.get("allow_domains", [])
@@ -734,8 +813,7 @@ class LocalContainerBackend(SandboxBackend):
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
             raise RuntimeError(f"Failed to inspect restricted sandbox network {network_name}") from exc
         if result.returncode != 0:
-            stderr = (result.stderr or "").lower()
-            if "not found" in stderr and (network_name.lower() in stderr or "network" in stderr):
+            if _is_no_such_network_error(result.stderr or "", network_name):
                 return None
             raise RuntimeError(f"Failed to inspect restricted sandbox network {network_name}: {(result.stderr or '').strip()}")
         try:
@@ -931,6 +1009,11 @@ class LocalContainerBackend(SandboxBackend):
         port: int = 0
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
+            proxy_state = _RestrictedProxyState() if self._network_mode != "open" else None
+            if proxy_state is not None:
+                # Register before discovery can expose resources to teardown.
+                with self._pending_cleanup_ports_lock:
+                    self._unknown_cleanup_ports.setdefault(sandbox_id, {})[port] = proxy_state
             try:
                 if self._network_mode == "open":
                     container_id = self._start_container(
@@ -939,6 +1022,7 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         labels=self._sandbox_labels(sandbox_id),
+                        release_port_on_spawn_failure=True,
                     )
                 else:
                     relay_token = secrets.token_urlsafe(32)
@@ -949,13 +1033,27 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         relay_token=relay_token,
+                        proxy_state=proxy_state,
                     )
+                    with self._pending_cleanup_ports_lock:
+                        if self._unknown_cleanup_ports.get(sandbox_id, {}).get(port) is proxy_state:
+                            self._forget_unknown_cleanup_port(sandbox_id, port)
                 break
             except _ExistingRestrictedSandbox as exc:
-                release_port(port)
+                if proxy_state is not None:
+                    self._release_failed_restricted_port(sandbox_id, port, proxy_state)
+                else:
+                    release_port(port)
                 return exc.info
-            except RuntimeError as exc:
-                release_port(port)
+            except BaseException as exc:
+                if proxy_state is not None:
+                    released = self._release_failed_restricted_port(sandbox_id, port, proxy_state)
+                    if not released:
+                        raise
+                elif isinstance(exc, RuntimeError):
+                    release_port(port)
+                if not isinstance(exc, RuntimeError):
+                    raise
                 err = str(exc)
                 err_lower = err.lower()
                 # Port already bound: skip this port and retry with the next one.
@@ -968,7 +1066,13 @@ class LocalContainerBackend(SandboxBackend):
                 # discover and adopt the existing container instead of failing.
                 if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
-                    existing = self.discover(sandbox_id)
+                    try:
+                        existing = self.discover(sandbox_id)
+                    except Exception:
+                        logger.warning("Could not probe conflicting sandbox %s", sandbox_id, exc_info=True)
+                        if proxy_state is None:
+                            raise
+                        raise exc
                     if existing is not None and not existing.requires_replacement:
                         return existing
                 raise
@@ -986,6 +1090,27 @@ class LocalContainerBackend(SandboxBackend):
             request_headers={RELAY_AUTH_HEADER: relay_token} if relay_token is not None else {},
         )
 
+    def _release_failed_restricted_port(self, sandbox_id: str, port: int, proxy_state: _RestrictedProxyState) -> bool:
+        """Return this reservation only with absence evidence and release ownership.
+
+        Uncertain ports stay in the existing cleanup ledger until fenced absent
+        teardown. Ordinary create calls do not reconcile earlier failures.
+        """
+        if proxy_state.proxy_may_exist:
+            proxy_name, _ = self._resource_names(sandbox_id)
+            try:
+                if proxy_name in self._inspect_container_entries([proxy_name], timeout=5):
+                    return False
+            except Exception:
+                logger.warning("Could not confirm proxy absence for sandbox %s; retaining its port", sandbox_id, exc_info=True)
+                return False
+        with self._pending_cleanup_ports_lock:
+            if self._unknown_cleanup_ports.get(sandbox_id, {}).get(port) is not proxy_state:
+                return False
+            self._forget_unknown_cleanup_port(sandbox_id, port)
+            release_port(port)
+        return True
+
     def _start_restricted_sandbox(
         self,
         sandbox_id: str,
@@ -995,6 +1120,7 @@ class LocalContainerBackend(SandboxBackend):
         *,
         config_mount_exclusion_root: str | None,
         relay_token: str,
+        proxy_state: _RestrictedProxyState | None = None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -1014,7 +1140,7 @@ class LocalContainerBackend(SandboxBackend):
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token, proxy_state)
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -1042,15 +1168,25 @@ class LocalContainerBackend(SandboxBackend):
         except BaseException as exc:
             message = str(exc).lower()
             if "is already in use by container" in message or "conflict. the container name" in message:
-                existing = self.discover(sandbox_id)
+                try:
+                    existing = self.discover(sandbox_id)
+                    resource_status = "compatible" if existing is not None and not existing.requires_replacement else self._restricted_resources_status(sandbox_id)
+                except Exception:
+                    # An unavailable peer probe cannot authorize rollback or
+                    # replace the error that caused creation to fail.
+                    logger.warning("Could not probe conflicting sandbox %s", sandbox_id, exc_info=True)
+                    raise exc
                 if existing is not None and not existing.requires_replacement:
                     raise _ExistingRestrictedSandbox(existing) from exc
                 # A peer may still be provisioning the deterministic resource
                 # set. Never roll it back just because its readiness check has
                 # not completed yet.
-                if self._restricted_resources_status(sandbox_id) != "missing":
+                if resource_status != "missing":
                     raise
-            self._cleanup_restricted_resources(sandbox_id)
+            try:
+                self._cleanup_restricted_resources(sandbox_id, proxy_state=proxy_state)
+            except Exception:
+                logger.warning("Restricted sandbox rollback failed for %s", sandbox_id, exc_info=True)
             raise
 
     def _create_internal_network(self, network_name: str, sandbox_id: str) -> None:
@@ -1121,6 +1257,7 @@ class LocalContainerBackend(SandboxBackend):
         port: int,
         sandbox_id: str,
         relay_token: str,
+        proxy_state: _RestrictedProxyState | None = None,
     ) -> None:
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
@@ -1170,15 +1307,25 @@ class LocalContainerBackend(SandboxBackend):
         ]
         # First use may pull the sidecar image. Match the sandbox create path's
         # tolerance for an image download instead of killing Docker mid-pull.
-        created = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=300,
-        )
+        if proxy_state is not None:
+            proxy_state.proxy_may_exist = True
+        try:
+            created = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+        except (FileNotFoundError, PermissionError):
+            if proxy_state is not None:
+                proxy_state.proxy_may_exist = False
+            raise
         if created.returncode != 0:
+            message = created.stderr.lower()
+            if proxy_state is not None and ("is already in use by container" in message or "conflict. the container name" in message):
+                proxy_state.proxy_may_exist = False
             raise RuntimeError(f"Failed to create sandbox network proxy: {created.stderr.strip()}")
         connected = subprocess.run(
             ["docker", "network", "connect", network_name, proxy_name],
@@ -1220,27 +1367,89 @@ class LocalContainerBackend(SandboxBackend):
 
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
-        # Prefer container_id, fall back to container_name (both accepted by docker stop).
-        # This ensures containers discovered via list_running() (which only has the name)
-        # can also be stopped.
+        from urllib.parse import urlparse
+
+        try:
+            port = urlparse(info.sandbox_url).port
+        except (TypeError, ValueError):
+            port = None
+        generation = info.container_id if self._runtime == "docker" else None
+        if generation:
+            with self._pending_cleanup_ports_lock:
+                pending = self._pending_cleanup_ports.get(generation)
+                port = pending[1] if pending is not None else port
+                if port:
+                    pending = (info.sandbox_id, port)
+                    self._pending_cleanup_ports[generation] = pending
+                    # Teardown now owns the release. Retire the startup token
+                    # before I/O so a late creation failure cannot release twice.
+                    self._forget_unknown_cleanup_port(info.sandbox_id, port)
+        elif port:
+            with self._pending_cleanup_ports_lock:
+                pending = None
+                if (info.sandbox_id, port) not in self._pending_cleanup_ports.values():
+                    pending = object()
+                    self._unknown_cleanup_ports.setdefault(info.sandbox_id, {})[port] = pending
+        restricted_cleanup = self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement)
+        # Keep the main generation inspectable if proxy teardown fails. Once
+        # its proxy is removed, a failed main stop retains the known reservation
+        # above for a subsequent generation-fenced retry.
+        if restricted_cleanup:
+            self._remove_restricted_proxy(info.sandbox_id)
+        # Prefer Docker's generation ID; names also support older metadata and
+        # Apple Container's caller-selected identity.
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
-        # An incompatible sandbox discovered while the new process is in open
-        # mode may have been provisioned by a previous restricted-mode process.
-        # Remove its deterministic sidecar/networks from this provider-owned,
-        # fenced destroy path as well (never from discovery itself).
-        if self._runtime == "docker" and (self._network_mode != "open" or info.requires_replacement):
-            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False)
-        # Extract port from sandbox_url for release
-        try:
-            from urllib.parse import urlparse
+        # The proxy has been removed and the main stop succeeded. Network
+        # cleanup cannot retain this host port, and a timeout there must not
+        # strand its reservation after the main generation disappears.
+        if generation:
+            with self._pending_cleanup_ports_lock:
+                if pending is not None and self._pending_cleanup_ports.get(generation) is pending:
+                    release_port(pending[1])
+                    self._pending_cleanup_ports.pop(generation)
+        elif port:
+            with self._pending_cleanup_ports_lock:
+                if pending is not None and self._unknown_cleanup_ports.get(info.sandbox_id, {}).get(port) is pending:
+                    release_port(port)
+                    self._forget_unknown_cleanup_port(info.sandbox_id, port)
+        if restricted_cleanup:
+            self._cleanup_restricted_resources(info.sandbox_id, stop_sandbox=False, remove_proxy=False)
 
-            port = urlparse(info.sandbox_url).port
-            if port:
+    def _forget_unknown_cleanup_port(self, sandbox_id: str, port: int) -> None:
+        """Remove a released reservation; caller holds the cleanup ledger lock."""
+        pending = self._unknown_cleanup_ports.get(sandbox_id)
+        if pending is not None:
+            pending.pop(port, None)
+            if not pending:
+                self._unknown_cleanup_ports.pop(sandbox_id)
+
+    def complete_absent_teardown(self, sandbox_id: str) -> None:
+        """Release local reservations after fenced, authoritative name vacancy.
+
+        A timed-out stop can still remove its container. The provider calls this
+        only after confirming absence under both teardown fences, before it
+        retires quarantine records. Metadata inspection stays read-only.
+        """
+        if self._runtime == "docker":
+            # A timeout can remove the main container before its deterministic
+            # sidecar/networks are cleaned. Retry even after a process restart,
+            # where the local reservation ledger is empty. Unknown cleanup
+            # failures must retain quarantine instead of stranding new creation
+            # behind the existing-resource mismatch guard.
+            self._cleanup_restricted_resources(sandbox_id, stop_sandbox=False, strict=True)
+        with self._pending_cleanup_ports_lock:
+            ports = {port for owner_id, port in self._pending_cleanup_ports.values() if owner_id == sandbox_id}
+            ports.update(self._unknown_cleanup_ports.pop(sandbox_id, {}))
+            # Drop every reservation owned by this logical ID from both ledgers
+            # in one pass. The set union releases each port at most once even if
+            # a reservation ever exists in both ledgers.
+            retained = {generation: entry for generation, entry in self._pending_cleanup_ports.items() if entry[0] != sandbox_id}
+            self._pending_cleanup_ports.clear()
+            self._pending_cleanup_ports.update(retained)
+            for port in ports:
                 release_port(port)
-        except Exception:
-            pass
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""
@@ -1252,6 +1461,51 @@ class LocalContainerBackend(SandboxBackend):
                 return self._is_container_running(proxy_name) and self._restricted_resources_status(info.sandbox_id) == "compatible"
             return True
         return False
+
+    def inspect_runtime(self, sandbox_id: str) -> SandboxInfo | None:
+        """Inspect resource identity without requiring a running, healthy sandbox.
+
+        Only an exact runtime missing-resource response returns None. Docker's
+        immutable ID fences teardown by generation; Apple Container exposes a
+        caller-selected logical ID instead, so its generation stays unknown.
+        """
+        name = f"{self._container_prefix}-{sandbox_id}"
+        entry = self._inspect_container_entries([name], timeout=5).get(name)
+        if entry is None:
+            return None
+        container_id = None
+        if self._runtime == "docker":
+            container_id = entry.get("Id")
+            if not isinstance(container_id, str) or not container_id.strip():
+                raise RuntimeError(f"Docker did not report a runtime generation for container {name}")
+        host_port = _extract_host_port(entry, 8080, include_stopped=True)
+        if self._runtime == "docker":
+            config = entry.get("Config") or {}
+            labels = config.get("Labels") or {}
+            if labels.get("deerflow.network_mode") in {"allowlist", "isolated"} or self._network_mode != "open":
+                proxy_name, _ = self._resource_names(sandbox_id)
+                proxy = self._inspect_container_entries([proxy_name], timeout=5).get(proxy_name)
+                # Missing proxy metadata does not prove the sandbox is absent.
+                # Only an observed binding may release a local reservation.
+                if host_port is None and proxy is not None:
+                    host_port = _extract_host_port(proxy, 8080, include_stopped=True)
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
+        if container_id:
+            with self._pending_cleanup_ports_lock:
+                pending = self._pending_cleanup_ports.get(container_id)
+                if pending is not None:
+                    host_port = pending[1]
+        return SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url=f"http://{sandbox_host}:{host_port}" if host_port else "",
+            container_name=name,
+            container_id=container_id,
+            created_at=_parse_docker_timestamp(entry.get("Created", "")),
+        )
+
+    def is_absent(self, sandbox_id: str) -> bool:
+        """Only an explicit missing-container response proves name vacancy."""
+        return self.inspect_runtime(sandbox_id) is None
 
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Discover an existing container by its deterministic name.
@@ -1308,6 +1562,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_id=sandbox_id,
                     sandbox_url="",
                     container_name=container_name,
+                    container_id=sandbox_inspection.container_id,
                     created_at=created_at,
                     requires_replacement=True,
                 )
@@ -1316,6 +1571,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_id=sandbox_id,
                     sandbox_url="",
                     container_name=container_name,
+                    container_id=sandbox_inspection.container_id,
                     created_at=created_at,
                     requires_replacement=True,
                 )
@@ -1333,6 +1589,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_id=sandbox_id,
                     sandbox_url="",
                     container_name=container_name,
+                    container_id=sandbox_inspection.container_id if sandbox_inspection else None,
                     created_at=created_at,
                     requires_replacement=True,
                 )
@@ -1355,6 +1612,7 @@ class LocalContainerBackend(SandboxBackend):
                 sandbox_id=sandbox_id,
                 sandbox_url="",
                 container_name=container_name,
+                container_id=sandbox_inspection.container_id if sandbox_inspection else None,
                 created_at=created_at,
                 requires_replacement=True,
             )
@@ -1369,6 +1627,7 @@ class LocalContainerBackend(SandboxBackend):
             sandbox_id=sandbox_id,
             sandbox_url=sandbox_url,
             container_name=container_name,
+            container_id=sandbox_inspection.container_id if sandbox_inspection else None,
             created_at=created_at,
             request_headers=request_headers,
         )
@@ -1503,6 +1762,7 @@ class LocalContainerBackend(SandboxBackend):
                     sandbox_id=sandbox_id,
                     sandbox_url=sandbox_url,
                     container_name=container_name,
+                    container_id=data.container_id,
                     created_at=created_at,
                     request_headers=request_headers,
                     requires_replacement=requires_replacement,
@@ -1512,11 +1772,8 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Found {len(infos)} running sandbox container(s)")
         return infos
 
-    def _cleanup_restricted_resources(self, sandbox_id: str, *, stop_sandbox: bool = True) -> None:
-        proxy_name, network_name = self._resource_names(sandbox_id)
-        egress_network_name = self._egress_network_name(sandbox_id)
-        if stop_sandbox:
-            self._stop_container(f"{self._container_prefix}-{sandbox_id}")
+    def _remove_restricted_proxy(self, sandbox_id: str) -> None:
+        proxy_name, _ = self._resource_names(sandbox_id)
         self._stop_container(proxy_name)
         # ``--rm`` removes a container after it has run and then stopped, but
         # not one left in Docker's Created state by a failure before start.
@@ -1530,8 +1787,51 @@ class LocalContainerBackend(SandboxBackend):
             errors="replace",
             timeout=15,
         )
-        if removed.returncode != 0 and "no such container" not in (removed.stderr or "").lower():
-            logger.warning("Failed to remove sandbox network proxy %s: %s", proxy_name, removed.stderr.strip())
+        if removed.returncode != 0 and not _is_no_such_container_error(removed.stderr or "", proxy_name):
+            raise RuntimeError(f"Failed to remove sandbox network proxy {proxy_name}: {(removed.stderr or '').strip()}")
+
+    def _cleanup_restricted_resources(
+        self,
+        sandbox_id: str,
+        *,
+        stop_sandbox: bool = True,
+        remove_proxy: bool = True,
+        strict: bool = False,
+        proxy_state: _RestrictedProxyState | None = None,
+    ) -> None:
+        """Tear down the restricted sidecar set.
+
+        ``strict=True`` makes any stage failure raise so the caller retains the
+        quarantine fence. Best-effort rollback logs stop/remove failures;
+        network CLI exceptions can still interrupt it. ``proxy_state`` records
+        confirmed proxy removal independently of subsequent network failures.
+        """
+        _, network_name = self._resource_names(sandbox_id)
+        egress_network_name = self._egress_network_name(sandbox_id)
+        if stop_sandbox:
+            try:
+                self._stop_container(f"{self._container_prefix}-{sandbox_id}")
+            except Exception:
+                if strict:
+                    raise
+                logger.warning(
+                    "Failed to stop sandbox container for %s during best-effort cleanup",
+                    sandbox_id,
+                    exc_info=True,
+                )
+        if remove_proxy:
+            try:
+                self._remove_restricted_proxy(sandbox_id)
+                if proxy_state is not None:
+                    proxy_state.proxy_may_exist = False
+            except Exception:
+                if strict:
+                    raise
+                logger.warning(
+                    "Failed to remove network proxy for %s during best-effort cleanup",
+                    sandbox_id,
+                    exc_info=True,
+                )
         for current_network_name in (network_name, egress_network_name):
             result = subprocess.run(
                 ["docker", "network", "rm", current_network_name],
@@ -1541,8 +1841,13 @@ class LocalContainerBackend(SandboxBackend):
                 errors="replace",
                 timeout=15,
             )
-            if result.returncode != 0 and "not found" not in (result.stderr or "").lower():
-                logger.warning("Failed to remove sandbox network %s: %s", current_network_name, result.stderr.strip())
+            if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
+                if strict:
+                    if not _is_no_such_network_error(stderr, current_network_name):
+                        raise RuntimeError(f"Failed to remove sandbox network {current_network_name}: {stderr or '<empty>'}")
+                elif "not found" not in stderr.lower():
+                    logger.warning("Failed to remove sandbox network %s: %s", current_network_name, stderr)
 
     def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if self._network_mode != "allowlist" or self._network_config.get("approval", "prompt") != "prompt":
@@ -1610,12 +1915,8 @@ class LocalContainerBackend(SandboxBackend):
         )
         return result.returncode == 0
 
-    def _batch_inspect(self, container_names: list[str], *, strict: bool = False) -> dict[str, _ContainerInspection]:
-        """Batch-inspect containers in a single subprocess call.
-
-        Returns creation/port plus policy-relevant labels, image, and networks.
-        Missing containers or parse failures are silently dropped from the result.
-        """
+    def _inspect_container_entries(self, container_names: list[str], *, timeout: float = 15, runtime_identity: bool = True) -> dict[str, dict]:
+        """Read inspect JSON, accounting for every queried name or exact absence."""
         if not container_names:
             return {}
         try:
@@ -1625,42 +1926,70 @@ class LocalContainerBackend(SandboxBackend):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=15,
+                timeout=timeout,
             )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            if strict:
-                raise RuntimeError("Failed to batch-inspect containers") from e
-            logger.warning(f"Failed to batch-inspect containers: {e}")
-            return {}
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise RuntimeError(f"Failed to inspect containers with {self._runtime}") from exc
 
+        missing: set[str] = set()
         if result.returncode != 0:
             stderr = (result.stderr or "").strip()
-            missing = "no such object" in stderr.lower() or "no such container" in stderr.lower()
+            # Deliberate all-or-nothing: one unrecognized stderr line fails the
+            # whole batch instead of risking a misread error as absence. Callers
+            # like list_running treat this as "reconcile nothing this tick" and
+            # retry; do not weaken this into per-container best effort.
+            for line in stderr.splitlines():
+                absent = {name for name in container_names if _is_no_such_container_error(line, name)}
+                if not absent:
+                    raise RuntimeError(f"Failed to inspect containers with {self._runtime}: {stderr or '<empty>'}")
+                missing.update(absent)
             if not missing:
-                if strict:
-                    raise RuntimeError(f"Failed to batch-inspect containers with {self._runtime} inspect: {stderr or '<empty>'}")
-                logger.warning(
-                    "Failed to batch-inspect containers with %s inspect (returncode=%s, stderr=%s)",
-                    self._runtime,
-                    result.returncode,
-                    stderr or "<empty>",
-                )
-                return {}
+                raise RuntimeError(f"Failed to inspect containers with {self._runtime}: {stderr or '<empty>'}")
 
         try:
-            payload = json.loads(result.stdout or "[]")
-        except json.JSONDecodeError as e:
+            payload = json.loads(result.stdout or ("[]" if missing else ""))
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError("Failed to parse container inspection data") from exc
+        if not isinstance(payload, list):
+            raise RuntimeError("Container inspection data must be a list")
+
+        entries: dict[str, dict] = {}
+        requested = set(container_names)
+        for entry in payload:
+            if not isinstance(entry, dict):
+                raise RuntimeError("Invalid container inspection entry")
+            if self._runtime == "docker" or not runtime_identity:
+                raw_name = entry.get("Name")
+            else:
+                config = entry.get("configuration")
+                raw_name = config.get("id") if isinstance(config, dict) else None
+            name = raw_name.lstrip("/") if isinstance(raw_name, str) else ""
+            if name not in requested or name in entries or name in missing:
+                raise RuntimeError("Container inspection returned an unexpected or duplicate resource")
+            entries[name] = entry
+        if requested != entries.keys() | missing:
+            raise RuntimeError("Container inspection did not account for every requested resource")
+        return entries
+
+    def _batch_inspect(self, container_names: list[str], *, strict: bool = False) -> dict[str, _ContainerInspection]:
+        """Batch-inspect creation, port, generation and policy metadata.
+
+        Exact missing resources are omitted. Strict callers propagate query and
+        parse failures; best-effort enumeration logs them and returns no entries.
+        """
+        try:
+            # Apple configuration.id establishes raw resource presence, but its
+            # port/policy schema is not Docker's. Preserve the legacy Name-based
+            # batch path rather than misclassifying those entries for teardown.
+            entries = self._inspect_container_entries(container_names, runtime_identity=False)
+        except RuntimeError as exc:
             if strict:
-                raise RuntimeError("Failed to parse container inspection data") from e
-            logger.warning(f"Failed to parse docker inspect output as JSON: {e}")
+                raise
+            logger.warning("Failed to batch-inspect containers: %s", exc)
             return {}
 
         out: dict[str, _ContainerInspection] = {}
-        for entry in payload:
-            # ``Name`` is prefixed with ``/`` in the docker inspect response
-            name = (entry.get("Name") or "").lstrip("/")
-            if not name:
-                continue
+        for name, entry in entries.items():
             created_at = _parse_docker_timestamp(entry.get("Created", ""))
             host_port = _extract_host_port(entry, 8080)
             config = entry.get("Config") or {}
@@ -1684,6 +2013,8 @@ class LocalContainerBackend(SandboxBackend):
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
                 relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
                 max_shell_sessions=max_shell_sessions,
+                max_bash_sessions=_parse_bash_capacity(config),
+                container_id=entry.get("Id") if isinstance(entry.get("Id"), str) and entry.get("Id") else None,
             )
         return out
 
@@ -1700,6 +2031,7 @@ class LocalContainerBackend(SandboxBackend):
         publish_port: bool = True,
         extra_environment: dict[str, str] | None = None,
         labels: dict[str, str] | None = None,
+        release_port_on_spawn_failure: bool = False,
     ) -> str:
         """Start a new container.
 
@@ -1709,6 +2041,9 @@ class LocalContainerBackend(SandboxBackend):
             extra_mounts: Additional volume mounts.
             config_mount_exclusion_root: Config-level mounts at or below this
                 container root are omitted for this container only.
+            release_port_on_spawn_failure: Return the reservation when the CLI
+                is missing or cannot execute. Only open-mode creation opts in;
+                a restricted sandbox's proxy may already own the port.
 
         Returns:
             The container ID.
@@ -1927,12 +2262,17 @@ class LocalContainerBackend(SandboxBackend):
                 errors="replace",
                 check=True,
             )
-            container_id = result.stdout.strip()
-            logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
-            return container_id
+        except (FileNotFoundError, PermissionError):
+            if release_port_on_spawn_failure:
+                release_port(port)
+            raise
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to start container using {self._runtime}: {e.stderr}")
             raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
+
+        container_id = result.stdout.strip()
+        logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
+        return container_id
 
     def _stop_container(self, container_id: str) -> None:
         """Stop a container (--rm ensures automatic removal).
@@ -1963,6 +2303,8 @@ class LocalContainerBackend(SandboxBackend):
             raise
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to stop container {container_id}: {e.stderr}")
+            if not _is_no_such_container_error(e.stderr or "", container_id):
+                raise
 
     def _is_container_running(self, container_name: str) -> bool:
         """Check if a named container is currently running.

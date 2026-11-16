@@ -88,7 +88,7 @@ def test_subagent_deferral_recipe_hides_then_promotes():
         state_schema=ThreadState,
     )
 
-    result = asyncio.run(graph.ainvoke({"messages": [SystemMessage(content=section), HumanMessage(content="use the deferred calculator")]}))
+    result = asyncio.run(graph.ainvoke({"messages": [SystemMessage(content=section), HumanMessage(content="use the deferred calculator", id="user-1")]}))
 
     assert len(bound) >= 2, f"expected >=2 model binds, got {bound}"
     # Turn 1: both deferred MCP tools hidden from the subagent's model binding.
@@ -97,7 +97,11 @@ def test_subagent_deferral_recipe_hides_then_promotes():
     assert "mcp_calc" in bound[1]
     assert "mcp_other" not in bound[1]
     # Promotion recorded in graph state, scoped by catalog hash.
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["mcp_calc"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["mcp_calc"],
+        "turn_id": "user-1",
+    }
 
 
 def test_subagent_builder_emits_working_deferred_filter():
@@ -162,7 +166,7 @@ def test_subagent_builder_emits_working_deferred_filter():
         system_prompt=None,
         state_schema=ThreadState,
     )
-    result = asyncio.run(graph.ainvoke({"messages": [SystemMessage(content=section), HumanMessage(content="use the deferred calculator")]}))
+    result = asyncio.run(graph.ainvoke({"messages": [SystemMessage(content=section), HumanMessage(content="use the deferred calculator", id="user-1")]}))
 
     assert len(bound) >= 2, f"expected >=2 model binds, got {bound}"
     # Turn 1: both deferred MCP tools hidden - the builder-produced filter is active.
@@ -171,4 +175,8 @@ def test_subagent_builder_emits_working_deferred_filter():
     # hash correctly (a wrong hash would leave mcp_calc hidden here).
     assert "mcp_calc" in bound[1]
     assert "mcp_other" not in bound[1]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["mcp_calc"]}
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["mcp_calc"],
+        "turn_id": "user-1",
+    }

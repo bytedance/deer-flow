@@ -65,12 +65,94 @@ async def test_agent_persistent_writes_route_through_write_drain(_agent_env, mon
     monkeypatch.setattr(router, "run_drained_write", drained)
 
     await create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model"))
+    await router.import_agent_package(router.AgentPackage(format="deerflow.custom-agent", version=1, agent={"name": "imported", "soul": "imported soul"}))
     await update_agent("planner", AgentUpdateRequest(description="later"))
     await get_agent("planner")
     await update_user_profile(UserProfileUpdateRequest(content="prefs"))
     await router.delete_agent("planner")
 
-    assert calls == ["Create agent", "Update agent", "Update user profile", "Delete agent"]
+    assert calls == ["Create agent", "Create agent", "Update agent", "Update user profile", "Delete agent"]
+
+
+async def test_agent_import_drains_started_store_write_across_repeated_cancellation(_agent_env, monkeypatch):
+    from app.gateway.routers import agents as router
+
+    store = router.get_agent_store()
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingStore:
+        def create(self, *args, **kwargs):
+            started.set()
+            assert release.wait(timeout=5)
+            return store.create(*args, **kwargs)
+
+    monkeypatch.setattr(router, "get_agent_store", lambda: BlockingStore())
+    package = router.AgentPackage(
+        format="deerflow.custom-agent",
+        version=1,
+        agent={"name": "imported", "soul": "imported soul", "memory_enabled": False},
+    )
+    task = asyncio.create_task(router.import_agent_package(package))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        imported = await get_agent("imported")
+        assert imported.soul == "imported soul"
+        assert router.load_agent_config("imported", user_id=router.get_effective_user_id()).memory_enabled is False
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_agent_creation_drains_store_write_across_repeated_cancellation(_agent_env, monkeypatch):
+    from app.gateway.routers import agents as router
+
+    store = router.get_agent_store()
+    user_id = router.get_effective_user_id()
+    create = store.create
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_create(*args, **kwargs):
+        started.set()
+        assert release.wait(timeout=5)
+        return create(*args, **kwargs)
+
+    monkeypatch.setattr(store, "create", blocked_create)
+    monkeypatch.setattr(router, "get_agent_store", lambda: store)
+
+    task = asyncio.create_task(create_agent_endpoint(AgentCreateRequest(name="planner", model="agent-model", soul="Keep working.")))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    config = router.load_agent_config("planner", user_id=user_id)
+    assert config.memory_enabled is True
+    assert router.load_agent_soul("planner", user_id=user_id) == "Keep working."
 
 
 async def test_agent_update_drains_started_store_write_across_repeated_cancellation(_agent_env, monkeypatch):

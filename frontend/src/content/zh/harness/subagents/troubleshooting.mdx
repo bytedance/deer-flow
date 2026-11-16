@@ -33,6 +33,12 @@ import { Callout } from "nextra/components";
 
 **处理**：先看步骤时间线里是不是同一个工具被反复调用。确实需要更多预算时调整 `subagents.token_budget.max_tokens` 或 `loop_detection.tool_freq_overrides`。注意 token 预算的默认值与 `summarization.enabled` 联动，显式设置的值不受影响。
 
+### 结果标记 `model_length_capped`
+
+**原因**：provider 在模型输出长度上限处停止了子 Agent 的回答，答案不完整，该回答里的工具调用已被丢弃。
+
+**处理**：调大子 Agent 所用模型的输出上限（`max_tokens`），或者要求更短的输出，例如拆分任务、把长内容分几步写入文件。
+
 ### 状态是 `failed`，错误为 `Reached max_turns=N`
 
 轮次用尽且最后一条助手消息没有可用文本，结果正文为 `Task failed (capped: turn budget). Error: Reached max_turns=N`。处理办法同上。
@@ -116,7 +122,7 @@ import { Callout } from "nextra/components";
 
 ### 子 Agent 看不到用户自定义技能
 
-旧版本只读全局技能目录。[#4356](https://github.com/bytedance/deer-flow/pull/4356) 之后按父 run 的用户身份加载。若某个被动技能声明了 `allowed-tools` 导致子 Agent 丢失 `write_file` 等普通工具，那是 [#4497](https://github.com/bytedance/deer-flow/pull/4497) 之前的行为，现在技能懒激活，只有被选用的技能才施加其工具限制。
+旧版本只读全局技能目录。[#4356](https://github.com/bytedance/deer-flow/pull/4356) 之后按父 run 的用户身份加载。[#4497](https://github.com/bytedance/deer-flow/pull/4497) 之前，声明了 `allowed-tools` 的技能可能剥夺子 Agent 的 `write_file` 等普通工具；现在技能懒激活，而 `allowed-tools` 只是兼容性元数据，即使对已激活的技能也不限制或授予工具。工具权限由 Agent 的工具配置和运行时授权决定。
 
 ### 子 Agent 不知道今天的日期，或日期差了一天
 

@@ -33,6 +33,12 @@ Expected. A failed subagent is an ordinary tool result; the parent run does not 
 
 **Fix**: first check the step timeline for the same tool being called over and over. If more budget is genuinely needed, adjust `subagents.token_budget.max_tokens` or `loop_detection.tool_freq_overrides`. Note that the default token ceiling is coupled to `summarization.enabled`; an explicit value is not.
 
+### The result is marked `model_length_capped`
+
+**Cause**: the provider stopped the subagent's response at the model's output limit, so the answer is incomplete and any tool call in that response was dropped.
+
+**Fix**: raise the output limit (`max_tokens`) of the model the subagent uses, or ask for shorter output, for example by splitting the task or writing long content to a file in several steps.
+
 ### Status `failed` with the error `Reached max_turns=N`
 
 The turns ran out and the last assistant message had no usable text; the result reads `Task failed (capped: turn budget). Error: Reached max_turns=N`. Same fix as above.
@@ -116,7 +122,7 @@ The subagent's system prompt is the first message in state, and older index-base
 
 ### A subagent cannot see the user's custom skills
 
-Older versions read the global skill catalog only. Since [#4356](https://github.com/bytedance/deer-flow/pull/4356) skills load under the parent run's user identity. If a passive skill declaring `allowed-tools` stripped ordinary tools such as `write_file` from a subagent, that was the behavior before [#4497](https://github.com/bytedance/deer-flow/pull/4497); skills are now lazily activated and only a selected skill applies its tool restrictions.
+Older versions read the global skill catalog only. Since [#4356](https://github.com/bytedance/deer-flow/pull/4356) skills load under the parent run's user identity. Before [#4497](https://github.com/bytedance/deer-flow/pull/4497) a skill declaring `allowed-tools` could strip ordinary tools such as `write_file` from a subagent; skills are now lazily activated, and `allowed-tools` is compatibility metadata only — it never restricts or grants tools, even for an activated skill. Tool authority lives in the agent's tool configuration and runtime authorization.
 
 ### A subagent does not know today's date, or is a day off
 

@@ -3,10 +3,16 @@
 Uses a temp SQLite DB to test ORM-backed CRUD operations.
 """
 
+import contextlib
+import copy
+import os
 from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import DropSchema
 
 from deerflow.persistence.run import RunRepository
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
@@ -79,6 +85,49 @@ class _CustomRunStoreWithoutProgress(RunStore):
         return False
 
 
+class _LegacyExplicitPutRunStore(_CustomRunStoreWithoutProgress):
+    async def put(
+        self,
+        run_id,
+        *,
+        thread_id,
+        assistant_id=None,
+        user_id=None,
+        model_name=None,
+        status="pending",
+        operation_kind="run",
+        multitask_strategy="reject",
+        metadata=None,
+        kwargs=None,
+        error=None,
+        stop_reason=None,
+        created_at=None,
+        goal_verdict=None,
+        owner_worker_id=None,
+        lease_expires_at=None,
+        idempotency_key=None,
+    ):
+        del (
+            run_id,
+            thread_id,
+            assistant_id,
+            user_id,
+            model_name,
+            status,
+            operation_kind,
+            multitask_strategy,
+            metadata,
+            kwargs,
+            error,
+            stop_reason,
+            created_at,
+            goal_verdict,
+            owner_worker_id,
+            lease_expires_at,
+            idempotency_key,
+        )
+
+
 @pytest.mark.anyio
 async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
@@ -108,6 +157,33 @@ async def test_legacy_create_run_atomic_store_remains_compatible():
         )
 
 
+@pytest.mark.anyio
+async def test_non_idempotent_run_remains_compatible_with_legacy_explicit_put_signature():
+    manager = RunManager(store=_LegacyExplicitPutRunStore())
+
+    record = await manager.create("t1")
+
+    assert record.thread_id == "t1"
+
+
+@pytest.mark.anyio
+async def test_keyed_resume_rejects_legacy_create_run_atomic_adapter_before_admission():
+    from deerflow.runtime import RunIdempotencyUnsupported
+
+    manager = RunManager(store=_CustomRunStoreWithoutProgress())
+
+    with pytest.raises(RunIdempotencyUnsupported, match="does not support keyed resume"):
+        await manager.create_or_reject(
+            "t1",
+            idempotency_key="http-run:resume",
+            idempotency_request={
+                "version": 1,
+                "kind": "resume",
+                "sha256": "a" * 64,
+            },
+        )
+
+
 class TestRunRepository:
     @pytest.mark.anyio
     async def test_put_and_get(self, tmp_path):
@@ -134,6 +210,30 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_manager_snapshot_put_preserves_private_idempotency_request(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo, worker_id="worker-a")
+        identity = {
+            "version": 1,
+            "kind": "resume",
+            "sha256": "a" * 64,
+        }
+        record = await manager.create_or_reject(
+            "t1",
+            idempotency_key="http-run:key",
+            idempotency_request=identity,
+        )
+
+        record.error = "snapshot retry"
+        assert await manager._persist_to_store(record) is True
+
+        row = await repo.get(record.run_id)
+        assert row is not None
+        assert row["idempotency_request"] == identity
+        assert row["error"] == "snapshot retry"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_get_missing_returns_none(self, tmp_path):
         repo = await _make_repo(tmp_path)
         assert await repo.get("nope") is None
@@ -148,6 +248,107 @@ class TestRunRepository:
         assert updated is True
         assert row["status"] == "running"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_answer_approval_is_single_winner_and_restores_exact_pause(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        original_metadata = {"hitl_approval": {"request_id": "approval-1"}, "retained": True}
+        answered_metadata = {"retained": True}
+        answered_updated_at = "2026-01-02T03:04:05.123456+00:00"
+        await repo.put(
+            "paused-run",
+            thread_id="t1",
+            status="waiting_for_input",
+            metadata=original_metadata,
+        )
+
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, answered_updated_at=answered_updated_at, expected_request_id="approval-0") is False
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, answered_updated_at=answered_updated_at, expected_request_id="approval-1") is True
+        assert await repo.answer_approval("paused-run", metadata=answered_metadata, answered_updated_at=answered_updated_at, expected_request_id="approval-1") is False
+        row = await repo.get("paused-run")
+        assert row["status"] == "success"
+        assert row["metadata"] == answered_metadata
+        assert row["updated_at"] == answered_updated_at
+
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_updated_at="2026-01-02T03:04:05.123455+00:00") is False
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_updated_at=answered_updated_at) is True
+        assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_updated_at=answered_updated_at) is False
+        restored = await repo.get("paused-run")
+        assert restored["status"] == "waiting_for_input"
+        assert restored["metadata"] == original_metadata
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_approval_cas_compiles_without_postgres_json_equality(self):
+        captured = []
+
+        class FakeResult:
+            rowcount = 1
+
+        class FakeSession:
+            async def execute(self, stmt):
+                captured.append(stmt)
+                return FakeResult()
+
+            async def commit(self):
+                return None
+
+        class FakeSessionContext:
+            async def __aenter__(self):
+                return FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+        repo = RunRepository(lambda: FakeSessionContext())
+        repo._next_change_seq = AsyncMock(return_value=1)
+        await repo.answer_approval(
+            "paused-run",
+            metadata={"retained": True},
+            answered_updated_at="2026-01-02T03:04:05.123456+00:00",
+            expected_request_id="approval-1",
+        )
+        await repo.restore_approval(
+            "paused-run",
+            metadata={"hitl_approval": {"request_id": "approval-1"}},
+            expected_updated_at="2026-01-02T03:04:05.123456+00:00",
+        )
+
+        answer_where = str(captured[0].compile(dialect=postgresql.dialect())).split(" WHERE ", 1)[1]
+        restore_where = str(captured[1].compile(dialect=postgresql.dialect())).split(" WHERE ", 1)[1]
+        assert "metadata_json" in answer_where
+        assert "->>" in answer_where
+        assert "metadata_json =" not in answer_where
+        assert "updated_at =" in restore_where
+        assert "metadata_json =" not in restore_where
+
+    @pytest.mark.anyio
+    async def test_answer_and_restore_approval_on_postgres(self):
+        uri = os.environ.get("TEST_POSTGRES_URI") or os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+        if not uri:
+            pytest.skip("requires TEST_POSTGRES_URI or DEERFLOW_TEST_POSTGRES_URL")
+
+        from support.postgres import asyncpg_test_url
+
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.persistence.engine import get_engine, get_session_factory, init_engine_from_config
+
+        schema = f"approval_cas_{uuid4().hex}"
+        config = DatabaseConfig(backend="postgres", postgres_url=asyncpg_test_url(uri), postgres_schema=schema)
+        await init_engine_from_config(config)
+        try:
+            repo = RunRepository(get_session_factory())
+            original_metadata = {"hitl_approval": {"request_id": "approval-1"}, "retained": True}
+            answered_updated_at = "2026-01-02T03:04:05.123456+00:00"
+            await repo.put("paused-run", thread_id="t1", status="waiting_for_input", metadata=original_metadata)
+            assert await repo.answer_approval("paused-run", metadata={"retained": True}, answered_updated_at=answered_updated_at, expected_request_id="approval-0") is False
+            assert await repo.answer_approval("paused-run", metadata={"retained": True}, answered_updated_at=answered_updated_at, expected_request_id="approval-1") is True
+            assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_updated_at="2026-01-02T03:04:05.123455+00:00") is False
+            assert await repo.restore_approval("paused-run", metadata=original_metadata, expected_updated_at=answered_updated_at) is True
+        finally:
+            async with get_engine().begin() as connection:
+                await connection.execute(DropSchema(schema, cascade=True))
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_update_status_returns_false_for_missing_row(self, tmp_path):
@@ -831,6 +1032,55 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+    async def test_peer_interrupt_strategy_reuses_live_idempotency_key_before_foreign_lease_conflict(
+        self,
+        tmp_path,
+        strategy,
+    ):
+        from deerflow.config.run_ownership_config import RunOwnershipConfig
+
+        repo = await _make_repo(tmp_path)
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        owner = RunManager(
+            store=repo,
+            worker_id="worker-a",
+            run_ownership_config=ownership,
+        )
+        peer = RunManager(
+            store=repo,
+            worker_id="worker-b",
+            run_ownership_config=ownership,
+        )
+        first = await owner.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            multitask_strategy=strategy,
+            idempotency_key="http-run:same",
+        )
+
+        reused = await peer.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            multitask_strategy=strategy,
+            idempotency_key="http-run:same",
+        )
+
+        assert reused.run_id == first.run_id
+        assert reused.idempotency_reused is True
+        assert reused.store_only is True
+        stored = await repo.get(first.run_id, user_id="user-1")
+        assert stored is not None
+        assert stored["status"] == "pending"
+        assert stored["owner_worker_id"] == "worker-a"
+        assert len(await repo.list_by_thread("thread-T", user_id="user-1")) == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_peer_idempotent_reuse_releases_thread_after_owner_completes(self, tmp_path):
         repo = await _make_repo(tmp_path)
         owner = RunManager(store=repo, worker_id="worker-a")
@@ -1183,8 +1433,8 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
-        """The SQL takeover CAS must reject a candidate renewed after its scan."""
+    async def test_reconciliation_claims_run_whose_expired_owner_attempted_renewal(self, tmp_path):
+        """An expired lease cannot be renewed to evade the SQL takeover CAS."""
         repo = await _make_repo(tmp_path)
         grace = 10
         run_id = "renewed-after-scan"
@@ -1207,7 +1457,7 @@ class TestRunRepository:
                     owner_worker_id=owner_worker_id,
                     lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
                 )
-                assert renewed is True
+                assert renewed is False
                 return rows
 
             repo.list_inflight_with_expired_lease = scan_then_renew
@@ -1216,10 +1466,10 @@ class TestRunRepository:
             recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
 
             row = await repo.get(run_id)
-            assert recovered == []
+            assert [r.run_id for r in recovered] == [run_id]
             assert row is not None
-            assert row["status"] == "running"
-            assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
+            assert row["status"] == "error"
+            assert datetime.fromisoformat(row["lease_expires_at"]) < datetime.now(UTC)
         finally:
             await _cleanup()
 
@@ -1356,3 +1606,101 @@ class TestMemoryRunStoreDeleteByThread:
         # list_by_thread is run-scoped, so the surviving reservation is not listed
         # even though the row is still tracked.
         assert await store.list_by_thread("t1", user_id="alice") == []
+
+
+class TestMergeOwnedMetadata:
+    """Both stores merge metadata only for the live owner of an active row."""
+
+    @staticmethod
+    @contextlib.asynccontextmanager
+    async def _store(kind, tmp_path):
+        if kind == "memory":
+            from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+            yield MemoryRunStore()
+            return
+        if kind == "sqlite":
+            try:
+                yield await _make_repo(tmp_path)
+            finally:
+                await _cleanup()
+            return
+        uri = os.environ.get("TEST_POSTGRES_URI") or os.environ.get("DEERFLOW_TEST_POSTGRES_URL")
+        if not uri:
+            pytest.skip("requires TEST_POSTGRES_URI or DEERFLOW_TEST_POSTGRES_URL")
+
+        from support.postgres import asyncpg_test_url
+
+        from deerflow.config.database_config import DatabaseConfig
+        from deerflow.persistence.engine import get_engine, get_session_factory, init_engine_from_config
+
+        schema = f"owned_metadata_{uuid4().hex}"
+        await init_engine_from_config(DatabaseConfig(backend="postgres", postgres_url=asyncpg_test_url(uri), postgres_schema=schema))
+        try:
+            yield RunRepository(get_session_factory())
+        finally:
+            async with get_engine().begin() as connection:
+                await connection.execute(DropSchema(schema, cascade=True))
+            await _cleanup()
+
+    @staticmethod
+    async def _put_owned(store, *, status="running", lease_delta=timedelta(seconds=30)):
+        lease = (datetime.now(UTC) + lease_delta).isoformat()
+        await store.put(
+            "run-1",
+            thread_id="t1",
+            status=status,
+            owner_worker_id="worker-a",
+            lease_expires_at=lease,
+            error="kept",
+            metadata={"existing": 1},
+        )
+        # MemoryRunStore.get returns its live row; compare against a copy.
+        return copy.deepcopy(await store.get("run-1"))
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("kind", ["memory", "sqlite", "postgresql"])
+    @pytest.mark.parametrize("status", ["pending", "running"])
+    async def test_live_owner_merges_only_metadata(self, kind, status, tmp_path):
+        async with self._store(kind, tmp_path) as store:
+            before = await self._put_owned(store, status=status)
+
+            assert await store.merge_owned_metadata("run-1", {"evidence": {"v": 1}}, owner_worker_id="worker-a") is True
+
+            after = await store.get("run-1")
+            assert after["metadata"] == {"existing": 1, "evidence": {"v": 1}}
+            for key in ("status", "owner_worker_id", "lease_expires_at", "error", "stop_reason"):
+                assert after[key] == before[key]
+            assert after["change_seq"] > before["change_seq"]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("kind", ["memory", "sqlite", "postgresql"])
+    @pytest.mark.parametrize("case", ["foreign-owner", "expired-lease", "terminal-row", "peer-takeover"])
+    async def test_rejects_write_without_live_ownership(self, kind, case, tmp_path):
+        async with self._store(kind, tmp_path) as store:
+            owner = "worker-a"
+            if case == "foreign-owner":
+                await self._put_owned(store)
+                owner = "worker-b"
+            elif case == "expired-lease":
+                await self._put_owned(store, lease_delta=timedelta(seconds=-5))
+            elif case == "terminal-row":
+                await self._put_owned(store, status="success")
+            else:
+                await self._put_owned(store, lease_delta=timedelta(seconds=-60))
+                assert await store.claim_for_takeover("run-1", grace_seconds=10, error="reclaimed", stop_reason="orphan_recovered") is True
+            before = copy.deepcopy(await store.get("run-1"))
+
+            assert await store.merge_owned_metadata("run-1", {"evidence": {"v": 1}}, owner_worker_id=owner) is False
+
+            after = await store.get("run-1")
+            for key in ("status", "metadata", "owner_worker_id", "lease_expires_at", "error", "stop_reason"):
+                assert after[key] == before[key]
+
+    @pytest.mark.anyio
+    async def test_missing_row_is_rejected(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            assert await repo.merge_owned_metadata("missing", {"evidence": {}}, owner_worker_id="worker-a") is False
+        finally:
+            await _cleanup()

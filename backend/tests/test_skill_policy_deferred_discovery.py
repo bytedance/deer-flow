@@ -1,3 +1,15 @@
+"""Deferred tool/skill discovery stays catalog/hash scoped.
+
+With the Skill tool policy removed, `allowed-tools` never filters
+model-visible schemas, execution, or tool_search promotions. These tests pin
+the still-supported deferred behaviors: the deferred filter scopes promotion by
+catalog hash and the genuine user turn, promoted names come only from the
+build-time catalog, the
+promotion audit records the final Command, and skill discovery metadata
+(describe_skill) stays catalog scoped. Genuine authorization denials are
+covered by the authorization suites.
+"""
+
 import asyncio
 import json
 from pathlib import Path
@@ -9,11 +21,9 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
-from deerflow.agents.middlewares.mcp_routing_middleware import McpRoutingMiddleware
-from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
 from deerflow.agents.thread_state import ThreadState
-from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, write_slash_skill_source_path
 from deerflow.runtime.serialization import serialize
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.types import Skill, SkillCategory
@@ -22,15 +32,18 @@ from deerflow.tools.mcp_metadata import tag_mcp_tool
 
 _SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
 _CALC_CALLS: list[str] = []
-_DENIED_CALLS: list[str] = []
 
 
 class _Recorder:
     def __init__(self):
         self.calls: list[dict] = []
+        self.skill_usages: list[dict] = []
 
     def record_middleware(self, **kwargs):
         self.calls.append(kwargs)
+
+    def record_skill_usage(self, *args, **kwargs):
+        self.skill_usages.append(args[0] if args else kwargs)
 
 
 @tool
@@ -41,10 +54,9 @@ def calc(expression: str) -> str:
 
 
 @tool
-def denied_lookup(query: str) -> str:
-    """Run a lookup the active skill does not authorize."""
-    _DENIED_CALLS.append(query)
-    return "denied data"
+def other_lookup(query: str) -> str:
+    """Another catalog tool."""
+    return "other data"
 
 
 class _StorageStub:
@@ -71,7 +83,7 @@ class _RecordingModel(GenericFakeChatModel):
         return self
 
 
-def _skill(name: str, allowed_tools: list[str]) -> Skill:
+def _skill(name: str, allowed_tools: list[str] | None) -> Skill:
     skill_dir = Path(f"/tmp/skills/public/{name}")
     return Skill(
         name=name,
@@ -81,35 +93,87 @@ def _skill(name: str, allowed_tools: list[str]) -> Skill:
         skill_file=skill_dir / "SKILL.md",
         relative_path=Path(name),
         category=SkillCategory.PUBLIC,
-        allowed_tools=tuple(allowed_tools),
+        allowed_tools=None if allowed_tools is None else tuple(allowed_tools),
         enabled=True,
     )
-
-
-def _active_policy(skill: Skill) -> tuple[SkillToolPolicyMiddleware, dict[str, object]]:
-    middleware = SkillToolPolicyMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
-    middleware._storage = lambda: _StorageStub([skill])
-    context: dict[str, object] = {}
-    write_slash_skill_source_path(
-        context,
-        skill.get_container_file_path(),
-        owner_token=_SLASH_SOURCE_OWNER_TOKEN,
-    )
-    return middleware, context
 
 
 def _deferred_setup():
     return build_deferred_tool_setup(
-        [tag_mcp_tool(calc), tag_mcp_tool(denied_lookup)],
+        [tag_mcp_tool(calc), tag_mcp_tool(other_lookup)],
         enabled=True,
     )
 
 
-def test_passive_empty_skill_policy_preserves_deferred_mcp_discovery_and_calling():
-    passive_fixture = _skill("example-safe-skill", [])
-    storage = _StorageStub([passive_fixture])
-    policy = SkillToolPolicyMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
-    policy._storage = lambda: storage
+class _ActivationStorageStub:
+    """Temp-backed storage stub: load_skills plus the path guards the real
+    SkillActivationMiddleware needs to read SKILL.md from disk."""
+
+    def __init__(self, root: Path, skills: list[Skill]):
+        self._root = root
+        self._skills = skills
+
+    def load_skills(self, *, enabled_only: bool = False) -> list[Skill]:
+        return [skill for skill in self._skills if skill.enabled or not enabled_only]
+
+    def get_container_root(self) -> str:
+        return "/mnt/skills"
+
+    def get_skills_root_path(self) -> Path:
+        return self._root
+
+    def validate_skill_file_path(self, skill_file: Path) -> Path:
+        resolved = skill_file.resolve()
+        root = self._root.resolve()
+        resolved.relative_to(root)  # raises ValueError outside the root
+        return resolved
+
+
+def _write_activated_skill(tmp_path: Path) -> Skill:
+    """Real SKILL.md with a declared-but-empty allowed-tools sequence."""
+    skill_dir = tmp_path / "example-safe-skill"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "\n".join(
+            [
+                "---",
+                "name: example-safe-skill",
+                "description: Uses the configured MCP calculator",
+                "license: MIT",
+                "allowed-tools: []",
+                "---",
+                "",
+                "# Calculator",
+                "",
+                "Use the deferred MCP calculator.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return Skill(
+        name="example-safe-skill",
+        description="Uses the configured MCP calculator",
+        license="MIT",
+        skill_dir=skill_dir,
+        skill_file=skill_file,
+        relative_path=Path("example-safe-skill"),
+        category=SkillCategory.CUSTOM,
+        allowed_tools=(),
+        enabled=True,
+    )
+
+
+def test_enabled_skills_preserve_deferred_mcp_discovery_and_calling(tmp_path):
+    """A real slash activation of a skill whose SKILL.md declares an empty
+    allowed-tools list still leaves deferred discovery and promotion intact:
+    tool_search stays bound, `calc` is promoted and executes, and only the
+    promoted tool becomes visible (allowed-tools is compatibility metadata,
+    never a filter)."""
+    skill = _write_activated_skill(tmp_path)
+    storage = _ActivationStorageStub(tmp_path, [skill])
+    activation = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    activation._storage = lambda: storage
     setup = _deferred_setup()
     model = _RecordingModel(
         [
@@ -119,65 +183,6 @@ def test_passive_empty_skill_policy_preserves_deferred_mcp_discovery_and_calling
                     {
                         "name": "tool_search",
                         "args": {"query": "select:calc"},
-                        "id": "passive-search-call",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "calc",
-                        "args": {"expression": "2 + 2"},
-                        "id": "passive-calc-call",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(content="done"),
-        ]
-    )
-    _CALC_CALLS.clear()
-    graph = create_agent(
-        model=model,
-        tools=[calc, denied_lookup, setup.tool_search_tool],
-        middleware=[
-            policy,
-            DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
-        ],
-        state_schema=ThreadState,
-    )
-
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="use the configured MCP calculator")]},
-        context={},
-    )
-
-    assert model.bound_tool_names[0] == ["tool_search"]
-    assert "calc" in model.bound_tool_names[1]
-    # This tool remains hidden because it was not promoted, not because the passive
-    # skill applied a policy restriction.
-    assert "denied_lookup" not in model.bound_tool_names[1]
-    assert _CALC_CALLS == ["2 + 2"]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
-    assert storage.load_calls == 0
-
-
-def test_active_skill_can_search_promote_and_call_allowed_deferred_tool():
-    restricted = _skill("restricted", ["calc"])
-    policy, context = _active_policy(restricted)
-    recorder = _Recorder()
-    context["__run_journal"] = recorder
-    setup = _deferred_setup()
-    model = _RecordingModel(
-        [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "tool_search",
-                        "args": {"query": "select:calc,denied_lookup"},
                         "id": "search-call",
                         "type": "tool_call",
                     }
@@ -200,38 +205,38 @@ def test_active_skill_can_search_promote_and_call_allowed_deferred_tool():
     _CALC_CALLS.clear()
     graph = create_agent(
         model=model,
-        tools=[calc, denied_lookup, setup.tool_search_tool],
+        tools=[calc, other_lookup, setup.tool_search_tool],
         middleware=[
-            DeferredToolPromotionAuditMiddleware(setup.deferred_names, setup.catalog_hash),
-            policy,
+            activation,
             DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
         ],
         state_schema=ThreadState,
     )
 
-    result = asyncio.run(
-        graph.ainvoke(
-            {"messages": [HumanMessage(content="use the allowed calculator")]},
-            context=context,
-        )
+    recorder = _Recorder()
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="/example-safe-skill use the configured MCP calculator", id="msg-1")], "promoted": {"catalog_hash": setup.catalog_hash, "names": []}},
+        context={"__run_journal": recorder},
+        config={"recursion_limit": 20},
     )
 
+    # The slash activation really ran: usage was recorded for the skill.
+    assert [usage.get("name") for usage in recorder.skill_usages if isinstance(usage, dict)] == ["example-safe-skill"]
     assert model.bound_tool_names[0] == ["tool_search"]
     assert "calc" in model.bound_tool_names[1]
-    assert "denied_lookup" not in model.bound_tool_names[1]
+    # Still hidden because it was not promoted — not by any skill declaration.
+    assert "other_lookup" not in model.bound_tool_names[1]
     assert _CALC_CALLS == ["2 + 2"]
-    assert result["promoted"] == {"catalog_hash": setup.catalog_hash, "names": ["calc"]}
-    search_result = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "search-call"]
-    assert len(search_result) == 1
-    assert '"name": "calc"' in search_result[0].content
-    assert "denied_lookup" not in search_result[0].content
-    assert recorder.calls[0]["changes"]["tool_names"] == ["calc"]
-    assert "denied_lookup" not in recorder.calls[0]["changes"]["tool_names"]
+    assert result["promoted"] == {
+        "catalog_hash": setup.catalog_hash,
+        "names": ["calc"],
+        "turn_id": "msg-1",
+    }
 
 
-def test_tool_search_promotion_cannot_expose_or_execute_denied_deferred_tool():
-    restricted = _skill("restricted", ["calc"])
-    policy, context = _active_policy(restricted)
+def test_promotion_is_scoped_to_the_build_time_catalog():
+    """tool_search can only promote names present in the deferred catalog; a
+    query naming a non-deferred tool promotes nothing."""
     setup = _deferred_setup()
     model = _RecordingModel(
         [
@@ -240,19 +245,8 @@ def test_tool_search_promotion_cannot_expose_or_execute_denied_deferred_tool():
                 tool_calls=[
                     {
                         "name": "tool_search",
-                        "args": {"query": "select:denied_lookup"},
-                        "id": "search-denied",
-                        "type": "tool_call",
-                    }
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "denied_lookup",
-                        "args": {"query": "secret"},
-                        "id": "denied-call",
+                        "args": {"query": "select:read_file"},
+                        "id": "search-miss",
                         "type": "tool_call",
                     }
                 ],
@@ -260,55 +254,42 @@ def test_tool_search_promotion_cannot_expose_or_execute_denied_deferred_tool():
             AIMessage(content="done"),
         ]
     )
-    _DENIED_CALLS.clear()
     graph = create_agent(
         model=model,
-        tools=[calc, denied_lookup, setup.tool_search_tool],
+        tools=[calc, other_lookup, setup.tool_search_tool],
         middleware=[
-            policy,
             DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
         ],
         state_schema=ThreadState,
     )
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="try the denied lookup")]},
-        context=context,
+        {"messages": [HumanMessage(content="search for a non-deferred tool", id="user-catalog-miss")]},
+        context={},
     )
 
-    assert all("denied_lookup" not in names for names in model.bound_tool_names)
-    assert _DENIED_CALLS == []
     assert result["promoted"] == {
         "catalog_hash": setup.catalog_hash,
         "names": [],
+        "turn_id": "user-catalog-miss",
     }
-    search_result = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "search-denied"]
-    assert len(search_result) == 1
-    assert "denied_lookup" not in search_result[0].content
-    blocked = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "denied-call"]
-    assert len(blocked) == 1
-    assert blocked[0].status == "error"
-    assert "not allowed by the active skill policy" in blocked[0].content
+    assert all("calc" not in names for names in model.bound_tool_names[1:])
 
 
-def test_auto_promotion_cannot_expose_or_execute_denied_deferred_tool():
-    restricted = _skill("restricted", ["calc"])
-    policy, context = _active_policy(restricted)
+def test_promotion_audit_records_final_command_names():
+    """The audit middleware observes the final tool_search Command and records
+    the promoted names exactly once per search."""
     setup = _deferred_setup()
-    routing = McpRoutingMiddleware(
-        {"denied_lookup": {"priority": 100, "keywords": ["denied lookup"]}},
-        setup.catalog_hash,
-        3,
-    )
+    recorder = _Recorder()
     model = _RecordingModel(
         [
             AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": "denied_lookup",
-                        "args": {"query": "secret"},
-                        "id": "auto-denied-call",
+                        "name": "tool_search",
+                        "args": {"query": "select:calc,other_lookup"},
+                        "id": "search-call",
                         "type": "tool_call",
                     }
                 ],
@@ -316,43 +297,34 @@ def test_auto_promotion_cannot_expose_or_execute_denied_deferred_tool():
             AIMessage(content="done"),
         ]
     )
-    _DENIED_CALLS.clear()
     graph = create_agent(
         model=model,
-        tools=[calc, denied_lookup, setup.tool_search_tool],
+        tools=[calc, other_lookup, setup.tool_search_tool],
         middleware=[
-            policy,
-            routing,
+            DeferredToolPromotionAuditMiddleware(setup.deferred_names, setup.catalog_hash),
             DeferredToolFilterMiddleware(setup.deferred_names, setup.catalog_hash),
         ],
         state_schema=ThreadState,
     )
 
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="run the denied lookup")]},
-        context=context,
+    asyncio.run(
+        graph.ainvoke(
+            {"messages": [HumanMessage(content="promote both tools")]},
+            context={"__run_journal": recorder},
+        )
     )
 
-    assert all("denied_lookup" not in names for names in model.bound_tool_names)
-    assert _DENIED_CALLS == []
-    assert result["promoted"] == {
-        "catalog_hash": setup.catalog_hash,
-        "names": ["denied_lookup"],
-    }
-    blocked = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "auto-denied-call"]
-    assert len(blocked) == 1
-    assert blocked[0].status == "error"
-    assert "not allowed by the active skill policy" in blocked[0].content
+    assert recorder.calls[0]["changes"]["tool_names"] == ["calc", "other_lookup"]
 
 
-def test_restrictive_skill_keeps_deferred_skill_discovery_available():
-    restricted = _skill("restricted", [])
-    hidden = _skill("hidden", ["write_file"])
+def test_skill_discovery_metadata_stays_catalog_scoped():
+    """describe_skill answers only from its build-time catalog, independent of
+    any skill's allowed-tools declaration."""
+    listed = _skill("listed", [])
     skill_setup = build_skill_search_setup(
-        [restricted],
+        [listed],
         enabled=True,
     )
-    policy, context = _active_policy(restricted)
     model = _RecordingModel(
         [
             AIMessage(
@@ -360,7 +332,7 @@ def test_restrictive_skill_keeps_deferred_skill_discovery_available():
                 tool_calls=[
                     {
                         "name": "describe_skill",
-                        "args": {"name": f"select:{restricted.name},{hidden.name}"},
+                        "args": {"name": f"select:{listed.name},unknown"},
                         "id": "describe-call",
                         "type": "tool_call",
                     }
@@ -372,37 +344,40 @@ def test_restrictive_skill_keeps_deferred_skill_discovery_available():
     graph = create_agent(
         model=model,
         tools=[skill_setup.describe_skill_tool],
-        middleware=[policy],
+        middleware=[],
         state_schema=ThreadState,
     )
 
     result = graph.invoke(
         {"messages": [HumanMessage(content="describe available skills")]},
-        context=context,
+        context={},
     )
 
     assert model.bound_tool_names[0] == ["describe_skill"]
     described = [message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "describe-call"]
     assert len(described) == 1
-    assert "Skill: restricted" in described[0].content
-    assert "Skill: hidden" not in described[0].content
+    assert "Skill: listed" in described[0].content
+    assert "Skill: unknown" not in described[0].content
 
 
-def test_policy_tokens_do_not_appear_in_debug_or_checkpoint_streams():
-    restricted = _skill("restricted", [])
-    policy, context = _active_policy(restricted)
+def test_activation_tokens_do_not_appear_in_debug_or_checkpoint_streams(tmp_path):
+    """The slash-source owner token stays out of observable streams even though
+    the (historical) policy decision key is no longer published."""
+    skill = _skill("restricted", [])
+    activation = SkillActivationMiddleware(slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN)
+    activation._storage = lambda: _StorageStub([skill])
     model = _RecordingModel([AIMessage(content="done")])
     graph = create_agent(
         model=model,
         tools=[],
-        middleware=[policy],
+        middleware=[activation],
         state_schema=ThreadState,
     )
 
     events = list(
         graph.stream(
             {"messages": [HumanMessage(content="finish")]},
-            context=context,
+            context={},
             stream_mode=["debug", "checkpoints"],
         )
     )
@@ -411,6 +386,5 @@ def test_policy_tokens_do_not_appear_in_debug_or_checkpoint_streams():
 
     assert events
     assert _SLASH_SOURCE_OWNER_TOKEN not in payload
-    assert policy._decision_owner_token not in payload
     assert "__slash_skill_secret_source" not in payload
-    assert SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY not in payload
+    assert "__skill_tool_policy_decision" not in payload

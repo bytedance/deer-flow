@@ -47,6 +47,7 @@ import {
 import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
+import { truncateToCodePoints } from "@/core/utils/text";
 
 import { SettingsSection } from "./settings-section";
 
@@ -216,14 +217,7 @@ function isMemorySummaryEmpty(memory: UserMemory) {
 
 function truncateFactPreview(content: string, maxLength = 140) {
   const normalized = content.replace(/\s+/g, " ").trim();
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  const ellipsis = "...";
-  if (maxLength <= ellipsis.length) {
-    return normalized.slice(0, maxLength);
-  }
-  return `${normalized.slice(0, maxLength - ellipsis.length)}${ellipsis}`;
+  return truncateToCodePoints(normalized, maxLength, "...");
 }
 
 function upperFirst(str: string) {

@@ -14,7 +14,7 @@ Middleware sees each model and tool call inside an agent. The four contributions
 | `TaskLifecycleContributor`   | `registry.task_lifecycle()`      | Start and stop of every lead run and subagent | async, awaited | The task store         |
 | `SystemModelCallObserver`    | `registry.system_model_observer()` | After each DeerFlow-owned model call   | async         | The task store, or detached |
 | `AgentAssemblyObserver`      | `registry.agent_assembly_observer()` | At the end of every agent construction | **sync**      | The app store only       |
-| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | After each summarization          | async, fire-and-forget | Detached         |
+| `ContextCompactionObserver`  | `registry.context_compaction_observer()` | After each summarization          | async, fire-and-forget | The task store, or detached |
 
 All the examples on this page come from one extension that registers all four:
 
@@ -312,10 +312,13 @@ Summarization replaces many messages with one summary. Afterwards, nothing in st
 | `output_content_hash`     | `canonical_hash` of the summary text                           |
 | `compacted_message_count` | How many messages were removed                                 |
 | `kept_message_count`      | How many messages were kept                                    |
+| `task_id`                 | The task the compaction happened in, or `None` outside a task  |
+| `run_id`                  | That task's run, or `None`                                     |
+| `thread_id`               | That task's thread, or `None`                                  |
 
 To match an event against messages you hold, hash exactly the same way: `canonical_hash(message.content)`, passing the content itself. Never stringify it first, because multimodal content is a list of dicts and `str()` depends on key order. Do not try to rediscover the summary later by hashing what the model is shown: the prompt carries a bounded, escaped rendering of the summary, whose hash will not match `output_content_hash`.
 
-The notification is fire-and-forget. It is dispatched to the notification loop without blocking the model turn, and the observer receives a **detached** store, because there is no live task at that call site. When no compaction observer is registered, the host skips the hashing pass too.
+The notification is fire-and-forget. It is dispatched to the notification loop without blocking the model turn. Inside a lead run or subagent, the observer receives that task's store, and `task_id`, `run_id`, and `thread_id` are copied from the `TaskInfo` the host keeps in it, so you can key a compaction on `(thread_id, run_id)` instead of matching hashes. A manual `/compact` runs outside any task, so the observer receives a **detached** store and the three ids are `None`. A subagent started without a parent run passes its own store but has no `TaskInfo`, so its ids are `None` too. When no compaction observer is registered, the host skips the hashing pass too.
 
 ### Example
 
@@ -323,12 +326,13 @@ The notification is fire-and-forget. It is dispatched to the notification loop w
 class CompactionLogger:
     async def on_context_compacted(self, app_store: ExtensionData, task_store: ExtensionData, event: CompactionEvent) -> None:
         logger.info(
-            "%s v%s folded %d message(s) into summary %s, kept %d",
+            "%s v%s folded %d message(s) into summary %s, kept %d (run %s)",
             event.transform_kind,
             event.transform_version,
             event.compacted_message_count,
             event.output_content_hash[:12],
             event.kept_message_count,
+            event.run_id or "none",
         )
 ```
 

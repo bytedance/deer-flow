@@ -121,10 +121,10 @@ def _install_manager(monkeypatch, manager):
 class TestGetMemoryTools:
     """Tests for get_memory_tools registry."""
 
-    def test_returns_four_tools(self):
-        """Should return exactly 4 tools."""
+    def test_returns_five_tools(self):
+        """Should return exactly 5 tools."""
         tools = get_memory_tools()
-        assert len(tools) == 4
+        assert len(tools) == 5
 
     def test_tools_have_unique_names(self):
         """All tools should have unique names."""
@@ -132,6 +132,7 @@ class TestGetMemoryTools:
         names = [t.name for t in tools]
         assert len(names) == len(set(names))
         assert "memory_search" in names
+        assert "memory_get" in names
         assert "memory_add" in names
         assert "memory_update" in names
         assert "memory_delete" in names
@@ -392,6 +393,7 @@ class TestModeGating:
 
         tool_names = [t.name for t in extra_tools]
         assert "memory_search" in tool_names
+        assert "memory_get" in tool_names
         assert "memory_add" in tool_names
         assert "memory_update" in tool_names
         assert "memory_delete" in tool_names
@@ -530,6 +532,7 @@ class TestModeGating:
             memory=MemoryConfig(enabled=True, mode="tool"),
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
+            hitl_approval=SimpleNamespace(enabled=False),
             database=SimpleNamespace(checkpoint_channel_mode="full"),
             authorization=AuthorizationConfig(enabled=False),
         )
@@ -566,6 +569,7 @@ class TestModeGating:
             skills=SimpleNamespace(deferred_discovery=False, container_path="/tmp/skills"),
             tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=0),
             database=SimpleNamespace(checkpoint_channel_mode="full"),
+            hitl_approval=SimpleNamespace(enabled=False),
             authorization=AuthorizationConfig(enabled=False),
         )
 

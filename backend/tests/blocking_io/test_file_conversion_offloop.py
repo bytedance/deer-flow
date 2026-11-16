@@ -1,13 +1,13 @@
 """Regression anchor: ``convert_file_to_markdown`` must not block the event loop.
 
-The converter itself is offloaded to a thread for files above 1 MB
-(``_ASYNC_THRESHOLD_BYTES``), but the converted markdown was written back with
-a synchronous ``Path.write_text`` on the event loop — a multi-megabyte blocking
-write in the upload ingestion path (``app/gateway/upload_ingestion.py`` calls
-this per uploaded document). This anchor drives the real
+Parsing and Markdown write-back must stay off-loop for every source size.
+The converted Markdown used to be written back with a synchronous
+``Path.write_text`` on the event loop — a multi-megabyte blocking write in the
+upload ingestion path (``app/gateway/upload_ingestion.py`` calls this per
+uploaded document). This anchor drives the real
 ``convert_file_to_markdown`` under the strict Blockbuster gate with the
-converter patched to return a large payload, so only the write-back is
-exercised.
+converter patched to read its tiny source and return a large payload, so both
+parsing IO and write-back are exercised.
 
 If the write regresses back onto the event loop, Blockbuster raises
 ``BlockingError`` — which the function's broad ``except`` turns into a ``None``
@@ -25,11 +25,11 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-async def test_convert_file_to_markdown_write_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_convert_file_to_markdown_parse_and_write_do_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from deerflow.utils import file_conversion
 
     large_text = "x" * (2 * 1024 * 1024)  # 2 MB conversion result
-    monkeypatch.setattr(file_conversion, "_do_convert", lambda *_args, **_kwargs: large_text)
+    monkeypatch.setattr(file_conversion, "_do_convert", lambda path, _converter: path.read_text(encoding="utf-8") + large_text)
 
     source = tmp_path / "doc.txt"
     source.write_text("source", encoding="utf-8")  # test-side seeding (not in scanned_modules)
@@ -37,7 +37,7 @@ async def test_convert_file_to_markdown_write_does_not_block_event_loop(tmp_path
     md_path = await file_conversion.convert_file_to_markdown(source)
 
     assert md_path is not None, "conversion failed — see captured logs for the swallowed error"
-    assert md_path.read_text(encoding="utf-8") == large_text
+    assert md_path.read_text(encoding="utf-8") == "source" + large_text
 
 
 async def test_cancelled_conversion_cleanup_failure_preserves_cancellation(
@@ -93,3 +93,56 @@ async def test_cancelled_conversion_cleanup_failure_preserves_cancellation(
         finish.set()
 
     assert any("partial conversion output" in record.getMessage() for record in caplog.records), "cleanup failure should be logged inside the handler, not escaped"
+
+
+@pytest.mark.parametrize("pdf_converter", ["markitdown", "pymupdf4llm"])
+@pytest.mark.parametrize("warm_cache", [False, True], ids=["cold_config", "cached_config"])
+async def test_conversion_resolves_real_config_in_the_parser_worker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pdf_converter: str, warm_cache: bool) -> None:
+    from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
+    from deerflow.config.extensions_config import reset_extensions_config
+    from deerflow.utils import file_conversion
+
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    source = tmp_path / "document.pdf"
+
+    def seed_files() -> None:
+        config_path.write_text(f"sandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\nuploads:\n  pdf_converter: {pdf_converter}\n", encoding="utf-8")
+        extensions_path.write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
+        source.write_text("synthetic source", encoding="utf-8")
+
+    await asyncio.to_thread(seed_files)
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+    reset_extensions_config()
+    config_threads: list[int] = []
+    parser_threads: list[int] = []
+    selected: list[str] = []
+    loop_thread = threading.get_ident()
+
+    def load_config() -> AppConfig:
+        config_threads.append(threading.get_ident())
+        return get_app_config()
+
+    def parse_document(path: Path, converter: str) -> str:
+        parser_threads.append(threading.get_ident())
+        selected.append(converter)
+        return path.read_text(encoding="utf-8") + " converted"
+
+    monkeypatch.setattr(file_conversion, "get_app_config", load_config)
+    monkeypatch.setattr(file_conversion, "_do_convert", parse_document)
+    try:
+        if warm_cache:
+            await asyncio.to_thread(get_app_config)
+        output = await file_conversion.convert_file_to_markdown(source)
+    finally:
+        reset_app_config()
+        reset_extensions_config()
+
+    assert config_threads == parser_threads
+    assert len(config_threads) == 1 and config_threads[0] != loop_thread
+    assert selected == [pdf_converter]
+    assert output is not None
+    assert output == source.with_suffix(".md")
+    assert output.read_text(encoding="utf-8") == "synthetic source converted"

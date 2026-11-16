@@ -21,6 +21,7 @@ spec:
         # Roll pods when the nginx ConfigMap changes (subPath mount).
         checksum/nginx: {{ include "deer-flow.nginxChecksum" . }}
     spec:
+      {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
       securityContext:
         # Non-root: nginx:alpine ships a `nginx` user (uid 101). /etc/nginx and
         # /var/cache/nginx are root-owned, so the command writes the rendered

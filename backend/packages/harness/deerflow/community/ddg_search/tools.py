@@ -7,13 +7,26 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_max_results import DEFAULT_MAX_RESULTS, coerce_max_results
 from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
+from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
 
+
+class DDGSearchError(RuntimeError):
+    """Raised when a DuckDuckGo search cannot be executed.
+
+    ``_search_text`` returns an empty list when the search ran and matched
+    nothing. Execution failures (client initialization, rate limits,
+    timeouts, blocked requests, SDK errors, a missing ddgs dependency) raise
+    this error instead, so ``web_search_tool`` can report the failure rather
+    than "No results found".
+    """
+
+
 DEFAULT_BACKEND = "auto"
-DEFAULT_MAX_RESULTS = 5
 DEFAULT_REGION = "wt-wt"
 DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
@@ -29,22 +42,6 @@ WIKIPEDIA_LANGUAGE_ALIASES = {
     "tzh": "zh",
     "wt": "en",
 }
-
-
-def _coerce_max_results(value: object) -> int:
-    """Normalize config/parameter values before passing them to DDGS."""
-    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
-        # int() accepts booleans and silently truncates a YAML value such as 3.5.
-        count = 0
-    else:
-        try:
-            count = int(value)  # type: ignore[call-overload]
-        except (TypeError, ValueError, OverflowError):
-            count = 0
-    if count <= 0:
-        logger.warning("Invalid DDG Search max_results=%r; using default %s", value, DEFAULT_MAX_RESULTS)
-        return DEFAULT_MAX_RESULTS
-    return count
 
 
 def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
@@ -141,16 +138,22 @@ def _search_text(
 
     Returns:
         List of search results
+
+    Raises:
+        DDGSearchError: If the search could not be executed, including a
+            ``DDGS`` client that fails to initialize. A genuinely empty
+            result set is not an error and still returns an empty list.
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
-
-    ddgs = DDGS(timeout=30)
+    except ImportError as e:
+        raise DDGSearchError("ddgs library not installed. Run: pip install ddgs") from e
 
     try:
+        # Constructing the client can already fail (proxy or client setup), so
+        # it stays inside the boundary that maps failures to DDGSearchError.
+        ddgs = DDGS(timeout=30)
+
         backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
@@ -166,8 +169,13 @@ def _search_text(
         return list(results) if results else []
 
     except Exception as e:
-        logger.error(f"Failed to search web: {e}")
-        return []
+        # ddgs signals a genuinely empty result set with the exact message
+        # "No results found."; every other failure (rate limit, timeout,
+        # blocked HTML, SDK error) must surface as an error instead, or the
+        # agent reads an outage as "no matches" and rewrites the query.
+        if str(e).strip().rstrip(".!").lower() == "no results found":
+            return []
+        raise DDGSearchError(f"{type(e).__name__}: {e}") from e
 
 
 @tool("web_search", parse_docstring=True)
@@ -195,14 +203,18 @@ def web_search_tool(
         safesearch = config.model_extra.get("safesearch", safesearch)
         backend = config.model_extra.get("backend", backend)
 
-    results = _search_text(
-        query=query,
-        max_results=_coerce_max_results(max_results),
-        region=region,
-        safesearch=safesearch,
-        backend=backend,
-        time_range=time_range,
-    )
+    try:
+        results = _search_text(
+            query=query,
+            max_results=coerce_max_results(max_results, provider="DDG Search", logger=logger),
+            region=region,
+            safesearch=safesearch,
+            backend=backend,
+            time_range=time_range,
+        )
+    except DDGSearchError as e:
+        logger.error("DuckDuckGo search failed: %s", e)
+        return json.dumps({"error": f"DuckDuckGo search failed: {e}", "query": query}, ensure_ascii=False)
 
     if not results:
         return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
@@ -210,7 +222,7 @@ def web_search_tool(
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "url": r.get("href", r.get("link", "")),
+            "url": safe_public_result_url(r.get("href", r.get("link"))),
             "content": r.get("body", r.get("snippet", "")),
         }
         for r in results

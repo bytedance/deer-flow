@@ -30,7 +30,7 @@ By default, memory works automatically through `MemoryMiddleware`:
 2. **Automatic learning**: the agent extracts and saves important facts in the background.
 3. **Future conversations**: memory facts are automatically injected into the system prompt — the agent does not need you to repeat context.
 
-DeerFlow also has an experimental `mode: tool` option. In tool mode, the agent receives `memory_search`, `memory_add`, `memory_update`, and `memory_delete` tools and decides when to call them. Keep `mode: middleware` unless you specifically want to evaluate model-driven memory behavior.
+DeerFlow also has an experimental `mode: tool` option. In tool mode, the agent receives `memory_search`, `memory_get`, `memory_add`, `memory_update`, and `memory_delete` tools and decides when to call them. Use `memory_get(fact_id)` to reread a fact whose ID is already known, or `memory_search` when the ID is unknown. Keep `mode: middleware` unless you specifically want to evaluate model-driven memory behavior.
 
 ## Example
 

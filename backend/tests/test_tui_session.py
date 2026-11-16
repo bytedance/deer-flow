@@ -8,7 +8,7 @@ class _Client:
     def __init__(self, threads):
         self._threads = threads
 
-    def list_threads(self, limit=10):
+    def list_threads(self, limit=10, *, sort_by="created_at"):
         return {"thread_list": self._threads}
 
 

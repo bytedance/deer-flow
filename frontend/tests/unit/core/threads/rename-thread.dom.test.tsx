@@ -1,9 +1,5 @@
 import { afterEach, beforeEach, expect, rs, test } from "@rstest/core";
-import {
-  type InfiniteData,
-  QueryClient,
-  QueryClientProvider,
-} from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
@@ -21,6 +17,7 @@ rs.mock("@/core/api", () => ({
 
 import {
   INFINITE_THREADS_QUERY_KEY_PREFIX,
+  type InfiniteThreadsData,
   useRenameThread,
 } from "@/core/threads/hooks";
 import { DEFAULT_THREAD_SEARCH_PARAMS } from "@/core/threads/thread-search-query";
@@ -79,8 +76,8 @@ function readInfiniteSearchTitle(
   queryClient: QueryClient,
   queryKey: readonly unknown[],
 ) {
-  return queryClient.getQueryData<InfiniteData<AgentThread[]>>(queryKey)
-    ?.pages[0]?.[0]?.values.title;
+  return queryClient.getQueryData<InfiniteThreadsData>(queryKey)?.pages[0]
+    ?.threads[0]?.values.title;
 }
 
 test("stale list responses cannot restore the old title after rename", async () => {
@@ -109,11 +106,15 @@ test("stale list responses cannot restore the old title after rename", async () 
   ] as const;
   const originalThread = makeThread(ORIGINAL_TITLE);
   const staleSearch = createDelayedResult([originalThread]);
-  const staleInfiniteSearch = createDelayedResult([originalThread]);
+  const staleInfiniteSearch = createDelayedResult({
+    threads: [originalThread],
+    hiddenCount: 0,
+    hasMore: false,
+  });
 
   queryClient.setQueryData(searchKey, [originalThread]);
-  queryClient.setQueryData<InfiniteData<AgentThread[]>>(infiniteSearchKey, {
-    pages: [[originalThread]],
+  queryClient.setQueryData<InfiniteThreadsData>(infiniteSearchKey, {
+    pages: [{ threads: [originalThread], hiddenCount: 0, hasMore: false }],
     pageParams: [0],
   });
 

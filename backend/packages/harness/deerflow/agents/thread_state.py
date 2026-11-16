@@ -16,7 +16,7 @@ from langgraph.channels import DeltaChannel
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
-from deerflow.agents.goal_state import GoalState
+from deerflow.agents.goal_state import GoalOutcomeState, GoalState
 from deerflow.agents.task_continuity.state import TaskNotesChannel, merge_task_notes
 from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
@@ -115,6 +115,12 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
 
     Special case: If new is an empty dict {}, it clears the existing images.
     This allows middlewares to clear the viewed_images state after processing.
+
+    Dict order tracks recency: a key updated by ``new`` is re-inserted at the
+    end, so a re-viewed image becomes the newest entry. The image injection
+    middleware admits entries newest-first and tells the model to re-view an
+    omitted image, so the recovery only works if the re-viewed entry actually
+    moves to the newest position (#6825, review on #6829).
     """
     if existing is None:
         return new or {}
@@ -123,8 +129,11 @@ def merge_viewed_images(existing: dict[str, ViewedImageData] | None, new: dict[s
     # Special case: empty dict means clear all viewed images
     if len(new) == 0:
         return {}
-    # Merge dictionaries, new values override existing ones for same keys
-    return {**existing, **new}
+    # Merge dictionaries; new values override existing ones for same keys, and
+    # updated keys move to the end so insertion order reflects recency.
+    merged = {key: value for key, value in existing.items() if key not in new}
+    merged.update(new)
+    return merged
 
 
 def merge_todos(existing: list | None, new: list | None) -> list | None:
@@ -150,27 +159,42 @@ def merge_goal(existing: GoalState | None, new: GoalState | None) -> GoalState |
 class PromotedTools(TypedDict):
     catalog_hash: str
     names: list[str]
+    turn_id: NotRequired[str]
 
 
 def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) -> PromotedTools | None:
-    """Reducer for deferred-tool promotions, scoped by catalog hash.
+    """Reducer for deferred-tool promotions, scoped by catalog and user turn.
 
     - new None/empty -> preserve existing (node didn't touch promotions).
-    - catalog_hash changed -> replace wholesale, dropping stale names (prevents a
-      persisted bare name from exposing a different tool after catalog drift).
-    - same catalog_hash -> union names, dedupe, preserve order.
+    - catalog_hash or explicit turn_id changed -> replace wholesale, dropping
+      stale names.
+    - same scope -> union names, dedupe, preserve order.
+    - a missing new turn_id inherits the existing scope. ``tool_search`` writes
+      this shape after the filter establishes the current turn before the model.
+    - a non-object value from either side is unusable and carries nothing to
+      merge: an Overwrite-poisoned checkpoint stores one, and without this the
+      thread's later genuine promotion writes would keep failing on it.
     """
+    if not isinstance(existing, Mapping):
+        existing = None
     if not new:
         return existing
-    if existing is None or existing.get("catalog_hash") != new["catalog_hash"]:
-        return {
-            "catalog_hash": new["catalog_hash"],
-            "names": list(dict.fromkeys(new["names"])),
-        }
-    return {
-        "catalog_hash": existing["catalog_hash"],
-        "names": list(dict.fromkeys(existing["names"] + new["names"])),
+    if not isinstance(new, Mapping):
+        return existing
+    new_turn_id = new.get("turn_id")
+    replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)
+    existing_names = existing.get("names") if existing is not None else None
+    if not isinstance(existing_names, list) or not all(isinstance(name, str) for name in existing_names):
+        existing_names = []
+    names = new["names"] if replace else existing_names + new["names"]
+    merged: PromotedTools = {
+        "catalog_hash": new["catalog_hash"],
+        "names": list(dict.fromkeys(names)),
     }
+    turn_id = new_turn_id if new_turn_id is not None else (existing or {}).get("turn_id")
+    if turn_id is not None:
+        merged["turn_id"] = turn_id
+    return merged
 
 
 TERMINAL_STATUSES: frozenset[str] = frozenset(SUBAGENT_STATUS_VALUES)
@@ -197,38 +221,81 @@ class DelegationEntry(TypedDict):
     # provenance as receipt_verdict.
     acceptance_verdict: NotRequired[dict]
     created_at: str
+    # The AIMessage that issued the call. Tool-call ids are unique per response,
+    # so a provider can reuse one in a later response of the same run; this keeps
+    # each dispatch its own entry. Absent on entries written before it existed.
+    dispatch_message_id: NotRequired[str]
+
+
+type DelegationKey = tuple[str | None, str, str | None]
+
+
+def delegation_key(entry: Mapping[str, Any]) -> DelegationKey:
+    """Identify one delegation: ``(run_id, tool-call id, dispatch message id)``.
+
+    DurableContext uses this key too. The cap's ``_delegation_id`` reads the
+    same fields from entries; keep the two in step.
+    """
+    return entry.get("run_id") or None, entry["id"], entry.get("dispatch_message_id") or None
+
+
+def find_delegation_key(keys: Sequence[DelegationKey], key: DelegationKey) -> DelegationKey | None:
+    """Return the key in ``keys`` that an entry identified by ``key`` updates, or None.
+
+    An exact match wins. Otherwise an entry without a run id updates the most
+    recent entry with its call id, as updates did before run-scoped
+    identities; an entry without a dispatch id updates the most recent entry
+    of its run with that call id; and a dispatch-scoped entry adopts the most
+    recent entry of its run and call id that predates dispatch ids. Two
+    different dispatches never match each other.
+    """
+    if key in keys:
+        return key
+    run_id, entry_id, dispatch_id = key
+    for prior in reversed(keys):
+        if prior[1] != entry_id:
+            continue
+        if run_id is None:
+            return prior
+        if prior[0] == run_id and (dispatch_id is None or prior[2] is None):
+            return prior
+    return None
 
 
 def merge_delegations(existing: list[DelegationEntry] | None, new: list[DelegationEntry] | None) -> list[DelegationEntry]:
     """Reducer for the delegation ledger.
 
     - new None/empty -> preserve existing.
-    - append entries, replacing the same (run_id, tool-call id) with the latest
-      version while preserving first-seen order. Provider ids can repeat in
-      later runs of the same thread.
+    - append entries, replacing the same delegation (see ``find_delegation_key``)
+      with the latest version while preserving first-seen order. Provider ids
+      can repeat in later runs of the same thread and in later responses of
+      the same run.
     - terminal status is never overwritten by a non-terminal status.
     """
     if not new:
         return existing or []
 
-    by_key: dict[tuple[str | None, str], DelegationEntry] = {}
-    order: list[tuple[str | None, str]] = []
+    by_key: dict[DelegationKey, DelegationEntry] = {}
+    order: list[DelegationKey] = []
     for entry in [*(existing or []), *new]:
-        entry_id = entry["id"]
-        key = (entry.get("run_id") or None, entry_id)
-        if key[0] is None:
-            # Legacy updates without run_id still update the most recent
-            # matching entry, as they did before run-scoped identities.
-            key = next((prior for prior in reversed(order) if prior[1] == entry_id), key)
-        previous = by_key.get(key)
-        if previous is not None and previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
-            continue
-        if key not in by_key:
+        target = find_delegation_key(order, delegation_key(entry))
+        previous = by_key.get(target) if target is not None else None
+        if previous is None:
+            key = delegation_key(entry)
             order.append(key)
-        elif previous.get("created_at"):
-            entry = {**entry, "created_at": previous["created_at"]}
-            if previous.get("run_id") and not entry.get("run_id"):
-                entry["run_id"] = previous["run_id"]
+            by_key[key] = entry
+            continue
+        if previous["status"] in TERMINAL_STATUSES and entry["status"] not in TERMINAL_STATUSES:
+            continue
+        inherited = {field: previous[field] for field in ("created_at", "run_id", "dispatch_message_id") if previous.get(field) and (field == "created_at" or not entry.get(field))}
+        if inherited:
+            entry = {**entry, **inherited}
+        key = delegation_key(entry)
+        if key != target:
+            # A legacy entry gained its dispatch id: re-key it in place so a
+            # later dispatch reusing the call id starts its own entry.
+            order[order.index(target)] = key
+            del by_key[target]
         by_key[key] = entry
     merged = [by_key[key] for key in order]
     if len(merged) > _DELEGATION_LEDGER_MAX_ENTRIES:
@@ -338,9 +405,16 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     by_handle: dict[str, ArtifactEntry] = {}
     order: list[str] = []
     for entry in [*(existing or []), *new]:
-        if not isinstance(entry, dict) or "handle" not in entry:
+        if not isinstance(entry, dict):
             continue
-        handle = entry["handle"]
+        # The state-update route persists reducer values with ``Overwrite``, so
+        # a checkpoint can carry an entry whose handle is missing or unhashable
+        # without this reducer ever seeing it. Skip such an entry instead of
+        # raising on the dict key: one bad write must not fail every later
+        # artifact capture on the thread.
+        handle = entry.get("handle")
+        if not isinstance(handle, str) or not handle:
+            continue
         if handle not in by_handle:
             order.append(handle)
         by_handle[handle] = entry
@@ -366,6 +440,8 @@ class ThreadState(AgentState):
     artifacts: Annotated[list[str], merge_artifacts]
     todos: Annotated[list | None, merge_todos]
     goal: Annotated[GoalState | None, merge_goal]
+    goal_outcome: NotRequired[GoalOutcomeState | None]
+    applied_run_inputs: NotRequired[dict | None]
     uploaded_files: NotRequired[list[dict] | None]
     viewed_images: Annotated[dict[str, ViewedImageData], merge_viewed_images]  # image_path -> metadata (no base64)
     promoted: Annotated[PromotedTools | None, merge_promoted]

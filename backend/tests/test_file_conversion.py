@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import sys
+import threading
 from types import ModuleType
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from deerflow.utils.file_conversion import (
-    _ASYNC_THRESHOLD_BYTES,
     _MIN_CHARS_PER_PAGE,
     MAX_OUTLINE_ENTRIES,
     _do_convert,
@@ -239,65 +242,59 @@ class TestGetPdfConverter:
 
 
 class TestConvertFileToMarkdown:
-    def test_small_file_runs_synchronously(self, tmp_path):
-        """Small files (< 1 MB) are converted in the event loop thread."""
-        pdf = tmp_path / "small.pdf"
-        pdf.write_bytes(b"%PDF-1.4 " + b"x" * 100)  # well under 1 MB
+    @pytest.mark.parametrize("file_size", [100, 1024 * 1024, 1024 * 1024 + 1], ids=["small", "former-threshold", "large"])
+    def test_conversion_runs_off_loop_for_every_file_size(self, tmp_path, file_size):
+        """Compressed byte size cannot bound a document's parsing time."""
+        source = tmp_path / "report.xlsx"
+        source.write_bytes(b"x" * file_size)
+        loop_thread = threading.get_ident()
+        worker_threads = []
+        request_context = contextvars.ContextVar("conversion_request_context")
+        token = request_context.set("upload-request")
 
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                return_value="# Small PDF",
-            ) as mock_convert,
-            patch("asyncio.to_thread") as mock_thread,
-        ):
-            md_path = _run(convert_file_to_markdown(pdf))
+        def convert(path, converter):
+            worker_threads.append(threading.get_ident())
+            assert path == source
+            assert converter == "auto"
+            assert request_context.get() == "upload-request"
+            return "# Converted document"
 
-        # asyncio.to_thread must NOT have been called
-        mock_thread.assert_not_called()
-        mock_convert.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Small PDF"
+        try:
+            with (
+                patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
+                patch("deerflow.utils.file_conversion._do_convert", side_effect=convert),
+            ):
+                md_path = _run(convert_file_to_markdown(source))
+        finally:
+            request_context.reset(token)
 
-    def test_large_file_offloaded_to_thread(self, tmp_path):
-        """Large files (> 1 MB) are offloaded via asyncio.to_thread."""
-        pdf = tmp_path / "large.pdf"
-        # Write slightly more than the threshold
-        pdf.write_bytes(b"%PDF-1.4 " + b"x" * (_ASYNC_THRESHOLD_BYTES + 1))
-
-        async def fake_to_thread(fn, *args, **kwargs):
-            return fn(*args, **kwargs)
-
-        with (
-            patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                return_value="# Large PDF",
-            ),
-            patch("asyncio.to_thread", side_effect=fake_to_thread) as mock_thread,
-        ):
-            md_path = _run(convert_file_to_markdown(pdf))
-
-        mock_thread.assert_called_once()
-        assert md_path == pdf.with_suffix(".md")
-        assert md_path.read_text() == "# Large PDF"
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread, "document parsing occupied the calling event-loop thread"
+        assert md_path == source.with_suffix(".md")
+        assert md_path.read_text(encoding="utf-8") == "# Converted document"
 
     def test_returns_none_on_conversion_error(self, tmp_path):
         """If conversion raises, return None without propagating the exception."""
         pdf = tmp_path / "broken.pdf"
         pdf.write_bytes(b"%PDF-1.4 fake")
 
+        worker_threads = []
+        loop_thread = threading.get_ident()
+
+        def fail_conversion(*_args):
+            worker_threads.append(threading.get_ident())
+            raise RuntimeError("conversion failed")
+
         with (
             patch("deerflow.utils.file_conversion._get_pdf_converter", return_value="auto"),
-            patch(
-                "deerflow.utils.file_conversion._do_convert",
-                side_effect=RuntimeError("conversion failed"),
-            ),
+            patch("deerflow.utils.file_conversion._do_convert", side_effect=fail_conversion),
         ):
             result = _run(convert_file_to_markdown(pdf))
 
         assert result is None
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != loop_thread
+        assert not pdf.with_suffix(".md").exists()
 
     def test_writes_utf8_markdown_file(self, tmp_path):
         """Generated .md file is written with UTF-8 encoding."""
@@ -524,11 +521,13 @@ def test_cancelled_conversion_drains_write_and_removes_partial(tmp_path, monkeyp
     out = tmp_path / "doc.md"
     src.write_text("hello")
 
+    # Isolate write cancellation from parser imports and conversion latency.
+    monkeypatch.setattr("deerflow.utils.file_conversion._do_convert", lambda _path, _converter: "hello")
     monkeypatch.setattr(Path, "write_text", _blocking_write_text)
 
     async def _scenario():
         task = asyncio.create_task(convert_file_to_markdown(src, output_path=out))
-        await asyncio.to_thread(started.wait, 10)
+        assert await asyncio.to_thread(started.wait, 10), "the write worker never started"
         task.cancel()
         # Release the worker only after the cancel is in flight, so the
         # ordering (cancel first, then the write settles) is forced and the

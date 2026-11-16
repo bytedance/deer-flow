@@ -84,6 +84,15 @@ class DeerMemConfig(BaseModel):
             "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
         ),
     )
+    retrieval_index_path: str = Field(
+        default="",
+        description=(
+            "Directory holding the derived SQLite FTS5 retrieval index. Empty (default) = ``{storage_path}/.retrieval``; "
+            "a relative path is resolved against storage_path; an absolute path is used as-is. The index is rebuildable, "
+            "so Gateway instances that share storage_path must each point this at instance-local disk: SQLite WAL is "
+            "unsupported on network filesystems, and peers would rebuild or delete each other's index."
+        ),
+    )
     fact_dedup_enabled: bool = Field(
         default=False,
         description=(
@@ -134,7 +143,14 @@ class DeerMemConfig(BaseModel):
         default=30,
         ge=1,
         le=300,
-        description="Seconds to wait before processing queued updates (debounce).",
+        description="Per-conversation quiet period before queued extraction becomes eligible.",
+    )
+    max_wait_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "Maximum debounce deferral from a conversation's first pending update. Continuous same-key updates cannot postpone eligibility beyond this limit. Extraction remains serial: consumer backlog and LLM latency can delay completion."
+        ),
     )
     queue_max_depth: int = Field(
         default=1000,
@@ -158,6 +174,14 @@ class DeerMemConfig(BaseModel):
     eviction_access_half_life_days: int = Field(default=30, ge=1, le=3650)
     eviction_correction_reserved_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
     eviction_correction_reserved_max: int = Field(default=10, ge=0, le=100)
+    eviction_reserved_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories eligible for reserved capacity slots in hybrid-v1 eviction. Defaults to ['correction'] for historical compatibility."),
+    )
+    eviction_decay_exempt_categories: list[str] = Field(
+        default_factory=list,
+        description=("Fact categories exempt from confirmation freshness time-decay in hybrid-v1 eviction (e.g. permanent preferences and user identity)."),
+    )
     eviction_audit_max_entries: int = Field(
         default=200,
         ge=0,
@@ -283,6 +307,8 @@ class DeerMemConfig(BaseModel):
         description=("Maximum number of source facts per consolidation group. Prevents the LLM from merging too many facts into one and losing important details."),
     )
     # ── Extraction quality callback (post-invoke observability) ─────────
+    project_memory: Any = Field(default=None, exclude=True, description="Optional host hook preparing a separate project fact pool for the same extraction call.")
+
     extraction_callback: Any = Field(
         default=None,
         description=(
@@ -304,22 +330,27 @@ class DeerMemConfig(BaseModel):
             "Set programmatically by the host factory (not from YAML)."
         ),
     )
-    # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
+    # ── Watermark (in-memory LRU + persisted per-agent sidecar) ──────────
     watermark_max_keys: int = Field(
         default=4096,
         ge=0,
         description=(
             "Soft cap on the in-memory conversation-watermark cache (one entry "
-            "per distinct thread/user/agent). The cache is a bounded LRU: when "
-            "over capacity the least-recently-used entry is dropped, and a "
-            "dropped key re-extracts one batch on that thread's next turn (the "
-            "same as a restart). 0 = unbounded."
+            "per distinct thread/user/agent) and on each agent's persisted "
+            "watermarks.json sidecar (one entry per thread). Over capacity the "
+            "cache drops its least-recently-used entry and the sidecar its "
+            "least-recently-advanced thread; a thread missing from both "
+            "re-extracts one batch on its next turn. 0 = unbounded."
         ),
     )
     # ── Message processing (externalized patterns / prompts) ──
     patterns_dir: str | None = Field(
         default=None,
-        description=("Directory with correction.yaml / reinforcement.yaml overriding the bundled signal-detection patterns. None (default) = bundled core/message_patterns/. When set explicitly, both files must exist."),
+        description=(
+            "Directory with {signal}.yaml files overriding bundled signal-detection patterns "
+            "(correction, reinforcement, preference, identity, goal, decision). None (default) "
+            "= bundled core/message_patterns/. When set explicitly, every signal file must exist."
+        ),
     )
     prompts_dir: str | None = Field(
         default=None,

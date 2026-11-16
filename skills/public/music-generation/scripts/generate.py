@@ -10,7 +10,16 @@ MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 def _check_base_resp(payload: dict) -> None:
     base = payload.get("base_resp") or {}
     if base.get("status_code", 0) != 0:
-        raise Exception(f"MiniMax error {base.get('status_code')}: {base.get('status_msg')}")
+        raise Exception(
+            f"MiniMax error {base.get('status_code')}: {base.get('status_msg')}"
+        )
+
+
+def _has_mp3_header(audio: bytes) -> bool:
+    """Check common MP3 signatures without decoding the audio stream."""
+    has_id3 = len(audio) >= 10 and audio.startswith(b"ID3")
+    has_mpeg_frame = len(audio) >= 4 and audio[0] == 0xFF and audio[1] & 0xE0 == 0xE0
+    return has_id3 or has_mpeg_frame
 
 
 def generate_music(prompt_file: str, output_file: str) -> str:
@@ -50,7 +59,10 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     host = os.getenv("MINIMAX_API_HOST", MINIMAX_DEFAULT_HOST).rstrip("/")
     response = requests.post(
         f"{host}/v1/music_generation",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
         json=body,
         timeout=300,
     )
@@ -60,20 +72,32 @@ def generate_music(prompt_file: str, output_file: str) -> str:
     audio_hex = (payload.get("data") or {}).get("audio")
     if not audio_hex:
         raise Exception("MiniMax returned no audio data")
+    # Decode before opening the output: malformed responses must not erase it.
+    audio = bytes.fromhex(audio_hex)
+    if not audio:
+        raise ValueError("MiniMax audio decoded to empty bytes")
+    # The request pins MP3; reject obvious non-audio responses before writing.
+    if not _has_mp3_header(audio):
+        raise ValueError("MiniMax audio does not have an MP3 header")
 
     output_dir = os.path.dirname(output_file)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
     with open(output_file, "wb") as f:
-        f.write(bytes.fromhex(audio_hex))
+        f.write(audio)
     return f"Successfully generated music to {output_file}"
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate music using MiniMax API")
-    parser.add_argument("--prompt-file", required=True,
-                        help="Absolute path to JSON spec file {title, prompt, lyrics?, is_instrumental?}")
-    parser.add_argument("--output-file", required=True, help="Output path for generated MP3")
+    parser.add_argument(
+        "--prompt-file",
+        required=True,
+        help="Absolute path to JSON spec file {title, prompt, lyrics?, is_instrumental?}",
+    )
+    parser.add_argument(
+        "--output-file", required=True, help="Output path for generated MP3"
+    )
     args = parser.parse_args()
 
     try:

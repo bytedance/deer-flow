@@ -31,12 +31,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 BASH = find_script_bash()
 pytestmark = pytest.mark.skipif(BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 
-SECRETS = ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN")
+SECRETS = ("BETTER_AUTH_SECRET", "DEER_FLOW_INTERNAL_AUTH_TOKEN", "DEER_FLOW_CREDENTIALS_KEY")
 PERSISTED_FILE = {
     "BETTER_AUTH_SECRET": ".better-auth-secret",
     "DEER_FLOW_INTERNAL_AUTH_TOKEN": ".internal-auth-token",
+    # Same name the Gateway itself generates under its runtime home, which is
+    # this directory's bind mount: one key whichever side created it first.
+    "DEER_FLOW_CREDENTIALS_KEY": ".credentials_key",
 }
-GENERATED = re.compile(r"set:[A-Za-z0-9_\-]{32,}")
+# A Fernet key ends in one "=" of base64 padding.
+GENERATED = re.compile(r"set:[A-Za-z0-9_\-]{32,}=?")
 
 # The fake docker answers `compose ... config` the way Compose renders the
 # script's stub project: it reads the `${KEY}` reference off stdin, looks the
@@ -65,6 +69,7 @@ esac
 {
   printf 'BETTER_AUTH_SECRET=%s\\n' "${BETTER_AUTH_SECRET+set:}${BETTER_AUTH_SECRET:-}"
   printf 'DEER_FLOW_INTERNAL_AUTH_TOKEN=%s\\n' "${DEER_FLOW_INTERNAL_AUTH_TOKEN+set:}${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}"
+  printf 'DEER_FLOW_CREDENTIALS_KEY=%s\\n' "${DEER_FLOW_CREDENTIALS_KEY+set:}${DEER_FLOW_CREDENTIALS_KEY:-}"
 } > "$CAPTURE_SECRETS"
 for arg in "$@"; do printf "%s\\n" "$arg"; done > "$CAPTURE_DOCKER_ARGS"
 exit 0
@@ -164,7 +169,8 @@ def test_deploy_asks_compose_to_interpolate_the_secret_like_the_real_project(tmp
     # The stub project on stdin is what gets interpolated: it must reference
     # the secret and nothing from the real compose file.
     assert config_args[config_args.index("-f") + 1] == "-"
-    assert "${DEER_FLOW_INTERNAL_AUTH_TOKEN}" in config_stdin
+    # Each probe replaces the captured stub; the last secret resolved is the last one probed.
+    assert f"${{{SECRETS[-1]}}}" in config_stdin
     assert "docker-compose.yaml" not in config_stdin
 
 
@@ -384,3 +390,36 @@ def test_real_compose_empty_shell_export_still_gets_a_generated_secret(tmp_path,
     _, observed, _, _, _, _ = _run_deploy_build(tmp_path, worktree, real_docker=real_docker, shell_env={key: ""})
 
     assert GENERATED.fullmatch(observed[key]), observed[key]
+
+
+# ── DEER_FLOW_CREDENTIALS_KEY specifics ─────────────────────────────────────
+
+
+def test_deploy_generates_a_valid_fernet_credentials_key(tmp_path):
+    """The Gateway refuses a malformed key, so the generated one must parse as Fernet."""
+    from cryptography.fernet import Fernet
+
+    from deerflow.config.credentials_key import parse_credentials_keys
+
+    worktree = _worktree(tmp_path)
+
+    _, observed, _, _, _, home = _run_deploy_build(tmp_path, worktree, compose_environment={})
+
+    key = observed["DEER_FLOW_CREDENTIALS_KEY"].removeprefix("set:")
+    Fernet(key)
+    assert parse_credentials_keys(key) == [key]
+    assert (home / ".credentials_key").read_text(encoding="utf-8").strip() == key
+
+
+def test_deploy_reuses_a_key_file_the_gateway_already_generated(tmp_path):
+    """A stack first started without deploy.sh already has the Gateway's own key file: keep it."""
+    worktree = _worktree(tmp_path)
+    home = tmp_path / "deer-flow-home"
+    home.mkdir()
+    (home / ".credentials_key").write_text("gateway-generated-key", encoding="utf-8")
+
+    result, observed, _, _, _, _ = _run_deploy_build(tmp_path, worktree, compose_environment={})
+
+    assert observed["DEER_FLOW_CREDENTIALS_KEY"] == "set:gateway-generated-key"
+    assert (home / ".credentials_key").read_text(encoding="utf-8") == "gateway-generated-key"
+    assert "DEER_FLOW_CREDENTIALS_KEY loaded from" in result.stdout

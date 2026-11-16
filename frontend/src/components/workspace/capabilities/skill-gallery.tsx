@@ -45,6 +45,7 @@ import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
 import { CapabilityCard, CapabilityIcon } from "./capability-card";
+import { SkillDiagnostics } from "./skill-diagnostics";
 import { presentSkill } from "./skill-presentation";
 
 const SkillExportDialog = dynamic(() => import("./skill-export-dialog"), {
@@ -53,11 +54,16 @@ const SkillExportDialog = dynamic(() => import("./skill-export-dialog"), {
 
 export function SkillGallery({ query = "" }: { query?: string } = {}) {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { skills, isLoading, error } = useSkills();
   const adminRequired =
     error instanceof SkillRequestError && error.isAdminRequired;
   return (
     <div>
+      {user?.system_role === "admin" &&
+        env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+          <SkillDiagnostics key={user.id} userId={user.id} />
+        )}
       {isLoading ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
       ) : adminRequired ? (

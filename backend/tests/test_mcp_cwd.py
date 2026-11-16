@@ -60,7 +60,7 @@ mcp.run(transport="stdio")
     try:
         tools = await mcp_tools.get_mcp_tools()
         assert [tool.name for tool in tools] == ["local_read_marker"]
-        content, _artifact = await tools[0].coroutine(runtime=runtime)
+        content, _artifact = await tools[0].coroutine(deerflow_runtime=runtime)
         assert content[0]["text"] == "configured-directory"
     finally:
         await pool.close_all()
@@ -110,7 +110,7 @@ mcp.run(transport="stdio")
         tools = await mcp_tools.get_mcp_tools()
         assert [tool.name for tool in tools] == ["local_read_cwd"]
         assert Path(tools[0].description) == launch_dir.resolve()
-        content, _artifact = await tools[0].coroutine(runtime=runtime)
+        content, _artifact = await tools[0].coroutine(deerflow_runtime=runtime)
         assert Path(content[0]["text"]) == paths.sandbox_work_dir("thread", user_id="user").resolve()
     finally:
         await pool.close_all()

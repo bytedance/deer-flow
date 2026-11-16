@@ -66,7 +66,7 @@ export function ConversationReferenceList({
         )}
         <CommandGroup>
           {candidates.map((thread) => {
-            const title = titleOfThread(thread);
+            const title = titleOfThread(thread, t.pages.untitled);
             const isSelected = selectedIds.has(thread.thread_id);
             return (
               <CommandItem

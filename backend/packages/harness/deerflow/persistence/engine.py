@@ -11,11 +11,11 @@ None and fall back to in-memory implementations.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from deerflow.persistence.json_compat import dumps_json_safe
 from deerflow.utils.file_io import await_drained
 
 # Recycle pooled Postgres connections before stale idle sockets can hang
@@ -25,8 +25,15 @@ POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
 
 
 def _json_serializer(obj: object) -> str:
-    """JSON serializer with ensure_ascii=False for Chinese character support."""
-    return json.dumps(obj, ensure_ascii=False)
+    """JSON serializer for every JSON column written through the ORM engine.
+
+    ensure_ascii=False keeps Chinese character support; non-finite floats are
+    normalized to ``None`` first — PostgreSQL jsonb rejects the bare
+    ``NaN`` / ``Infinity`` token as invalid JSON, so a lenient dump turns a
+    reachable non-finite value (caller metadata, model verdict JSON, provider
+    usage numbers) into a ``DataError`` on the whole write.
+    """
+    return dumps_json_safe(obj)
 
 
 def _postgres_engine_kwargs(
@@ -56,6 +63,49 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# SQLSTATE invalid_catalog_name: the database named in the URL does not exist.
+_MISSING_DATABASE_SQLSTATE = "3D000"
+# SQLSTATE duplicate_database: the CREATE DATABASE issued by
+# ``_auto_create_postgres_db`` lost a race against another Gateway booting the same
+# target. The winner's catalog row is committed by the time the loser is refused, so
+# the database exists and is usable.
+_DUPLICATE_DATABASE_SQLSTATE = "42P04"
+
+
+def _has_sqlstate(exc: BaseException, code: str) -> bool:
+    """Return whether *exc*, or anything it wraps, carries SQLSTATE *code*.
+
+    Postgres words missing relations, columns and roles as "does not exist"
+    too, so the message cannot tell them apart; only the SQLSTATE can.
+    asyncpg raises these unwrapped from connect(); follow ``orig``,
+    ``__cause__`` and ``__context__`` (as ``_is_unique_violation`` in
+    ``runtime/runs/manager.py`` does) so a wrapped copy is recognized as well.
+    """
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "sqlstate", None) == code:
+            return True
+        for attr in ("orig", "__cause__", "__context__"):
+            inner = getattr(current, attr, None)
+            if isinstance(inner, BaseException):
+                pending.append(inner)
+    return False
+
+
+def _is_missing_database_error(exc: BaseException) -> bool:
+    """Return whether *exc* means the target PostgreSQL database is absent."""
+    return _has_sqlstate(exc, _MISSING_DATABASE_SQLSTATE)
+
+
+def _is_duplicate_database_error(exc: BaseException) -> bool:
+    """Return whether *exc* means the target PostgreSQL database already exists."""
+    return _has_sqlstate(exc, _DUPLICATE_DATABASE_SQLSTATE)
+
 
 async def _auto_create_postgres_db(url: str) -> None:
     """Connect to the ``postgres`` maintenance DB and CREATE DATABASE.
@@ -77,9 +127,20 @@ async def _auto_create_postgres_db(url: str) -> None:
     maint_url = parsed.set(database="postgres")
     maint_engine = create_async_engine(maint_url, isolation_level="AUTOCOMMIT")
     try:
-        async with maint_engine.connect() as conn:
-            await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-        logger.info("Auto-created PostgreSQL database: %s", db_name)
+        try:
+            async with maint_engine.connect() as conn:
+                await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+            logger.info("Auto-created PostgreSQL database: %s", db_name)
+        except Exception as exc:
+            # Two Gateways booting the same missing database both reach this point and
+            # only one can win; for the loser the database exists and is usable, so the
+            # caller's retry should proceed instead of the boot failing. Everything else
+            # -- including "permission denied to create database" -- propagates
+            # untouched, because a CREATE DATABASE failure is not a reason to mask the
+            # bootstrap error that led here.
+            if not _is_duplicate_database_error(exc):
+                raise
+            logger.info("PostgreSQL database %s was created by a peer process; continuing", db_name)
     finally:
         # Drain: the maintenance engine is local to this helper, so an
         # abandoned dispose leaves its pool to the ``postgres`` database with
@@ -218,13 +279,16 @@ async def init_engine(
         await _ensure_postgres_schema()
         await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
     except Exception as exc:
-        if backend == "postgres" and "does not exist" in str(exc):
+        if backend == "postgres" and _is_missing_database_error(exc):
             # Database not yet created -- attempt to auto-create it, then retry.
+            # Any other bootstrap failure is re-raised untouched: a
+            # CREATE DATABASE attempt would replace it with "already exists"
+            # or "permission denied to create database".
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database. The rebuilt
             # engine MUST keep the same connect_args so the retried bootstrap
             # lands in the target schema, not the default one.
-            await _engine.dispose()
+            await await_drained(_engine.dispose())
             _engine = create_async_engine(
                 url,
                 **_postgres_engine_kwargs(

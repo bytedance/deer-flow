@@ -7,6 +7,7 @@ import jwt as pyjwt
 from app.gateway.auth.config import AuthConfig, set_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
 from app.gateway.auth.jwt import create_access_token, decode_token
+from app.gateway.auth.oidc_state import _verify_state_signed
 
 
 def test_auth_error_code_values():
@@ -73,3 +74,38 @@ def test_decode_token_returns_payload_on_valid():
     result = decode_token(token)
     assert not isinstance(result, TokenError)
     assert result.sub == "user-123"
+
+
+def test_decode_token_returns_token_error_on_signed_token_with_wrong_claims():
+    _setup_config()
+    # The OIDC state cookie is signed with the same secret but has no sub/exp.
+    state_payload = {"provider": "google", "state": "abc", "issued_at": 1}
+    token = pyjwt.encode(state_payload, _TEST_SECRET, algorithm="HS256")
+
+    assert decode_token(token) == TokenError.MALFORMED
+
+
+def test_decode_token_prefers_expired_over_malformed():
+    _setup_config()
+    # jwt.decode raises ExpiredSignatureError before TokenPayload(**payload) runs, so a token that is
+    # both expired and missing `sub` must keep reporting EXPIRED.
+    expired_without_sub = {"provider": "x", "exp": datetime.now(UTC) - timedelta(hours=1)}
+    token = pyjwt.encode(expired_without_sub, _TEST_SECRET, algorithm="HS256")
+    assert decode_token(token) == TokenError.EXPIRED
+
+
+def test_verify_state_signed_rejects_signed_payload_with_bad_claims():
+    _setup_config()
+    # A cookie signed with our secret but missing required claims used to raise ValidationError out of
+    # the public callback endpoint; it has to be treated like any other unusable state.
+    signed = pyjwt.encode({"not_provider": "x"}, _TEST_SECRET, algorithm="HS256")
+    assert _verify_state_signed(signed) is None
+
+
+def test_verify_state_signed_accepts_a_valid_state():
+    _setup_config()
+    now = datetime.now(UTC).timestamp()
+    signed = pyjwt.encode({"provider": "google", "state": "abc", "issued_at": now}, _TEST_SECRET, algorithm="HS256")
+    payload = _verify_state_signed(signed)
+    assert payload is not None
+    assert payload.provider == "google"

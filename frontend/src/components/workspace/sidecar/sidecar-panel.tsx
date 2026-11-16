@@ -74,6 +74,7 @@ import {
 import { createSidecarThread } from "@/core/sidecar/api";
 import {
   useDeleteThread,
+  useThreadMetadata,
   useThreadStream,
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
@@ -142,6 +143,9 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
+    // Settles the composer's submit with the queued send's outcome.
+    resolve: () => void;
+    reject: (error: unknown) => void;
   } | null>(null);
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
@@ -157,6 +161,11 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
   }, [models, sidecar.context.model_name]);
 
+  const threadMetadata = useThreadMetadata(sidecar.sidecarThreadId, {
+    enabled: !sidecar.isMock,
+    isMock: sidecar.isMock,
+  });
+
   const {
     thread,
     sendMessage,
@@ -164,6 +173,10 @@ export function SidecarPanel({ className }: { className?: string }) {
     isHistoryLoading,
     hasMoreHistory,
     loadMoreHistory,
+    approvalRequests,
+    hasPendingApproval,
+    submitHitlApproval,
+    waitingForInputRunIds,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
@@ -172,6 +185,9 @@ export function SidecarPanel({ className }: { className?: string }) {
     onStart: (createdThreadId) => {
       sidecar.setSidecarThreadId(createdThreadId);
     },
+    restInterrupts: threadMetadata.data?.interrupts,
+    restInterruptsLoading: threadMetadata.isLoading,
+    restInterruptsError: threadMetadata.isError,
   });
 
   const referenceCountLabel = useMemo(() => {
@@ -200,6 +216,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     isUploading ||
     (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
+    hasPendingApproval ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
 
   useEffect(() => {
@@ -390,6 +407,17 @@ export function SidecarPanel({ className }: { className?: string }) {
     [sidecar, submitToSidecarThread],
   );
 
+  const handleSubmitApproval = useCallback(
+    (
+      request: (typeof approvalRequests)[number],
+      responses: Parameters<typeof submitHitlApproval>[2],
+    ) =>
+      sidecar.sidecarThreadId
+        ? submitHitlApproval(sidecar.sidecarThreadId, request, responses)
+        : false,
+    [sidecar.sidecarThreadId, submitHitlApproval],
+  );
+
   useEffect(() => {
     if (!queuedSubmit || !sidecar.sidecarThreadId || thread.isLoading) {
       return;
@@ -408,17 +436,12 @@ export function SidecarPanel({ className }: { className?: string }) {
           sidecar.clearActiveReferences();
         }
       },
-    ).catch((error) => {
-      toast.error(
-        error instanceof Error ? error.message : t.sidecar.sendFailed,
-      );
-    });
+    ).then(nextSubmit.resolve, nextSubmit.reject);
   }, [
     queuedSubmit,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
-    t.sidecar.sendFailed,
     thread.isLoading,
   ]);
 
@@ -439,7 +462,16 @@ export function SidecarPanel({ className }: { className?: string }) {
       try {
         if (!sidecar.sidecarThreadId) {
           await ensureSidecarThread(pendingReferences);
-          setQueuedSubmit({ message, references: pendingReferences });
+          // The first send waits for the new thread to reach the stream hook.
+          // Settle with that send so the composer clears only once it is sent.
+          await new Promise<void>((resolve, reject) => {
+            setQueuedSubmit({
+              message,
+              references: pendingReferences,
+              resolve,
+              reject,
+            });
+          });
           return;
         }
 
@@ -457,6 +489,8 @@ export function SidecarPanel({ className }: { className?: string }) {
         toast.error(
           error instanceof Error ? error.message : t.sidecar.sendFailed,
         );
+        // Reject so PromptInput keeps the draft and attachments for a retry.
+        throw error;
       }
     },
     [
@@ -565,6 +599,18 @@ export function SidecarPanel({ className }: { className?: string }) {
             sidecarSurface
             initialScroll="instant"
             resizeScroll="instant"
+            approvalRequests={approvalRequests}
+            approvalMetadataLoading={
+              hasPendingApproval && approvalRequests.length === 0
+            }
+            approvalMetadataError={
+              hasPendingApproval &&
+              approvalRequests.length === 0 &&
+              threadMetadata.isError
+            }
+            onReloadApprovalMetadata={() => threadMetadata.refetch()}
+            waitingForInputRunIds={waitingForInputRunIds}
+            onSubmitApproval={handleSubmitApproval}
             onSubmitHumanInput={
               sidecar.isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                 ? undefined

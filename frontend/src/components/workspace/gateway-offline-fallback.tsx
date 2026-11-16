@@ -28,7 +28,7 @@ export function GatewayOfflineFallback({
   children,
 }: GatewayOfflineFallbackProps) {
   return (
-    <AuthProvider initialUser={null}>
+    <AuthProvider initialUser={null} initialAuthUnknown>
       {renderBanner && <GatewayOfflineBanner gatewayUnavailable />}
       {children}
     </AuthProvider>

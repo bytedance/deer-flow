@@ -139,6 +139,67 @@ try {
     window.teamContext.callBackend("list", {}).then((r) => r.teams[0]),
   );
   const [research, review] = team.members;
+  async function stateCall(operation, input, source = research.thread_id) {
+    const response = await page.request.post(
+      `${apiBase.origin}/preview/state`,
+      {
+        data: {
+          operation,
+          input: { team_id: team.id, ...input },
+          source_thread: source,
+        },
+      },
+    );
+    assert.equal(response.status(), 200);
+    return response.json();
+  }
+  const state = await stateCall("publish", {
+    request_id: "browser-state",
+    kind: "plan",
+    title: "Deployment cost review",
+    content:
+      "Gather quotes, then check operating costs. <script>throw Error('unsafe')</script>",
+  });
+  const statePanel = page.locator(".public-state:not(.team-artifacts)");
+  await expect(
+    statePanel.getByText("Deployment cost review", { exact: true }),
+  ).toBeVisible({ timeout: 12000 });
+  await expect(statePanel.locator("script")).toHaveCount(0);
+  await expect(statePanel).toContainText("v1 · Research");
+  await expect(composer).toHaveValue(
+    "Keep this unfinished draft while the result arrives.",
+  );
+  await stateCall(
+    "update",
+    {
+      entry_id: state.entry.id,
+      expected_revision: 1,
+      title: "Deployment cost review",
+      content: "Include annual operating costs in the final report.",
+      status: "active",
+    },
+    review.thread_id,
+  );
+  await expect(statePanel).toContainText("v2 · Review", { timeout: 12000 });
+  await expect(statePanel).toContainText(
+    "Include annual operating costs in the final report.",
+  );
+  const conflict = await stateCall("update", {
+    entry_id: state.entry.id,
+    expected_revision: 1,
+    title: "Stale replacement",
+    content: "Must not overwrite the reviewer.",
+    status: "active",
+  });
+  assert.equal(conflict.conflict, true);
+  await expect(
+    statePanel.getByText("Stale replacement", { exact: true }),
+  ).toHaveCount(0);
+  if (process.env.TEAM_STATE_SCREENSHOT)
+    await page.screenshot({
+      path: process.env.TEAM_STATE_SCREENSHOT,
+      fullPage: true,
+    });
   await page.request
     .post(`${apiBase.origin}/preview/peer-request`, {
       data: {
@@ -315,6 +376,87 @@ try {
     { timeout: 12000 },
   );
   await expect(clarificationCard).toContainText("Completed");
+  // Capture versions through the real plugin handler and copy selected bytes
+  // into the recipient's actual uploads before its Agent is admitted.
+  const bytesV1 = Buffer.from([0x25, 0x50, 0x44, 0x46, 0, 0xff, 0x31]);
+  async function publishArtifact(request_id, content, artifact_id) {
+    const response = await page.request.post(
+      `${apiBase.origin}/preview/artifact`,
+      {
+        data: {
+          team_id: team.id,
+          request_id,
+          name: "Release report",
+          content_base64: content.toString("base64"),
+          ...(artifact_id ? { artifact_id } : {}),
+        },
+      },
+    );
+    assert.equal(response.status(), 200, await response.text());
+    return (await response.json()).artifact;
+  }
+  const fileV1 = await publishArtifact("browser-file-v1", bytesV1);
+  const filePanel = page.locator(".team-artifacts");
+  await expect(
+    filePanel.getByLabel("Attach Release report v1", { exact: true }),
+  ).toBeVisible({ timeout: 12000 });
+  await publishArtifact(
+    "browser-file-v2",
+    Buffer.from("later source version"),
+    fileV1.artifact_id,
+  );
+  await expect(
+    filePanel.getByLabel("Attach Release report v2", { exact: true }),
+  ).toBeVisible({ timeout: 12000 });
+  const oldFileCard = filePanel
+    .locator("article")
+    .filter({ hasText: "Release report · v1" });
+  const downloadEvent = page.waitForEvent("download");
+  await oldFileCard
+    .getByRole("button", { name: "Download", exact: true })
+    .click();
+  const download = await downloadEvent;
+  const downloadStream = await download.createReadStream();
+  const downloaded = [];
+  for await (const chunk of downloadStream) downloaded.push(chunk);
+  assert.deepEqual(Buffer.concat(downloaded), bytesV1);
+  await filePanel
+    .getByLabel("Attach Release report v1", { exact: true })
+    .check();
+  await composer.fill("Review the first retained file version.");
+  await page
+    .getByRole("button", { name: "Mention Review", exact: true })
+    .click();
+  await expect(
+    page.getByText("1 file version(s) attached to the next task", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const sentFile = page.waitForResponse((r) =>
+    r.url().endsWith("/actions/send"),
+  );
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  assert.deepEqual((await sentFile).request().postDataJSON().artifacts, [
+    { artifact_id: fileV1.artifact_id, version: 1 },
+  ]);
+  await expect(async () => {
+    const response = await page.request.get(
+      `${apiBase.origin}/preview/imported`,
+      { params: { team_id: team.id, member_id: review.id } },
+    );
+    const files = await response.json();
+    assert.equal(files.length, 1);
+    assert.deepEqual(Buffer.from(files[0].content_base64, "base64"), bytesV1);
+  }).toPass({ timeout: 12000 });
+  await expect(page.locator(".task-message").last()).toContainText(
+    "Completed",
+    { timeout: 12000 },
+  );
+  if (process.env.TEAM_ARTIFACT_SCREENSHOT)
+    await page.screenshot({
+      path: process.env.TEAM_ARTIFACT_SCREENSHOT,
+      fullPage: true,
+    });
   // Opening an existing team should return to its conversation, not a blank form.
   await page.reload();
   await expect(
@@ -419,7 +561,7 @@ try {
   assert.equal(requests, finalCount);
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: HTTP, catalog outage/retry/search/selection, @ picker, real task/result association, peer handoff/receipt, auto-refresh, stable drafts/details, conditional updates, isolation, mobile/dark, reopen, delete, disposal",
+    "PASS: HTTP, catalog outage/retry/search/selection, @ picker, task/result association, peer handoff/receipt, file versions/download/exact-byte transfer, stable drafts/details, conditional updates, isolation, mobile/dark, reopen, delete, disposal",
   );
 } finally {
   await browser.close();

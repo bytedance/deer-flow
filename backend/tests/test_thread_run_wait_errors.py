@@ -87,3 +87,30 @@ async def test_successful_wait_preserves_checkpoint_and_reused_status_contract(w
     else:
         assert response["messages"][0]["content"] == "Current answer."
         state.accessor.aget.assert_awaited_once()
+
+
+_STEP_LIMIT_ERROR = "The run stopped at its step limit (recursion_limit=6) before finishing. Send a message to continue."
+
+
+@pytest.mark.asyncio
+async def test_step_limit_wait_error_keeps_the_stream_frame_name(wait_client):
+    state = wait_client
+    state.record.status = RunStatus.error
+    state.record.error = _STEP_LIMIT_ERROR
+    state.record.stop_reason = "recursion_capped"
+
+    response = await state.client.runs.wait("thread-1", "lead_agent", input={"messages": []}, raise_error=False)
+    assert response["__error__"] == {"error": "GraphRecursionError", "message": _STEP_LIMIT_ERROR}
+    # IM channels read the name from the SDK's exception text.
+    with pytest.raises(Exception, match=r"^GraphRecursionError: The run stopped at its step limit"):
+        await state.client.runs.wait("thread-1", "lead_agent", input={"messages": []})
+
+
+@pytest.mark.asyncio
+async def test_store_backed_wait_reads_the_durable_stop_reason():
+    record = RunRecord(run_id="run-1", thread_id="thread-1", assistant_id=None, status=RunStatus.running, on_disconnect=DisconnectMode.continue_, store_only=True)
+    store = SimpleNamespace(get=AsyncMock(return_value={"status": "error", "error": _STEP_LIMIT_ERROR, "stop_reason": "recursion_capped"}))
+
+    refreshed = await thread_runs._refresh_store_backed_run(SimpleNamespace(_store=store), record)
+
+    assert thread_runs.serialize_wait_run_status(refreshed)["__error__"] == {"error": "GraphRecursionError", "message": _STEP_LIMIT_ERROR}

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from deerflow.config.reload_boundary import format_field_description
 
 
 class OIDCProviderConfig(BaseModel):
@@ -67,6 +70,31 @@ class OIDCAuthConfig(BaseModel):
     )
 
 
+class LoginThrottleStorage(StrEnum):
+    """Where the per-IP failed-login counter behind ``POST /api/v1/auth/login/local`` lives."""
+
+    AUTO = "auto"
+    MEMORY = "memory"
+    DB = "db"
+
+
+def resolve_login_throttle_storage(selector: LoginThrottleStorage | str | None, database_backend: str | None) -> Literal["memory", "db"]:
+    """Resolve ``auth.local.throttle_storage`` against ``database.backend``.
+
+    ``auto`` (the default) shares the counter through the application database
+    whenever one exists (``sqlite`` or ``postgres``), so every Gateway replica
+    using that database enforces one lockout per IP; a ``memory`` database has
+    no shared table and falls back to the per-process counter. ``memory``
+    always keeps the per-process counter. ``db`` asks for the shared table and
+    degrades to ``memory`` when there is no database to hold it — the caller
+    warns about that misconfiguration.
+    """
+    value = str(selector.value if isinstance(selector, StrEnum) else selector or LoginThrottleStorage.AUTO)
+    if value == LoginThrottleStorage.MEMORY:
+        return "memory"
+    return "db" if database_backend in ("sqlite", "postgres") else "memory"
+
+
 class LocalAuthConfig(BaseModel):
     """Configuration for the built-in email/password authentication provider."""
 
@@ -88,9 +116,10 @@ class LocalAuthConfig(BaseModel):
             "Raise it when many users share an egress IP (corporate proxy / NAT); lower it for "
             "a stricter posture. Minimum 2: one failed attempt must never lock an IP, or a "
             "single typo would block everyone behind a shared egress — the strictest legal "
-            "value locks after the second failure. The counter is per-Gateway-worker "
-            "(in-process), so effective attempts in multi-worker deployments scale with "
-            "worker count."
+            "value locks after the second failure. Where the counter lives is decided by "
+            "throttle_storage: shared through the application database (the default whenever "
+            "one exists) every Gateway replica enforces one limit per IP; the in-process "
+            "counter is per worker, so effective attempts scale with the worker count."
         ),
     )
     lockout_seconds: float = Field(
@@ -98,6 +127,21 @@ class LocalAuthConfig(BaseModel):
         gt=0,
         allow_inf_nan=False,
         description=("Seconds an IP stays locked out after reaching auth.local.max_login_attempts. Defaults preserve the historical hardcoded policy (5 minutes)."),
+    )
+    throttle_storage: LoginThrottleStorage = Field(
+        default=LoginThrottleStorage.AUTO,
+        description=format_field_description(
+            "auth.local.throttle_storage",
+            field_doc=(
+                "Where failed-login counters and lockouts for POST /api/v1/auth/login/local are kept. "
+                "'auto' uses the application database whenever database.backend is sqlite or postgres, so every "
+                "Gateway replica sharing that database enforces one lockout per client IP; with database.backend=memory "
+                "it falls back to an in-process counter. 'memory' forces the in-process counter (per process: N replicas "
+                "give an attacker N x max_login_attempts guesses and a lockout on one replica is invisible to the others). "
+                "'db' forces the shared table: it falls back to memory with a warning when the database backend is memory, and refuses to start when the configured "
+                "database's engine is unavailable."
+            ),
+        ),
     )
 
 

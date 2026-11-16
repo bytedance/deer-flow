@@ -19,7 +19,15 @@ ENTRYPOINTS = {
 def run_startup(tmp_path, entrypoint="config", selector=None, extra_env=None, prelude=""):
     # Only propagate interpreter necessities, never ambient credentials/config.
     env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT") if key in os.environ}
-    env.update(PYTHONPATH=os.pathsep.join((str(BACKEND), str(BACKEND / "packages/harness"))), AUTH_JWT_SECRET="test-only")
+    # The stripped env drops the suite's UTF-8 pins (PYTHONUTF8/PYTHONIOENCODING
+    # from `make test`), so the child's interpreter writes stderr in the host's
+    # ANSI codepage (cp936 on Chinese Windows) while a UTF-8-mode parent decodes
+    # it as UTF-8 — the reader thread dies on the first non-ASCII byte and
+    # stderr comes back None. Pin the child's interpreter to UTF-8 like the
+    # suite does, and pin the parent's capture explicitly so the round-trip is
+    # locale-independent even when pytest runs without the Makefile wrapper
+    # (bare `uv run pytest`, the bug class #6590 eliminated).
+    env.update(PYTHONPATH=os.pathsep.join((str(BACKEND), str(BACKEND / "packages/harness"))), AUTH_JWT_SECRET="test-only", PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     if selector is not None:
         env["DEER_FLOW_ENV_FILE"] = str(selector)
     env.update(extra_env or {})
@@ -37,7 +45,7 @@ dotenv.main.find_dotenv = lambda *args, **kwargs: {str(default)!r}
 {ENTRYPOINTS[entrypoint]}
 print(json.dumps([os.getenv('ENV_FILE_TEST_VALUE'), os.getenv('ENV_FILE_TEST_DEFAULT_ONLY')]))
 """
-    return subprocess.run([sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, timeout=30)
+    return subprocess.run([sys.executable, "-c", script], cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
@@ -57,6 +65,21 @@ def test_process_environment_wins(tmp_path, value):
     result = run_startup(tmp_path, selector=selected, extra_env={"ENV_FILE_TEST_VALUE": value})
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [value, None]
+
+
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
+def test_a_bom_prefixed_selection_file_loads_its_first_variable(tmp_path, entrypoint):
+    """Windows Notepad and the PowerShell 5.1 ``Set-Content -Encoding UTF8``
+    switch write a UTF-8 BOM. Plain utf-8 decoding keeps U+FEFF, and dotenv
+    then parses the first variable under a BOM-prefixed key no consumer
+    reads — a silently dropped first variable. The BOM is an encoding
+    artifact, so the selection loader consumes it."""
+    selected = tmp_path / "bom.env"
+    selected.write_bytes(b"\xef\xbb\xbf" + b"ENV_FILE_TEST_VALUE=bom-selected\nENV_FILE_TEST_DEFAULT_ONLY=from-bom\n")
+    assert selected.read_bytes().startswith(b"\xef\xbb\xbf"), "fixture must carry a real BOM"
+    result = run_startup(tmp_path, entrypoint, selected)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == ["bom-selected", "from-bom"]
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)

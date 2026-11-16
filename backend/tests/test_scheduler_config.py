@@ -11,6 +11,8 @@ def test_scheduler_config_defaults():
 
     assert config.enabled is False
     assert config.recursion_limit == 1000
+    assert config.max_concurrent_runs == 3
+    assert config.max_concurrent_runs_per_user == 2
 
 
 def test_scheduler_config_accepts_positive_recursion_limit():
@@ -24,3 +26,14 @@ def test_scheduler_config_rejects_non_positive_recursion_limit():
 
     with pytest.raises(ValidationError):
         SchedulerConfig(recursion_limit=-5)
+
+
+def test_scheduler_config_per_user_cap_bounds():
+    assert SchedulerConfig(max_concurrent_runs_per_user=0).max_concurrent_runs_per_user == 0
+    assert SchedulerConfig(max_concurrent_runs_per_user=32).max_concurrent_runs_per_user == 32
+
+    with pytest.raises(ValidationError):
+        SchedulerConfig(max_concurrent_runs_per_user=-1)
+
+    with pytest.raises(ValidationError):
+        SchedulerConfig(max_concurrent_runs_per_user=33)

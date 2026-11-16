@@ -12,6 +12,8 @@ def _literal_assignment(path: Path, name: str):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            if isinstance(node.value, ast.Set):
+                return {_literal_assignment(path, item.id) if isinstance(item, ast.Name) else ast.literal_eval(item) for item in node.value.elts}
             return ast.literal_eval(node.value)
     raise AssertionError(f"{name} not found in {path}")
 

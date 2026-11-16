@@ -14,13 +14,22 @@ from typing import Any, Literal
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
 from deerflow.constants import MCP_TMP_SUBDIR
+from deerflow.mcp.agent_auth import McpAgentAuthorizationError, bind_task_agent_authority, validate_task_agent_reference
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
 from deerflow.mcp.personal_access import require_personal_mcp_access
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import (
+    MCPPoolDomain,
+    MCPSessionPool,
+    call_pooled_session_tool,
+    get_session_pool,
+    normalized_connection_fingerprint,
+)
+from deerflow.mcp.tasks.ordinary import McpTaskConnectionUnavailableError
+from deerflow.mcp.tasks.runtime import get_mcp_task_oauth_token_manager
 from deerflow.mcp.user_config import PersonalMcpConfigSnapshot, load_user_mcp_config_if_changed
 from deerflow.mcp_scope import mcp_session_scope_key
 from deerflow.runtime.user_context import reset_current_user, set_current_user
@@ -68,16 +77,18 @@ class McpTaskToolCaller:
         extensions_config: ExtensionsConfig,
         *,
         oauth_token_manager: OAuthTokenManager | None = None,
+        connection_scope: Literal["deployment", "personal"] = "deployment",
     ) -> None:
         self._extensions_config = extensions_config
         self._personal_callers: OrderedDict[str, tuple[PersonalMcpConfigSnapshot, McpTaskToolCaller | None]] = OrderedDict()
         self._personal_callers_lock = threading.Lock()
-        self._oauth_token_manager = oauth_token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
+        self._oauth_token_manager = oauth_token_manager or get_mcp_task_oauth_token_manager(extensions_config)
         context_headers_interceptor = build_context_headers_interceptor(extensions_config)
         # Built once so the two chains keep an identical interceptor order and a
         # custom ``mcpInterceptors`` builder is invoked exactly once.
         self._submit_interceptors = build_mcp_tool_interceptors(
             extensions_config,
+            connection_scope=connection_scope,
             oauth_builder=lambda config: build_oauth_tool_interceptor(
                 config,
                 token_manager=self._oauth_token_manager,
@@ -109,6 +120,7 @@ class McpTaskToolCaller:
         thread_incarnation: str | None = None,
         request_scoped_headers: bool = False,
         connection_scope: Literal["deployment", "personal"] = "deployment",
+        agent_auth: dict[str, Any] | None = None,
     ) -> Any:
         """Call a raw MCP tool.
 
@@ -118,29 +130,29 @@ class McpTaskToolCaller:
         run after that run ended. ``connection_scope`` is captured in the task
         binding, so an equal deployment server name cannot change its owner.
         """
-        if connection_scope == "personal":
-            caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
-            await require_personal_mcp_access(user_id, caller._extensions_config.mcp_servers[server_name])
-            return await caller._call_configured_tool(
-                server_name=server_name,
-                tool_name=tool_name,
-                arguments=arguments,
-                user_id=user_id,
-                thread_id=thread_id,
-                thread_incarnation=thread_incarnation,
-                request_scoped_headers=request_scoped_headers,
-            )
-        if connection_scope != "deployment":
-            raise ValueError("Invalid MCP task connection scope")
-        return await self._call_configured_tool(
-            server_name=server_name,
-            tool_name=tool_name,
-            arguments=arguments,
-            user_id=user_id,
-            thread_id=thread_id,
-            thread_incarnation=thread_incarnation,
-            request_scoped_headers=request_scoped_headers,
-        )
+        try:
+            if connection_scope == "personal" and agent_auth is not None:
+                raise McpAgentAuthorizationError("Personal MCP tasks cannot use deployment agent credentials")
+            authority = await validate_task_agent_reference(user_id, server_name, agent_auth)
+            with bind_task_agent_authority(authority):
+                caller = self
+                if connection_scope == "personal":
+                    caller = await asyncio.to_thread(self._personal_caller_for, user_id, server_name)
+                    await require_personal_mcp_access(user_id, caller._extensions_config.mcp_servers[server_name])
+                elif connection_scope != "deployment":
+                    raise ValueError("Invalid MCP task connection scope")
+                return await caller._call_configured_tool(
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    thread_incarnation=thread_incarnation,
+                    request_scoped_headers=request_scoped_headers,
+                    connection_scope=connection_scope,
+                )
+        except McpAgentAuthorizationError as exc:
+            raise McpTaskConnectionUnavailableError(str(exc)) from None
 
     def _personal_caller_for(self, user_id: str, server_name: str) -> McpTaskToolCaller:
         with self._personal_callers_lock:
@@ -153,9 +165,11 @@ class McpTaskToolCaller:
                 self._personal_callers.popitem(last=False)
             server = snapshot.config.mcp_servers.get(server_name)
             if server is None or not server.enabled:
-                raise LookupError("Personal MCP task connection is missing, disabled or changed")
+                raise McpTaskConnectionUnavailableError("Personal MCP task connection is missing, disabled or changed")
             if caller is None:
-                caller = McpTaskToolCaller(snapshot.config)
+                # A personal name can equal a deployment name. Never consult
+                # the deployment OAuth state or startup snapshot for this path.
+                caller = McpTaskToolCaller(snapshot.config, oauth_token_manager=OAuthTokenManager.from_extensions_config(snapshot.config, owner_user_id=user_id), connection_scope="personal")
                 self._personal_callers[user_id] = (snapshot, caller)
             return caller
 
@@ -169,12 +183,13 @@ class McpTaskToolCaller:
         thread_id: str,
         thread_incarnation: str | None,
         request_scoped_headers: bool,
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         is_background_call = not request_scoped_headers
         interceptors = self._interceptors if is_background_call else self._submit_interceptors
         server_config = self._extensions_config.get_enabled_mcp_servers().get(server_name)
         if server_config is None:
-            raise LookupError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
+            raise McpTaskConnectionUnavailableError(f"MCP task server {server_name!r} is missing or disabled in the startup configuration")
         connection = build_server_params(server_name, server_config)
         transport = connection.get("transport", "stdio")
         scope_key = mcp_session_scope_key(
@@ -184,18 +199,40 @@ class McpTaskToolCaller:
         )
 
         if transport == "stdio":
+            pool = get_session_pool()
+            binding = None
+            if isinstance(pool, MCPSessionPool):
+                # Resolve the opaque binding from the base connection before
+                # per-call workspace cwd/TMP variables are added. Direct unit
+                # tests may inject a lightweight fake pool; the production
+                # singleton always takes the binding-aware path.
+                binding = pool.ensure_binding(
+                    server_name,
+                    normalized_connection_fingerprint(connection),
+                    domain=connection_scope,
+                )
             connection = await asyncio.to_thread(
                 _prepare_stdio_connection,
                 connection,
                 user_id=user_id,
                 thread_id=thread_id,
             )
-            pool = get_session_pool()
             session_init_timeout = server_config.session_init_timeout
+            if binding is not None:
+                session_request = pool.get_session(
+                    server_name,
+                    scope_key,
+                    connection,
+                    binding=binding,
+                )
+            elif connection_scope == "deployment":
+                session_request = pool.get_session(server_name, scope_key, connection)
+            else:
+                session_request = pool.get_session(server_name, scope_key, connection, domain=connection_scope)
             if session_init_timeout is not None:
                 try:
                     session = await asyncio.wait_for(
-                        pool.get_session(server_name, scope_key, connection),
+                        session_request,
                         timeout=session_init_timeout,
                     )
                 except TimeoutError:
@@ -206,7 +243,7 @@ class McpTaskToolCaller:
                     )
                     raise
             else:
-                session = await pool.get_session(server_name, scope_key, connection)
+                session = await session_request
             return await self._invoke(
                 session=session,
                 pool=pool,
@@ -220,15 +257,16 @@ class McpTaskToolCaller:
                 session_init_timeout_seconds=None,
                 persistent_session=True,
                 interceptors=interceptors,
+                connection_scope=connection_scope,
             )
 
-        authorization = await self._oauth_token_manager.get_authorization_header(server_name)
+        authorization = None if server_config.agent_auth else await self._oauth_token_manager.get_authorization_header(server_name)
         if authorization:
             connection["headers"] = apply_header_overrides(
                 connection.get("headers") or {},
                 {"Authorization": authorization},
             )
-        # Only HTTP/SSE servers with enabled user_auth need an ambient owner.
+        # Agent/user-auth background calls need the persisted owner's identity.
         # Leave other custom-interceptor contexts unchanged.
         user_auth = server_config.user_auth
         return await self._invoke(
@@ -239,11 +277,12 @@ class McpTaskToolCaller:
             server_name=server_name,
             tool_name=tool_name,
             arguments=arguments,
-            background_user_id=user_id if is_background_call and user_auth is not None and user_auth.enabled else None,
+            background_user_id=user_id if is_background_call and (server_config.agent_auth or (user_auth is not None and user_auth.enabled)) else None,
             timeout_seconds=server_config.tool_call_timeout,
             session_init_timeout_seconds=server_config.session_init_timeout,
             persistent_session=False,
             interceptors=interceptors,
+            connection_scope=connection_scope,
         )
 
     async def _invoke(
@@ -261,6 +300,7 @@ class McpTaskToolCaller:
         session_init_timeout_seconds: float | None,
         persistent_session: bool,
         interceptors: list[Any],
+        connection_scope: MCPPoolDomain,
     ) -> Any:
         from langchain_mcp_adapters.interceptors import MCPToolCallRequest
         from langchain_mcp_adapters.sessions import create_session
@@ -280,6 +320,7 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
+                domain_kwargs = {"domain": connection_scope} if connection_scope != "deployment" else {}
                 return await call_pooled_session_tool(
                     session,
                     pool,
@@ -288,6 +329,7 @@ class McpTaskToolCaller:
                     tool_name=request.name,
                     arguments=request.args,
                     call_kwargs=call_kwargs,
+                    **domain_kwargs,
                 )
 
             effective_connection = dict(connection)

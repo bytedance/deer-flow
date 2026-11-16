@@ -46,6 +46,8 @@ coverage/
 skills/custom/*
 logs/
 log/
+# nginx temp dirs and the BIND_HOST-rendered nginx config from local runs
+/temp/
 debug.log
 
 # Local git hooks (keep only on this machine, do not push)

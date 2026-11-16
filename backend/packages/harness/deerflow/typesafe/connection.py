@@ -81,11 +81,15 @@ class TypeSafeConnection:
     deadline_seconds: float
     max_attempts: int
     retry_backoff: float
+    #: Which request path the endpoint serves. It belongs to the *dialect*, not the operator:
+    #: a connection whose base URL points at another service must not report a System One URL, so
+    #: every consumer resolves it through the backend it is about to call.
+    endpoint_path: str = ENDPOINT_PATH
 
     @property
     def url(self) -> str:
-        """The System One endpoint this connection posts to."""
-        return f"{self.base_url.rstrip('/')}{ENDPOINT_PATH}"
+        """The endpoint this connection posts to."""
+        return f"{self.base_url.rstrip('/')}{self.endpoint_path}"
 
     def credential_fingerprint(self) -> str:
         """A short digest of the credential, to compare consumers without recording either key."""
@@ -96,6 +100,7 @@ class TypeSafeConnection:
         return {
             "model": self.model,
             "base_url": self.base_url.rstrip("/"),
+            "endpoint_path": self.endpoint_path,
             "timeout": self.timeout,
             "deadline_seconds": self.deadline_seconds,
             "max_attempts": self.max_attempts,
@@ -108,6 +113,8 @@ def resolve_connection(
     settings: Mapping[str, object] | None = None,
     defaults: Mapping[str, object] | None = None,
     configuration_source: str,
+    endpoint_path: str = ENDPOINT_PATH,
+    provider_label: str = "TypeSafe",
 ) -> TypeSafeConnection:
     """Resolve the effective connection for one consumer.
 
@@ -122,7 +129,13 @@ def resolve_connection(
     ``configuration_source`` names the consumer's settings location (for example
     ``guardrails.provider.config``); it reaches the missing-credential message so
     an operator knows which block to edit. It never carries the credential.
+
+    ``endpoint_path`` is what the calling backend serves, not something a consumer
+    configures; it is validated here so a malformed value cannot become a per-request URL error.
+    ``provider_label`` names that backend in construction-time diagnostics.
     """
+    if not isinstance(endpoint_path, str) or not endpoint_path.startswith("/"):
+        raise ValueError("endpoint_path must be an absolute request path such as '/v1/systemone'")
     override = _configured(settings)
     fallback = _configured(defaults)
 
@@ -132,7 +145,7 @@ def resolve_connection(
 
     api_key = _resolve_credential(override, fallback, api_key_env)
     if not isinstance(api_key, str) or not api_key:
-        raise ValueError(f"TypeSafe requires an API key: pass 'api_key' in {configuration_source} or set the {api_key_env} environment variable")
+        raise ValueError(f"{provider_label} requires an API key: pass 'api_key' in {configuration_source} or set the {api_key_env} environment variable")
     # Shape only, and never echoed: a key that cannot travel as a header value is a
     # configuration error here instead of a per-call protocol error whose message
     # carries the whole ``Bearer`` header into the guardrail's exception log.
@@ -142,7 +155,7 @@ def resolve_connection(
 
     model = _first(override, fallback, "model", DEFAULT_MODEL)
     if not isinstance(model, str) or not model.strip():
-        raise ValueError("model must be a non-empty string; TypeSafe returns the version it actually served")
+        raise ValueError(f"{provider_label} model must be a non-empty string")
 
     return TypeSafeConnection(
         api_key=api_key,
@@ -153,6 +166,7 @@ def resolve_connection(
         deadline_seconds=finite_float("deadline_seconds", _first(override, fallback, "deadline_seconds", DEFAULT_DEADLINE_SECONDS), minimum=0.0, exclusive=True),
         max_attempts=whole_number("max_attempts", _first(override, fallback, "max_attempts", DEFAULT_MAX_ATTEMPTS), minimum=1),
         retry_backoff=finite_float("retry_backoff", _first(override, fallback, "retry_backoff", DEFAULT_RETRY_BACKOFF), minimum=0.0),
+        endpoint_path=endpoint_path,
     )
 
 
@@ -162,6 +176,7 @@ def resolve_connection_for_mode(
     settings: Mapping[str, object] | None = None,
     defaults: Mapping[str, object] | None = None,
     configuration_source: str,
+    endpoint_path: str = ENDPOINT_PATH,
 ) -> TypeSafeConnection | None:
     """Resolve a mode-bearing consumer's connection, or ``None`` when it is off.
 
@@ -175,7 +190,7 @@ def resolve_connection_for_mode(
     """
     if mode == MODE_OFF:
         return None
-    return resolve_connection(settings=settings, defaults=defaults, configuration_source=configuration_source)
+    return resolve_connection(settings=settings, defaults=defaults, configuration_source=configuration_source, endpoint_path=endpoint_path)
 
 
 def _configured(settings: Mapping[str, object] | None) -> dict[str, object]:

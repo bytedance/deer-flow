@@ -17,8 +17,13 @@ function channelsUrl(path: string): string {
   return `${getBackendBaseURL()}/api/channels${path}`;
 }
 
-export async function listChannelProviders(): Promise<ChannelProvidersResponse> {
-  const response = await fetch(channelsUrl("/providers"));
+export async function listChannelProviders(options?: {
+  signal?: AbortSignal;
+}): Promise<ChannelProvidersResponse> {
+  const signal = options?.signal;
+  const response = signal
+    ? await fetch(channelsUrl("/providers"), { signal })
+    : await fetch(channelsUrl("/providers"));
   if (!response.ok) {
     await throwGatewayApiError(
       response,
@@ -42,10 +47,17 @@ export async function listChannelConnections(): Promise<ChannelConnection[]> {
 
 export async function connectChannelProvider(
   provider: ChannelProviderId,
+  options?: { groupName?: string },
 ): Promise<ChannelConnectResponse> {
   const response = await fetch(
     channelsUrl(`/${encodeURIComponent(provider)}/connect`),
-    { method: "POST" },
+    options?.groupName
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ group_name: options.groupName }),
+        }
+      : { method: "POST" },
   );
   if (!response.ok) {
     await throwGatewayApiError(

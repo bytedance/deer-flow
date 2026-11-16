@@ -62,6 +62,24 @@ test.each([
   expect(onChange).toHaveBeenLastCalledWith(initial);
 });
 
+test("a date-only run_at opens at midnight in the task's zone and is kept as sent", () => {
+  // The server runs a bare date at midnight in the task's zone; reading it as
+  // UTC midnight put the New York field on the previous evening.
+  const initial = once("2026-12-07");
+  const onChange = rs.fn();
+  const ui = render(
+    <ScheduledTaskScheduleInput
+      initial={initial}
+      onChange={onChange}
+      scheduleTypeLocked
+    />,
+  );
+  expect((ui.getByLabelText("Run at") as HTMLInputElement).value).toBe(
+    "2026-12-07T00:00",
+  );
+  expect(onChange).toHaveBeenLastCalledWith(initial);
+});
+
 test("parent feedback and title-only rerenders retain the original instant", () => {
   const original = once("2026-11-01T06:30:00Z");
   function Editor() {
@@ -102,6 +120,28 @@ test("parent feedback and title-only rerenders retain the original instant", () 
   expect(ui.getByRole("status").textContent).toBe(
     original.schedule_spec.run_at,
   );
+});
+
+test("a stored skipped midnight opens at the scheduler's time without rewriting it", () => {
+  const initial = once("2026-09-06", "America/Santiago");
+  const onChange = rs.fn();
+  const ui = render(
+    <ScheduledTaskScheduleInput
+      initial={initial}
+      onChange={onChange}
+      scheduleTypeLocked
+    />,
+  );
+  const input = ui.getByLabelText("Run at") as HTMLInputElement;
+  expect(input.value).toBe("2026-09-06T01:00");
+  expect(onChange).toHaveBeenLastCalledWith(initial);
+
+  fireEvent.change(input, { target: { value: "2026-09-06T02:00" } });
+  expect(onChange).toHaveBeenLastCalledWith(
+    once("2026-09-06T05:00:00+00:00", "America/Santiago"),
+  );
+  fireEvent.change(input, { target: { value: "2026-09-06T01:00" } });
+  expect(onChange).toHaveBeenLastCalledWith(initial);
 });
 
 test("changing timezone recomputes the instant and reverting restores seconds", () => {

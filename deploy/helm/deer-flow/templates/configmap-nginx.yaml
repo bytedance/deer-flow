@@ -204,6 +204,24 @@ data:
                 proxy_read_timeout 600s;
             }
 
+            # Live browser stream is a WebSocket upgrade. Match it before the
+            # generic /api/threads regex so the handshake reaches Gateway with
+            # the upgrade headers intact.
+            location ~ ^/api/threads/[^/]+/browser/stream {
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_cache_bypass $http_upgrade;
+
+                # Allow quiet streams; connection and send timeouts use nginx defaults.
+                proxy_read_timeout 600s;
+            }
+
             location ~ ^/api/threads {
                 proxy_pass http://gateway_upstream;
                 proxy_http_version 1.1;

@@ -63,6 +63,8 @@ export type ProjectDocument = {
   source_name: string | null;
   created_at: string;
   updated_at: string;
+  /** Best-effort LLM-generated one-line description; null when absent. */
+  summary?: string | null;
 };
 
 /**

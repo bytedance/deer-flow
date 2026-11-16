@@ -154,7 +154,9 @@ class Rows:
         origin = await ThreadMetaRepository(self.read_session).get(origin_thread_id, user_id=DEFAULT_USER_ID)
         if origin is None or origin.get("user_id") != DEFAULT_USER_ID:
             raise ValueError("Benchmark fixture seeding requires a real owned origin thread")
-        body = ScheduledTaskCreateRequest(title=f"synthetic-{case_id}-{arm}", prompt=prompt, schedule_type="once", schedule_spec={"run_at": due_at.isoformat()}, timezone="UTC")
+        goal = f"{fixture(case_id)['instruction']} Produce and present report.json from the supplied synthetic source." if arm == "goal" else None
+        # The shared validation returns goal and limits with the definition.
+        body = ScheduledTaskCreateRequest(title=f"synthetic-{case_id}-{arm}", prompt=prompt, schedule_type="once", schedule_spec={"run_at": due_at.isoformat()}, timezone="UTC", goal_objective=goal)
         scheduler = SchedulerConfig(enabled=True, min_once_delay_seconds=plan["scheduler_min_delay"])
         definition = await validate_scheduled_task_create(body, user_id=DEFAULT_USER_ID, thread_store=None, scheduler_config=scheduler, assistant_resolver=resolve_scheduled_task_assistant_id)
         return await ScheduledTaskRepository(self.write_session).create(
@@ -162,7 +164,6 @@ class Rows:
             user_id=DEFAULT_USER_ID,
             origin_thread_id=origin_thread_id,
             **definition,
-            goal_objective=f"{fixture(case_id)['instruction']} Produce and present report.json from the supplied synthetic source." if arm == "goal" else None,
         )
 
 

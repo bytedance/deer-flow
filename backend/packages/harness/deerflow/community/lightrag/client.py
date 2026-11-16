@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
+
+from deerflow.community.provider_credentials import redact_secret
 
 QUERY_MODES = ("naive", "local", "global", "hybrid", "mix")
 
@@ -49,10 +52,7 @@ class LightRAGClient:
         self._transport = transport
 
     def _redact(self, value: object) -> str:
-        text = str(value)
-        if self._api_key:
-            text = text.replace(self._api_key, "[REDACTED]")
-        return text
+        return redact_secret(value, self._api_key)
 
     def _error_message(self, payload: object, status_code: int) -> str | None:
         """Extract a redacted, human-readable message from an error payload.
@@ -100,7 +100,7 @@ class LightRAGClient:
             client_kwargs["transport"] = self._transport
 
         try:
-            async with httpx.AsyncClient(**client_kwargs) as client:
+            async with await asyncio.to_thread(httpx.AsyncClient, **client_kwargs) as client:
                 response = await client.request(method, path, json=json)
         except httpx.TimeoutException:
             raise LightRAGConnectionError(f"LightRAG request timed out after {self.timeout:g} seconds.") from None

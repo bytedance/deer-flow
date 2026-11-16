@@ -133,7 +133,7 @@ class TestSummarizationEmitsTheEvent:
         monkeypatch.setattr(
             summarization_middleware,
             "notify_context_compacted",
-            lambda event, extensions=None: events.append(event),
+            lambda event, extensions=None, task_store=None: events.append(event),
         )
         middleware = _middleware()
 
@@ -159,7 +159,7 @@ class TestSummarizationEmitsTheEvent:
         monkeypatch.setattr(
             summarization_middleware,
             "notify_context_compacted",
-            lambda event, extensions=None: events.append(event),
+            lambda event, extensions=None, task_store=None: events.append(event),
         )
         # A trigger threshold far above the message count never fires, so
         # compaction never runs and the record half is never reached.
@@ -204,7 +204,7 @@ class TestAnInstallWithNoObserverPaysNothing:
         from deerflow.extensions import get_agent_build_extensions
 
         events = []
-        monkeypatch.setattr(summarization_middleware, "notify_context_compacted", lambda event, extensions=None: events.append(event))
+        monkeypatch.setattr(summarization_middleware, "notify_context_compacted", lambda event, extensions=None, task_store=None: events.append(event))
         unobserved = replace(get_agent_build_extensions(), context_compaction_observers=())
 
         result = await _middleware(extensions=unobserved).abefore_model({"messages": _messages()}, _runtime())

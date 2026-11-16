@@ -11,6 +11,7 @@ import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,65 @@ from deerflow.agents.memory.manager import (
     reset_memory_manager,
 )
 from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    config_path = tmp_path / "ovcli.conf"
+    config_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("OPENVIKING_CLI_CONFIG_FILE", str(config_path))
+    for name in ("OPENVIKING_URL", "OPENVIKING_API_KEY", "OPENVIKING_ACCOUNT", "OPENVIKING_USER", "OPENVIKING_ACTOR_PEER_ID", "OPENVIKING_TIMEOUT"):
+        monkeypatch.delenv(name, raising=False)
+    return config_path
+
+
+@pytest.fixture
+def openviking_http_server(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, list[dict[str, Any]]]]:
+    # This fixture exercises a direct loopback transport, not host proxy routing.
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "127.0.0.1,localhost,::1")
+    requests: list[dict[str, Any]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            requests.append({"path": self.path, "headers": {key.lower(): value for key, value in self.headers.items()}})
+            self._respond({"status": "ok"})
+
+        def do_POST(self) -> None:
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append({"path": self.path, "headers": {key.lower(): value for key, value in self.headers.items()}, "payload": payload})
+            if self.path == "/api/v1/search/find":
+                result = {"memories": [{"uri": "viking://user/alice/memories/style.md", "category": "preferences", "overview": "Prefers concise answers.", "score": 0.9}]}
+            elif self.path.endswith("/messages/batch"):
+                result = {"pending_tokens": 2}
+            elif self.path.endswith("/commit"):
+                result = {"status": "committed"}
+            else:
+                self.send_error(404)
+                return
+            self._respond({"status": "success", "result": result})
+
+        def _respond(self, body: dict[str, Any]) -> None:
+            encoded = json.dumps(body).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 class _CommitPolicy:
@@ -161,6 +221,55 @@ _ACTOR_PEER: ContextVar[str | None] = ContextVar(
     "test_actor_peer",
     default=None,
 )
+
+
+@pytest.mark.parametrize("kind", ["invalid", "legacy"])
+@pytest.mark.parametrize("entry", ["after-agent", "async-after-agent", "compaction"])
+def test_memory_admission_redacts_call_views_before_openviking_recorder(tmp_path, monkeypatch, official_integration, kind: str, entry: str) -> None:
+    import asyncio
+
+    from langchain_core.messages import messages_to_dict
+    from langchain_openai.chat_models.base import _convert_dict_to_message
+    from langgraph.runtime import Runtime
+
+    from deerflow.agents.memory import summarization_hook
+    from deerflow.agents.middlewares import memory_middleware
+    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+    from deerflow.agents.middlewares.summarization_middleware import SummarizationEvent
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
+    config = PiiRedactionConfig(enabled=True, token_secret="openviking-regression-secret")
+    raw = {"role": "assistant", "content": "Preparing lookup"}
+    call = {"name": "lookup", "arguments": '{"email":"alice@example.com"}' if kind == "legacy" else '{"email":"alice@example.com",'}
+    raw.update({"function_call": call} if kind == "legacy" else {"tool_calls": [{"id": "call-1", "type": "function", "function": call}]})
+    messages = [HumanMessage("Look up contact"), _convert_dict_to_message(raw), AIMessage("Lookup was not executed")]
+    original = messages_to_dict(messages)
+    manager = _manager(tmp_path, monkeypatch)
+    monkeypatch.setattr(memory_middleware, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_manager", lambda: manager)
+    monkeypatch.setattr(summarization_hook, "get_memory_config", lambda: MemoryConfig(enabled=True))
+    runtime = Runtime(context={"thread_id": "thread-1", "user_id": "alice"})
+    middleware = MemoryMiddleware(memory_config=MemoryConfig(enabled=True), pii_redaction_config=config)
+    try:
+        if entry == "after-agent":
+            middleware.after_agent({"messages": messages}, runtime)
+        elif entry == "async-after-agent":
+            asyncio.run(middleware.aafter_agent({"messages": messages}, runtime))
+        else:
+            event = SummarizationEvent(messages_to_summarize=tuple(messages), preserved_messages=(), thread_id="thread-1", agent_name=None, runtime=runtime)
+            summarization_hook.memory_flush_hook(event, pii_redaction_config=config)
+        assert len(manager._recorder.calls) == 1
+        recorded = manager._recorder.calls[0][1]
+        assert len(recorded) == 3
+        assert "alice@example.com" not in str(messages_to_dict(recorded))
+        if kind == "legacy":
+            assert "[EMAIL_" in recorded[1].additional_kwargs["function_call"]["arguments"]
+        else:
+            assert "[EMAIL_" in recorded[1].invalid_tool_calls[0]["args"]
+        assert messages_to_dict(messages) == original
+    finally:
+        manager.close()
 
 
 @contextmanager
@@ -345,6 +454,61 @@ def test_official_loader_uses_standalone_package() -> None:
     assert integration["OpenVikingRetriever"].__module__.startswith("langchain_openviking")
 
 
+@pytest.mark.parametrize("cli_profile", ["missing", "empty", "foreign", "oidc-env", "ldap-env"])
+def test_user_key_connection_uses_owner_key_without_ambient_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_cli_config: Path,
+    openviking_http_server: tuple[str, list[dict[str, Any]]],
+    cli_profile: str,
+) -> None:
+    if cli_profile == "missing":
+        isolated_cli_config.unlink()
+    elif cli_profile == "foreign":
+        isolated_cli_config.write_text(json.dumps({"url": "http://unused.invalid", "api_key": "cli-key", "extra_headers": {"X-CLI-Only": "must-not-leak", "X-API-Key": "cli-header-key"}}), encoding="utf-8")
+    if cli_profile in {"oidc-env", "ldap-env"}:
+        monkeypatch.setenv("OPENVIKING_AUTH_MODE", cli_profile.removesuffix("-env"))
+        monkeypatch.setenv("OPENVIKING_OIDC_TOKEN", "foreign-token")
+        monkeypatch.setenv("OPENVIKING_USERNAME", "foreign-user")
+        monkeypatch.setenv("OPENVIKING_PASSWORD", "foreign-password")
+    base_url, requests = openviking_http_server
+    manager = _manager(tmp_path, monkeypatch, base_url=base_url, timeout_seconds=1, failure_policy={"read": "raise"})
+    try:
+        assert manager.warm() is True
+        facts = manager.search("response style", top_k=2, user_id="alice")
+        assert facts == [{"id": "viking://user/alice/memories/style.md", "content": "Prefers concise answers.", "category": "preferences", "confidence": 0.9, "source": "viking://user/alice/memories/style.md", "score": 0.9}]
+        assert [request["path"] for request in requests] == ["/health", "/api/v1/search/find"]
+        assert requests[-1]["payload"]["query"] == "response style"
+        assert requests[-1]["payload"]["limit"] == 2
+
+        messages = [HumanMessage("remember short replies"), AIMessage("noted")]
+        manager.add("thread-1", messages, user_id="alice")
+        batch, commit = requests[2:]
+        assert batch["path"].endswith("/messages/batch")
+        assert commit["path"] == batch["path"].removesuffix("/messages/batch") + "/commit"
+        assert [message["role"] for message in batch["payload"]["messages"]] == ["user", "assistant"]
+        assert [message["parts"] for message in batch["payload"]["messages"]] == [[{"type": "text", "text": "remember short replies"}], [{"type": "text", "text": "noted"}]]
+        assert all(request["headers"]["x-api-key"] == "user-key" for request in requests)
+        assert all("x-cli-only" not in request["headers"] for request in requests)
+        assert all("authorization" not in request["headers"] for request in requests)
+        before = len(requests)
+        manager.add("thread-1", messages, user_id="alice")
+        assert len(requests) == before
+        with pytest.raises(MemoryReadError, match="owner_user_id"):
+            manager.search("private data", user_id="another-owner")
+        with pytest.raises(MemoryManagerError, match="owner_user_id"):
+            manager.add("thread-1", messages, user_id="another-owner")
+        assert len(requests) == before
+    finally:
+        manager.close()
+
+
+def test_malformed_cli_configuration_is_not_silently_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_cli_config: Path) -> None:
+    isolated_cli_config.write_text("{invalid", encoding="utf-8")
+    with pytest.raises(ValueError, match="Invalid CLI config"):
+        _manager(tmp_path, monkeypatch)
+
+
 def test_manager_uses_official_recorder_retriever_and_commit_always(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -422,6 +586,18 @@ def test_context_without_thread_uses_existing_find_path(
     ]
 
 
+def _injection_middleware(manager: OpenVikingMemoryManager) -> DynamicContextMiddleware:
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.memory_config import MemoryConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    config = AppConfig(
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        memory=MemoryConfig(enabled=True, injection_enabled=True, manager_class="openviking", backend_config=manager.backend_config),
+    )
+    return DynamicContextMiddleware(app_config=config)
+
+
 def test_unreachable_context_read_raise_aborts_dynamic_context_injection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -442,7 +618,7 @@ def test_unreachable_context_read_raise_aborts_dynamic_context_injection(
         "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
         lambda runtime: "alice",
     )
-    middleware = DynamicContextMiddleware()
+    middleware = _injection_middleware(manager)
     state = {"messages": [HumanMessage("answer this", id="message-1")]}
 
     with pytest.raises(MemoryReadError) as exc_info:
@@ -469,7 +645,7 @@ def test_strict_scope_mismatch_uses_required_read_error(
         "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
         lambda runtime: "bob",
     )
-    middleware = DynamicContextMiddleware()
+    middleware = _injection_middleware(manager)
     state = {"messages": [HumanMessage("answer this", id="message-1")]}
 
     with pytest.raises(MemoryReadError, match="owner_user_id 'alice'") as exc_info:
@@ -503,7 +679,7 @@ def test_unreachable_context_read_fail_open_returns_no_injected_context(
         "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
         lambda runtime: "alice",
     )
-    middleware = DynamicContextMiddleware()
+    middleware = _injection_middleware(manager)
     state = {"messages": [HumanMessage("answer this", id="message-1")]}
 
     assert manager.get_context("alice", agent_name="research") == ""
@@ -557,7 +733,7 @@ async def test_unreachable_context_read_raise_aborts_async_dynamic_context_injec
         "deerflow.agents.middlewares.dynamic_context_middleware.resolve_runtime_user_id",
         lambda runtime: "alice",
     )
-    middleware = DynamicContextMiddleware()
+    middleware = _injection_middleware(manager)
     state = {"messages": [HumanMessage("answer this", id="message-1")]}
 
     with pytest.raises(MemoryReadError) as exc_info:

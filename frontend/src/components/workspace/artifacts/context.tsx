@@ -12,7 +12,9 @@ import {
 } from "react";
 
 import { useSidebar } from "@/components/ui/sidebar";
+import { useArtifactDrafts } from "@/core/artifacts/draft-context";
 import type { ArtifactDraftState } from "@/core/artifacts/editing";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
@@ -90,10 +92,14 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   );
   const [autoOpen, setAutoOpen] = useState(true);
-  const [drafts, setDrafts] = useState<Record<string, ArtifactDraftState>>({});
   const [editingPath, setEditingPath] = useState<string | null>(null);
   const { setOpen: setSidebarOpen } = useSidebar();
   const pathname = usePathname();
+  const { user } = useAuth();
+  const { drafts, setDrafts } = useArtifactDrafts(
+    pathname ?? "",
+    user?.id ?? null,
+  );
   const hydratedPathRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -107,24 +113,9 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
     setAutoOpen(true);
     setAutoSelect(!persisted?.selectedArtifact);
-    setDrafts({});
     setEditingPath(null);
     hydratedPathRef.current = pathname;
   }, [pathname]);
-
-  useEffect(() => {
-    const hasUnsavedDrafts = Object.values(drafts).some(
-      (draft) => draft.draftContent !== draft.baselineContent,
-    );
-    if (!hasUnsavedDrafts) {
-      return;
-    }
-    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
-  }, [drafts]);
 
   useEffect(() => {
     if (!pathname || hydratedPathRef.current !== pathname) {

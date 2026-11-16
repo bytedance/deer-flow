@@ -10,6 +10,7 @@ import {
 import { useState, type PropsWithChildren } from "react";
 
 const mocks = rs.hoisted(() => ({
+  pathname: "/workspace/chats/artifact-editing-test",
   artifactContent: {
     content: undefined as string | undefined,
     url: undefined as string | undefined,
@@ -35,7 +36,7 @@ rs.mock("@/components/ui/sidebar", () => ({
   useSidebar: () => ({ setOpen: mocks.setSidebarOpen }),
 }));
 rs.mock("next/navigation", () => ({
-  usePathname: () => "/workspace/chats/artifact-editing-test",
+  usePathname: () => mocks.pathname,
 }));
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
@@ -76,6 +77,7 @@ rs.mock("@/components/workspace/code-editor", () => ({
 import { ArtifactFileDetail } from "@/components/workspace/artifacts/artifact-file-detail";
 import { ArtifactsProvider } from "@/components/workspace/artifacts/context";
 import { fetch as apiFetch } from "@/core/api/fetcher";
+import { ArtifactDraftsProvider } from "@/core/artifacts/draft-context";
 import { I18nProvider } from "@/core/i18n/context";
 
 const filepath = "/mnt/user-data/outputs/large.txt";
@@ -84,6 +86,7 @@ const prefix = "a".repeat(1024 * 1024);
 const fullContent = prefix + "\nComplete file tail\n";
 const revision = "a".repeat(64);
 const mockedFetch = rs.mocked(apiFetch);
+let resolvePendingSave: (() => void) | undefined;
 
 function Wrapper({ children }: PropsWithChildren) {
   const [queryClient] = useState(
@@ -92,7 +95,9 @@ function Wrapper({ children }: PropsWithChildren) {
   return (
     <QueryClientProvider client={queryClient}>
       <I18nProvider initialLocale="en-US">
-        <ArtifactsProvider>{children}</ArtifactsProvider>
+        <ArtifactDraftsProvider>
+          <ArtifactsProvider key={mocks.pathname}>{children}</ArtifactsProvider>
+        </ArtifactDraftsProvider>
       </I18nProvider>
     </QueryClientProvider>
   );
@@ -129,6 +134,7 @@ function save() {
 }
 
 beforeEach(() => {
+  mocks.pathname = "/workspace/chats/artifact-editing-test";
   window.sessionStorage.clear();
   Object.assign(mocks.artifactContent, {
     content: prefix,
@@ -150,6 +156,7 @@ beforeEach(() => {
       { headers: { "Content-Type": "application/json" } },
     ),
   );
+  resolvePendingSave = undefined;
 });
 
 afterEach(() => {
@@ -159,6 +166,130 @@ afterEach(() => {
 });
 
 describe("ArtifactFileDetail complete editing baseline", () => {
+  it("retains a dirty draft and marks a remote conflict after A-B-A navigation", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "retained draft" } });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    Object.assign(mocks.artifactContent, {
+      content: "agent regenerated the report",
+      sha256: "c".repeat(64),
+    });
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("retained draft");
+    expect(screen.getByText("Changed remotely")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+    expect(mockedFetch).not.toHaveBeenCalled();
+  });
+
+  it("restores an actual editor draft after the chat provider is replaced", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), {
+      target: { value: "retained after navigation" },
+    });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("retained after navigation");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(false);
+  });
+
+  it("does not resurrect discarded changes after navigating away and back", () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "discarded edit" } });
+    rs.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Discard changes" }));
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe(fullContent);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+  });
+
+  it("keeps a successful save clean after navigating away and back", async () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "saved edit" } });
+    fireEvent.click(save());
+    await waitFor(() => expect(save().disabled).toBe(true));
+    Object.assign(mocks.artifactContent, {
+      content: "saved edit",
+      sha256: "b".repeat(64),
+    });
+    mocks.pathname = "/workspace/chats/other";
+    rerender(<div />);
+    mocks.pathname = "/workspace/chats/artifact-editing-test";
+    rerender(detail());
+    expect(source().value).toBe("saved edit");
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(save().disabled).toBe(true);
+    expect(screen.queryByText("Unsaved")).toBeNull();
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("keeps edits made after a save across a remount", async () => {
+    loadFull();
+    const { rerender } = renderDetail();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(source(), { target: { value: "first save" } });
+
+    mockedFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePendingSave = () =>
+            resolve(
+              new Response(
+                JSON.stringify({
+                  path: filepath,
+                  sha256: "b".repeat(64),
+                  size: "first save".length,
+                }),
+                { headers: { "Content-Type": "application/json" } },
+              ),
+            );
+        }),
+    );
+    fireEvent.click(save());
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledOnce());
+
+    // Leaving the chat unmounts the detail while the original PUT is pending.
+    rerender(<div />);
+    rerender(detail());
+    fireEvent.change(source(), { target: { value: "newer edit" } });
+
+    resolvePendingSave?.();
+    await waitFor(() => expect(source().value).toBe("newer edit"));
+    expect(save().disabled).toBe(false);
+
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+
+    fireEvent.click(save());
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledTimes(2));
+    expect(mockedFetch.mock.calls[1]?.[1]).toMatchObject({
+      body: JSON.stringify({
+        content: "newer edit",
+        expected_sha256: "b".repeat(64),
+      }),
+    });
+  });
+
   it.each([
     ["truncated preview", { content: prefix, truncated: true }],
     ["failed refetch", { error: new Error("Artifact refetch failed") }],

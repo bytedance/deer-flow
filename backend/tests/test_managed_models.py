@@ -60,6 +60,55 @@ def test_missing_encryption_key_never_replaced(store):
     assert not store.key_path.exists()
 
 
+def test_first_save_keeps_a_key_a_peer_created_concurrently(store, monkeypatch):
+    """A peer that publishes the key file first must win; replacing it would orphan the peer's catalog."""
+    from cryptography.fernet import Fernet
+
+    peer_key = Fernet.generate_key()
+    original_generate = Fernet.generate_key
+
+    def peer_wins_the_race():
+        store.key_path.parent.mkdir(parents=True, exist_ok=True)
+        store.key_path.write_bytes(peer_key)
+        return original_generate()
+
+    monkeypatch.setattr(Fernet, "generate_key", staticmethod(peer_wins_the_race))
+    store.save(profile(), expected_revision=None)
+
+    assert store.key_path.read_bytes() == peer_key
+    assert Fernet(peer_key).decrypt(store.path.read_bytes())
+
+
+def test_first_save_recovers_an_empty_key_left_by_an_interrupted_creation(store):
+    """An empty key file with no catalog encrypted no data, so the next save must replace it, not 503 forever."""
+    from cryptography.fernet import Fernet
+
+    store.key_path.parent.mkdir(parents=True, exist_ok=True)
+    store.key_path.write_bytes(b"")
+
+    store.save(profile(), expected_revision=None)
+
+    key = store.key_path.read_bytes()
+    assert key.strip()
+    assert Fernet(key).decrypt(store.path.read_bytes())
+    assert ManagedModelStore().list()[0].api_key.get_secret_value() == "test-secret"
+
+
+def test_an_empty_key_next_to_an_existing_catalog_is_never_replaced(store):
+    """The catalog was encrypted with the lost key; a new key would silently orphan it."""
+    store.save(profile(), expected_revision=None)
+    catalog = store.path.read_bytes()
+    store.key_path.write_bytes(b"")
+
+    with pytest.raises(ValueError):
+        store.save(profile(), expected_revision=None)
+    with pytest.raises(ValueError, match="restore it from backup"):
+        store._cipher(create=True)
+
+    assert store.key_path.read_bytes() == b""
+    assert store.path.read_bytes() == catalog
+
+
 @pytest.mark.parametrize("url", ["file:///tmp/test", "https://user:pass@example.com/v1", "https://example.com/v1?key=abc", "https://example.com/#fragment"])
 def test_endpoint_validation(url):
     with pytest.raises(ValidationError):
@@ -234,7 +283,6 @@ async def test_yaml_name_reserved_and_pat_denied(store, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,expected", [("tool", "success"), ("text", "tool_call_missing"), ("error", "connection_failed")])
 async def test_connection_probe_is_bounded_redacted_and_does_not_save(store, monkeypatch, mode, expected):
-    import langchain_openai
     from langchain_core.messages import AIMessageChunk
 
     from app.gateway.routers import managed_models as router
@@ -254,7 +302,12 @@ async def test_connection_probe_is_bounded_redacted_and_does_not_save(store, mon
                 raise RuntimeError("test-secret should never be returned")
             yield AIMessageChunk(content="", tool_call_chunks=[{"name": "connection_check", "args": "{}", "id": "call-1", "index": 0}] if mode == "tool" else [])
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", FakeModel)
+    def fake_factory(**kwargs):
+        assert kwargs["attach_tracing"] is False
+        assert kwargs["app_config"].models[0].use == "langchain_openai:ChatOpenAI"
+        return FakeModel(**kwargs["model_overrides"])
+
+    monkeypatch.setattr(router, "create_chat_model", fake_factory)
     request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
     result = await router.test_model(request, router.SaveModelRequest(config=profile()))
     assert result["message"] == expected

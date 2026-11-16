@@ -7,7 +7,7 @@ import { Callout } from "nextra/components";
 
 # 参考
 
-本页列出契约版本 **0.2.4** 中 `deerflow_extension_api.__all__` 的每一个名称。请从包根导入：
+本页说明契约版本 **0.2.4** 时 `deerflow_extension_api.__all__` 中的每一个名称，以及 0.2.10 为 `CompactionEvent` 新增的身份字段。0.2.4 之后新增的其他名称列在[版本历史](#版本历史)中，本页尚未展开说明。所有名称都从包根导入：
 
 ```python
 from deerflow_extension_api import ExtensionRegistry, MiddlewarePlacement, Placement
@@ -143,7 +143,7 @@ class TaskLifecycleContributor(Protocol):
 
 ### `TaskInfo`
 
-冻结的 dataclass。
+冻结的 dataclass。宿主还会把它放进自己分配的每个任务存储（子 Agent 仅在有父运行时），所以任何拿到该存储的钩子都能用 `task_store.get(TaskInfo)` 确定所属任务。
 
 | 字段             | 类型                          | 默认值  |
 | ---------------- | ----------------------------- | ------- |
@@ -260,8 +260,11 @@ class ContextCompactionObserver(Protocol):
 | `output_content_hash`     | `str`             |
 | `compacted_message_count` | `int`             |
 | `kept_message_count`      | `int`             |
+| `task_id`                 | `str \| None = None` |
+| `run_id`                  | `str \| None = None` |
+| `thread_id`               | `str \| None = None` |
 
-哈希是对直接传入的内容计算的 `canonical_hash(message.content)`，从不是字符串化后的副本。要把某条消息与事件对应起来，请用同样的方式哈希它的 `content`。
+这三个 id 取自观察者收到的任务存储里的 `TaskInfo`。没有任务身份时它们为 `None`：手动 `/compact`，或没有父运行的子 Agent。哈希是对直接传入的内容计算的 `canonical_hash(message.content)`，从不是字符串化后的副本。要把某条消息与事件对应起来，请用同样的方式哈希它的 `content`。
 
 ## 服务
 
@@ -501,7 +504,7 @@ class ReleasePolicyProvider(Protocol):
 
 ### `API_VERSION`
 
-宿主的契约版本，为点分字符串，本页描述的契约是 `"0.2.4"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
+宿主的契约版本，为点分字符串，例如 `"0.2.10"`。始终等于 `backend/packages/extension-api/pyproject.toml` 中的包版本。
 
 ## 兼容性规则
 
@@ -527,5 +530,11 @@ class ReleasePolicyProvider(Protocol):
 | 0.2.2 | [#5647](https://github.com/bytedance/deer-flow/pull/5647) | 实验性的 `registry.plugin()`，以及 `PluginContribution`、`BrowserModule`、`BackendAction`、`ModelTool`、`ActionContext`、`ToolContext`、`SettingsField` |
 | 0.2.3 | [#5727](https://github.com/bytedance/deer-flow/pull/5727)、[#5685](https://github.com/bytedance/deer-flow/pull/5685) | 请求级运行证据：`resolve_run_evidence_reader`、`require_run_evidence_reader`、`RUN_EVIDENCE_READER_RESOLVER_KEY`（#5727）。打包的浏览器资源：`BrowserAssets`，`PluginContribution.frontend` 也接受它（#5685） |
 | 0.2.4 | [#5842](https://github.com/bytedance/deer-flow/pull/5842) | 插件资源授权：`require_plugin_management`、`arequire_plugin_management`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY`、`EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY` |
+| 0.2.5 | [#5796](https://github.com/bytedance/deer-flow/pull/5796)、[#6190](https://github.com/bytedance/deer-flow/pull/6190) | 受限的宿主模型调用：`ExtensionRuntimeDeps.model_invoker`，以及 `ModelInvoker`、`ModelMessage`、`ModelInvocationRequest`、`ModelInvocationResult`、`ModelUsage` 和错误类型 `ModelInvocationError`、`ModelInvocationUnavailable`、`ModelInvocationUnauthorized`、`ModelInvocationFailed`、`ModelOutputValidationError`（#5796）。宿主绑定的 Agent 运行控制：`AgentRuns`、`AgentRun`、`AgentRunError`、`resolve_agent_runs`、`require_agent_runs`、`AGENT_RUNS_RESOLVER_KEY`、`AGENT_RUNS_CONTEXT_KEY`、`ActionContext.agent_runs`（#6190） |
+| 0.2.6 | [#6861](https://github.com/bytedance/deer-flow/pull/6861) | `PluginToolResult` 和 `ModelTool.response_format`，插件工具可以在文本之外再返回一个 JSON 产物 |
+| 0.2.7 | [#6904](https://github.com/bytedance/deer-flow/pull/6904) | `ExtensionRegistry.knowledge_provider()`，用于注册只读的知识检索提供方 |
+| 0.2.8 | [#6920](https://github.com/bytedance/deer-flow/pull/6920)、[#5645](https://github.com/bytedance/deer-flow/pull/5645)、[#7075](https://github.com/bytedance/deer-flow/pull/7075) | `AgentRuns.configuration_evidence()`、`read_artifact()`、`configuration_revision()`，以及 `ActionContext.interaction`（#6920）。已完成运行的证据，以及由宿主执行的已有自定义技能更新：`ExtensionRuntimeDeps.completed_run_evidence` 和 `skill_mutations`，以及 `CompletedRunEvidenceReader`、`CompletedRunSnapshot`、`CompletedRunEvent`、`CompletedRunEventPage`、`EvidenceLimits`、`SkillMutationService`、`MutationCapabilities`、`Proposal`、`ProposalBundle`、`BundleFile`、`Operation`、`AssessmentRef`、`AssetRevision`、`HostCheckResult`、`SkillRevisionView` 和共用的 `HostCapabilityError`（#5645）。`configuration_revision()` 的 `durable` 参数（#7075） |
+| 0.2.9 | [#7138](https://github.com/bytedance/deer-flow/pull/7138) | `ExecutionFence`，以及 `AgentRuns.start()` 和 `cancel()` 的 `execution_fence` 参数 |
+| 0.2.10 | [#7729](https://github.com/bytedance/deer-flow/pull/7729)、[#7831](https://github.com/bytedance/deer-flow/pull/7831) | `AgentRuns.send_input()`、`list_inputs()`、`authorize_control()`、`dispatch_input()`（#7729）。`CompactionEvent.task_id`、`run_id`、`thread_id`；压缩观察者收到活跃的任务存储，每个任务存储都带有自己的 `TaskInfo`（#7831） |
 
 至今没有任何版本移除过公开名称。

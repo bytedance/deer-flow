@@ -66,6 +66,52 @@ export type HumanInputResponse =
       value: string;
     };
 
+export type HitlApprovalDecision =
+  | "approve"
+  | "approve_thread"
+  | "edit"
+  | "reject";
+
+export type HitlApprovalAction = {
+  tool_call_id: string;
+  tool_name: string;
+  args_summary: string | Record<string, unknown>;
+  request_id: string;
+  args?: Record<string, unknown>;
+  args_schema?: Record<string, unknown>;
+  fingerprint?: string;
+  grant_allowed?: boolean;
+  reason?: string;
+  source?: Record<string, unknown>;
+};
+
+export type HitlApprovalRequest = {
+  version: 1 | 2;
+  kind: "hitl_approval";
+  request_id: string;
+  actions: HitlApprovalAction[];
+  allowed_decisions: HitlApprovalDecision[];
+  pending_tool_call_ids: string[];
+  transport?: "live";
+  run_id?: string;
+  agent_id?: string;
+  expires_at?: number;
+};
+
+export type HitlApprovalResponse = {
+  version: 1;
+  kind: "human_input_response";
+  source: "hitl_approval";
+  request_id: string;
+  tool_call_id: string;
+  response_kind: "option";
+  option_id: HitlApprovalDecision;
+  value: string;
+  args?: Record<string, unknown>;
+};
+
+export type HitlApprovalResume = { responses: HitlApprovalResponse[] };
+
 export type HumanInputThreadState = {
   answeredResponses: Map<string, HumanInputResponse>;
   latestOpenRequestId: string | null;
@@ -93,6 +139,287 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isApprovalDecision(value: unknown): value is HitlApprovalDecision {
+  return (
+    value === "approve" ||
+    value === "reject" ||
+    value === "approve_thread" ||
+    value === "edit"
+  );
+}
+
+/** Parse only the approval interrupt payload; static breakpoints stay invisible. */
+export function parseHitlApprovalRequest(
+  value: unknown,
+): HitlApprovalRequest | null {
+  if (
+    !isRecord(value) ||
+    value.kind !== "hitl_approval" ||
+    (value.version !== 1 && value.version !== 2) ||
+    !isNonEmptyString(value.request_id) ||
+    !Array.isArray(value.actions) ||
+    value.actions.length === 0 ||
+    !Array.isArray(value.allowed_decisions) ||
+    !Array.isArray(value.pending_tool_call_ids)
+  ) {
+    return null;
+  }
+  if (
+    value.transport !== undefined &&
+    (value.transport !== "live" || !isNonEmptyString(value.run_id))
+  )
+    return null;
+
+  const allowedDecisions = value.allowed_decisions.filter(isApprovalDecision);
+  if (
+    allowedDecisions.length === 0 ||
+    allowedDecisions.length !== value.allowed_decisions.length ||
+    new Set(allowedDecisions).size !== allowedDecisions.length
+  ) {
+    return null;
+  }
+
+  const actions: HitlApprovalAction[] = [];
+  const toolCallIds = new Set<string>();
+  const requestIds = new Set<string>();
+  for (const action of value.actions) {
+    if (
+      !isRecord(action) ||
+      !isNonEmptyString(action.tool_call_id) ||
+      !isNonEmptyString(action.tool_name) ||
+      (typeof action.args_summary !== "string" &&
+        !isRecord(action.args_summary)) ||
+      !isNonEmptyString(action.request_id) ||
+      toolCallIds.has(action.tool_call_id) ||
+      requestIds.has(action.request_id)
+    ) {
+      return null;
+    }
+    if (
+      value.version === 2 &&
+      (!isRecord(action.args) ||
+        Array.isArray(action.args) ||
+        !isRecord(action.args_schema) ||
+        Array.isArray(action.args_schema))
+    )
+      return null;
+    toolCallIds.add(action.tool_call_id);
+    requestIds.add(action.request_id);
+    actions.push({
+      tool_call_id: action.tool_call_id,
+      tool_name: action.tool_name,
+      args_summary: action.args_summary,
+      request_id: action.request_id,
+      ...(isRecord(action.args) ? { args: action.args } : {}),
+      ...(isRecord(action.args_schema)
+        ? { args_schema: action.args_schema }
+        : {}),
+      ...(typeof action.fingerprint === "string"
+        ? { fingerprint: action.fingerprint }
+        : {}),
+      ...(typeof action.grant_allowed === "boolean"
+        ? { grant_allowed: action.grant_allowed }
+        : {}),
+      ...(typeof action.reason === "string" ? { reason: action.reason } : {}),
+      ...(isRecord(action.source) ? { source: action.source } : {}),
+    });
+  }
+
+  if (
+    value.pending_tool_call_ids.length !== actions.length ||
+    value.pending_tool_call_ids.some(
+      (id) => typeof id !== "string" || !toolCallIds.has(id),
+    ) ||
+    new Set(value.pending_tool_call_ids).size !== actions.length
+  ) {
+    return null;
+  }
+
+  return {
+    version: value.version,
+    kind: "hitl_approval",
+    request_id: value.request_id,
+    actions,
+    allowed_decisions: allowedDecisions,
+    pending_tool_call_ids: [...value.pending_tool_call_ids] as string[],
+    ...(value.transport === "live"
+      ? { transport: "live" as const, run_id: value.run_id as string }
+      : {}),
+    ...(typeof value.agent_id === "string" ? { agent_id: value.agent_id } : {}),
+    ...(typeof value.expires_at === "number"
+      ? { expires_at: value.expires_at }
+      : {}),
+  };
+}
+
+/** Accept SDK live Interrupt objects and REST Record<task, Interrupt[]> shapes. */
+export function extractHitlApprovalRequests(source: unknown) {
+  const candidates: unknown[] = Array.isArray(source) ? source : [source];
+  const requests: HitlApprovalRequest[] = [];
+  const seen = new Set<string>();
+  const append = (candidate: unknown): void => {
+    if (Array.isArray(candidate)) {
+      candidate.forEach(append);
+      return;
+    }
+    if (!isRecord(candidate)) return;
+    const value = "value" in candidate ? candidate.value : candidate;
+    if (Array.isArray(value)) {
+      value.forEach(append);
+      return;
+    }
+    const request = parseHitlApprovalRequest(value);
+    if (request && !seen.has(request.request_id)) {
+      seen.add(request.request_id);
+      requests.push(request);
+    }
+  };
+
+  for (const candidate of candidates) {
+    if (
+      isRecord(candidate) &&
+      candidate.kind !== "hitl_approval" &&
+      !("value" in candidate)
+    ) {
+      for (const interrupts of Object.values(candidate)) {
+        if (Array.isArray(interrupts)) interrupts.forEach(append);
+      }
+    } else {
+      append(candidate);
+    }
+  }
+  return requests;
+}
+
+/** Build one atomic resume batch, or null while any action is undecided. */
+export function createHitlApprovalResponses(
+  request: HitlApprovalRequest,
+  decisions: Readonly<Record<string, HitlApprovalDecision | undefined>>,
+  rejectionReason = "",
+  editedArguments: Readonly<
+    Record<string, Record<string, unknown> | undefined>
+  > = {},
+): HitlApprovalResponse[] | null {
+  const responses: HitlApprovalResponse[] = [];
+  for (const action of request.actions) {
+    const decision = decisions[action.tool_call_id];
+    if (!decision || !request.allowed_decisions.includes(decision)) return null;
+    if (decision === "edit" && !editedArguments[action.tool_call_id])
+      return null;
+    if (decision === "approve_thread" && action.grant_allowed !== true)
+      return null;
+    responses.push({
+      version: 1,
+      kind: "human_input_response",
+      source: "hitl_approval",
+      request_id: action.request_id,
+      tool_call_id: action.tool_call_id,
+      response_kind: "option",
+      option_id: decision,
+      value: decision === "reject" ? rejectionReason : "",
+      ...(decision === "edit"
+        ? { args: editedArguments[action.tool_call_id] }
+        : {}),
+    });
+  }
+  return responses;
+}
+
+export function parseApprovalArgsSummary(summary: unknown) {
+  if (isRecord(summary)) return summary;
+  if (typeof summary !== "string") return { summary: String(summary) };
+  try {
+    const parsed: unknown = JSON.parse(summary);
+    if (isRecord(parsed)) return parsed;
+  } catch {
+    // The backend serializes its flat string map with Python repr.
+  }
+  return parsePythonStringDict(summary) ?? { summary };
+}
+
+const PYTHON_STRING_ESCAPES: Record<string, string> = {
+  "\\": "\\",
+  "'": "'",
+  '"': '"',
+  a: "\u0007",
+  b: "\b",
+  f: "\f",
+  n: "\n",
+  r: "\r",
+  t: "\t",
+  v: "\v",
+  "\n": "",
+};
+function readPythonQuotedString(text: string, start: number) {
+  const quote = text[start];
+  if (quote !== "'" && quote !== '"') return null;
+  let value = "";
+  let index = start + 1;
+  while (index < text.length) {
+    const char = text[index++]!;
+    if (char === quote) return { value, end: index };
+    if (char !== "\\") {
+      value += char;
+      continue;
+    }
+    if (index >= text.length) return null;
+    const escape = text[index++]!;
+    if (escape in PYTHON_STRING_ESCAPES) {
+      value += PYTHON_STRING_ESCAPES[escape];
+      continue;
+    }
+    const hexLength =
+      escape === "x" ? 2 : escape === "u" ? 4 : escape === "U" ? 8 : 0;
+    if (hexLength > 0) {
+      const hex = text.slice(index, index + hexLength);
+      if (hex.length !== hexLength || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+      const codePoint = Number.parseInt(hex, 16);
+      if (codePoint > 0x10ffff) return null;
+      value += String.fromCodePoint(codePoint);
+      index += hexLength;
+      continue;
+    }
+    if (/^[0-7]$/.test(escape)) {
+      let octal = escape;
+      while (octal.length < 3 && /^[0-7]$/.test(text[index] ?? "")) {
+        octal += text[index++]!;
+      }
+      value += String.fromCharCode(Number.parseInt(octal, 8));
+      continue;
+    }
+    value += escape;
+  }
+  return null;
+}
+
+function parsePythonStringDict(text: string) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return null;
+  const result: Record<string, unknown> = Object.create(null);
+  let index = 1;
+  const skipSpace = () => {
+    while (/\s/.test(trimmed[index] ?? "")) index += 1;
+  };
+  while (index < trimmed.length - 1) {
+    skipSpace();
+    if (trimmed[index] === "}") return result;
+    const key = readPythonQuotedString(trimmed, index);
+    if (!key) return null;
+    index = key.end;
+    skipSpace();
+    if (trimmed[index++] !== ":") return null;
+    skipSpace();
+    const value = readPythonQuotedString(trimmed, index);
+    if (!value) return null;
+    index = value.end;
+    result[key.value] = value.value;
+    skipSpace();
+    if (trimmed[index] === "}") return result;
+    if (trimmed[index++] !== ",") return null;
+  }
+  return index === trimmed.length - 1 ? result : null;
 }
 
 function isHumanInputMode(value: unknown): value is HumanInputMode {

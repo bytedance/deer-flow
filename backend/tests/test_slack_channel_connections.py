@@ -179,8 +179,8 @@ def test_slack_socket_mode_connect_failure_is_logged(monkeypatch, caplog):
             },
         )
 
-        # start() drops the future for the executor-backed connect; capture it
-        # here so the test can wait for the connect attempt to finish.
+        # Capture the executor-backed connect so the test can wait for the
+        # failing attempt before checking its logged error.
         loop = asyncio.get_running_loop()
         real_run_in_executor = loop.run_in_executor
         connect_futures = []
@@ -252,25 +252,31 @@ def test_slack_socket_mode_queued_connect_does_not_target_replacement_client(mon
             # same executor path and must still run.
             if func != channel._connect_socket_mode:
                 return real_run_in_executor(executor, func, *args)
-            queued_callbacks.append((func, args))
-            return loop.create_future()
+            future = loop.create_future()
+            queued_callbacks.append((func, args, future))
+            return future
 
         monkeypatch.setattr(loop, "run_in_executor", queue_run_in_executor)
 
         await channel.start()
-        await channel.stop()
+        stopping = asyncio.create_task(channel.stop())
+        await asyncio.sleep(0)
+        stale_func, stale_args, stale_future = queued_callbacks[0]
+        stale_func(*stale_args)
+        stale_future.set_result(None)
+        await stopping
         await channel.start()
 
         assert len(clients) == 2
         assert len(queued_callbacks) == 2
 
-        stale_func, stale_args = queued_callbacks[0]
         stale_func(*stale_args)
         assert clients[0].connect_calls == 0
         assert clients[1].connect_calls == 0
 
-        current_func, current_args = queued_callbacks[1]
+        current_func, current_args, current_future = queued_callbacks[1]
         current_func(*current_args)
+        current_future.set_result(None)
         assert clients[0].connect_calls == 0
         assert clients[1].connect_calls == 1
 

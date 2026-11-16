@@ -91,3 +91,38 @@ def test_skill_md_outside_eval_fixtures_is_still_reported(tmp_path: Path) -> Non
 
     assert [(finding["rule_id"], finding["severity"]) for finding in result["findings"]] == [("package-nested-skill-md", "CRITICAL")]
     assert result["blocked"] is True
+
+
+_WINDOWS_SCRIPT_PATHS = (
+    "hooks/install.bat",
+    "hooks/install.cmd",
+    "hooks/install.vbs",
+    "hooks/install.wsf",
+    "hooks/module.psm1",
+    "hooks/install.jse",
+    "hooks/install.vbe",
+    "assets/setup.hta",
+    "policy/install.sct",
+    "hooks/install.JSE",
+    "hooks/install.VBE",
+    "assets/setup.HTA",
+    "policy/install.SCT",
+)
+_STRAY_BYTES = (("invalid-utf8", b"\xff"), ("nul", b"\x00"))
+_SECRET_ASSIGNMENT = b'api_key = "sk-live-9f3c77a1b0e4"'
+
+
+@pytest.mark.parametrize("rel_path", _WINDOWS_SCRIPT_PATHS)
+@pytest.mark.parametrize(("marker", "marker_bytes"), _STRAY_BYTES)
+def test_windows_script_with_one_stray_byte_is_still_analyzed(tmp_path: Path, marker: str, marker_bytes: bytes, rel_path: str) -> None:
+    """Windows scripts, HTML applications and scriptlets must stay visible despite a stray byte."""
+    root = tmp_path / "pkg"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "SKILL.md").write_text(_MINIMAL_SKILL_MD, encoding="utf-8")
+    script = root / rel_path
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_bytes(marker_bytes + _SECRET_ASSIGNMENT + b"\r\n")
+
+    findings = sorted((finding["rule_id"], finding["severity"]) for finding in scan_skill_dir(root)["findings"] if finding["file"] == rel_path)
+
+    assert findings == [("package-undecodable-script", "HIGH"), ("secret-env-assignment", "HIGH")]

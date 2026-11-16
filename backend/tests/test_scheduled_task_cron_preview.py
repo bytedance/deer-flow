@@ -168,8 +168,9 @@ async def test_preview_first_occurrence_matches_task_creation_at_same_clock(clie
     response = await client.post(URL, json={"cron": PAYLOAD["cron"], "timezone": PAYLOAD["timezone"], "count": 1})
     assert response.status_code == 200, response.text
     # Only the separate creation below is allowed to acquire persistence dependencies.
-    repo = SimpleNamespace(create=AsyncMock())
+    repo = SimpleNamespace(create=AsyncMock(return_value={"id": "task-preview"}), automatic_runs_used_for=AsyncMock(return_value={}), get_active_run_status=AsyncMock(return_value=None))
     monkeypatch.setattr(scheduled_tasks, "get_scheduled_task_repo", lambda request: repo)
+    monkeypatch.setattr(scheduled_tasks, "is_scheduler_running", lambda request: True)
     monkeypatch.setattr(scheduled_tasks, "get_thread_store", lambda request: None)
     monkeypatch.setattr(scheduled_tasks, "get_config", lambda: SimpleNamespace(scheduler=SimpleNamespace(min_once_delay_seconds=60)))
     request = SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user=SimpleNamespace(id="preview-user"))))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Annotated, NotRequired, TypedDict
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -13,7 +14,7 @@ from app.gateway import services as gateway_services
 from deerflow.agents.middlewares.summarization_middleware import SummaryGenerationError
 from deerflow.runtime import context_compaction
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
-from deerflow.runtime.context_compaction import ContextCompactionFailed, compact_thread_context
+from deerflow.runtime.context_compaction import ContextCompactionFailed, ContextCompactionPendingWork, compact_thread_context
 from deerflow.runtime.context_keys import CHECKPOINT_AGENT_NAME_METADATA_KEY, DEFAULT_AGENT_NAME_METADATA_VALUE
 
 
@@ -34,6 +35,11 @@ class _FakeAccessor:
 
     async def aget(self, _config):
         return self.snapshot
+
+    async def aget_tuple(self, _config):
+        # Mirror CheckpointStateAccessor.aget_tuple: raw checkpoint tuple with
+        # channel_values. The stub thread is idle, so no __pregel_tasks entry.
+        return SimpleNamespace(checkpoint={"channel_values": dict(self.snapshot.values)})
 
     async def aupdate(self, config, values, *, as_node=None):
         self.update_args = (config, values, as_node)
@@ -122,6 +128,140 @@ async def test_compact_thread_context_reads_materialized_state_and_overwrites_me
     assert middleware.runtime_contexts == [
         {"thread_id": "thread-1", "user_id": "user-1", "agent_name": "research-agent"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_rejects_genuine_interrupt_pause(monkeypatch):
+    accessor = _FakeAccessor({"messages": [HumanMessage(content="question"), AIMessage(content="answer")]})
+    accessor.snapshot.next = ("agent",)
+    accessor.snapshot.tasks = (SimpleNamespace(interrupts=(SimpleNamespace(value={"kind": "hitl_approval"}),)),)
+    create_middleware = MagicMock(return_value=_FakeCompactionMiddleware())
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+
+    with pytest.raises(ContextCompactionPendingWork, match="resumable pending execution"):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    create_middleware.assert_not_called()
+    assert accessor.update_args is None
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_allows_terminal_mid_graph_snapshot(monkeypatch):
+    messages = [HumanMessage(content="old question"), AIMessage(content="old answer"), HumanMessage(content="latest question")]
+    accessor = _FakeAccessor({"messages": messages})
+    # Errored/cancelled graphs can retain next nodes without resumable tasks.
+    accessor.snapshot.next = ("tools",)
+    middleware = _FakeCompactionMiddleware()
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", lambda **_kwargs: middleware)
+
+    result = await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    assert result.compacted is True
+    assert accessor.update_args is not None
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_rejects_unavailable_checkpoint_before_summarizing(monkeypatch):
+    accessor = _FakeAccessor({"messages": [HumanMessage(content="question"), AIMessage(content="answer")]})
+    accessor.aget_tuple = AsyncMock(return_value=None)
+    accessor.aupdate = AsyncMock(wraps=accessor.aupdate)
+    middleware = _FakeCompactionMiddleware()
+    create_middleware = MagicMock(return_value=middleware)
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+
+    with pytest.raises(ContextCompactionPendingWork, match="checkpoint is unavailable.*Cannot verify pending execution"):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    accessor.aget_tuple.assert_awaited_once()
+    create_middleware.assert_not_called()
+    assert middleware.prepare_calls == 0
+    assert middleware.runtime_contexts == []
+    accessor.aupdate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_falls_back_to_sync_head_and_history(monkeypatch):
+    messages = [HumanMessage(content="question"), AIMessage(content="answer")]
+    head = SimpleNamespace(checkpoint={"channel_values": {"messages": messages}}, pending_writes=())
+    paused = SimpleNamespace(
+        checkpoint={"channel_values": {"messages": messages}},
+        pending_writes=(("task-1", "__interrupt__", SimpleNamespace(value={"kind": "hitl_approval"})),),
+    )
+
+    class SyncOnlySaver:
+        list_called = False
+
+        async def alist(self, *args, **kwargs):
+            raise NotImplementedError
+            yield  # pragma: no cover
+
+        def list(self, *args, **kwargs):
+            self.list_called = True
+            return iter((head, paused))
+
+        def get_tuple(self, *args, **kwargs):
+            return head
+
+    saver = SyncOnlySaver()
+    accessor = _FakeAccessor({"messages": messages})
+    accessor.checkpointer = saver
+    accessor.aget_tuple = AsyncMock(side_effect=NotImplementedError)
+    accessor.get_tuple = saver.get_tuple
+    create_middleware = MagicMock(return_value=_FakeCompactionMiddleware())
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+
+    with pytest.raises(ContextCompactionPendingWork, match="resumable pending execution"):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    accessor.aget_tuple.assert_awaited_once()
+    assert saver.list_called
+    create_middleware.assert_not_called()
+    assert accessor.update_args is None
+
+
+@pytest.mark.asyncio
+async def test_compact_thread_context_falls_back_to_sync_current_tuple_without_history(monkeypatch):
+    messages = [HumanMessage(content="question"), AIMessage(content="answer")]
+    paused = SimpleNamespace(
+        checkpoint={"channel_values": {"messages": messages}},
+        pending_writes=(("task-1", "__interrupt__", SimpleNamespace(value={"kind": "hitl_approval"})),),
+    )
+
+    class TupleOnlySaver:
+        def __init__(self):
+            self.calls = []
+
+        async def alist(self, *args, **kwargs):
+            self.calls.append("alist")
+            raise NotImplementedError
+            yield  # pragma: no cover
+
+        def list(self, *args, **kwargs):
+            self.calls.append("list")
+            raise NotImplementedError
+
+        async def aget_tuple(self, *args, **kwargs):
+            self.calls.append("aget_tuple")
+            raise NotImplementedError
+
+        def get_tuple(self, *args, **kwargs):
+            self.calls.append("get_tuple")
+            return paused
+
+    saver = TupleOnlySaver()
+    accessor = _FakeAccessor({"messages": messages})
+    accessor.checkpointer = saver
+    accessor.aget_tuple = AsyncMock(side_effect=NotImplementedError)
+    accessor.get_tuple = saver.get_tuple
+    create_middleware = MagicMock(return_value=_FakeCompactionMiddleware())
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", create_middleware)
+
+    with pytest.raises(ContextCompactionPendingWork, match="resumable pending execution"):
+        await compact_thread_context(accessor, "thread-1", app_config=SimpleNamespace())
+
+    assert saver.calls == ["get_tuple", "alist", "list", "aget_tuple", "get_tuple"]
+    create_middleware.assert_not_called()
+    assert accessor.update_args is None
 
 
 @pytest.mark.asyncio

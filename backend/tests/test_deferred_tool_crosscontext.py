@@ -11,7 +11,6 @@
 """
 
 import asyncio
-from pathlib import Path
 
 import pytest
 from langchain.agents import create_agent
@@ -20,8 +19,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool as as_tool
 
 from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
-from deerflow.skills.tool_policy import filter_tools_by_skill_allowed_tools
-from deerflow.skills.types import Skill
 from deerflow.tools.builtins.tool_search import DeferredToolSetup, assemble_deferred_tools, build_deferred_tool_setup
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 
@@ -82,10 +79,11 @@ def test_deferred_hidden_when_built_and_run_in_different_contexts():
     assert not any("mcp_secret" in names for names in _BOUND), f"deferred MCP tool leaked into bind_tools: {_BOUND}"
 
 
-def test_policy_excluded_mcp_tool_not_in_catalog():
-    """Finding 1: a tool removed by policy is not searchable/exposed."""
-    filtered_after_policy = [active_tool]  # mcp_secret denied by skill allowed-tools
-    setup = build_deferred_tool_setup(filtered_after_policy, enabled=True)
+def test_assembly_filtered_mcp_tool_not_in_catalog():
+    """A tool removed by assembly-time authorization is not searchable/exposed
+    (skill allowed-tools no longer participates in that filtering)."""
+    assembled_after_authorization = [active_tool]  # mcp_secret denied by the agent ceiling
+    setup = build_deferred_tool_setup(assembled_after_authorization, enabled=True)
     assert setup.deferred_names == frozenset()
     assert setup.tool_search_tool is None
 
@@ -117,7 +115,14 @@ def test_subagent_reentry_does_not_touch_lead_state():
     class _Req:
         def __init__(self):
             self.tools = [active_tool, mcp_secret]
-            self.state = {"promoted": {"catalog_hash": lead_setup.catalog_hash, "names": ["mcp_secret"]}}
+            self.state = {
+                "messages": [HumanMessage(content="use the secret tool", id="user-1")],
+                "promoted": {
+                    "catalog_hash": lead_setup.catalog_hash,
+                    "names": ["mcp_secret"],
+                    "turn_id": "user-1",
+                },
+            }
 
         def override(self, tools):
             self.tools = tools
@@ -127,47 +132,11 @@ def test_subagent_reentry_does_not_touch_lead_state():
     assert {t.name for t in out.tools} == {"active_tool", "mcp_secret"}  # promotion intact
 
 
-def _make_skill(allowed_tools):
-    """Skill carrying an explicit allowed-tools allowlist (None = legacy allow-all)."""
-    return Skill(
-        name="s",
-        description="d",
-        license="MIT",
-        skill_dir=Path("/tmp/s"),
-        skill_file=Path("/tmp/s/SKILL.md"),
-        relative_path=Path("s"),
-        category="public",
-        allowed_tools=tuple(allowed_tools) if allowed_tools is not None else None,
-        enabled=True,
-    )
-
-
-def test_policy_denied_mcp_yields_no_tool_search_end_to_end():
-    """An allowlist that denies the MCP tool gates it end-to-end: after the real
-    policy filter no MCP tool survives, so ``assemble_deferred_tools`` adds no
-    tool_search (and does not fail-closed, because no MCP tool leaked through)."""
-    filtered = filter_tools_by_skill_allowed_tools([active_tool, tag_mcp_tool(mcp_secret)], [_make_skill(["active_tool"])])
-    final_tools, setup = assemble_deferred_tools(filtered, enabled=True)
-
-    assert [t.name for t in final_tools] == ["active_tool"]
-    assert "tool_search" not in {t.name for t in final_tools}
-    assert setup.deferred_names == frozenset()
-
-
-def test_tool_search_appended_after_policy_but_never_exposes_denied_tool():
-    """Intentional behavior change vs. upstream (Copilot review on PR #3342).
-
-    ``tool_search`` is appended AFTER skill-allowlist filtering, so an allowlist
-    can no longer deny ``tool_search`` by name. This is safe by construction: the
-    tool only appears when allowed MCP tools survive the filter, and its catalog
-    is derived from the already policy-filtered list — so it can never expose a
-    tool the allowlist denied. Locks that contract so the ordering cannot regress.
-    """
-    allowed = ["active_tool", "mcp_secret"]  # permits the MCP tool, does NOT list tool_search
-    filtered = filter_tools_by_skill_allowed_tools([active_tool, tag_mcp_tool(mcp_secret)], [_make_skill(allowed)])
-    final_tools, setup = assemble_deferred_tools(filtered, enabled=True)
+def test_tool_search_appended_to_the_authorized_tool_list():
+    """Deferred assembly appends ``tool_search`` after the authorized MCP
+    candidates, so the model can discover and promote catalog tools."""
+    final_tools, setup = assemble_deferred_tools([active_tool, tag_mcp_tool(mcp_secret)], enabled=True)
 
     names = {t.name for t in final_tools}
-    assert "tool_search" in names  # appended despite not being in the allowlist
+    assert "tool_search" in names
     assert setup.deferred_names == frozenset({"mcp_secret"})
-    assert set(setup.deferred_names) <= set(allowed)  # catalog never exceeds the allowlist

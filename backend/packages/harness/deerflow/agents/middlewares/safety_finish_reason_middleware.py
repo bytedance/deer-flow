@@ -25,11 +25,10 @@ configured ``SafetyTerminationDetector`` fires it either
   ("message ... with role 'assistant' must not be empty"), stranding the
   whole thread until a new chat is started.
 
-A safety-terminated message that carries visible text but no tool calls is
-left untouched so its partial answer still reaches the user. Either way we
-append the explanation and stash observability fields in
-``additional_kwargs.safety_termination`` so logs, traces, and SSE consumers
-can see what happened.
+A safety-terminated message that carries visible text but no tool calls keeps
+its content without an explanation. Every detected termination stamps
+``runtime.context.stop_reason`` and ``additional_kwargs.safety_termination``
+so downstream hooks cannot mistake the partial answer for a premature exit.
 
 Hook choice: ``after_model`` (not ``wrap_model_call``) because the response
 is a *normal* return — not an exception — and we want to participate in the
@@ -71,6 +70,10 @@ if TYPE_CHECKING:
     from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 
 logger = logging.getLogger(__name__)
+
+SAFETY_CAPPED_STOP_REASON = "safety_capped"
+# Stamped on the AIMessage this guard rewrote; consumers import it, not the literal.
+SAFETY_TERMINATION_MARKER = "safety_termination"
 
 
 _USER_FACING_MESSAGE = (
@@ -124,6 +127,7 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
             detectors.append(descriptor)
         return {
             "action": "suppress_tool_calls",
+            "mark_text_only_termination": True,
             "detectors": detectors,
         }
 
@@ -190,15 +194,17 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         message: AIMessage,
         termination: SafetyTermination,
     ) -> AIMessage:
-        tool_calls = message.tool_calls or []
+        tool_calls = [*(message.tool_calls or []), *(message.invalid_tool_calls or [])]
         suppressed_names = [tc.get("name") or "unknown" for tc in tool_calls]
-        template = _USER_FACING_MESSAGE if tool_calls else _USER_FACING_EMPTY_MESSAGE
-        explanation = template.format(
-            reason_field=termination.reason_field,
-            reason_value=termination.reason_value,
-            detector=termination.detector,
-        )
-        new_content = self._append_user_message(message.content, explanation)
+        new_content = message.content
+        if tool_calls or not message_content_to_text(message.content or "").strip():
+            template = _USER_FACING_MESSAGE if tool_calls else _USER_FACING_EMPTY_MESSAGE
+            explanation = template.format(
+                reason_field=termination.reason_field,
+                reason_value=termination.reason_value,
+                detector=termination.detector,
+            )
+            new_content = self._append_user_message(message.content, explanation)
 
         # clone_ai_message_with_tool_calls handles structured tool_calls,
         # raw additional_kwargs.tool_calls, function_call, and provider
@@ -206,14 +212,17 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # It only rewrites finish_reason when the old value was "tool_calls",
         # which is not our case — content_filter / refusal / SAFETY stay put
         # so downstream SSE / converters keep seeing the real provider reason.
-        cleared = clone_ai_message_with_tool_calls(message, [], content=new_content)
+        # Invalid calls must also be suppressed: the shared helper otherwise
+        # retains their native content blocks for dangling-call recovery.
+        source = message.model_copy(update={"invalid_tool_calls": []})
+        cleared = clone_ai_message_with_tool_calls(source, [], content=new_content)
 
         # Re-clone additional_kwargs so we don't accidentally mutate the
         # dict returned by clone_ai_message_with_tool_calls (which already
         # made a shallow copy, but downstream model_copy still references
         # it). Then stamp the observability record.
         kwargs = dict(getattr(cleared, "additional_kwargs", None) or {})
-        kwargs["safety_termination"] = {
+        kwargs[SAFETY_TERMINATION_MARKER] = {
             "detector": termination.detector,
             "reason_field": termination.reason_field,
             "reason_value": termination.reason_value,
@@ -362,9 +371,8 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         if not isinstance(last, AIMessage):
             return None
 
-        # Two provider-safety failure modes are worth rewriting; a safety
-        # termination that produced visible text with no tool calls is left
-        # untouched so the partial answer still reaches the user naturally.
+        # All provider-safety terminations need a stop marker. Only two cases
+        # need a visible explanation; partial text otherwise stays unchanged.
         #   1. tool_calls present: they may be truncated/unsafe (#3028), so
         #      suppress them.
         #   2. blank content and no tool_calls: an empty assistant message
@@ -373,14 +381,11 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         #      'assistant' must not be empty", #4393), which poisons the whole
         #      thread until a new chat is started. Backfill an explanation so
         #      the persisted message is non-empty.
-        tool_calls = list(last.tool_calls or [])
+        tool_calls = [*(last.tool_calls or []), *(last.invalid_tool_calls or [])]
         # Keep local falsey-content normalization as a defensive guard; the
         # shared helper also handles None from validation-skipping rewrites.
         # The trailing strip() makes whitespace-only content blank as well.
         content_is_blank = not message_content_to_text(last.content or "").strip()
-        if not tool_calls and not content_is_blank:
-            return None
-
         termination = self._detect(last)
         if termination is None:
             return None
@@ -391,7 +396,11 @@ class SafetyFinishReasonMiddleware(AgentMiddleware[AgentState]):
         # alongside loop_capped / token_capped (#4176).
         ctx = getattr(runtime, "context", None)
         if isinstance(ctx, dict):
-            ctx["stop_reason"] = "safety_capped"
+            ctx["stop_reason"] = SAFETY_CAPPED_STOP_REASON
+        # Re-observing a terminal message must not replace its original
+        # suppression record or emit another event. Still stamp this runtime.
+        if not tool_calls and not content_is_blank and (last.additional_kwargs or {}).get(SAFETY_TERMINATION_MARKER):
+            return None
         patched = self._build_suppressed_message(last, termination)
 
         thread_id = None

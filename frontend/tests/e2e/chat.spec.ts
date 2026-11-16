@@ -435,12 +435,14 @@ test.describe("Chat workspace", () => {
     await textarea.fill("Send this immediately");
     await textarea.press("Enter");
 
+    // The attachment is still uploading, so the send is not dispatched yet:
+    // the draft stays stored, and a reload or a failed upload cannot lose it.
     await page.waitForTimeout(500);
     expect(
       await page.evaluate(() =>
         Object.values(window.sessionStorage).join("\n"),
       ),
-    ).not.toContain("Send this immediately");
+    ).toContain("Send this immediately");
 
     releaseUpload();
     await expect
@@ -449,6 +451,15 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+
+    // Dispatch retired the draft, and nothing scheduled before it may write
+    // the accepted text back.
+    await page.waitForTimeout(500);
+    expect(
+      await page.evaluate(() =>
+        Object.values(window.sessionStorage).join("\n"),
+      ),
+    ).not.toContain("Send this immediately");
 
     // A new user edit must still save, even when it repeats the accepted text.
     await page
@@ -1197,6 +1208,37 @@ test.describe("Chat workspace", () => {
     await expect(page.getByText("Hello from DeerFlow!")).toBeVisible({
       timeout: 10_000,
     });
+  });
+
+  test("opens local files directly from the attachment button and keeps references under @", async ({
+    page,
+  }) => {
+    await page.goto("/workspace/chats/new");
+    const fileChooserPromise = page.waitForEvent("filechooser");
+    await page.getByTestId("add-attachments-button").click();
+    const fileChooser = await fileChooserPromise;
+    await expect(page.getByTestId("mention-picker")).toBeHidden();
+    await fileChooser.setFiles({
+      name: "local-report.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Local attachment"),
+    });
+    await expect(
+      page.locator("form").getByText("local-report.txt"),
+    ).toBeVisible();
+
+    await page.getByTestId("mention-button").click();
+    const picker = page.getByTestId("mention-picker");
+    await expect(picker).toBeVisible();
+    await expect(
+      picker.getByRole("option", { name: "Upload a file" }),
+    ).toBeAttached();
+    await expect(
+      picker.getByRole("group", { name: "Skills", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.locator("form").getByText("local-report.txt"),
+    ).toBeVisible();
   });
 
   test("shows gateway upload limits on the attachment entry point", async ({

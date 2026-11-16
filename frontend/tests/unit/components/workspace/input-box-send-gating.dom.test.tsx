@@ -14,7 +14,7 @@ import { PromptInputProvider } from "@/components/ai-elements/prompt-input";
 import { InputBox } from "@/components/workspace/input-box";
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { AuthProvider } from "@/core/auth/AuthProvider";
-import { DEFAULT_LOCALE } from "@/core/i18n";
+import { DEFAULT_LOCALE, type Locale } from "@/core/i18n";
 import { I18nProvider } from "@/core/i18n/context";
 
 rs.mock("next/navigation", () => ({
@@ -58,18 +58,20 @@ function renderComposer({
   onPrepareThread,
   onGoalChange,
   isWelcomeMode = false,
+  locale = DEFAULT_LOCALE,
 }: {
   canCreateRuns?: boolean;
   onSubmit: () => void;
   onPrepareThread?: () => void | Promise<void>;
   onGoalChange?: () => void;
   isWelcomeMode?: boolean;
+  locale?: Locale;
 }) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   const tree = (onSubmitProp: () => void): ReactNode => (
-    <I18nProvider initialLocale={DEFAULT_LOCALE}>
+    <I18nProvider initialLocale={locale}>
       <QueryClientProvider client={queryClient}>
         <AuthProvider
           initialUser={{
@@ -302,4 +304,225 @@ describe("InputBox send gating (runs:create)", () => {
     const submit = screen.getByRole("button", { name: "Submit" });
     expect(submit.tagName).toBe("BUTTON");
   });
+});
+
+describe("InputBox /goal rejected by the server", () => {
+  const BUSY = "A run is still going in this chat. Try again when it finishes.";
+  const GOAL = {
+    objective: "finish all tests",
+    status: "active",
+    created_at: "2026-10-07T00:00:00Z",
+    updated_at: "2026-10-07T00:00:00Z",
+    continuation_count: 0,
+    max_continuations: 8,
+    no_progress_count: 0,
+    max_no_progress_continuations: 2,
+  };
+
+  function mockGoalResponses(
+    respond: (method: string) => { status: number; body: unknown },
+  ) {
+    const methods: string[] = [];
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (!url.endsWith("/goal")) {
+          return new Response("{}", { status: 200 });
+        }
+        const method = init?.method ?? "GET";
+        methods.push(method);
+        const { status, body } = respond(method);
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    return methods;
+  }
+
+  it.each([
+    [
+      "/goal finish all tests",
+      "PUT",
+      "Thread has a run in flight. Set the goal after the run finishes.",
+    ],
+    [
+      "/goal clear",
+      "DELETE",
+      "Thread has a run in flight. Clear the goal after the run finishes.",
+    ],
+  ])(
+    "keeps %s in the composer when %s returns 409",
+    async (command, method, detail) => {
+      const methods = mockGoalResponses(() => ({
+        status: 409,
+        body: { detail },
+      }));
+      const error = rs.spyOn(toast, "error");
+      const success = rs.spyOn(toast, "success");
+      const onSubmit = rs.fn();
+      const onGoalChange = rs.fn();
+      const { container } = renderComposer({ onSubmit, onGoalChange });
+
+      submitForm(container, command);
+      await waitFor(() => expect(error).toHaveBeenCalledWith(BUSY));
+      // Let PromptInput settle the submit promise before reading the draft.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(methods).toEqual([method]);
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onGoalChange).not.toHaveBeenCalled();
+      expect(success).not.toHaveBeenCalled();
+      expect(container.querySelector("textarea")?.value).toBe(command);
+    },
+  );
+
+  it("says a run is still going in zh-CN and keeps the draft", async () => {
+    // useI18n re-reads the locale cookie on mount.
+    document.cookie = "locale=zh-CN; path=/";
+    try {
+      mockGoalResponses(() => ({
+        status: 409,
+        body: { detail: "Thread has a run in flight." },
+      }));
+      const error = rs.spyOn(toast, "error");
+      const { container } = renderComposer({
+        onSubmit: rs.fn(),
+        locale: "zh-CN",
+      });
+
+      submitForm(container, "/goal clear");
+      await waitFor(() =>
+        expect(error).toHaveBeenCalledWith(
+          "这个对话还有运行未结束，结束后再试。",
+        ),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(container.querySelector("textarea")?.value).toBe("/goal clear");
+    } finally {
+      document.cookie = "locale=; max-age=0; path=/";
+    }
+  });
+
+  it("keeps the draft when a second submit replaces the first and then fails", async () => {
+    let calls = 0;
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : input.url;
+        if (!url.endsWith("/goal")) {
+          return new Response("{}", { status: 200 });
+        }
+        calls += 1;
+        if (calls === 1) {
+          // Pending until the second submit aborts it.
+          return new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          });
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return new Response(JSON.stringify({ detail: "busy" }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }),
+    );
+    const error = rs.spyOn(toast, "error");
+    const { container } = renderComposer({ onSubmit: rs.fn() });
+    const draft = () => container.querySelector("textarea")?.value;
+
+    submitForm(container, "/goal clear");
+    await waitFor(() => expect(calls).toBe(1));
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(calls).toBe(2));
+    // The stale first request leaves the composer to the second one.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(draft()).toBe("/goal clear");
+
+    await waitFor(() => expect(error).toHaveBeenCalledWith(BUSY));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(error).toHaveBeenCalledTimes(1);
+    expect(draft()).toBe("/goal clear");
+  });
+
+  it("keeps the server's detail and the draft for other failures", async () => {
+    mockGoalResponses(() => ({
+      status: 422,
+      body: { detail: "Goal objective is too long." },
+    }));
+    const error = rs.spyOn(toast, "error");
+    const { container } = renderComposer({ onSubmit: rs.fn() });
+
+    submitForm(container, "/goal finish all tests");
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("Goal objective is too long."),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(container.querySelector("textarea")?.value).toBe(
+      "/goal finish all tests",
+    );
+  });
+
+  it.each([
+    [
+      "a goal without a status",
+      { objective: "finish" },
+      null,
+      "No active goal.",
+    ],
+    ["a paused goal", { ...GOAL, status: "paused" }, null, "No active goal."],
+    [
+      "an active goal without created_at",
+      { objective: "finish", status: "active" },
+      { objective: "finish", status: "active" },
+      "Active goal: finish",
+    ],
+  ])(
+    "reads %s like the backend's active-goal check",
+    async (_name, stored, expected, message) => {
+      mockGoalResponses(() => ({ status: 200, body: { goal: stored } }));
+      const info = rs.spyOn(toast, "info");
+      const onGoalChange = rs.fn();
+      const { container } = renderComposer({ onSubmit: rs.fn(), onGoalChange });
+
+      submitForm(container, "/goal");
+      await waitFor(() => expect(onGoalChange).toHaveBeenCalledTimes(1));
+      expect(onGoalChange).toHaveBeenCalledWith(expected, "status");
+      expect(info).toHaveBeenCalledWith(message);
+    },
+  );
+
+  it.each([
+    ["/goal finish all tests", GOAL, "set"],
+    ["/goal clear", null, "clear"],
+    ["/goal", GOAL, "status"],
+  ] as const)(
+    "reports %s to the page as a %s change",
+    async (command, goal, kind) => {
+      mockGoalResponses(() => ({ status: 200, body: { goal } }));
+      const onGoalChange = rs.fn();
+      const { container } = renderComposer({ onSubmit: rs.fn(), onGoalChange });
+
+      submitForm(container, command);
+      await waitFor(() => expect(onGoalChange).toHaveBeenCalledTimes(1));
+      expect(onGoalChange).toHaveBeenCalledWith(goal, kind);
+      await waitFor(() =>
+        expect(container.querySelector("textarea")?.value).toBe(""),
+      );
+    },
+  );
 });

@@ -1,7 +1,8 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Skill } from "./type";
+import { isErrorDetailRecord, readSkillErrorDetail } from "./error-detail";
+import type { Skill, SkillLoadDiagnostic } from "./type";
 
 // Keep this in lockstep with `_MAX_SKILL_ARCHIVE_UPLOAD_BYTES` in
 // `backend/app/gateway/routers/skills.py`; nginx and Ingress allow 101 MiB so
@@ -93,32 +94,49 @@ export function formatSkillSecurityFindings(
 }
 
 async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {
-  const data = (await response.json().catch(() => ({}))) as {
-    detail?:
-      | string
-      | {
-          message?: unknown;
-          skill_name?: unknown;
-          findings?: unknown;
-        };
-  };
-  if (typeof data.detail === "string") {
-    return { message: data.detail, findings: [] };
+  const detail = await readSkillErrorDetail(response);
+  if (typeof detail === "string") {
+    return { message: detail, findings: [] };
   }
-  if (typeof data.detail?.message === "string") {
+  if (isErrorDetailRecord(detail) && typeof detail.message === "string") {
     return {
-      message: data.detail.message,
+      message: detail.message,
       skillName:
-        typeof data.detail.skill_name === "string"
-          ? data.detail.skill_name
-          : undefined,
-      findings: parseSecurityFindings(data.detail.findings),
+        typeof detail.skill_name === "string" ? detail.skill_name : undefined,
+      findings: parseSecurityFindings(detail.findings),
     };
   }
   return {
     message: `HTTP ${response.status}${response.statusText ? `: ${response.statusText}` : ""}`,
     findings: [],
   };
+}
+
+export async function loadSkillDiagnostics(
+  signal?: AbortSignal,
+): Promise<SkillLoadDiagnostic[]> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/diagnostics/custom`,
+    { signal, cache: "no-store" },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  const data = (await response.json()) as {
+    diagnostics: SkillLoadDiagnostic[];
+  };
+  return data.diagnostics;
+}
+
+export async function reloadSkills(): Promise<void> {
+  const response = await fetch(`${getBackendBaseURL()}/api/skills/reload`, {
+    method: "POST",
+  });
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
 }
 
 export async function loadSkills() {

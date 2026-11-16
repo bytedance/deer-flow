@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
+import { QueryClientProvider } from "@/components/query-client-provider";
 import { ArtifactViewer } from "@/components/workspace/artifacts/artifact-viewer";
 import {
   artifactViewerTitle,
@@ -9,8 +10,13 @@ import {
   requiresAuthenticatedViewer,
   type ArtifactViewerTarget,
 } from "@/core/artifacts/viewer";
+import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
-import { assertNever, buildLoginUrl } from "@/core/auth/types";
+import {
+  ACCOUNT_DISABLED_LOGIN_URL,
+  assertNever,
+  buildLoginUrl,
+} from "@/core/auth/types";
 import { getI18n } from "@/core/i18n/server";
 
 const POST_LOGIN_FALLBACK = "/workspace";
@@ -36,18 +42,23 @@ export async function generateMetadata({
  */
 async function requireViewerAccess(target: ArtifactViewerTarget | null) {
   if (target && !requiresAuthenticatedViewer(target)) {
-    return;
+    // Public access is not a confirmed logout. Keep the same provider boundary
+    // as private viewers without probing auth or clearing retained drafts.
+    return { user: null, unknown: true };
   }
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":
-      return;
+      return { user: result.user, unknown: false };
     case "unauthenticated":
       redirect(
         buildLoginUrl(
           target ? buildArtifactViewerURL(target) : POST_LOGIN_FALLBACK,
         ),
       );
+    case "account_disabled":
+      // No `next`: a disabled account cannot sign back in to recover it.
+      redirect(ACCOUNT_DISABLED_LOGIN_URL);
     case "needs_setup":
     case "system_setup_required":
       redirect("/setup");
@@ -57,7 +68,7 @@ async function requireViewerAccess(target: ArtifactViewerTarget | null) {
       // Render anyway: the viewer surfaces its own load failure with a
       // download link, which beats bouncing a detached window to a page the
       // user did not ask for.
-      return;
+      return { user: null, unknown: true };
     default:
       assertNever(result);
   }
@@ -67,7 +78,7 @@ export default async function ArtifactViewerPage({
   searchParams,
 }: ArtifactViewerPageProps) {
   const target = parseArtifactViewerQuery(await searchParams);
-  await requireViewerAccess(target);
+  const auth = await requireViewerAccess(target);
 
   if (!target) {
     const { t } = await getI18n();
@@ -81,10 +92,14 @@ export default async function ArtifactViewerPage({
   }
 
   return (
-    <ArtifactViewer
-      filepath={target.filepath}
-      threadId={target.threadId}
-      isMock={target.isMock}
-    />
+    <AuthProvider initialUser={auth.user} initialAuthUnknown={auth.unknown}>
+      <QueryClientProvider>
+        <ArtifactViewer
+          filepath={target.filepath}
+          threadId={target.threadId}
+          isMock={target.isMock}
+        />
+      </QueryClientProvider>
+    </AuthProvider>
   );
 }
