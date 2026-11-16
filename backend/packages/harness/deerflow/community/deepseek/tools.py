@@ -10,10 +10,12 @@ import httpx
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from deerflow.agents.middlewares.pii_redaction_middleware import redact_text_excerpts
 from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.runtime.cancellation import drained_async_context
 
 logger = logging.getLogger(__name__)
@@ -63,7 +65,7 @@ def _text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
+def _normalize(data: object, query: str, max_results: int, pii_config: PiiRedactionConfig) -> dict[str, Any]:
     if not isinstance(data, dict):
         logger.error(
             "DeepSeek returned malformed response container of type %s",
@@ -104,8 +106,7 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
     # 引用可能指向深度搜索中打开、但未出现在搜索列表中的网页。
     answer = _text(message.get("content"))
     cited_urls: set[str] = set()
-    spans_by_url: dict[str, list[dict[str, int]]] = {}
-    seen_spans: set[tuple[str, int, int]] = set()
+    spans_by_url: dict[str, dict[tuple[int, int], None]] = {}
     for annotation in _objects(message.get("annotations"), "annotations"):
         if annotation.get("type") != "url_citation":
             continue
@@ -124,10 +125,7 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
             continue
         if not 0 <= start < end <= len(answer):
             continue
-        span = (url, start, end)
-        if span not in seen_spans:
-            seen_spans.add(span)
-            spans_by_url.setdefault(url, []).append({"start_index": start, "end_index": end})
+        spans_by_url.setdefault(url, {})[start, end] = None
 
     results_by_url: dict[str, dict[str, Any]] = {}
     for source in sources:
@@ -149,9 +147,12 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
     # 优先保留回答实际引用的来源，同时保留搜索结果提供的摘要。
     results.sort(key=lambda result: result["url"] not in cited_urls)
     results = results[:max_results]
-    for result in results:
-        if spans := spans_by_url.get(result["url"]):
-            result["citation_spans"] = spans
+    retained_spans = list(dict.fromkeys(span for result in results for span in spans_by_url.get(result["url"], {})))
+    if retained_spans:
+        excerpts = dict(zip(retained_spans, redact_text_excerpts(answer, retained_spans, pii_config), strict=True))
+        for result in results:
+            if spans := spans_by_url.get(result["url"]):
+                result["citation_excerpts"] = [excerpts[span] for span in spans]
     return {
         "query": query,
         "total_results": len(results),
@@ -161,20 +162,21 @@ def _normalize(data: object, query: str, max_results: int) -> dict[str, Any]:
     }
 
 
-def _prepare() -> tuple[dict[str, Any], httpx.AsyncClient | None, str | None]:
-    config = get_app_config().get_tool_config("web_search")
+def _prepare() -> tuple[dict[str, Any], httpx.AsyncClient | None, str | None, PiiRedactionConfig]:
+    app_config = get_app_config()
+    config = app_config.get_tool_config("web_search")
     extras = dict(config.model_extra or {}) if config is not None else {}
     api_key = resolve_api_key(extras.get("api_key")) or resolve_api_key(os.getenv("DEEPSEEK_API_KEY"))
     if not api_key:
-        return extras, None, "DEEPSEEK_API_KEY is not configured"
+        return extras, None, "DEEPSEEK_API_KEY is not configured", app_config.pii_redaction
     # 配置读取与 TLS 初始化统一放到工作线程。
     client = httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"})
-    return extras, client, None
+    return extras, client, None, app_config.pii_redaction
 
 
 async def _close_prepared_client(preparation: asyncio.Task) -> None:
     try:
-        _, client, _ = await preparation
+        _, client, _, _ = await preparation
         if client is not None:
             await client.aclose()
     except Exception as exc:
@@ -197,7 +199,7 @@ async def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -
         )
     preparation = asyncio.create_task(asyncio.to_thread(_prepare))
     try:
-        extras, client, error = await asyncio.shield(preparation)
+        extras, client, error, pii_config = await asyncio.shield(preparation)
     except asyncio.CancelledError:
         # 工作线程仍会创建客户端。独立清理任务持有资源，重复取消时也先等它关闭。
         cleanup = asyncio.create_task(_close_prepared_client(preparation))
@@ -248,7 +250,7 @@ async def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -
             async with asyncio.timeout(options.timeout_seconds):
                 response = await client.post(_ENDPOINT, json=payload, timeout=options.timeout_seconds)
                 response.raise_for_status()
-                result = _normalize(response.json(), query, max_results)
+                result = _normalize(response.json(), query, max_results, pii_config)
         except httpx.HTTPStatusError as exc:
             logger.error("DeepSeek search returned HTTP %s", exc.response.status_code)
             result = {

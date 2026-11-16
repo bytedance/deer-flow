@@ -1343,13 +1343,15 @@ The tool accepts `query` and `max_results` and returns JSON with `query`,
 `total_results`, `results` (`title`, `url`, `snippet`), `answer`, and `truncated`.
 Source URLs use the shared public-URL policy and are deduplicated. Sources cited
 by the generated answer take priority, with search snippets preserved when
-available. Retained sources with valid citations include `citation_spans`, a list
-of `{start_index, end_index}` ranges into the unchanged `answer`. Indices count
-Unicode code points, with an inclusive start and exclusive end. Duplicate ranges
-for the same source are removed. Sources without valid ranges keep their usual
-fields. `max_results` defaults to 5 and is capped at 50. A configured value
-takes precedence over the tool argument. It limits returned source links, while
-DeepSeek controls how many searches it executes and what answer it generates.
+available. Retained sources with valid citation ranges include a list of
+`citation_excerpts` taken from the answer. Each excerpt stays paired with its
+source through tool-result sanitization and optional PII redaction. If either
+boundary falls inside a redacted value, the excerpt includes the whole placeholder.
+Duplicate ranges for the same source are removed. Sources without valid ranges
+keep their usual fields. `max_results` defaults to 5 and is capped at 50.
+A configured value takes precedence over the tool argument. It limits returned
+source links, while DeepSeek controls how many searches it executes and what
+answer it generates.
 
 `timeout_seconds` bounds the request, including server-side search and reasoning.
 `max_tokens` bounds generated output, including thinking. Both accept positive

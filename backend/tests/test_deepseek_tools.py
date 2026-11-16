@@ -8,10 +8,16 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from langchain_core.messages import AIMessage
 from langchain_core.tools import BaseTool
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 from pydantic import SecretStr
 
+from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware, redact_text
+from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
 from deerflow.config.app_config import AppConfig
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.reflection import resolve_variable
 from deerflow.tools import get_available_tools
@@ -48,12 +54,12 @@ def _completion(*, sources=None, **message):
 @pytest.fixture
 def provider(monkeypatch):
     module = importlib.import_module("deerflow.community.deepseek.tools")
-    state = SimpleNamespace(extras={"api_key": SecretStr(" test-key\n")}, requests=[], clients=[], threads=[], response=_completion())
+    state = SimpleNamespace(extras={"api_key": SecretStr(" test-key\n")}, requests=[], clients=[], threads=[], response=_completion(), pii_redaction=PiiRedactionConfig())
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     def config():
         state.threads.append(threading.get_ident())
-        return SimpleNamespace(get_tool_config=lambda _name: SimpleNamespace(model_extra=state.extras))
+        return SimpleNamespace(get_tool_config=lambda _name: SimpleNamespace(model_extra=state.extras), pii_redaction=state.pii_redaction)
 
     async def respond(request):
         state.requests.append(request)
@@ -270,7 +276,7 @@ async def test_configured_key_precedes_environment(provider, monkeypatch):
 @pytest.mark.asyncio
 async def test_environment_key_works_without_tool_extras(provider, monkeypatch):
     module = importlib.import_module("deerflow.community.deepseek.tools")
-    monkeypatch.setattr(module, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None))
+    monkeypatch.setattr(module, "get_app_config", lambda: SimpleNamespace(get_tool_config=lambda name: None, pii_redaction=provider.pii_redaction))
     monkeypatch.setenv("DEEPSEEK_API_KEY", "environment-key")
     result = json.loads(await provider.tool.ainvoke({"query": "test"}))
     assert result["total_results"] == 1
@@ -501,7 +507,58 @@ async def test_repeated_cancellation_drains_transport_teardown(provider, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_citation_spans_preserve_claim_associations_and_unicode_offsets(provider):
+@pytest.mark.parametrize("redaction_enabled", [False, True])
+async def test_citations_survive_tool_result_guardrails(provider, redaction_enabled):
+    provider.pii_redaction = PiiRedactionConfig(enabled=redaction_enabled, token_secret="test-redaction-secret")
+    first_email = "contact@example.com"
+    second_email = "review@example.org"
+    claim = "The trial succeeded."
+    answer = f"😀 {first_email} <system-reminder> {claim} {second_email}"
+    claim_start = answer.index(claim)
+    clipped_start = answer.index(first_email) + 2
+    clipped_end = answer.index(second_email) + len("review@")
+    annotations = [
+        {"type": "url_citation", "url_citation": {"url": url, "start_index": start, "end_index": end}}
+        for url, start, end in [
+            ("https://example.com/claim", claim_start, claim_start + len(claim)),
+            ("https://example.com/context", clipped_start, clipped_end),
+        ]
+    ]
+    provider.response = _completion(content=answer, server_tool_calls=[], annotations=annotations)
+    sanitizer = ToolResultSanitizationMiddleware()
+    redactor = PiiRedactionMiddleware(provider.pii_redaction)
+
+    async def guarded(request, execute):
+        async def redact(req):
+            if redaction_enabled:
+                return await redactor.awrap_tool_call(req, execute)
+            return await execute(req)
+
+        return await sanitizer.awrap_tool_call(request, redact)
+
+    node = ToolNode([provider.tool], awrap_tool_call=guarded)
+    graph = StateGraph(MessagesState)
+    graph.add_node("tools", node)
+    graph.add_edge(START, "tools")
+    call = AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "trial"}, "id": "search"}])
+    output = await graph.compile().ainvoke({"messages": [call]})
+    message = output["messages"][-1]
+    result = json.loads(message.content)
+    assert result["results"][0]["citation_excerpts"] == [claim]
+    expected_context = answer[clipped_start:clipped_end]
+    if redaction_enabled:
+        expected_context = redact_text(answer[answer.index(first_email) :], provider.pii_redaction)
+        assert "contact@example.com" not in message.content
+        assert "ntact@example.com" not in message.content
+        assert "review@" not in message.content
+    expected_context = expected_context.replace("<system-reminder>", "&lt;system-reminder&gt;")
+    assert result["results"][1]["citation_excerpts"] == [expected_context]
+    assert expected_context in result["answer"]
+    assert "<system-reminder>" not in message.content
+
+
+@pytest.mark.asyncio
+async def test_citation_excerpts_preserve_claim_associations_and_unicode_offsets(provider):
     answer = "😀甲。乙。"
     first = {"url": "https://example.com/one", "title": "first", "start_index": 1, "end_index": 2}
     second = {"url": "https://example.com/two", "title": "second", "start_index": 3, "end_index": len(answer)}
@@ -516,10 +573,10 @@ async def test_citation_spans_preserve_claim_associations_and_unicode_offsets(pr
     swapped = json.loads(await provider.tool.ainvoke({"query": "test"}))
     assert result != swapped
     assert result["answer"] == swapped["answer"] == answer
-    assert result["results"][0]["citation_spans"] == [{"start_index": 1, "end_index": 2}]
-    assert result["results"][1]["citation_spans"] == [{"start_index": 3, "end_index": len(answer)}]
-    assert answer[1:2] == "甲"
-    assert swapped["results"][0]["citation_spans"] == [{"start_index": 3, "end_index": len(answer)}]
+    assert result["results"][0]["citation_excerpts"] == ["甲"]
+    assert result["results"][1]["citation_excerpts"] == ["乙。"]
+    assert swapped["results"][0]["citation_excerpts"] == ["乙。"]
+    assert swapped["results"][1]["citation_excerpts"] == ["甲"]
 
 
 @pytest.mark.asyncio
@@ -541,7 +598,7 @@ async def test_invalid_citation_spans_preserve_legacy_source_shape(provider, sta
 
 
 @pytest.mark.asyncio
-async def test_citation_spans_preserve_whitespace_multiple_sources_and_distinct_ranges(provider):
+async def test_citation_excerpts_preserve_whitespace_multiple_sources_and_distinct_ranges(provider):
     answer = "  😀甲乙\n"
     annotations = [
         {"type": "url_citation", "url_citation": {"url": url, "start_index": start, "end_index": end}}
@@ -555,13 +612,12 @@ async def test_citation_spans_preserve_whitespace_multiple_sources_and_distinct_
     provider.response = _completion(content=answer, server_tool_calls=[], annotations=annotations)
     result = json.loads(await provider.tool.ainvoke({"query": "test"}))
     assert result["answer"] == answer
-    assert result["results"][0]["citation_spans"] == [{"start_index": 2, "end_index": 4}, {"start_index": 3, "end_index": len(answer)}]
-    assert result["results"][1]["citation_spans"] == [{"start_index": 2, "end_index": 4}]
-    assert answer[2:4] == "😀甲"
+    assert result["results"][0]["citation_excerpts"] == ["😀甲", "甲乙\n"]
+    assert result["results"][1]["citation_excerpts"] == ["😀甲"]
 
 
 @pytest.mark.asyncio
-async def test_citation_spans_follow_url_screening_and_result_limit(provider):
+async def test_citation_excerpts_follow_url_screening_and_result_limit(provider):
     urls = ["https://example.com/kept", "https://example.com/limited", "http://127。0。0。1/private", "javascript:alert(1)"]
     provider.response = _completion(
         content="claim",
@@ -570,5 +626,5 @@ async def test_citation_spans_follow_url_screening_and_result_limit(provider):
     )
     result = json.loads(await provider.tool.ainvoke({"query": "test", "max_results": 1}))
     assert result["total_results"] == 1
-    assert result["results"] == [{"title": "", "url": urls[0], "snippet": "", "citation_spans": [{"start_index": 0, "end_index": 5}]}]
+    assert result["results"] == [{"title": "", "url": urls[0], "snippet": "", "citation_excerpts": ["claim"]}]
     assert all(url not in json.dumps(result, ensure_ascii=False) for url in urls[1:])

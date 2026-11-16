@@ -59,6 +59,7 @@ import hashlib
 import hmac
 import logging
 import re
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
@@ -266,6 +267,15 @@ def redact_texts(texts: Sequence[str], config: PiiRedactionConfig | None) -> lis
     return [redactor.redact(text) for text in texts]
 
 
+def redact_text_excerpts(text: str, ranges: Sequence[tuple[int, int]], config: PiiRedactionConfig) -> list[str]:
+    """Extract validated ranges after redacting the full text.
+
+    When an endpoint falls inside a redacted value, include the entire
+    placeholder. Redacting a substring in isolation could miss a clipped value.
+    """
+    return _make_redactor(config).excerpts(text, ranges)
+
+
 def _make_redactor(config: PiiRedactionConfig | None) -> _Redactor:
     """Build the scan redactor: active detectors + the configured token key."""
     if config is None:
@@ -328,6 +338,40 @@ class _Redactor:
         for detector in self._detectors:
             text = detector.sub(self._replacer(detector), text)
         return text
+
+    def excerpts(self, text: str, ranges: Sequence[tuple[int, int]]) -> list[str]:
+        for detector in self._detectors:
+            text, ranges = self._redact_excerpt_ranges(text, ranges, detector)
+        return [text[start:end] for start, end in ranges]
+
+    def _redact_excerpt_ranges(self, text: str, ranges: Sequence[tuple[int, int]], detector: _Detector) -> tuple[str, Sequence[tuple[int, int]]]:
+        replace = self._replacer(detector)
+        edits: list[tuple[int, int, int]] = []
+        deltas = [0]
+
+        def record_edit(match: re.Match[str]) -> str:
+            replacement = replace(match)
+            if replacement != match.group(0):
+                start, end = match.span()
+                edits.append((start, end, len(replacement)))
+                deltas.append(deltas[-1] + len(replacement) - (end - start))
+            return replacement
+
+        redacted = detector.sub(record_edit, text)
+        if not edits:
+            return redacted, ranges
+
+        def remap(boundary: int, *, is_end: bool) -> int:
+            # Completed edits shift the boundary by their cumulative length change.
+            # A boundary inside the next edit moves to the edge of its placeholder.
+            preceding = bisect_right(edits, boundary, key=lambda edit: edit[1])
+            if preceding < len(edits):
+                start, _, size = edits[preceding]
+                if start < boundary:
+                    boundary = start + (size if is_end else 0)
+            return boundary + deltas[preceding]
+
+        return redacted, [(remap(start, is_end=False), remap(end, is_end=True)) for start, end in ranges]
 
     def _replacer(self, detector: _Detector) -> Callable[[re.Match[str]], str]:
         def replace(match: re.Match[str]) -> str:

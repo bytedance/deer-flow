@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from deerflow.config.pii_redaction_config import PiiRedactionConfig
+
 
 @pytest.fixture
 def provider(monkeypatch):
@@ -18,7 +20,7 @@ def provider(monkeypatch):
     def config():
         threads.append(threading.get_ident())
         Path(__file__).read_text(encoding="utf-8")
-        return SimpleNamespace(get_tool_config=lambda _name: SimpleNamespace(model_extra={"api_key": "test-key"}))
+        return SimpleNamespace(get_tool_config=lambda _name: SimpleNamespace(model_extra={"api_key": "test-key"}), pii_redaction=PiiRedactionConfig())
 
     def respond(request):
         return httpx.Response(200, json={"choices": [{"finish_reason": "stop", "message": {"content": "", "server_tool_calls": []}}]})
