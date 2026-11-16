@@ -412,6 +412,23 @@ fences, including unclosed fences, in complete and streamed replies.
    ```
 
    `mcode` must be on the Gateway process's `PATH`; installing it only on the Docker host does not make it available inside the Gateway container. DeerFlow invokes it through `invoke_acp_agent` in a per-thread ACP workspace and forwards enabled MCP servers. Keep `auto_approve_permissions: false` for untrusted tasks; enable it only when mcode must edit files or run commands and you trust the task.
+
+   Pi can be used as an external coding agent through the community `pi-acp` adapter. Install the adapter globally or let `npx` fetch it, then add it as an ACP agent:
+
+   ```bash
+   npm install --global pi-acp
+   ```
+
+   ```yaml
+   acp_agents:
+     pi:
+       command: npx
+       args: ["-y", "pi-acp"]
+       description: Pi coding agent for repository tasks and code generation
+       auto_approve_permissions: false
+   ```
+
+   `npx` and Node.js must be available on the Gateway process's `PATH`. When the Gateway runs in Docker, install them inside the Gateway image or container. Keep `auto_approve_permissions: false` for untrusted tasks.
    - On macOS, export Claude Code auth explicitly if needed:
 
    ```bash

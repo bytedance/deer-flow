@@ -2279,6 +2279,26 @@ Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
 only when the agent is expected to edit files or run commands for a trusted
 task.
 
+Pi can run as an external coding agent through the community `pi-acp` adapter.
+Install the adapter globally or let `npx` fetch it on demand:
+
+```bash
+npm install --global pi-acp
+```
+
+```yaml
+acp_agents:
+  pi:
+    command: npx
+    args: ["-y", "pi-acp"]
+    description: Pi coding agent for repository tasks and code generation
+    auto_approve_permissions: false
+```
+
+Node.js and `npx` must be available on the Gateway process's `PATH`. When the
+Gateway runs in Docker, install them inside the Gateway image or container.
+Keep `auto_approve_permissions` disabled for untrusted tasks.
+
 
 ## HITL Tool Approval
 

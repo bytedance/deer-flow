@@ -147,6 +147,14 @@ def test_missing_mcode_command_returns_install_and_login_guidance():
     assert "restart DeerFlow" in result
 
 
+def test_missing_pi_command_returns_adapter_install_guidance():
+    result = _format_invocation_error("pi", "pi-acp", FileNotFoundError())
+
+    assert "npm install --global pi-acp" in result
+    assert "npx -y pi-acp" in result
+    assert "Gateway PATH" in result
+
+
 @pytest.mark.anyio
 async def test_build_invoke_tool_description_and_unknown_agent_error():
     tool = build_invoke_acp_agent_tool(

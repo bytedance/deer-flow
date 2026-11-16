@@ -2214,6 +2214,15 @@ hitl_approval:
 #     # auto_approve_permissions: false  # Set to true to auto-approve ACP permission requests
 #     # env:                             # Optional: inject environment variables into the agent subprocess
 #     #   OPENAI_API_KEY: $OPENAI_API_KEY  # $VAR resolves from host environment
+#
+#   pi:
+#     # Pi coding agent through the standard ACP adapter. Install it globally
+#     # with `npm install --global pi-acp`, or let npx fetch it on demand.
+#     command: npx
+#     args: ["-y", "pi-acp"]
+#     description: Pi coding agent for repository tasks and code generation
+#     # auto_approve_permissions: false  # Set to true only for trusted tasks
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time
 
 # ============================================================================
 # Skills Configuration
