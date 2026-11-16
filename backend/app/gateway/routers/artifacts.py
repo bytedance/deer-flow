@@ -24,7 +24,7 @@ from app.gateway.authz import SandboxRequestLease, require_permission, try_acqui
 from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
-from deerflow.authz.sandbox_authz import safe_app_config
+from deerflow.authz.sandbox_authz import safe_app_config_async
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
@@ -848,7 +848,7 @@ async def update_artifact(
                     sandbox_provider,
                     thread_id,
                     user_id=effective_user_id,
-                    app_config=safe_app_config(),
+                    app_config=await safe_app_config_async(),
                     owner_prefix="gateway:artifact",
                 )
                 sandbox = sandbox_lease.sandbox
