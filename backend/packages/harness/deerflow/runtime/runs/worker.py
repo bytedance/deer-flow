@@ -437,6 +437,18 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _with_delivery_enforcement(content: dict[str, Any], *, required: bool) -> dict[str, Any]:
+    """Normalize a receipt's enforcement after the goal verdict is known.
+
+    The recursion-capped path builds its receipt before the goal continuation
+    call can record a verdict; without this it would persist ``advisory`` for a
+    goal run. Receipts without produced paths carry no enforcement field.
+    """
+    if not content.get("produced_paths"):
+        return content
+    return {**content, "enforcement": "required" if required else "advisory"}
+
+
 def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
     """Directory names workspace snapshots must skip for this deployment.
 
@@ -2002,6 +2014,10 @@ async def run_agent(
                     verdict_callback=capture_goal_verdict,
                 )
                 record.goal_verdict = final_goal_verdict
+            # The receipt was built before the continuation call could record a
+            # verdict; normalize its enforcement now so a capped goal run does
+            # not persist an advisory verdict.
+            delivery_content = _with_delivery_enforcement(delivery_content, required=record.goal_verdict is not None)
             stop_status_kwargs = {"stop_reason": _RECURSION_CAPPED_STOP_REASON, "goal_verdict": record.goal_verdict}
         else:
             logger.exception("Run %s failed: %s", run_id, error_msg)
@@ -2124,9 +2140,14 @@ async def run_agent(
                     if delivery_content is None:
                         if produced_output_paths is None:
                             produced_output_paths = await _produced_output_paths(pre_run_workspace_snapshot, thread_id=thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
-                        delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths, pre_run_snapshot=pre_run_workspace_snapshot)
+                        delivery_content = _delivery_content_with_outputs(
+                            journal.get_delivery_content(),
+                            produced_output_paths,
+                            pre_run_snapshot=pre_run_workspace_snapshot,
+                            required=record.goal_verdict is not None,
+                        )
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
-                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                    if produced_output_paths and record.status == RunStatus.success and not receipt_persisted and delivery_content.get("enforcement") == "required":
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
 
                 if not record.ownership_lost and journal is not None and persist_completion:

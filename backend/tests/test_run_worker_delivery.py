@@ -329,6 +329,40 @@ async def test_goal_run_delivery_stays_required_when_not_presented(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_advisory_delivery_receipt_failure_keeps_the_run_successful(monkeypatch):
+    """An event-store outage must not fail a finished ordinary run.
+
+    Only a goal run's required verdict may downgrade the run when the receipt
+    cannot be persisted.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+    monkeypatch.setattr("deerflow.runtime.runs.worker._persist_delivery_receipt", AsyncMock(return_value=False))
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert record.error is None
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("modify_existing", [False, True], ids=["unproven-new-output", "observed-modified-output"])
 @pytest.mark.parametrize("terminal_outcome", ["success", "error", "cancelled"])
 async def test_truncated_snapshots_limit_output_delivery_verification(tmp_path, monkeypatch, modify_existing, terminal_outcome):
@@ -908,7 +942,7 @@ async def test_delivery_write_failure_preserves_real_durable_terminal_status():
 
 
 @pytest.mark.anyio
-async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_persisted(monkeypatch):
+async def test_produced_artifact_delivery_keeps_an_advisory_run_successful_when_receipt_cannot_be_persisted(monkeypatch):
     class FailingReceiptStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
             raise RuntimeError("event store unavailable")
@@ -920,6 +954,61 @@ async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_pe
         "deerflow.runtime.runs.worker._produced_output_paths",
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
+
+    class PresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            journal._remember_current_run_tool_calls(
+                AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}]),
+                caller="lead_agent",
+            )
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=FailingReceiptStore()),
+        agent_factory=lambda *, config: PresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert record.error is None
+    assert (await run_store.get(record.run_id))["status"] == "success"
+
+
+@pytest.mark.anyio
+async def test_required_delivery_receipt_failure_still_fails_a_goal_run(monkeypatch):
+    """A goal run still fails closed when its delivery receipt cannot be persisted."""
+
+    class FailingReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, **kwargs):
+            raise RuntimeError("event store unavailable")
+
+    run_store = MemoryRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    async def prepare_continuation(**kwargs):
+        kwargs["verdict_callback"]({"continuation_count": 1}, {"satisfied": True}, None)
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
 
     class PresentingAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
