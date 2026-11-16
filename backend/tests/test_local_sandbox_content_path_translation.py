@@ -11,6 +11,7 @@ stored verbatim; code files keep the translation.
 from __future__ import annotations
 
 import builtins
+import errno
 import os
 import shutil
 import threading
@@ -261,7 +262,7 @@ def test_download_file_leaves_valid_utf8_binary_overwrite_identical(tmp_path):
     sandbox.write_file(virtual, "#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n")
 
     host_path = os.path.realpath(tmp_path / "outputs" / "data.csv")
-    raw = f"PK\x03\x04\x00binary blob {host_path} \x01\x02 tail\n".encode("utf-8")
+    raw = f"PK\x03\x04\x00binary blob {host_path} \x01\x02 tail\n".encode()
     raw.decode("utf-8")  # the payload is valid UTF-8 — that must not matter
     (tmp_path / "workspace" / "run.sh").write_bytes(raw)
 
@@ -299,3 +300,32 @@ def test_download_file_reverse_resolves_after_append_to_script(tmp_path):
     expected = b"#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n"
     assert sandbox.read_file(virtual) == expected.decode("utf-8")
     assert sandbox.download_file(virtual) == expected
+
+
+def test_download_file_enforces_limit_on_restored_bytes(tmp_path):
+    """The size ceiling applies to the bytes download_file returns, not
+    only to the bytes on disk: reverse resolution can expand the payload
+    when a short host path stands in for a longer virtual one, so a file
+    that fits the limit on disk can still exceed it once restored.
+    """
+    outputs = tmp_path / "o"
+    outputs.mkdir()
+    # A virtual prefix far longer than any host temp path, so restoring it
+    # measurably expands the payload over what is stored on disk.
+    prefix = "/mnt/user-data/" + "/".join(["segment"] * 16) + "/outputs"
+    sandbox = LocalSandbox(
+        id="test",
+        path_mappings=[PathMapping(container_path=prefix, local_path=str(outputs))],
+    )
+    virtual = f"{prefix}/run.sh"
+    content = f"#!/bin/sh\ncat {prefix}/data.csv\n"
+    sandbox.write_file(virtual, content)
+
+    stored_size = (outputs / "run.sh").stat().st_size
+    restored = content.encode()
+    assert stored_size < len(restored)  # the fixture must really expand on restore
+
+    assert sandbox.download_file(virtual, max_bytes=len(restored)) == restored
+    with pytest.raises(OSError) as excinfo:
+        sandbox.download_file(virtual, max_bytes=stored_size)
+    assert excinfo.value.errno == errno.EFBIG

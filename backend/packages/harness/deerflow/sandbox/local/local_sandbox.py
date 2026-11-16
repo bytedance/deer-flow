@@ -1357,7 +1357,14 @@ class LocalSandbox(Sandbox):
             digest = self._stored_content_digests.get(resolved_path)
             if resolved_path in self._stored_content_translated and digest is not None and hashlib.sha256(data).hexdigest() == digest.hexdigest():
                 text = data.decode("utf-8")
-                return self._reverse_resolve_paths_in_output(text).encode("utf-8")
+                restored = self._reverse_resolve_paths_in_output(text).encode("utf-8")
+                # Reverse resolution can expand the payload — a short host
+                # path can stand in for a longer virtual one — so the size
+                # ceiling applies to the bytes actually returned, not only
+                # to the bytes read from disk.
+                if len(restored) > max_download_size:
+                    raise OSError(errno.EFBIG, f"File exceeds maximum download size of {max_download_size} bytes", path)
+                return restored
             return data
         except OSError as e:
             # Re-raise with the original path for clearer error messages, hiding internal resolved paths
