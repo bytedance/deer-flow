@@ -1548,6 +1548,69 @@ DELETE /api/threads/{thread_id}
 
 Deleting a thread also removes every user's read marker for it.
 
+### Incognito Threads
+
+An incognito chat is a temporary thread that never enters a listing surface,
+search, project, share or the activity feed. The user-facing behavior is in
+[Incognito Chats](../../docs/guide/incognito-chats.md); this section is the
+wire contract.
+
+#### Create an Incognito Thread
+
+```http
+POST /api/threads
+Content-Type: application/json
+
+{
+  "thread_id": "abc123",
+  "incognito": true
+}
+```
+
+The response carries `"incognito": true`. Creation is server-restricted to an
+authenticated browser session (or the auth-disabled local mode): a personal
+access token, an internal/IM caller and an extension-launched request get
+`403`, and `incognito.enabled: false` answers `403` for every caller. An
+incognito thread cannot carry `project_id` (`400`). Repeating the create is
+idempotent while the stored mode matches; a stored mode that differs answers
+`409` (`Thread already exists with a different visibility mode`), and an
+expired tombstone answers `410` (`This incognito thread has expired`).
+
+#### End an Incognito Thread
+
+```http
+POST /api/threads/{thread_id}/incognito/end
+```
+
+Answers `204`. The Gateway schedules deletion after
+`incognito.end_grace_seconds` in the background, and the deadline no longer
+moves. `409` when the thread is not incognito. Once the thread has expired it
+is no longer visible to its owner, so the route answers `404` like any read; a
+deadline that passes mid-request answers `410`.
+
+**Lifetime.** `expires_at` moves forward on run admission and run completion
+but never past `created_at + incognito.max_lifetime_seconds`. An expired thread
+answers `404` on read routes; the tombstone row keeps its ID from being reused.
+The sweep purges the thread directory, checkpoints, run and event records,
+feedback, scheduled-task lines, read markers, durable subagent-batch rows and
+browser/MCP sessions through the same orchestration as a user delete.
+
+**REST backstops.** An incognito thread cannot be branched (`409`), moved into
+a project (`409`), shared (`409`), or used as the `reuse_thread` target of a
+scheduled task (`422`, error code `incognito_thread_not_schedulable`). A chat
+run in an incognito thread binds no scheduler capability, so `schedule_task`
+answers its existing `scheduler_tools_disabled` `503` and the model tells the
+user it cannot create tasks in this conversation.
+
+**Feature flag.** `GET /api/features` includes:
+
+```json
+{ "incognito": { "enabled": true, "idle_ttl_seconds": 86400 } }
+```
+
+`enabled` gates the entry point; `idle_ttl_seconds` is the live idle window the
+chat displays.
+
 ### Thread Origin, Activity and Unread State
 
 Runs the server starts for a user (a schedule, an IM channel, a GitHub agent,
