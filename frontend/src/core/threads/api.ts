@@ -137,6 +137,7 @@ export async function patchThreadMetadata(
 export async function createThread(
   threadId: string,
   projectId?: string,
+  incognito = false,
 ): Promise<AgentThread> {
   const response = await fetchWithAuth(`${getBackendBaseURL()}/api/threads`, {
     method: "POST",
@@ -146,6 +147,7 @@ export async function createThread(
     body: JSON.stringify({
       thread_id: threadId,
       ...(projectId ? { project_id: projectId } : {}),
+      ...(incognito ? { incognito: true } : {}),
     }),
   });
 
@@ -156,6 +158,30 @@ export async function createThread(
   }
 
   return (await response.json()) as AgentThread;
+}
+
+/**
+ * End an incognito chat. The Gateway schedules the purge after a short grace
+ * period; the browser can leave as soon as the request is sent. `404`/`410`
+ * mean the thread is already gone (deleted or expired), which is success for
+ * this caller.
+ */
+export async function endIncognitoThread(threadId: string): Promise<void> {
+  const response = await fetchWithAuth(
+    `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/incognito/end`,
+    {
+      method: "POST",
+      // The page navigates immediately; keep the request alive if that
+      // navigation unloads the document.
+      keepalive: true,
+    },
+  );
+
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw new Error(
+      await readThreadAPIError(response, "Failed to end incognito chat."),
+    );
+  }
 }
 
 export async function moveThreadToProject(

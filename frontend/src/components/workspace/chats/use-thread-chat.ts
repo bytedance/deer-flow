@@ -84,31 +84,35 @@ export function useThreadChat() {
   }, [pathname, threadIdFromPath]);
 
   // A new-chat identity is minted for the entry scope (the new chat's
-  // `project` query). The sidebar "New chat" link can leave
-  // `/new?project=…` for plain `/new` without a pathname change, so the
-  // pathname sync above keeps the old identity — which may already be
-  // pre-created under the previous project, and whose in-flight submission
-  // would otherwise survive the navigation. Re-mint whenever the project
-  // scope changes while still on a new-chat path.
+  // `project` and `incognito` query). The sidebar links can move between
+  // `/new`, `/new?project=…` and `/new?incognito=true` without a pathname
+  // change, so the pathname sync above keeps the old identity — which may
+  // already be pre-created under the previous scope, and whose in-flight
+  // submission would otherwise survive the navigation. Re-mint whenever the
+  // entry scope changes while still on a new-chat path.
   const newChatScopeRef = useRef<string | null | symbol>(NEW_CHAT_SCOPE_UNSET);
   useEffect(() => {
     const project = isNewPath ? searchParams.get("project") : null;
+    const incognito = isNewPath && searchParams.get("incognito") === "true";
+    // Incognito threads never belong to a project; compose the scope so a
+    // switch between the two entry points always mints a fresh identity.
+    const scope = `${project ?? ""}\u0000${incognito ? "incognito" : ""}`;
     if (!isNewPath) {
       newChatScopeRef.current = NEW_CHAT_SCOPE_UNSET;
       return;
     }
-    if (newChatScopeRef.current === project) {
+    if (newChatScopeRef.current === scope) {
       return;
     }
     const previousScope = newChatScopeRef.current;
-    newChatScopeRef.current = project;
+    newChatScopeRef.current = scope;
     if (previousScope === NEW_CHAT_SCOPE_UNSET) {
       return;
     }
-    // Scope changed (project added, removed, or swapped): the old identity
-    // belongs to the previous scope, so allocate a fresh one. The threadId
-    // flip also runs every fence keyed on `threadId` (composer goal aborts,
-    // chat-page submission epoch).
+    // Scope changed (project added, removed, or swapped; incognito toggled):
+    // the old identity belongs to the previous scope, so allocate a fresh one.
+    // The threadId flip also runs every fence keyed on `threadId` (composer
+    // goal aborts, chat-page submission epoch).
     const nextThreadId = uuid();
     newThreadIdRef.current = nextThreadId;
     setIsNewThreadState(true);

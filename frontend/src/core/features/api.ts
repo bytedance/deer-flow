@@ -39,6 +39,10 @@ export interface FeaturesResponse {
   thread_activity?: {
     available?: boolean;
   };
+  incognito?: {
+    enabled?: boolean;
+    idle_ttl_seconds?: number;
+  };
 }
 
 export interface ScheduledTasksFeature {
@@ -79,6 +83,17 @@ export interface ThreadActivityFeature {
 export const DEFAULT_THREAD_ACTIVITY_FEATURE: ThreadActivityFeature = {
   available: false,
 };
+
+export interface IncognitoFeature {
+  /** New incognito chats can be created; the sidebar entry is shown. */
+  enabled: boolean;
+  /**
+   * Idle window after the last activity before an incognito chat is deleted.
+   * `null` when the backend sends no block, so the UI never states a lifetime
+   * it did not read from the live configuration.
+   */
+  idleTtlSeconds: number | null;
+}
 
 export interface ConversationReferencesCapability {
   enabled: boolean;
@@ -178,5 +193,21 @@ export async function fetchThreadActivityFeature(): Promise<ThreadActivityFeatur
   const feature = (await fetchFeatures()).thread_activity;
   return {
     available: feature?.available === true,
+  };
+}
+
+export async function fetchIncognitoFeature(): Promise<IncognitoFeature> {
+  const feature = (await fetchFeatures()).incognito;
+  const idleTtlSeconds = feature?.idle_ttl_seconds;
+  return {
+    // Creation is opt-in on the server; a missing block (older backend) must
+    // not advertise an entry point whose create request would be rejected.
+    enabled: feature?.enabled === true,
+    idleTtlSeconds:
+      typeof idleTtlSeconds === "number" &&
+      Number.isInteger(idleTtlSeconds) &&
+      idleTtlSeconds > 0
+        ? idleTtlSeconds
+        : null,
   };
 }

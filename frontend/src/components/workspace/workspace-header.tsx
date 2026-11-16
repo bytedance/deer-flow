@@ -1,8 +1,8 @@
 "use client";
 
-import { MessageSquarePlus } from "lucide-react";
+import { MessageSquarePlus, VenetianMaskIcon } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 
 import {
   SidebarMenu,
@@ -10,6 +10,7 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useIncognitoFeature } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -22,6 +23,14 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { isMobile } = useSidebar();
   const isSidebarOpen = useWorkspaceSidebarExpanded();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const { enabled: incognitoEnabled } = useIncognitoFeature();
+  const isNewChatPath = pathname === "/workspace/chats/new";
+  const isIncognitoNew =
+    isNewChatPath && searchParams.get("incognito") === "true";
+  // A static demo has no Gateway, so the entry would lead to a dead page.
+  const showIncognito =
+    incognitoEnabled && env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true";
   return (
     <>
       <div
@@ -65,7 +74,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
       <SidebarMenu>
         <SidebarMenuItem>
           <SidebarMenuButton
-            isActive={pathname === "/workspace/chats/new"}
+            isActive={isNewChatPath && !isIncognitoNew}
             asChild
           >
             <Link className="text-muted-foreground" href="/workspace/chats/new">
@@ -74,6 +83,19 @@ export function WorkspaceHeader({ className }: { className?: string }) {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        {showIncognito && (
+          <SidebarMenuItem>
+            <SidebarMenuButton isActive={isIncognitoNew} asChild>
+              <Link
+                className="text-muted-foreground"
+                href="/workspace/chats/new?incognito=true"
+              >
+                <VenetianMaskIcon size={16} />
+                <span>{t.incognito.entry}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
       </SidebarMenu>
     </>
   );

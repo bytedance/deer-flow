@@ -840,6 +840,25 @@ export const enUS: Translations = {
     agentsDisabledTooltip: "Feature not enabled",
   },
 
+  // Incognito (temporary) chats
+  incognito: {
+    entry: "Incognito chat",
+    privacyNotice: "This chat won't appear in your history, memory or search.",
+    lifetimeNotice: (duration) =>
+      `It is deleted automatically after ${duration} of inactivity.`,
+    lifetimeUnknown:
+      "It is deleted automatically after a period of inactivity.",
+    durationMinutes: (count) =>
+      `${count} ${count === 1 ? "minute" : "minutes"}`,
+    durationHours: (count) => `${count} ${count === 1 ? "hour" : "hours"}`,
+    durationDays: (count) => `${count} ${count === 1 ? "day" : "days"}`,
+    end: "End incognito chat",
+    endFailed:
+      "Couldn't end the chat. It will still be deleted when it expires.",
+    createFailed:
+      "Couldn't start an incognito chat. Your message was not sent — try again.",
+  },
+
   // Knowledge scope for custom-agent chat
   knowledge: {
     scope: {

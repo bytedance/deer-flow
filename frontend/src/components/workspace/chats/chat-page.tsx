@@ -42,6 +42,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { hasPermission, PERMISSIONS } from "@/core/auth/permissions";
 import {
   useBrowserControlEnabled,
+  useIncognitoFeature,
   useKnowledgeBaseEnabled,
 } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
@@ -68,7 +69,7 @@ import { useThreadScheduledTaskEvents } from "@/core/scheduled-tasks/events";
 import { useScheduleToolResultRefresh } from "@/core/scheduled-tasks/hooks";
 import { useLocalSettings, useThreadSettings } from "@/core/settings";
 import { resolveThreadContext, selectThreadModel } from "@/core/settings/store";
-import { createThread } from "@/core/threads/api";
+import { createThread, endIncognitoThread } from "@/core/threads/api";
 import {
   useBranchThread,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -85,6 +86,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
+import { IncognitoFrame } from "./incognito-frame";
 import { useSpecificChatMode } from "./use-chat-mode";
 import { useMarkOpenThreadRead } from "./use-mark-open-thread-read";
 import { useThreadChat } from "./use-thread-chat";
@@ -106,7 +108,17 @@ export default function ChatPage() {
   // meaningful while the thread is still lazy (`isNewThread`); once
   // materialized the URL is replaced with the thread route and the param is
   // gone. Invalid ids are dropped by backend admission.
-  const projectParam = isNewThread ? searchParams.get("project") : null;
+  //
+  // Incognito new chat: `/workspace/chats/new?incognito=true` needs the same
+  // pre-create for a different reason — run admission only pins the marker on
+  // a row that already exists, so the first run would otherwise write memory
+  // and shared blobs as an ordinary chat. An incognito thread never belongs to
+  // a project, so the incognito entry point wins over a hand-written project
+  // param.
+  const incognitoParam =
+    isNewThread && searchParams.get("incognito") === "true";
+  const projectParam =
+    isNewThread && !incognitoParam ? searchParams.get("project") : null;
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false
@@ -124,6 +136,9 @@ export default function ChatPage() {
   useEffect(() => setModelChoiceSummary(""), [threadId, user?.id]);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { enabled: browserControlEnabled } = useBrowserControlEnabled();
+  // The frame's lifetime notice follows the live configuration; `null` until
+  // `/api/features` answers, so the UI never states a duration it did not read.
+  const { idleTtlSeconds: incognitoIdleTtlSeconds } = useIncognitoFeature();
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
@@ -133,6 +148,12 @@ export default function ChatPage() {
     enabled: !isNewThread && !isMock,
     isMock,
   });
+  // The URL carries the mode while the thread is lazy; afterwards the row is
+  // authoritative. The pre-create seeds the metadata cache, so the frame does
+  // not blink away between the first run starting and the refetch.
+  const isIncognito = isNewThread
+    ? incognitoParam
+    : threadMetadata.data?.incognito === true;
   // A saved thread that exists on the server is being read while open:
   // clears its unread dot (sidebar and chats list) on every device.
   const markThreadRead = useMarkOpenThreadRead(threadId, {
@@ -283,40 +304,54 @@ export default function ChatPage() {
   ]);
 
   // Born assigned: pre-create the thread row with its project so the sidebar
-  // lists it under the project immediately. Idempotent server-side on
+  // lists it under the project immediately, or with its incognito marker so
+  // run admission can pin it on the very first turn. Idempotent server-side on
   // `thread_id`, so retrying the same first message (same `threadId` while
-  // `isNewThread`) reuses the existing row instead of double-creating. This
-  // is the sole membership channel — run requests never carry the project
-  // key.
+  // `isNewThread`) reuses the existing row instead of double-creating. Project
+  // membership is the sole membership channel — run requests never carry the
+  // project key.
   //
   // Also runs before InputBox issues a `/goal <condition>` PUT (via
   // `onPrepareThread`): the goal endpoint materializes a missing thread row
   // itself, and an unassigned row would make this later idempotent create a
-  // membership no-op.
-  const ensureProjectThread = useCallback(async () => {
-    if (!projectParam) {
+  // membership no-op. The same pre-create keeps that materialized row from
+  // being an ordinary chat when the user is in an incognito entry.
+  const ensureThreadRow = useCallback(async () => {
+    if (!projectParam && !incognitoParam) {
       return;
     }
     try {
-      const created = await createThread(threadId, projectParam);
-      // Keep confirmed membership available while the first metadata read is pending
-      // or fails after the composer materializes this new project thread.
+      const created = await createThread(
+        threadId,
+        projectParam ?? undefined,
+        incognitoParam,
+      );
+      // Keep confirmed membership/visibility available while the first
+      // metadata read is pending or fails after the composer materializes
+      // this new thread.
       queryClient.setQueryData(
         ["thread", "metadata", threadId, false],
         created,
       );
-      void queryClient.invalidateQueries({
-        queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      });
+      if (!incognitoParam) {
+        void queryClient.invalidateQueries({
+          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+        });
+      }
     } catch (error) {
       // Any failure (e.g. the project was deleted/archived between page load
-      // and submit): do NOT submit unassigned. Reject so PromptInput keeps
-      // the composer's text for a retry; the send in-flight guard is never
-      // engaged on this path, so retrying works immediately.
-      toast.error(t.projects.projectUnavailable);
+      // and submit, or an operator disabled incognito chats): do NOT submit in
+      // the wrong mode. Reject so PromptInput keeps the composer's text for a
+      // retry; the send in-flight guard is never engaged on this path, so
+      // retrying works immediately.
+      toast.error(
+        incognitoParam
+          ? t.incognito.createFailed
+          : t.projects.projectUnavailable,
+      );
       throw error;
     }
-  }, [threadId, projectParam, queryClient, t]);
+  }, [threadId, projectParam, incognitoParam, queryClient, t]);
 
   // Submission fence. The cleanup runs when `threadId` changes (conversation
   // switch on a persisted page — sidebar navigation keeps this component
@@ -359,7 +394,7 @@ export default function ChatPage() {
           runModelContext.model_selection_requested = choice.model_name;
         }
       }
-      await ensureProjectThread();
+      await ensureThreadRow();
       // Conversation switched (or the page unmounted) while the project
       // pre-create was pending: drop the submission. Reject silently — the
       // user has already moved on, so a toast would land on the new
@@ -374,7 +409,9 @@ export default function ChatPage() {
         isNewThread &&
         !projectParam
       ) {
-        await createThread(threadId);
+        // Idempotent with the incognito pre-create above; the mode must match
+        // the existing row or the server answers 409.
+        await createThread(threadId, undefined, incognitoParam);
         if (submissionEpochRef.current !== submissionEpoch)
           throw new Error("thread-submission-stale");
       }
@@ -478,12 +515,13 @@ export default function ChatPage() {
       currentKnowledgeScopeSnapshot,
       sendMessage,
       threadId,
-      ensureProjectThread,
+      ensureThreadRow,
       prepareModelControl,
       settings.context.mode,
       locale,
       isNewThread,
       projectParam,
+      incognitoParam,
       setThreadId,
       setIsNewThread,
     ],
@@ -525,6 +563,22 @@ export default function ChatPage() {
   const handleStop = useCallback(async () => {
     await thread.stop();
   }, [thread]);
+  // End the chat and leave in the same click: the Gateway schedules the purge
+  // after the grace period, and a lost request still leaves the idle lifetime
+  // to delete the thread. Only a materialized row can be ended; a lazy new
+  // chat has nothing on the server to purge.
+  const handleEndIncognito = useCallback(() => {
+    const endedThreadId = threadId;
+    if (!isNewThread && !isMock) {
+      void endIncognitoThread(endedThreadId).catch(() => {
+        toast.error(t.incognito.endFailed);
+      });
+    }
+    queryClient.removeQueries({
+      queryKey: ["thread", "metadata", endedThreadId],
+    });
+    router.replace("/workspace/chats/new");
+  }, [isMock, isNewThread, queryClient, router, t, threadId]);
   const handleRegenerate = useCallback(
     (messageId: string, supersededMessageIds: string[]) =>
       regenerateMessage(threadId, messageId, supersededMessageIds),
@@ -680,7 +734,22 @@ export default function ChatPage() {
                 <ArtifactTrigger />
               </div>
             </header>
-            <main className="flex min-h-0 max-w-full grow flex-col">
+            <main
+              className={cn(
+                "flex min-h-0 max-w-full grow flex-col",
+                // The frame sits below the 48px header, which overlays the
+                // top of the conversation area.
+                isIncognito && "pt-12",
+              )}
+            >
+              {isIncognito && (
+                <div className="mx-auto w-full max-w-(--container-width-md) shrink-0 px-3 pb-1 sm:px-4">
+                  <IncognitoFrame
+                    idleTtlSeconds={incognitoIdleTtlSeconds}
+                    onEnd={handleEndIncognito}
+                  />
+                </div>
+              )}
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
                   activeRunId={activeRunId}
@@ -819,6 +888,11 @@ export default function ChatPage() {
                       <InputBox
                         className={cn(
                           "bg-background/5 w-full",
+                          // The border is drawn by the composer's inner
+                          // input group, so reach it with the same selector
+                          // the base class uses for its radius.
+                          isIncognito &&
+                            "*:data-[slot='input-group']:border-dashed",
                           isWelcomeMode && "-translate-y-2 sm:-translate-y-4",
                         )}
                         isWelcomeMode={isWelcomeMode}
@@ -868,7 +942,7 @@ export default function ChatPage() {
                           else setSettings("context", context);
                         }}
                         onGoalChange={setLocalGoal}
-                        onPrepareThread={ensureProjectThread}
+                        onPrepareThread={ensureThreadRow}
                         onReferenceFileAttached={() => {
                           if (!isNewThread) return;
                           history.replaceState(

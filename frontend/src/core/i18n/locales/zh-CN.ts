@@ -790,6 +790,20 @@ export const zhCN: Translations = {
     agentsDisabledTooltip: "功能未启用",
   },
 
+  // 无痕（临时）对话
+  incognito: {
+    entry: "无痕对话",
+    privacyNotice: "本对话不会出现在历史记录、记忆或搜索结果中。",
+    lifetimeNotice: (duration) => `无活动 ${duration}后，本对话将自动删除。`,
+    lifetimeUnknown: "一段时间无活动后，本对话将自动删除。",
+    durationMinutes: (count) => `${count} 分钟`,
+    durationHours: (count) => `${count} 小时`,
+    durationDays: (count) => `${count} 天`,
+    end: "结束无痕对话",
+    endFailed: "无法结束对话，但它仍会在到期后自动删除。",
+    createFailed: "无法开始无痕对话，消息未发送，请重试。",
+  },
+
   // 自定义智能体聊天中的知识库范围
   knowledge: {
     scope: {

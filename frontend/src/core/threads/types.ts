@@ -100,6 +100,12 @@ export interface AgentThreadContext extends Record<string, unknown> {
 export interface AgentThread extends Thread<AgentThreadState> {
   context?: AgentThreadContext;
   /**
+   * Temporary chat: hidden from every list, search, project and share
+   * surface. Served by the Gateway's public thread projection; absent on
+   * older backends.
+   */
+  incognito?: boolean;
+  /**
    * Thread search only: a server-originated run of the viewer (schedule, IM,
    * GitHub, extension) changed since the viewer last opened the thread.
    * `null`/absent when unknown (another endpoint, or no SQL read state).

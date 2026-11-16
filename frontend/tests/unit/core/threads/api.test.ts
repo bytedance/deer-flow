@@ -171,3 +171,72 @@ test("compactThreadContext surfaces an active-run conflict", async () => {
     "Thread has a run in flight. Compact after the run finishes.",
   );
 });
+
+test("createThread sends the incognito marker only when requested", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({ thread_id: "thread-1", incognito: true }),
+  });
+
+  const { createThread } = await import("@/core/threads/api");
+
+  await createThread("thread-1", undefined, true);
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: "thread-1", incognito: true }),
+    },
+  );
+
+  fetchWithAuth.mockClear();
+  await createThread("thread-2", "project-1");
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ thread_id: "thread-2", project_id: "project-1" }),
+    },
+  );
+});
+
+test("endIncognitoThread posts to the end route and keeps the request alive", async () => {
+  fetchWithAuth.mockResolvedValue({ ok: true, status: 204 });
+
+  const { endIncognitoThread } = await import("@/core/threads/api");
+
+  await expect(endIncognitoThread("thread/1")).resolves.toBeUndefined();
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads/thread%2F1/incognito/end"),
+    { method: "POST", keepalive: true },
+  );
+});
+
+test("endIncognitoThread treats an already-deleted chat as done", async () => {
+  const { endIncognitoThread } = await import("@/core/threads/api");
+
+  for (const status of [404, 410]) {
+    fetchWithAuth.mockResolvedValue({
+      ok: false,
+      status,
+      json: async () => ({ detail: "This incognito thread has expired" }),
+    });
+    await expect(endIncognitoThread("thread-1")).resolves.toBeUndefined();
+  }
+});
+
+test("endIncognitoThread surfaces a real failure", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 500,
+    json: async () => ({ detail: "Failed to end the thread" }),
+  });
+
+  const { endIncognitoThread } = await import("@/core/threads/api");
+
+  await expect(endIncognitoThread("thread-1")).rejects.toThrow(
+    "Failed to end the thread",
+  );
+});

@@ -6,6 +6,7 @@ import {
   DEFAULT_THREAD_ACTIVITY_FEATURE,
   fetchBrowserControlEnabled,
   fetchConversationReferencesCapability,
+  fetchIncognitoFeature,
   fetchKnowledgeBaseFeature,
   fetchMcpTasksEnabled,
   fetchScheduledTasksFeature,
@@ -142,6 +143,26 @@ export function useThreadActivityFeature() {
   const feature = data ?? DEFAULT_THREAD_ACTIVITY_FEATURE;
   return {
     available: feature.available,
+    isLoading: isPending,
+  };
+}
+
+/**
+ * Incognito chat availability and idle lifetime. The entry point stays hidden
+ * while loading, on error and on servers without the block; the lifetime is
+ * `null` until the live configuration has been read.
+ */
+export function useIncognitoFeature() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "incognito"],
+    queryFn: fetchIncognitoFeature,
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return {
+    enabled: data?.enabled === true,
+    idleTtlSeconds: data?.idleTtlSeconds ?? null,
     isLoading: isPending,
   };
 }

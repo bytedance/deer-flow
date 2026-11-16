@@ -229,6 +229,10 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-incognito: var(--incognito);
+  --color-incognito-foreground: var(--incognito-foreground);
+  --color-incognito-muted-foreground: var(--incognito-muted-foreground);
+  --color-incognito-border: var(--incognito-border);
   --animate-aurora: aurora 8s ease-in-out infinite alternate;
   @keyframes aurora {
     0% {
@@ -299,6 +303,12 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0.0098 87.47);
   --sidebar-ring: oklch(0.708 0 0);
+  /* Incognito chats keep a dark frame in both themes, like the browser mode
+     they are named after; these tokens deliberately do not flip. */
+  --incognito: oklch(0.24 0.0036 106.64);
+  --incognito-foreground: oklch(0.985 0 0);
+  --incognito-muted-foreground: oklch(0.708 0 0);
+  --incognito-border: oklch(1 0 0 / 15%);
 }
 
 html.dark .shiki span {

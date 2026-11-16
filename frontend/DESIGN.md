@@ -49,6 +49,9 @@ Rules:
   opacity modifiers (`bg-secondary/60`), so they follow the theme.
 - Theme switching is `next-themes` with `attribute="class"` and system default.
   Every new color must work in both modes; check both before shipping.
+- The incognito chat frame uses the `--incognito*` tokens, which stay dark in
+  both themes because the temporary-chat surface is meant to read as a distinct
+  mode, not as another raised card.
 
 ## Typography
 

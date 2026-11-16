@@ -685,6 +685,19 @@ export interface Translations {
     agentsDisabledTooltip: string;
     channels: string;
   };
+  // Incognito (temporary) chats
+  incognito: {
+    entry: string;
+    privacyNotice: string;
+    lifetimeNotice: (duration: string) => string;
+    lifetimeUnknown: string;
+    durationMinutes: (count: number) => string;
+    durationHours: (count: number) => string;
+    durationDays: (count: number) => string;
+    end: string;
+    endFailed: string;
+    createFailed: string;
+  };
   // Sidebar projects section
   projects: {
     title: string;

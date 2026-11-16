@@ -6,6 +6,7 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 import { fetch } from "@/core/api/fetcher";
 import {
   fetchConversationReferencesCapability,
+  fetchIncognitoFeature,
   fetchScheduledTasksFeature,
   fetchSubagentBatchesCapability,
 } from "@/core/features/api";
@@ -155,5 +156,45 @@ describe("scheduled tasks feature", () => {
       groupNotifications: false,
       minIntervalSeconds: 60,
     });
+  });
+});
+
+describe("incognito feature", () => {
+  it("reads the entry switch and the idle lifetime", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        incognito: { enabled: true, idle_ttl_seconds: 3600 },
+      }),
+    );
+    await expect(fetchIncognitoFeature()).resolves.toEqual({
+      enabled: true,
+      idleTtlSeconds: 3600,
+    });
+  });
+
+  it("keeps the entry hidden and the lifetime unknown without the block", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ agents_api: { enabled: true } }),
+    );
+    await expect(fetchIncognitoFeature()).resolves.toEqual({
+      enabled: false,
+      idleTtlSeconds: null,
+    });
+  });
+
+  it("never states a lifetime the backend did not report as a positive integer", async () => {
+    for (const idle of [0, -60, 1.5, "86400", null]) {
+      mockedFetch.mockResolvedValueOnce(
+        jsonResponse({
+          agents_api: { enabled: true },
+          incognito: { enabled: true, idle_ttl_seconds: idle },
+        }),
+      );
+      await expect(fetchIncognitoFeature()).resolves.toEqual({
+        enabled: true,
+        idleTtlSeconds: null,
+      });
+    }
   });
 });

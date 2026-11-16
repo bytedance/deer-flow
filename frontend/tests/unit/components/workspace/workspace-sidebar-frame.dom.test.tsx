@@ -22,14 +22,27 @@ import {
 
 const { mobile, navigation } = rs.hoisted(() => ({
   mobile: { value: true },
-  navigation: { pathname: "/workspace/chats/new" },
+  navigation: { pathname: "/workspace/chats/new", search: "" },
 }));
 rs.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => mobile.value }));
 rs.mock("next/navigation", () => ({
   usePathname: () => navigation.pathname,
+  useSearchParams: () => new URLSearchParams(navigation.search),
+}));
+rs.mock("@/core/features/hooks", () => ({
+  useIncognitoFeature: () => ({
+    enabled: false,
+    idleTtlSeconds: 86400,
+    isLoading: false,
+  }),
 }));
 rs.mock("@/core/i18n/hooks", () => ({
-  useI18n: () => ({ t: { sidebar: { newChat: "New chat" } } }),
+  useI18n: () => ({
+    t: {
+      sidebar: { newChat: "New chat" },
+      incognito: { entry: "Incognito chat" },
+    },
+  }),
 }));
 rs.mock("@/env", () => ({
   env: { NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "false" },
@@ -82,6 +95,7 @@ afterEach(() => {
   cleanup();
   mobile.value = true;
   navigation.pathname = "/workspace/chats/new";
+  navigation.search = "";
   document.cookie = "sidebar_state=; path=/; max-age=0";
 });
 
