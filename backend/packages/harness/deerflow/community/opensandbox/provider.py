@@ -15,6 +15,7 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Mapping
 from datetime import timedelta
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -125,6 +126,14 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise ValueError(f"sandbox.{name} must be true or false")
             return value
 
+        def resource_option(name: str) -> dict[str, str] | None:
+            value = option(name)
+            if value is None:
+                return None
+            if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str | int | float) and not isinstance(v, bool) for k, v in value.items()):
+                raise ValueError(f"sandbox.{name} must map resource names to quantities, e.g. {{cpu: '2', memory: 4Gi}}")
+            return {k: str(v) for k, v in value.items()} or None
+
         api_key = option("api_key")
         domain = option("domain")
         protocol = option("protocol") or "http"
@@ -160,6 +169,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             "environment": environment,
             "replicas": replicas if replicas is not None else self.DEFAULT_REPLICAS,
             "idle_timeout": idle_timeout if idle_timeout is not None else self.DEFAULT_IDLE_TIMEOUT,
+            "resource": resource_option("resource"),
+            "resource_requests": resource_option("resource_requests"),
         }
 
     def _get_sdk(self) -> tuple[type[SandboxSync], type[ConnectionConfigSync], type[RunCommandOpts]]:
@@ -318,6 +329,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
             ready_timeout=timedelta(seconds=self._config["ready_timeout"]),
             env=self._config["environment"] or None,
             metadata=metadata,
+            resource=self._config["resource"],
+            resource_requests=self._config["resource_requests"],
             connection_config=connection_config,
             secure_access=self._config["secure_access"],
         )

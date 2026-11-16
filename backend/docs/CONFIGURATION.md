@@ -1657,6 +1657,8 @@ sandbox:
    ready_timeout: 30                  # create/readiness timeout seconds
    use_server_proxy: false            # proxy execd/file traffic through server
    secure_access: false               # per-sandbox endpoint token; Kubernetes + gateway mode only
+   resource: {cpu: "2", memory: 4Gi}  # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+   resource_requests: {cpu: "1", memory: 2Gi}  # sandbox requests; omitted = server default
    sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
@@ -1668,6 +1670,11 @@ sandbox:
 `use_server_proxy` and `secure_access` accept YAML booleans. Omitted or `null`
 values default to `false`. Quoted values such as `"false"` cause a provider
 startup error.
+
+`resource` and `resource_requests` map resource names to Kubernetes quantities
+(`cpu`, `memory`, or any name the OpenSandbox runtime accepts). They become the
+sandbox's limits and requests. Without `resource`, the SDK asks for 1 CPU and
+2Gi; without `resource_requests`, the server decides the requests.
 
 Install the optional SDK before selecting this provider:
 
