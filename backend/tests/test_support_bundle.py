@@ -1176,3 +1176,88 @@ def test_dotenv_path_lookup_does_not_execute_shell_commands(tmp_path):
 
     assert summary["found"] is False
     assert not marker.exists()
+
+
+def test_config_path_falls_back_to_env_var(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    external = tmp_path / "custom.yaml"
+    external.write_text("models: []\ntools: []\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(external))
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["signals"]["config_missing"] is False
+
+
+def test_explicit_config_overrides_env_var(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    from_env = tmp_path / "from-env.yaml"
+    from_env.write_text("models:\n  - name: from-env\n", encoding="utf-8")
+    explicit = tmp_path / "explicit.yaml"
+    explicit.write_text("models: []\ntools: []\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(from_env))
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        config_path=explicit,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+
+
+def test_missing_env_config_path_is_reported(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models: []\n", encoding="utf-8")
+    missing = tmp_path / "does-not-exist.yaml"
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(missing))
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary["present"] is True
+    assert "DEER_FLOW_CONFIG_PATH" in config_summary["error"]
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["signals"]["config_error"] is True
+
+
+def test_config_path_follows_dotenv_override(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    external = tmp_path / "from-dotenv.yaml"
+    external.write_text("models: []\ntools: []\n", encoding="utf-8")
+    (project_root / ".env").write_text(f"DEER_FLOW_CONFIG_PATH={external}\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+    # The staged lookup must not leak into the process environment.
+    assert "DEER_FLOW_CONFIG_PATH" not in os.environ
+    assert "DEER_FLOW_PROJECT_ROOT" not in os.environ
