@@ -55,23 +55,33 @@ async def test_tavily_builds_tls_off_loop(tool, args, route, result, monkeypatch
     assert loop_thread not in context_threads
 
 
-async def test_tavily_closes_client_when_fetch_is_cancelled_during_construction(monkeypatch):
+@pytest.mark.parametrize(("tool", "args"), [(tools.web_search_tool, {"query": "example"}), (tools.web_fetch_tool, {"url": _URL})], ids=["search", "fetch"])
+@pytest.mark.parametrize("cancel_count", [1, 2])
+@pytest.mark.parametrize("construction_fails", [False, True], ids=["client-built", "construction-failed"])
+async def test_tavily_drains_cancelled_client_construction(tool, args, cancel_count, construction_fails, monkeypatch, caplog):
     loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
     started = asyncio.Event()
     release = threading.Event()
-    constructed = asyncio.Event()
+    finished = asyncio.Event()
+    clients = []
     closed = []
     requests = []
     original_init = AsyncTavilyClient.__init__
     original_close = AsyncTavilyClient.close
+    sensitive_detail = "synthetic-sensitive-value"
 
     def gated_init(self, *args, **kwargs):
+        assert threading.get_ident() != loop_thread, "client construction must run off the event loop"
         loop.call_soon_threadsafe(started.set)
-        assert release.wait(10), "the constructor was never released"
         try:
+            assert release.wait(10), "the constructor was never released"
+            if construction_fails:
+                raise RuntimeError(sensitive_detail)
             original_init(self, *args, **kwargs)
+            clients.append(self)
         finally:
-            loop.call_soon_threadsafe(constructed.set)
+            loop.call_soon_threadsafe(finished.set)
 
     async def record_close(self):
         await original_close(self)
@@ -85,15 +95,36 @@ async def test_tavily_closes_client_when_fetch_is_cancelled_during_construction(
     monkeypatch.setattr(AsyncTavilyClient, "close", record_close)
     monkeypatch.setattr(httpx.AsyncClient, "send", refuse)
 
-    pending = asyncio.create_task(tools.web_fetch_tool.coroutine(url=_URL))
+    pending = asyncio.create_task(tool.coroutine(**args))
+    start_waiter = asyncio.create_task(started.wait())
     try:
-        await asyncio.wait_for(started.wait(), timeout=10)
-    finally:
-        pending.cancel()
+        done, _ = await asyncio.wait({pending, start_waiter}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+        if pending in done:
+            await pending
+        assert start_waiter in done, "the constructor never started"
+        for _ in range(cancel_count):
+            pending.cancel()
+            await asyncio.sleep(0)  # Let cancellation reach the tool while the constructor is gated.
+            assert not pending.done(), "cancellation escaped before the constructor finished"
+
         release.set()
         with pytest.raises(asyncio.CancelledError):
-            await pending
-        await asyncio.wait_for(constructed.wait(), timeout=10)
+            await asyncio.wait_for(pending, timeout=10)
 
-    assert requests == []
-    assert closed == [True]
+        assert requests == []
+        if construction_fails:
+            assert closed == []
+            assert "Tavily client cleanup after cancellation failed (RuntimeError)" in caplog.text
+            assert sensitive_detail not in caplog.text
+        else:
+            assert closed == [True]
+    finally:
+        release.set()
+        pending.cancel()
+        start_waiter.cancel()
+        await asyncio.gather(pending, start_waiter, return_exceptions=True)
+        if started.is_set():
+            await asyncio.wait_for(finished.wait(), timeout=10)
+        for client in clients:
+            if not client._client.is_closed:
+                await original_close(client)
