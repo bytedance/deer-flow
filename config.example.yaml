@@ -1010,6 +1010,18 @@ tools:
   #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
   #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
 
+  # Web search tool (DeepSeek server-side search, requires DEEPSEEK_API_KEY)
+  # Replace the active web_search entry with this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.deepseek.tools:web_search_tool
+  #   api_key: $DEEPSEEK_API_KEY
+  #   model: deepseek-flash
+  #   thinking: false               # true enables multi-step thinking search
+  #   max_results: 5                # Returned sources, capped at 50
+  #   timeout_seconds: 180          # Includes server-side search and reasoning
+  #   max_tokens: 8192
+
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
   #   group: web
