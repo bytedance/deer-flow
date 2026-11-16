@@ -833,11 +833,18 @@ class ScheduledTaskService:
             }
         except Exception as exc:
             if not launch_succeeded and self._is_overlap_conflict(exc):
+                requeue_kwargs = {
+                    "lease_owner": self._lease_owner,
+                    "error": str(exc),
+                }
+                # Omit the generation keyword entirely for legacy/custom repos:
+                # passing None would break implementations that predate the
+                # optional fence and do not accept the argument.
+                if claim_attempt is not None:
+                    requeue_kwargs["expected_attempt_count"] = claim_attempt
                 requeued = await self._task_run_repo.requeue_claimed_run(
                     task_run_id,
-                    lease_owner=self._lease_owner,
-                    error=str(exc),
-                    expected_attempt_count=claim_attempt,
+                    **requeue_kwargs,
                 )
                 if not requeued:
                     logger.warning(
@@ -913,13 +920,17 @@ class ScheduledTaskService:
 
             # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
+            fail_kwargs = {
+                "task_id": task["id"],
+                "lease_owner": self._lease_owner,
+                "error": str(exc),
+                "now": now,
+            }
+            if claim_attempt is not None:
+                fail_kwargs["expected_attempt_count"] = claim_attempt
             finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
-                task_id=task["id"],
-                lease_owner=self._lease_owner,
-                error=str(exc),
-                now=now,
-                expected_attempt_count=claim_attempt,
+                **fail_kwargs,
             )
             if not finalized:
                 logger.warning(

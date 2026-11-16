@@ -160,6 +160,18 @@ class LostClaimRunRepo(GenerationRunRepo):
         return False
 
 
+class LegacyRunRepo(DummyRunRepo):
+    """A custom repository whose writes predate the optional generation fence."""
+
+    async def requeue_claimed_run(self, run_record_id, *, lease_owner, error=None):
+        self.updated.append((run_record_id, {"status": "queued", "lease_owner": lease_owner, "error": error}))
+        return True
+
+    async def fail_launching_run(self, run_record_id, *, task_id, lease_owner, error, now):
+        self.updated.append((run_record_id, {"status": "failed", "task_id": task_id, "lease_owner": lease_owner, "error": error, "now": now}))
+        return True
+
+
 @pytest.mark.asyncio
 async def test_service_claims_and_dispatches_due_task():
     async def fake_launch(**kwargs):
@@ -2133,6 +2145,40 @@ async def test_launch_passes_user_language_origin_and_run_thread_title(trigger):
     assert launch["prompt"].startswith(origin["instructions"])
     assert "stop_scheduled_task" in launch["prompt"] and "<standing_notes>" in launch["prompt"]
     assert launch["title"] == "检查发布清单 · 10-07 09:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("launch_error", "expected_outcome"),
+    [
+        (ConflictError("Thread busy"), "queued"),
+        (RuntimeError("launch failed"), "failed"),
+    ],
+)
+async def test_legacy_repo_does_not_receive_a_generation_kwarg(launch_error, expected_outcome):
+    async def fake_launch(**_kwargs):
+        raise launch_error
+
+    task_repo = DummyTaskRepo([_provenance_task()])
+    run_repo = LegacyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(
+        task_repo.rows[0],
+        now=datetime(2026, 10, 7, 1, 0, tzinfo=UTC),
+        trigger="manual",
+    )
+
+    assert result["outcome"] == expected_outcome
+    assert run_repo.updated
+    assert "expected_attempt_count" not in run_repo.updated[0][1]
 
 
 @pytest.mark.asyncio
