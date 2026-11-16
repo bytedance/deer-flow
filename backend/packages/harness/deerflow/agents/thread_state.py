@@ -171,8 +171,15 @@ def merge_promoted(existing: PromotedTools | None, new: PromotedTools | None) ->
     - same scope -> union names, dedupe, preserve order.
     - a missing new turn_id inherits the existing scope. ``tool_search`` writes
       this shape after the filter establishes the current turn before the model.
+    - a non-object value from either side is unusable and carries nothing to
+      merge: an Overwrite-poisoned checkpoint stores one, and without this the
+      thread's later genuine promotion writes would keep failing on it.
     """
+    if not isinstance(existing, Mapping):
+        existing = None
     if not new:
+        return existing
+    if not isinstance(new, Mapping):
         return existing
     new_turn_id = new.get("turn_id")
     replace = existing is None or existing.get("catalog_hash") != new["catalog_hash"] or (new_turn_id is not None and existing.get("turn_id") != new_turn_id)

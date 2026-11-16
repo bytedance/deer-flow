@@ -280,7 +280,11 @@ redirects to `/login?error=sso_failed`. A discovery document without a usable
 authorization, token or JWKS endpoint counts as failed unless the provider
 config overrides that endpoint, and it is not cached. A malformed UserInfo body
 is skipped like a failed UserInfo request: the login continues with the ID
-token claims. The cause stays in the Gateway log.
+token claims. The cause stays in the Gateway log. A UserInfo response whose
+`sub` is missing or differs from the ID token's is skipped the same way, since
+OIDC Core requires the two to match. With a provider that omits `sub` from
+UserInfo and sends the email only there, a first login gets `403` because no
+email reaches provisioning. Users already linked by subject still sign in.
 
 ## Frontend Callback Flow
 
@@ -296,7 +300,7 @@ The frontend handles the post-SSO flow at `/auth/callback`:
 - **State cookies** are HttpOnly, SameSite=Lax, Max-Age=300 seconds, and signed with the JWT secret
 - **PKCE** prevents authorization code interception attacks
 - **Nonce** prevents ID token replay attacks
-- **UserInfo sub check** ensures the UserInfo response matches the ID token subject
+- **UserInfo sub check** — UserInfo claims are used only when the response's `sub` equals the ID token subject; a response without a `sub` counts as a mismatch
 - **Reject alg=none** — ID tokens with algorithm "none" are always rejected
 - **No email auto-linking** — SSO accounts are always separate from email/password accounts. An email collision with an existing local account blocks the SSO login (409) rather than merging the two.
 - **Verified email requirement** — SSO users must have verified emails by default
