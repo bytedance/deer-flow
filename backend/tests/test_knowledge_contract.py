@@ -324,6 +324,58 @@ def test_global_budget_preserves_dependencies_when_rebudgeting_a_saved_result():
     assert sources_from_messages([restored]) == [source]
 
 
+@pytest.mark.parametrize(("initial_limit", "legacy_preview"), [(0, False), (0, True), (50, False)])
+def test_global_budget_preserves_file_backed_retrieval_within_budget(tmp_path, monkeypatch, initial_limit, legacy_preview):
+    from deerflow.agents.middlewares import tool_output_budget_middleware as budget
+    from deerflow.config.tool_output_config import ToolOutputConfig
+    from deerflow.storage.backends.local_fs import LocalFsBlobStore
+
+    store = LocalFsBlobStore.from_config({"root": str(tmp_path / "blobs")})
+    monkeypatch.setattr(budget, "get_blob_store_if_enabled", lambda: store)
+    source = KnowledgeSource(provider="test", title="Original", excerpt="Evidence " + "x" * 100)
+    content, artifact = format_result(
+        RetrievalResult(
+            hits=[
+                RetrievalHit(content=source.excerpt, source=source),
+                RetrievalHit(content="Dependent relation", depends_on=[1]),
+                RetrievalHit(content="Oversized entry " + "a" * 400),
+            ]
+        )
+    )
+    original = ToolMessage(content=content, artifact=artifact, name="entity_relations_search", tool_call_id="relations")
+    config = ToolOutputConfig(externalize_min_chars=500, fallback_max_chars=initial_limit, preview_head_chars=800, preview_tail_chars=0)
+    preview = budget._patch_tool_message(original, config, str(tmp_path / "outputs"))
+    blob = preview.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY]
+    (saved_file,) = (tmp_path / "outputs").rglob("*.txt")
+    assert saved_file.read_text(encoding="utf-8") == content
+
+    if initial_limit:
+        assert len(preview.content) <= initial_limit
+        assert blob["virtual_path"] not in preview.content
+        assert sources_from_messages([preview]) == []
+        (replayed,) = budget._patch_model_messages([preview], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=10))
+        assert len(replayed.content) <= 10
+        assert replayed.additional_kwargs.get(budget.TOOL_OUTPUT_BLOB_KEY) == blob
+        return
+
+    notice = preview.content.rsplit("\n\n", 1)[-1]
+    assert blob["virtual_path"] in notice and "read_file" in notice
+    restored = ToolMessage.model_validate_json(preview.model_dump_json())
+    if legacy_preview:
+        restored.artifact["knowledge_result_layout"].pop("file_notice", None)
+    (replayed,) = budget._patch_model_messages([restored], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=450))
+    assert len(replayed.content) <= 450
+    assert replayed.content.endswith(notice)
+    assert "Evidence: result [1].\nDependent relation" in replayed.content
+    assert sources_from_messages([replayed]) == [source]
+    assert replayed.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY] == blob
+
+    (notice_only,) = budget._patch_model_messages([replayed], ToolOutputConfig(externalize_min_chars=0, fallback_max_chars=len(notice)))
+    assert notice_only.content == notice
+    assert notice_only.additional_kwargs[budget.TOOL_OUTPUT_BLOB_KEY] == blob
+    assert sources_from_messages([notice_only]) == []
+
+
 def test_global_budget_prunes_hidden_evidence_and_orphan_citations() -> None:
     from deerflow.agents.middlewares.tool_output_budget_middleware import _patch_tool_message
     from deerflow.config.tool_output_config import ToolOutputConfig

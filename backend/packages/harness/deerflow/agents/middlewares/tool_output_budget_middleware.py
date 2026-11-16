@@ -648,9 +648,8 @@ def _budget_content(
             )
             file_notice = f"[Full output saved to {virtual_path} ({len(content)} chars). Use read_file to inspect it.]"
             preview_chars = config.preview_head_chars + config.preview_tail_chars
-            if config.fallback_max_chars > 0:
-                preview_chars = min(preview_chars, max(0, config.fallback_max_chars - len(file_notice) - 2))
-            retrieval = budget_dependent_result(content, artifact, preview_chars, file_notice=file_notice)
+            total_chars = config.fallback_max_chars or preview_chars + len(file_notice) + 2
+            retrieval = budget_dependent_result(content, artifact, preview_chars, file_notice=file_notice, max_total_chars=total_chars)
             if retrieval is not None:
                 replacement, retained_artifact = retrieval
                 return _BudgetedContent(replacement, "externalized", blob_metadata, retained_artifact)
@@ -753,9 +752,10 @@ def _patch_tool_message(
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
     new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
-    new_kwargs.pop(TOOL_OUTPUT_BLOB_KEY, None)
     if budgeted is not None and budgeted.blob_metadata is not None:
         new_kwargs[TOOL_OUTPUT_BLOB_KEY] = budgeted.blob_metadata
+    elif budgeted is None or budgeted.artifact is None or budgeted.transform_kind != "truncated":
+        new_kwargs.pop(TOOL_OUTPUT_BLOB_KEY, None)
     if citation_result is not None and budgeted is not None and budgeted.transform_kind == "externalized":
         append_tool_transform(new_kwargs, "externalized", by="ToolOutputBudgetMiddleware")
     append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")

@@ -29,6 +29,8 @@ class _ResultEntry(BaseModel):
 class _ResultLayout(BaseModel):
     digest: str
     entries: list[_ResultEntry] = Field(max_length=100)
+    # An empty notice denotes a saved file whose path did not fit the budget.
+    file_notice: str | None = None
 
 
 def redact_strings(value: Any, secret: str | None) -> Any:
@@ -92,10 +94,11 @@ def _content_digest(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-def _set_result_layout(artifact: dict[str, Any], content: str, entries: list[dict[str, Any]]) -> None:
-    # Persist offsets only for results that need dependency-aware budgeting.
-    if any(entry["depends_on"] for entry in entries):
+def _set_result_layout(artifact: dict[str, Any], content: str, entries: list[dict[str, Any]], *, file_notice: str | None = None) -> None:
+    if file_notice is not None or any(entry["depends_on"] for entry in entries):
         artifact[_RESULT_LAYOUT_KEY] = {"digest": _content_digest(content), "entries": entries}
+        if file_notice is not None:
+            artifact[_RESULT_LAYOUT_KEY]["file_notice"] = file_notice
 
 
 def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, max_total_chars: int = 8000) -> tuple[str, dict[str, Any]]:
@@ -154,7 +157,7 @@ def format_result(result: RetrievalResult, *, max_chars_per_chunk: int = 800, ma
     return text, artifact
 
 
-def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file_notice: str = "") -> tuple[str, dict[str, Any]] | None:
+def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file_notice: str = "", max_total_chars: int | None = None) -> tuple[str, dict[str, Any]] | None:
     """Project whole retrieval entries and their evidence into a later budget."""
     if not isinstance(artifact, Mapping) or _RESULT_LAYOUT_KEY not in artifact:
         return None
@@ -163,12 +166,30 @@ def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file
         layout = _ResultLayout.model_validate(artifact[_RESULT_LAYOUT_KEY])
     except ValidationError:
         layout = None
+    if layout is not None and layout.digest != _content_digest(content):
+        layout = None
+    if not file_notice and layout is not None:
+        tail = content[layout.entries[-1].end if layout.entries else 0 :]
+        if layout.file_notice and tail.endswith(layout.file_notice):
+            file_notice = layout.file_notice
+        elif layout.file_notice is None:
+            # Older previews kept the generated notice after the last entry span.
+            _, prefix, notice = tail.partition("[Full output saved to /mnt/user-data/outputs/")
+            if prefix and notice.endswith(". Use read_file to inspect it.]"):
+                file_notice = prefix + notice
+    file_backed = bool(file_notice) or (layout is not None and layout.file_notice is not None)
+    total_chars = max_chars if max_total_chars is None else max_total_chars
+    omitted_notice = file_backed and (not file_notice or len(file_notice) > total_chars)
+    if omitted_notice:
+        file_notice = ""
+    notice_cost = len(file_notice) + 2 if file_notice else 0
+    max_chars = min(max_chars, max(0, total_chars - notice_cost))
     entries: list[str] = []
     retained_layout: list[dict[str, Any]] = []
     retained_sources: dict[str, KnowledgeSource] = {}
     retained_evidence: set[int] = set()
     used = previous_position = previous_end = 0
-    if layout is not None and layout.digest == _content_digest(content):
+    if layout is not None:
         available = {source.id: source for source in sources_from_messages([{"type": "tool", "content": content, "artifact": artifact}])}
         for entry in layout.entries:
             if not (entry.position > previous_position and previous_end <= entry.start < entry.end <= len(content)):
@@ -196,14 +217,14 @@ def budget_dependent_result(content: str, artifact: Any, max_chars: int, *, file
 
     text = "\n\n".join(entries)
     separator = "\n\n" if text else ""
-    if layout is None or len(entries) < len(layout.entries) or content.endswith(TRUNCATION_MARKER):
+    if omitted_notice or layout is None or len(entries) < len(layout.entries) or content.endswith(TRUNCATION_MARKER):
         remaining = max_chars - len(text) - len(separator)
         if remaining > 0:
             text += separator + TRUNCATION_MARKER[:remaining]
     if file_notice:
         text = f"{text}\n\n{file_notice}" if text else file_notice
     updated.update(source_artifact(retained_sources.values()))
-    _set_result_layout(updated, text, retained_layout)
+    _set_result_layout(updated, text, retained_layout, file_notice=file_notice if file_backed else None)
     return text, updated
 
 
