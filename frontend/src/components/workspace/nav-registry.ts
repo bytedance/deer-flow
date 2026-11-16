@@ -97,7 +97,7 @@ export const NAV_ITEMS: readonly NavItemDefinition[] = [
       matches: (pathname) => pathname.startsWith("/workspace/agents"),
     },
     isDisabled: (ctx) => !ctx.agentsEnabled,
-    disabledReason: (t) => t.sidebar.agentsDisabledTooltip,
+    disabledReason: (t) => t.sidebar.featureDisabledTooltip,
   },
   {
     key: "scheduled-tasks",

@@ -1,6 +1,5 @@
 "use client";
 
-import { MessageSquarePlus } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -14,6 +13,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { NAV_ITEMS } from "./nav-registry";
 import { useWorkspaceSidebarExpanded } from "./workspace-sidebar-frame";
 import { WorkspaceSidebarTrigger } from "./workspace-sidebar-trigger";
 
@@ -22,6 +22,10 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { isMobile } = useSidebar();
   const isSidebarOpen = useWorkspaceSidebarExpanded();
   const pathname = usePathname();
+  const newChat = NAV_ITEMS.find((item) => item.key === "new-chat");
+  const newChatTarget =
+    newChat?.target.kind === "link" ? newChat.target : undefined;
+  const NewChatIcon = newChat?.icon;
   return (
     <>
       <div
@@ -64,15 +68,17 @@ export function WorkspaceHeader({ className }: { className?: string }) {
       </div>
       <SidebarMenu>
         <SidebarMenuItem>
-          <SidebarMenuButton
-            isActive={pathname === "/workspace/chats/new"}
-            asChild
-          >
-            <Link className="text-muted-foreground" href="/workspace/chats/new">
-              <MessageSquarePlus size={16} />
-              <span>{t.sidebar.newChat}</span>
-            </Link>
-          </SidebarMenuButton>
+          {newChat && newChatTarget && NewChatIcon && (
+            <SidebarMenuButton
+              isActive={newChatTarget.matches(pathname)}
+              asChild
+            >
+              <Link className="text-muted-foreground" href={newChatTarget.href}>
+                <NewChatIcon size={16} />
+                <span>{newChat.label(t)}</span>
+              </Link>
+            </SidebarMenuButton>
+          )}
         </SidebarMenuItem>
       </SidebarMenu>
     </>
