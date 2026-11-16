@@ -1,5 +1,7 @@
 """Exercise the authenticated route and real HTTPX multipart encoding offline."""
 
+from pathlib import Path
+from shutil import copyfile
 from types import SimpleNamespace
 
 import httpx
@@ -58,6 +60,7 @@ def test_recording_is_forwarded_as_multipart_using_server_config(upstream):
     request = upstream.requests[0]
     assert str(request.url) == "https://speech.example/v1/audio/transcriptions"
     assert request.headers["authorization"] == "Bearer synthetic-key"
+    assert request.headers["accept-encoding"] == "identity"
     assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
     for value in (b'name="model"\r\n\r\nstt-test', b'name="language"\r\n\r\nzh', b'name="response_format"\r\n\r\njson', b'filename="recording.webm"', b"Content-Type: audio/webm", b"encoded audio"):
         assert value in request.content
@@ -119,6 +122,24 @@ def test_provider_timeout_is_sanitized(upstream):
     assert "speech.example" not in response.text
 
 
+@pytest.mark.parametrize("encoding", ["gzip", "br", "identity, gzip"])
+def test_encoded_provider_response_is_rejected_before_reading(upstream, encoding):
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            pytest.fail("encoded provider body was read")
+            yield b""
+
+        async def aclose(self):
+            self.closed = True
+
+    body = Body()
+    upstream.response = httpx.Response(200, headers={"Content-Encoding": encoding}, stream=body)
+    with client_for(settings()) as client:
+        response = client.post("/api/voice-input/transcribe", content=b"audio", headers={"Content-Type": "audio/webm"})
+    assert response.status_code == 502
+    assert body.closed
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("declared", [None, "1"])
 async def test_stream_size_is_enforced_without_trusting_content_length(declared, upstream):
@@ -175,6 +196,15 @@ def test_unconfigured_and_null_sections_disable_voice_input():
     assert AppConfig.model_validate({**base, "voice_input": None}).voice_input is None
     with pytest.raises(ValidationError):
         AppConfig.model_validate({**base, "voice_input": {}})
+
+
+def test_existing_config_warns_about_the_voice_input_schema(tmp_path, caplog):
+    example = Path(__file__).resolve().parents[2] / "config.example.yaml"
+    copyfile(example, tmp_path / example.name)
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 66\nsandbox:\n  use: deerflow.sandbox.local:LocalSandboxProvider\n", encoding="utf-8")
+    assert AppConfig.from_file(str(path)).voice_input is None
+    assert "Your config.yaml (version 66) is outdated" in caplog.text
 
 
 def test_config_resolves_environment_once_and_does_not_expose_secrets(monkeypatch, tmp_path):

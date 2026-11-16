@@ -380,7 +380,7 @@ The configured microphone appears beside Send; recording adds a status bar with 
 
 ![Recording status and cancel action](assets/voice-input/recording.png)
 
-The Gateway requires `runs:create`, accepts only supported audio MIME types, enforces `max_audio_bytes` even without `Content-Length`, limits provider response size, and bounds upload/provider request time. `max_duration_seconds` limits browser recording; the server enforces bytes rather than decoding audio duration. Set limits to match the chosen service. Removing the configuration disables new transcription requests immediately; refreshed feature discovery hides the UI.
+The Gateway requires `runs:create`, accepts only supported audio MIME types, enforces `max_audio_bytes` even without `Content-Length`, and bounds upload/provider request time. The transcription service must return uncompressed JSON of at most 1 MiB. `max_duration_seconds` limits browser recording; the server enforces bytes rather than decoding audio duration. Set limits to match the chosen service. Removing the configuration disables new transcription requests immediately; refreshed feature discovery hides the UI.
 
 The Web UI displays a localized AI-generated-content disclaimer below the composer in both standard and custom-agent conversations, reminding users to verify important
 information.

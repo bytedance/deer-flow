@@ -50,7 +50,9 @@ async def _read_audio(request: Request, limit: int) -> bytes:
 
 
 async def _transcribe(audio: bytes, mime: str, config: VoiceInputConfig) -> str:
-    headers = {"Authorization": f"Bearer {config.api_key.get_secret_value()}"} if config.api_key else {}
+    headers = {"Accept-Encoding": "identity"}
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key.get_secret_value()}"
     data = {"model": config.model, "response_format": "json"}
     if config.language:
         data["language"] = config.language
@@ -70,6 +72,9 @@ async def _transcribe(audio: bytes, mime: str, config: VoiceInputConfig) -> str:
                 ) as response:
                     if not response.is_success:
                         raise HTTPException(502, "Transcription service failed")
+                    # A decoder could allocate beyond the limit before yielding a chunk.
+                    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                        raise HTTPException(502, "Invalid transcription response")
                     payload = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=16384):
                         if len(payload) + len(chunk) > _MAX_RESPONSE_BYTES:
