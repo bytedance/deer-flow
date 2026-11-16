@@ -74,7 +74,11 @@ This section accumulates work toward the **2.3.0** milestone
   refreshed in place, or removed when the visible call already shows the
   current list. Injected reminders are stamped with middleware
   provenance, and caller-edited todo text is neutralized before rendering so
-  it cannot forge framework tags. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
+  it cannot forge framework tags. Reminders persisted before provenance
+  stamps existed are migrated or superseded instead of being left next to
+  a fresh one, an explicitly cleared list removes the persisted reminder,
+  and todo items render as data after the framework block rather than
+  inside it. ([#8168](https://github.com/bytedance/deer-flow/issues/8168))
 
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as
