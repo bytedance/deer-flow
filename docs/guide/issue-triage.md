@@ -28,6 +28,9 @@ under `usage` in the JSON report. Transient network failures and HTTP
 answers are flagged without an extra repair call.
 
 `--model`, `--base-url` and `--reasoning-effort high` override the defaults.
+For `--base-url`, an origin alone uses `/v1`. If the URL includes a base
+path, the scorer keeps that path and appends the selected API operation.
+A URL that already ends in the selected operation can be used as-is.
 `TRIAGE_LLM_MODEL`, `TRIAGE_LLM_BASE_URL` and `OPENAI_BASE_URL` are also supported.
 For compatible services exposing Chat Completions, use
 `--api-format chat-completions`; that service must support the requested strict

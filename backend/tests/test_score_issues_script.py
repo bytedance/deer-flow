@@ -196,6 +196,29 @@ def test_chat_completions_compatibility(scorer, transport, issue, facts, model):
     assert not result["scoring"]["needs_review"]
 
 
+@pytest.mark.parametrize(
+    ("base_url", "api_format", "expected_url"),
+    [
+        ("https://proxy.example/", "responses", "https://proxy.example/v1/responses"),
+        ("https://proxy.example/v1/", "responses", "https://proxy.example/v1/responses"),
+        ("https://proxy.example/v1beta/openai/", "chat-completions", "https://proxy.example/v1beta/openai/chat/completions"),
+        ("https://proxy.example/api/v2", "responses", "https://proxy.example/api/v2/responses"),
+        ("https://proxy.example/api/v2/responses", "responses", "https://proxy.example/api/v2/responses"),
+        ("https://proxy.example/v1beta/openai/chat/completions", "chat-completions", "https://proxy.example/v1beta/openai/chat/completions"),
+        ("https://proxy.example/responses", "responses", "https://proxy.example/responses"),
+        ("https://proxy.example/v1/chat/completions", "responses", "https://proxy.example/v1/responses"),
+        ("https://proxy.example/api/v2?api-version=2", "responses", "https://proxy.example/api/v2/responses?api-version=2"),
+    ],
+)
+def test_request_preserves_configured_api_base_path(scorer, transport, issue, base_url, api_format, expected_url):
+    calls = transport({})
+
+    scorer.call_llm_evaluator(issue, api_key="test-key", base_url=base_url, model="test-model", api_format=api_format)
+
+    assert len(calls) == 1
+    assert calls[0][0].full_url == expected_url
+
+
 @pytest.mark.parametrize(("status", "expected_calls"), [(401, 1), (429, 3), (503, 3)])
 def test_transport_retries_are_bounded_and_errors_redact_credentials(scorer, monkeypatch, issue, status, expected_calls):
     calls = []

@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LABELS_FILE = REPO_ROOT / ".github" / "labels.yml"
@@ -236,13 +237,12 @@ def call_llm_evaluator(
     reasoning_effort: str = "medium",
     timeout: int = 180,
 ) -> dict[str, Any]:
-    endpoint = base_url.rstrip("/")
+    url = urlsplit(base_url)
+    path = url.path.rstrip("/") or "/v1"
     for suffix in ("/chat/completions", "/responses"):
-        if endpoint.endswith(suffix):
-            endpoint = endpoint[: -len(suffix)]
+        if path.endswith(suffix):
+            path = path.removesuffix(suffix)
             break
-    if not endpoint.endswith("/v1"):
-        endpoint += "/v1"
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -257,7 +257,7 @@ def call_llm_evaluator(
     payload: dict[str, Any] = {"model": model, "store": False}
     reasoning_model = _uses_max_completion_tokens(model)
     if api_format == "responses":
-        endpoint += "/responses"
+        operation = "/responses"
         payload.update(
             input=messages,
             max_output_tokens=6500,
@@ -266,7 +266,7 @@ def call_llm_evaluator(
         if reasoning_model:
             payload["reasoning"] = {"effort": reasoning_effort}
     elif api_format == "chat-completions":
-        endpoint += "/chat/completions"
+        operation = "/chat/completions"
         payload.update(
             messages=messages,
             response_format={"type": "json_schema", "json_schema": schema_format},
@@ -277,7 +277,7 @@ def call_llm_evaluator(
     else:
         raise ValueError("Unsupported API format")
     request = urllib.request.Request(
-        endpoint,
+        urlunsplit(url._replace(path=path + operation)),
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
