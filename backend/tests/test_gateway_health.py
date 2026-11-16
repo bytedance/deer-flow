@@ -181,23 +181,35 @@ async def test_concurrent_readiness_requests_check_out_one_pooled_database_conne
 @pytest.mark.anyio
 async def test_database_and_checkpointer_probes_use_separate_gates(monkeypatch, tmp_path):
     """One request's database and checkpointer probes still run side by side."""
+    database_started = asyncio.Event()
+    checkpointer_started = asyncio.Event()
 
-    async def _slow_sqlite(conn_string: str | None) -> str:
-        await asyncio.sleep(0.3)
+    class _RendezvousEngine:
+        def connect(self):
+            @asynccontextmanager
+            async def _connect():
+                database_started.set()
+                await checkpointer_started.wait()
+                yield _FakeConnection()
+
+            return _connect()
+
+    async def _rendezvous_sqlite(conn_string: str | None) -> str:
+        checkpointer_started.set()
+        await database_started.wait()
         return PROBE_OK
 
-    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _TrackingEngine(delay=0.3))
-    monkeypatch.setattr(health_module, "_probe_sqlite_backend", _slow_sqlite)
+    # Each probe waits until the other has entered its gate. With one shared
+    # gate neither can, so the deadline reports both probes unreachable.
+    monkeypatch.setattr(health_module, "_READINESS_DEADLINE_SECONDS", 0.5)
+    monkeypatch.setattr("app.gateway.health.get_engine", lambda: _RendezvousEngine())
+    monkeypatch.setattr(health_module, "_probe_sqlite_backend", _rendezvous_sqlite)
 
-    started = time.perf_counter()
     status_code, payload = await readiness_payload(CheckpointerConfig(type="sqlite", connection_string=str(tmp_path / "store.db")), stream_bridge=MemoryStreamBridge())
-    elapsed = time.perf_counter() - started
 
     assert status_code == 200
     assert payload["database"] == PROBE_OK
     assert payload["checkpointer"] == PROBE_OK
-    # Sharing one gate would run the two 0.3s probes back to back.
-    assert elapsed < 0.5
 
 
 @pytest.mark.anyio
