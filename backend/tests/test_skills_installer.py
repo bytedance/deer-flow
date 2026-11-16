@@ -1081,3 +1081,40 @@ def test_safe_extract_rejects_overlong_paths(tmp_path):
     with zipfile.ZipFile(zip_path) as zf:
         with pytest.raises(ValueError, match="too long"):
             safe_extract_skill_archive(zf, dest)
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"Notes": "first", "notes": "second"},
+        {"notes": "second", "Notes": "first"},
+    ],
+)
+def test_safe_extract_rejects_duplicate_folded_file_paths(tmp_path, members):
+    zip_path = tmp_path / "dup.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+def test_safe_extract_rejects_paths_over_the_host_limit(tmp_path, monkeypatch):
+    import os
+
+    zip_path = tmp_path / "host-limit.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("skill/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    monkeypatch.setattr(
+        "deerflow.skills.installer._host_path_limit",
+        lambda root: len(os.fsencode(str(root))) + 5,
+    )
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="destination filesystem"):
+            safe_extract_skill_archive(zf, dest)

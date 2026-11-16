@@ -38,6 +38,18 @@ _MAX_MEMBER_PATH_BYTES = 1024
 _MAX_MEMBER_DEPTH = 33
 _MAX_MEMBER_SEGMENT_BYTES = 255
 
+
+def _host_path_limit(root: Path) -> int:
+    """Return the destination filesystem's maximum path length in bytes."""
+    if hasattr(os, "pathconf"):
+        try:
+            return os.pathconf(root, "PC_PATH_MAX")
+        except (OSError, ValueError):
+            pass
+    # Windows without long-path support: legacy MAX_PATH.
+    return 260
+
+
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
 
@@ -146,6 +158,7 @@ def safe_extract_skill_archive(
         ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
+    host_path_limit = _host_path_limit(dest_root)
     total_written = 0
 
     infos = zip_ref.infolist()
@@ -189,6 +202,9 @@ def safe_extract_skill_archive(
                 # already refused for support-file writes and skill names.
                 raise ValueError(f"Archive member path is not portable to Windows: {info.filename!r} ({reason})")
 
+        if len(os.fsencode(dest_root.joinpath(*parts))) >= host_path_limit:
+            raise ValueError(f"Archive member path is too long for the destination filesystem: {info.filename!r}")
+
         # Compare NFC+casefolded keys so case-insensitive and normalization-
         # sensitive filesystems cannot turn a distinct path into a collision.
         key = tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
@@ -199,7 +215,7 @@ def safe_extract_skill_archive(
                 raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
             seen_dirs.add(key)
         else:
-            if key in seen_dirs:
+            if key in seen_dirs or key in seen_files:
                 raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
             seen_files.add(key)
         for index in range(1, len(key)):
