@@ -983,6 +983,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Register cleanup before starting: start() can partially acquire
         # resources and then fail or be cancelled.
         stack.push_async_callback(stop_extension_services)
+
+        async def restore_agent_runs_authority(*, user_id: str, grant: dict, validator=None, plugin_namespace: str | None = None):
+            # Lazy on purpose: the AgentRuns host is constructed after extension
+            # services start, while unattended restoration only runs later.
+            host = getattr(app.state, "agent_runs_host", None)
+            if host is None:
+                raise RuntimeError("Agent run host unavailable")
+            return await host.restore_delegated_authority(user_id=user_id, grant=grant, validator=validator, plugin_namespace=plugin_namespace)
+
         record_runtime_diagnostics(
             await start_services(
                 extensions,
@@ -991,6 +1000,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_evidence_reader=app.state.run_evidence_reader,
                 host_capabilities=host_capabilities.bindings,
                 attempted_services=attempted_services,
+                agent_runs_restore=restore_agent_runs_authority,
             )
         )
 

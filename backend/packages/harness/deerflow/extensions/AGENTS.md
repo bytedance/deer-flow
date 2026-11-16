@@ -101,6 +101,10 @@ hook directory, so they never run a developer's or CI's Git hooks.
   cannot collide.
 - **`configuration_revision` never exposes raw configuration.** It returns an HMAC.
   Sets hash the same way across process hash seeds; ordered lists keep their order.
+- **Restorable authority is captured, never created.** `capture_authority` on a
+  live session handle snapshots the existing ceiling; the host-side restore
+  revalidates the user row on every operation and runs the extension's grant
+  validator (expiry/revocation), so a stale grant fails closed.
 
 ## Extension-first exceptions
 
