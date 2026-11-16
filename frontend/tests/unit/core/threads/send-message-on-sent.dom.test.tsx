@@ -19,6 +19,7 @@ type StreamCallbacks = {
   onCreated?: (meta: { thread_id: string; run_id: string }) => void;
   onMetadataEvent?: (data: unknown) => void;
   onError?: (error: unknown, run?: unknown) => void;
+  onThreadId?: (threadId: string) => void;
 };
 
 const mocks = rs.hoisted(() => ({
@@ -36,6 +37,7 @@ rs.mock("@langchain/langgraph-sdk/react", () => ({
       onCreated: options.onCreated,
       onMetadataEvent: options.onMetadataEvent,
       onError: options.onError,
+      onThreadId: options.onThreadId,
     };
     return {
       isLoading: false,
@@ -118,14 +120,14 @@ async function flushFrames() {
   }
 }
 
-async function renderThreadStream(initialThreadId = "thread-1") {
+async function renderThreadStream(initialThreadId: string | null = "thread-1") {
   const { useThreadStream } = await import("@/core/threads/hooks");
   const rendered = renderHook(
-    ({ threadId }: { threadId: string }) =>
+    ({ threadId }: { threadId: string | null }) =>
       useThreadStream({
         context: DEFAULT_LOCAL_SETTINGS.context,
         isMock: false,
-        threadId,
+        threadId: threadId ?? undefined,
       }),
     {
       initialProps: { threadId: initialThreadId },
@@ -437,6 +439,70 @@ test("retires a released send when the run is accepted after the view moved on",
     mocks.callbacks.onCreated?.({ thread_id: "thread-1", run_id: "run-1" });
   });
   expect(onSent).toHaveBeenCalledTimes(1);
+});
+
+test("does not retire a released new-chat send when another chat is accepted", async () => {
+  stubUploadFetch(async () => {
+    throw new Error("no upload expected");
+  });
+  const { result, rerender } = await renderThreadStream(null);
+  const onSentA = rs.fn(() => {
+    mocks.events.push("onSentA");
+  });
+  const onSentB = rs.fn(() => {
+    mocks.events.push("onSentB");
+  });
+
+  // Chat A: a new conversation, so the page submits a placeholder id and the
+  // SDK creates the thread, which it reports through onThreadId.
+  let sendA: Promise<unknown> | undefined;
+  act(() => {
+    sendA = result.current.sendMessage(
+      "placeholder-a",
+      { text: "Hello from A", files: [] },
+      undefined,
+      { onSent: onSentA },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-a");
+  });
+
+  // Navigate away before A's run is accepted pattern: the caller is released.
+  rerender({ threadId: "thread-other" });
+  await flushFrames();
+  await act(async () => {
+    await sendA;
+  });
+  expect(onSentA).not.toHaveBeenCalled();
+
+  // Chat B starts another new conversation and its run is accepted. That frame
+  // must not retire A's draft: A's run was never acknowledged.
+  rerender({ threadId: null });
+  await flushFrames();
+  let sendB: Promise<unknown> | undefined;
+  act(() => {
+    sendB = result.current.sendMessage(
+      "placeholder-b",
+      { text: "Hello from B", files: [] },
+      undefined,
+      { onSent: onSentB },
+    );
+  });
+  await flushFrames();
+  await act(async () => {
+    mocks.callbacks.onThreadId?.("server-b");
+  });
+  await act(async () => {
+    mocks.callbacks.onCreated?.({ thread_id: "server-b", run_id: "run-b" });
+  });
+  await act(async () => {
+    await sendB;
+  });
+
+  expect(onSentA).not.toHaveBeenCalled();
+  expect(onSentB).toHaveBeenCalledTimes(1);
 });
 
 test("resolves an accepted send whose onSent throws and reports the failure", async () => {

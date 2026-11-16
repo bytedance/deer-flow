@@ -193,6 +193,12 @@ type PendingSend = {
   threadId: string;
   /** The conversation did not exist yet when the send started. */
   newThread: boolean;
+  /**
+   * The id of the thread the SDK created for this send. A new chat submits a
+   * placeholder id; once the SDK reports the created thread, the send has a
+   * known identity and another chat's acceptance can no longer retire it.
+   */
+  serverThreadId?: string;
   options?: SendMessageOptions;
   settled: boolean;
   promise: Promise<void>;
@@ -204,9 +210,10 @@ type PendingSend = {
  * A send whose caller was released because the view switched or unmounted
  * before acceptance arrived. The caller no longer waits, but `onSent` still
  * belongs to the run: if the Gateway accepted it afterwards, its one-time
- * composer state must be retired exactly once.
+ * composer state must be retired exactly once. The record is kept by reference
+ * so a thread id the SDK reports after the navigation still binds to it.
  */
-type ReleasedSend = Pick<PendingSend, "threadId" | "newThread" | "options">;
+type ReleasedSend = PendingSend;
 
 /** Upper bound on released sends kept for a late acceptance. */
 const MAX_RELEASED_SENDS = 8;
@@ -215,8 +222,9 @@ const MAX_RELEASED_SENDS = 8;
  * Whether an acceptance that names `frameThreadId` may settle the pending send.
  *
  * A send on an existing conversation accepts only a frame naming that thread.
- * A new-chat send carries a page placeholder, so its own frame names a
- * different thread; it may adopt it only when no other unnamed send (another
+ * A new-chat send carries a page placeholder; once the SDK reports the thread
+ * it created (`onThreadId`), that id becomes the send's identity too. Until
+ * then it may adopt one frame, and only when no other unnamed send (another
  * new-chat send, released or not) could own the same frame. That keeps one
  * stream's late acceptance from retiring a later send's draft.
  */
@@ -2234,6 +2242,10 @@ export function useThreadStream({
   // keep each one until that acceptance so a late frame cannot strand its draft.
   // A list, not a slot: release A, start B, release B must not lose A's cleanup.
   const releasedSendsRef = useRef<ReleasedSend[]>([]);
+  // New-chat sends in submission order, until the SDK reports the thread it
+  // created for each. The stream controller serializes starts, so the reports
+  // arrive in the same order as the sends and binding the first one is exact.
+  const unboundThreadSendsRef = useRef<PendingSend[]>([]);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const pendingPreparedReplayRef = useRef<PendingPreparedReplayMask | null>(
     null,
@@ -2346,92 +2358,114 @@ export function useThreadStream({
   const queryClient = useQueryClient();
 
   /**
+   * A settled send no longer needs a thread binding. Dropping it also keeps a
+   * stale unbound entry from adopting the next send's created thread.
+   */
+  const forgetUnboundSend = useCallback((send: PendingSend) => {
+    unboundThreadSendsRef.current = unboundThreadSendsRef.current.filter(
+      (candidate) => candidate !== send,
+    );
+  }, []);
+
+  /**
    * A stream frame, the run's `Content-Location` metadata, or a finished
    * stream proves the run was created: retire the send's one-time composer
    * state and let `sendMessage` resolve. A send whose caller was already
    * released still gets its `onSent` here when the acceptance names its thread.
    */
-  const acceptPendingSend = useCallback((threadId?: string) => {
-    const pending = pendingSendRef.current;
-    // A released send is retired only by an acceptance that names its thread:
-    // an id-less frame from an older stream must never consume a newer send's
-    // cleanup, and vice versa. A new-chat send carries a page placeholder
-    // instead of the server id, so it is matched as the only unnamed entry. A
-    // frame that retires one never settles a pending send in the same call —
-    // that is how a late frame could retire the next send — but the retired
-    // entry is gone, so the next send's own frame is accepted.
-    let retiredReleased = false;
-    if (threadId) {
-      const released = releasedSendsRef.current;
-      let match = released.findIndex((send) => send.threadId === threadId);
-      if (match < 0) {
-        const unnamed = released.filter(
-          (send) => send.newThread || !send.threadId,
+  const acceptPendingSend = useCallback(
+    (threadId?: string) => {
+      const pending = pendingSendRef.current;
+      // A released send is retired only by an acceptance that names its own
+      // thread: either the id it was submitted with or the id the SDK created for
+      // it (`onThreadId`). A send with a known thread id never adopts another
+      // chat's frame; that is how a released new-chat attempt keeps its draft
+      // until its own run is acknowledged.
+      let retiredReleased = false;
+      if (threadId) {
+        const released = releasedSendsRef.current;
+        let match = released.findIndex(
+          (send) =>
+            send.threadId === threadId || send.serverThreadId === threadId,
         );
-        const candidate = unnamed[0];
-        if (unnamed.length === 1 && candidate) {
-          match = released.indexOf(candidate);
-        }
-      }
-      if (match >= 0) {
-        const [accepted] = released.splice(match, 1);
-        retiredReleased = true;
-        try {
-          accepted?.options?.onSent?.();
-        } catch (error) {
-          // A caller's one-time cleanup must not break the stream callback that
-          // observed acceptance; surface it instead of swallowing it.
-          console.error(
-            "Failed to retire one-time composer state for an accepted send.",
-            error,
+        if (match < 0) {
+          const unnamed = released.filter(
+            (send) => send.newThread && !send.serverThreadId,
           );
+          const candidate = unnamed[0];
+          if (unnamed.length === 1 && candidate) {
+            match = released.indexOf(candidate);
+          }
+        }
+        if (match >= 0) {
+          const [accepted] = released.splice(match, 1);
+          retiredReleased = true;
+          if (accepted) {
+            forgetUnboundSend(accepted);
+            try {
+              accepted.options?.onSent?.();
+            } catch (error) {
+              // A caller's one-time cleanup must not break the stream callback
+              // that observed acceptance; surface it instead of swallowing it.
+              console.error(
+                "Failed to retire one-time composer state for an accepted send.",
+                error,
+              );
+            }
+          }
         }
       }
-    }
-    if (!pending || pending.settled) {
-      return;
-    }
-    // A new-chat send may carry only the page's placeholder id: the run's frame
-    // names the server's real thread. It accepts that frame only when no other
-    // unnamed send could own it; a send on an existing conversation still
-    // rejects a frame from another thread.
-    if (
-      !shouldAcceptPendingSend({
-        frameThreadId: threadId ?? "",
-        pendingThreadId: pending.threadId,
-        pendingNewThread: pending.newThread,
-        retiredReleased,
-        otherUnnamedReleased: releasedSendsRef.current.some(
-          (send) => send.newThread || !send.threadId,
-        ),
-      })
-    ) {
-      return;
-    }
-    pending.settled = true;
-    pendingSendRef.current = null;
-    try {
-      pending.options?.onSent?.();
-    } catch (error) {
-      console.error(
-        "Failed to retire one-time composer state for an accepted send.",
-        error,
-      );
-    } finally {
-      // Acceptance always resolves the caller, even if its cleanup threw.
-      pending.resolve();
-    }
-  }, []);
+      if (!pending || pending.settled) {
+        return;
+      }
+      // A new-chat send may carry only the page's placeholder id: the run's frame
+      // names the server's real thread. It accepts that frame only when no other
+      // unnamed send could own it; a send on an existing conversation still
+      // rejects a frame from another thread.
+      if (
+        !shouldAcceptPendingSend({
+          frameThreadId: threadId ?? "",
+          pendingThreadId: pending.serverThreadId ?? pending.threadId,
+          pendingNewThread: pending.newThread && !pending.serverThreadId,
+          retiredReleased,
+          otherUnnamedReleased: releasedSendsRef.current.some(
+            (send) => send.newThread && !send.serverThreadId,
+          ),
+        })
+      ) {
+        return;
+      }
+      pending.settled = true;
+      pendingSendRef.current = null;
+      forgetUnboundSend(pending);
+      try {
+        pending.options?.onSent?.();
+      } catch (error) {
+        console.error(
+          "Failed to retire one-time composer state for an accepted send.",
+          error,
+        );
+      } finally {
+        // Acceptance always resolves the caller, even if its cleanup threw.
+        pending.resolve();
+      }
+    },
+    [forgetUnboundSend],
+  );
 
-  const rejectPendingSend = useCallback((error: unknown) => {
-    const pending = pendingSendRef.current;
-    if (!pending || pending.settled) {
-      return;
-    }
-    pending.settled = true;
-    pendingSendRef.current = null;
-    pending.reject(error);
-  }, []);
+  const rejectPendingSend = useCallback(
+    (error: unknown) => {
+      const pending = pendingSendRef.current;
+      if (!pending || pending.settled) {
+        return;
+      }
+      pending.settled = true;
+      pendingSendRef.current = null;
+      forgetUnboundSend(pending);
+      pending.reject(error);
+    },
+    [forgetUnboundSend],
+  );
 
   /**
    * The view moved on before acceptance arrived. Let the caller finish without
@@ -2445,16 +2479,13 @@ export function useThreadStream({
     }
     pending.settled = true;
     pendingSendRef.current = null;
-    // Keep one cleanup per released send, bounded: a long session must not
-    // accumulate drafts, and the oldest attempt is the least likely to be
+    // Keep the record itself, not a copy: a thread id the SDK reports after the
+    // navigation must still bind to this send. Bounded so a long session does
+    // not accumulate drafts, and the oldest attempt is the least likely to be
     // accepted after this much navigation.
     releasedSendsRef.current = [
       ...releasedSendsRef.current.slice(-MAX_RELEASED_SENDS + 1),
-      {
-        threadId: pending.threadId,
-        newThread: pending.newThread,
-        options: pending.options,
-      },
+      pending,
     ];
     pending.resolve();
   }, []);
@@ -2592,6 +2623,17 @@ export function useThreadStream({
     // starves UI updates while chunks keep arriving faster than the window.
     // Keep explicit: SDK types claim @default true, but runtime uses throttle ?? false.
     throttle: true,
+    // The SDK reports the conversation it created for a new-chat send before any
+    // run frame. Bind it to that send so a released attempt keeps its draft
+    // until its own run is acknowledged, never another chat's.
+    onThreadId(createdThreadId) {
+      const [send] = unboundThreadSendsRef.current;
+      if (!send) {
+        return;
+      }
+      send.serverThreadId = createdThreadId;
+      unboundThreadSendsRef.current = unboundThreadSendsRef.current.slice(1);
+    },
     onCreated(meta) {
       const pendingApproval = pendingApprovalSubmissionRef.current;
       const timedOutApproval = timedOutApprovalSubmissionRef.current;
@@ -3513,6 +3555,15 @@ export function useThreadStream({
         };
         pendingSend = pending;
         pendingSendRef.current = pending;
+        if (startedNewThread) {
+          // The SDK will create this conversation and report its id through
+          // `onThreadId`; keep the submission order so each report binds its own
+          // send, even when an earlier attempt was released on navigation.
+          unboundThreadSendsRef.current = [
+            ...unboundThreadSendsRef.current,
+            pending,
+          ];
+        }
         await thread.submit(
           {
             messages: buildThreadSubmitMessages({
