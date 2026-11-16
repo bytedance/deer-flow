@@ -12,6 +12,11 @@ export const extensionCatalog = [
     icon: "file-text",
   },
   {
+    key: "workspaceSearch",
+    package: "deerflow-extension-workspace-search",
+    namespace: null,
+  },
+  {
     key: "agentTeams",
     icon: "users",
     package: "deerflow-extension-agent-teams",

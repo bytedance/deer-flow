@@ -99,3 +99,14 @@ def test_configure_rejects_unknown_flags_without_generating_files(config_checkou
     assert not (config_checkout / "config.yaml").exists()
     assert not (config_checkout / ".env").exists()
     assert not (config_checkout / "frontend" / ".env").exists()
+
+
+def test_env_template_leaves_every_placeholder_credential_commented():
+    """``make config`` and ``make setup`` copy ``.env.example`` verbatim into ``.env``.
+
+    A live ``JINA_API_KEY=your-jina-api-key`` line made the default keyless
+    ``web_fetch`` send that text as a key and fail every request with 401, so
+    every ``your-...`` example value must stay behind a ``#``.
+    """
+    live = [line for line in (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#") and "=" in line and line.split("=", 1)[1].strip().lower().startswith("your-")]
+    assert live == []

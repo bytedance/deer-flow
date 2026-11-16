@@ -468,7 +468,13 @@ class ScheduledTaskService:
                 # failure (e.g. the candidate query) must not skip admission or
                 # queue draining for this poll.
                 logger.exception("Failed to reconcile terminal scheduled runs")
-        await self._expire_waiting_runs(now=now)
+        try:
+            await self._expire_waiting_runs(now=now)
+        except Exception:
+            # A failed timeout sweep must not skip queue draining or this
+            # poll's due-task admission. Individual rows are also isolated by
+            # expire_queued_runs; this guard covers the candidate query/session.
+            logger.exception("Failed to expire queued scheduled runs")
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -704,6 +710,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         """Turn one queued occurrence into a live run under its own trace scope.
 
@@ -712,9 +719,17 @@ class ScheduledTaskService:
         sharing one id across a whole poll cycle. A manual trigger arrives
         inside a Gateway request and keeps that request's trace instead, so
         the launched run stays correlated with the call that asked for it.
+
+        ``created_after`` applies the queue-age cutoff when retrying a row
+        from the waiting queue. A freshly admitted row has not waited.
         """
         with ensure_trace_context():
-            return await self._launch_queued_occurrence(task, queued, now=now)
+            return await self._launch_queued_occurrence(
+                task,
+                queued,
+                now=now,
+                created_after=created_after,
+            )
 
     async def _launch_queued_occurrence(
         self,
@@ -722,6 +737,7 @@ class ScheduledTaskService:
         queued: dict[str, Any],
         *,
         now: datetime,
+        created_after: datetime | None = None,
     ) -> dict[str, Any]:
         task_run_id = queued["id"]
         execution_thread_id = queued["thread_id"]
@@ -733,6 +749,7 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             global_max_concurrent_runs=self._max_concurrent_runs,
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=created_after,
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
@@ -1026,31 +1043,52 @@ class ScheduledTaskService:
         queued_rows = await self._task_run_repo.list_queued_runs(
             limit=max(16, self._max_concurrent_runs * 4),
             per_user_max_concurrent_runs=self._max_concurrent_runs_per_user,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
         )
         for queued in queued_rows:
-            await self._task_repo.release_queued_admission_lease(queued["task_id"])
-            task = await self._task_repo.get_internal(queued["task_id"])
-            if task is None:
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_DELETED_WHILE_QUEUED,
-                    finished_at=now,
+            try:
+                await self._drain_queued_run(queued, now=now)
+            except Exception:
+                # A storage failure on one occurrence must not leave every
+                # later queued row and this poll's due tasks undispatched. The
+                # failed row keeps its queue/lease state for the next recovery
+                # pass, and queue_timeout still bounds how long it can wait.
+                logger.exception(
+                    "Failed to drain scheduled occurrence %s; continuing with the remaining queue",
+                    queued.get("id"),
                 )
-                continue
-            # Pausing suppresses automatic occurrences, but a manual trigger is
-            # an explicit request and has always been allowed to run without
-            # resuming the schedule. A later pause still cancels an already
-            # queued manual row atomically in pause_with_queue_cancellation().
-            if task.get("status") == "paused" and queued["trigger"] != "manual":
-                await self._task_run_repo.update_status(
-                    queued["id"],
-                    status="interrupted",
-                    error=RUN_ERROR_PAUSED_WHILE_QUEUED,
-                    finished_at=now,
-                )
-                continue
-            await self._attempt_queued_run(task, queued, now=now)
+
+    async def _drain_queued_run(self, queued: dict[str, Any], *, now: datetime) -> None:
+        await self._task_repo.release_queued_admission_lease(queued["task_id"])
+        task = await self._task_repo.get_internal(queued["task_id"])
+        if task is None:
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_DELETED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # Pausing suppresses automatic occurrences, but a manual trigger is
+        # an explicit request and has always been allowed to run without
+        # resuming the schedule. A later pause still cancels an already
+        # queued manual row atomically in pause_with_queue_cancellation().
+        if task.get("status") == "paused" and queued["trigger"] != "manual":
+            await self._task_run_repo.update_status(
+                queued["id"],
+                status="interrupted",
+                error=RUN_ERROR_PAUSED_WHILE_QUEUED,
+                finished_at=now,
+            )
+            return
+        # The timeout sweep may have failed for this row. Enforce the same
+        # cutoff in the atomic claim so cleanup retries cannot start it.
+        await self._attempt_queued_run(
+            task,
+            queued,
+            now=now,
+            created_after=now - timedelta(seconds=self._queue_timeout_seconds),
+        )
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
         await self._task_run_repo.expire_queued_runs(

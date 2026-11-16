@@ -147,8 +147,15 @@ def validate_task_bounds(
         upcoming = _as_datetime(next_run_at)
         if end > now and upcoming is not None and end <= upcoming:
             raise scheduler_error(422, "end_at_before_first_run", "end_at must allow at least one scheduled occurrence")
-    if require_limit_for_frequent and max_runs is None and end_at is None and is_frequent_schedule(schedule_type, schedule_spec):
-        raise scheduler_error(422, "frequent_requires_limit", "Schedules more frequent than hourly require max_runs or end_at")
+    if require_limit_for_frequent and max_runs is None and end_at is None:
+        if is_frequent_schedule(schedule_type, _require_schedule_object(schedule_spec)):
+            raise scheduler_error(422, "frequent_requires_limit", "Schedules more frequent than hourly require max_runs or end_at")
+
+
+def _require_schedule_object(spec: Any) -> dict[str, Any]:
+    if not isinstance(spec, dict):
+        raise scheduler_error(422, "invalid_schedule", "schedule_spec must be an object")
+    return spec
 
 
 def _normalized_stop_condition(value: Any) -> str | None:
@@ -257,7 +264,8 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
     schedule_type = str(updates.get("schedule_type", existing["schedule_type"]))
     if schedule_type != existing["schedule_type"] and not isinstance(updates.get("schedule_spec"), dict):
         raise scheduler_error(422, "invalid_schedule", "changing schedule_type requires schedule_spec")
-    schedule_spec = dict(updates["schedule_spec"]) if isinstance(updates.get("schedule_spec"), dict) else dict(existing["schedule_spec"])
+    previous_spec = existing["schedule_spec"]
+    schedule_spec = dict(_require_schedule_object(updates.get("schedule_spec", previous_spec)))
     timezone = str(updates.get("timezone", existing["timezone"]))
     try:
         if schedule_type == "once":
@@ -265,7 +273,8 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
             # definitions and terminal reactivation must pass today's validation.
             unchanged_definition = (
                 existing["schedule_type"] == "once"
-                and schedule_spec.get("run_at") == existing["schedule_spec"].get("run_at")
+                and isinstance(previous_spec, dict)
+                and schedule_spec.get("run_at") == previous_spec.get("run_at")
                 and timezone == existing["timezone"]
                 and existing["status"] not in TERMINAL_TASK_STATUSES
                 and existing.get("next_run_at") is not None
@@ -279,10 +288,12 @@ def _recompute_schedule(existing: dict[str, Any], updates: dict[str, Any], *, sc
             schedule_spec["cron"] = normalize_cron_expression(raw_cron)
         if schedule_type == "interval":
             every_seconds = validate_interval_seconds(schedule_spec, scheduler_config.min_once_delay_seconds)
-            try:
-                previous_seconds = parse_interval_seconds(dict(existing["schedule_spec"])) if existing["schedule_type"] == "interval" else None
-            except ValueError:
-                previous_seconds = None
+            previous_seconds = None
+            if existing["schedule_type"] == "interval" and isinstance(previous_spec, dict):
+                try:
+                    previous_seconds = parse_interval_seconds(previous_spec)
+                except ValueError:
+                    pass
             # Re-saving an unchanged cadence keeps the next occurrence.
             if previous_seconds == every_seconds and existing.get("next_run_at") is not None:
                 upcoming = existing["next_run_at"]
@@ -379,10 +390,11 @@ def prepare_resume_updates(existing: dict[str, Any], renewal: dict[str, Any], *,
     if existing.get("status") == "enabled":
         return {}
     renewal = {key: value for key, value in renewal.items() if key in {"max_runs", "end_at"}}
+    schedule_spec = _require_schedule_object(existing["schedule_spec"])
     upcoming = _as_datetime(existing.get("next_run_at"))
     if upcoming is None or upcoming <= now:
         try:
-            upcoming = next_run_at(existing["schedule_type"], existing["schedule_spec"], existing["timezone"], now=now)
+            upcoming = next_run_at(existing["schedule_type"], schedule_spec, existing["timezone"], now=now)
         except (ValueError, OverflowError) as exc:
             raise scheduler_error(422, "invalid_schedule", str(exc)) from exc
     if upcoming is None:

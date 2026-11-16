@@ -33,6 +33,8 @@ change to a query, a lock or a JSON predicate is verified on both dialects.
   Otherwise unrelated writers fail with `database is locked`.
 - **`FOR UPDATE SKIP LOCKED` does not serialize SQLite readers.** A claim on
   SQLite reserves the writer before it selects.
+- **Managed subagent updates lock before reading `updated_at`.** Peer registry
+  caches depend on each committed update advancing that timestamp.
 - **A create-or-update by unique key must survive two first writers.** Both can
   miss the SELECT. Use the dialect's `on_conflict_do_update`, or roll back and
   retry the select-then-write.

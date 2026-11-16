@@ -458,6 +458,7 @@ class McpServerConfigResponse(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
+    agent_auth: bool = Field(default=False, description="Require an administrator-granted agent credential on this deployment HTTP server")
     user_auth: McpUserScopedAuthConfigResponse | None = Field(default=None, description="Per-user credential injection for MCP HTTP/SSE servers")
     headers_from_context: McpContextHeadersConfigResponse | None = Field(default=None, description="Per-request credential injection for MCP HTTP/SSE servers: map header names to config.context.secrets keys")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
@@ -1106,6 +1107,9 @@ def _merge_preserving_secrets(
     }
     if preserve_omitted_fields and "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
+    # Changing an ordinary field must not silently remove credential enforcement.
+    if "agent_auth" not in incoming.model_fields_set:
+        update["agent_auth"] = existing.agent_auth
     if preserve_omitted_fields and "headers_from_context" not in incoming.model_fields_set:
         update["headers_from_context"] = existing.headers_from_context
     if preserve_omitted_fields and "routing" not in incoming.model_fields_set:
