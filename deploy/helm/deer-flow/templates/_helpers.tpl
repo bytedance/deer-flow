@@ -37,22 +37,23 @@ imagePullSecrets:
 {{- end }}
 {{- end -}}
 
-{{/* Fully-qualified image refs for the three DeerFlow images.
+{{/* Fully-qualified image refs for the three DeerFlow images. Each takes its
+     own tag (`image.<name>Tag`) when set, otherwise `image.tag`.
      When `image.registry` is empty, omit the prefix so the ref is
      `deer-flow-gateway:latest` (local-image mode, imagePullPolicy: Never). */}}
 {{- define "deer-flow.gatewayImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage .Values.image.tag -}}{{- end -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.gatewayImage (.Values.image.gatewayTag | default .Values.image.tag) -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.gatewayImage (.Values.image.gatewayTag | default .Values.image.tag) -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.frontendImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage .Values.image.tag -}}{{- end -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.frontendImage (.Values.image.frontendTag | default .Values.image.tag) -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.frontendImage (.Values.image.frontendTag | default .Values.image.tag) -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.provisionerImage" -}}
-{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage .Values.image.tag -}}
-{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage .Values.image.tag -}}{{- end -}}
+{{- if .Values.image.registry -}}{{- printf "%s/%s:%s" .Values.image.registry .Values.image.provisionerImage (.Values.image.provisionerTag | default .Values.image.tag) -}}
+{{- else -}}{{- printf "%s:%s" .Values.image.provisionerImage (.Values.image.provisionerTag | default .Values.image.tag) -}}{{- end -}}
 {{- end -}}
 
 {{- define "deer-flow.nginxImage" -}}

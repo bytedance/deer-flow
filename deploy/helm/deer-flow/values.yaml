@@ -22,6 +22,12 @@ image:
   gatewayImage: deer-flow-backend
   frontendImage: deer-flow-frontend
   provisionerImage: deer-flow-provisioner
+  # Optional per-image tags; empty uses `tag`. For an image you rebuild on top
+  # of a release (e.g. a backend with extra packages) while the others stay on
+  # the published release tag.
+  gatewayTag: ""
+  frontendTag: ""
+  provisionerTag: ""
 
 # -- Gateway (backend) deployment.
 gateway:

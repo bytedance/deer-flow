@@ -59,6 +59,10 @@ pull secret (step 1) and reference it via `image.pullSecrets`.
 > `appVersion`; always set `image.tag` to the release that matches your chart
 > `--version` unless you have a reason to pin differently.
 
+`image.gatewayTag`, `image.frontendTag` and `image.provisionerTag` override
+`image.tag` for one image, e.g. a backend you rebuild on top of a release
+(`v2.2.0-custom.1`) while the frontend stays on the published `v2.2.0`.
+
 ## 1. Build & push images (custom builds only)
 
 Skip this section if you're using the published chart above. To build the
