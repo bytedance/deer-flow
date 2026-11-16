@@ -30,6 +30,16 @@ session. Personal access tokens, IM channels, extensions and scheduled runs
 cannot create one. An operator can disable new incognito chats with
 `incognito.enabled: false`; existing incognito chats still expire on schedule.
 
+## What the run does not write
+
+Runs in an incognito chat do not write long-term memory or the shared blob
+store. Passive memory capture, the compaction flush and the memory tools'
+write operations are skipped; large tool outputs and viewed images stay in the
+thread's own workspace instead of entering shared blob storage. Reading
+memory that already exists (injection and search) still works. Everything the
+chat does write stays inside its thread directory and is removed by the same
+expiry sweep.
+
 ## Lifetime and deletion
 
 The deadline shown in `expires_at` moves forward on run admission and run

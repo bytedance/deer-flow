@@ -27,6 +27,18 @@ AGENT_AUTH_CONTEXT_KEY: Final[str] = "__deerflow_mcp_agent_authority"
 INCOGNITO_CONTEXT_KEY: Final[str] = "__deerflow_incognito"
 
 
+def is_incognito_runtime(runtime: object) -> bool:
+    """Return whether *runtime* belongs to an incognito thread.
+
+    The marker is server-owned: Gateway admission pins it from the stored
+    thread, and the run worker hoists it into the runtime context, so a client
+    cannot mark or unmark a run. Anything other than the exact boolean ``True``
+    means an ordinary run.
+    """
+    context = getattr(runtime, "context", None)
+    return isinstance(context, Mapping) and context.get(INCOGNITO_CONTEXT_KEY) is True
+
+
 def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:
     """Copy a checkpoint's server-authored agent binding for a state rewrite.
 

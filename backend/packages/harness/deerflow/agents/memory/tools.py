@@ -22,10 +22,13 @@ import logging
 from langchain.tools import tool
 
 from deerflow.agents.memory.manager import get_memory_manager
+from deerflow.runtime.context_keys import is_incognito_runtime
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+_INCOGNITO_WRITE_ERROR = "Memory writes are disabled in incognito chats"
 
 
 def _resolve_scope(runtime: Runtime | None = None) -> tuple[str | None, str]:
@@ -142,6 +145,8 @@ def memory_add_tool(
         JSON string with "fact_id" and "status": "added".
         On duplicate content, returns "error" with explanation.
     """
+    if is_incognito_runtime(runtime):
+        return json.dumps({"error": _INCOGNITO_WRITE_ERROR})
     agent_name, user_id = _resolve_scope(runtime)
     try:
         normalized_content = content.strip()
@@ -214,6 +219,8 @@ def memory_update_tool(
         JSON string with "fact_id" and "status": "updated".
         On invalid fact_id, returns "error" with explanation.
     """
+    if is_incognito_runtime(runtime):
+        return json.dumps({"error": _INCOGNITO_WRITE_ERROR})
     agent_name, user_id = _resolve_scope(runtime)
     try:
         manager = get_memory_manager()
@@ -252,6 +259,8 @@ def memory_delete_tool(runtime: Runtime, fact_id: str) -> str:
         JSON string with "fact_id" and "status": "deleted".
         On invalid fact_id, returns "error" with explanation.
     """
+    if is_incognito_runtime(runtime):
+        return json.dumps({"error": _INCOGNITO_WRITE_ERROR})
     agent_name, user_id = _resolve_scope(runtime)
     try:
         manager = get_memory_manager()

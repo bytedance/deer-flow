@@ -53,6 +53,7 @@ from deerflow.community.ragflow.sources import budget_source_artifact
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH, WRITE_ELISION_PLACEHOLDER_TEMPLATE
+from deerflow.runtime.context_keys import is_incognito_runtime
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.storage import BlobRef, BlobStoreError, get_blob_store_if_enabled
@@ -538,11 +539,14 @@ def _budget_content(
     config: ToolOutputConfig,
     sandbox: Sandbox | None = None,
     thread_id: str | None = None,
+    persist_blobs: bool = True,
 ) -> _BudgetedContent | None:
     """Apply budget to *content* and name the applied transform.
 
     Returns the replacement, transform kind, and optional durable blob
-    metadata, or ``None`` if no change was needed.
+    metadata, or ``None`` if no change was needed. ``persist_blobs`` is False
+    for incognito runs: the output still externalizes into the thread's own
+    outputs directory, but no copy enters the shared blob store.
     """
     threshold = config.tool_overrides.get(tool_name, config.externalize_min_chars)
     if threshold <= 0 and config.fallback_max_chars <= 0:
@@ -587,7 +591,7 @@ def _budget_content(
             host_outputs_path = outputs_path
 
         if host_outputs_path is not None:
-            blob_store = get_blob_store_if_enabled()
+            blob_store = get_blob_store_if_enabled() if persist_blobs else None
             try:
                 blob_bytes = content.encode("utf-8") if blob_store is not None else None
             except UnicodeEncodeError:
@@ -695,6 +699,8 @@ def _patch_tool_message(
     outputs_path: str | None,
     sandbox: Sandbox | None = None,
     thread_id: str | None = None,
+    *,
+    persist_blobs: bool = True,
 ) -> ToolMessage:
     """Apply budget to a single ToolMessage. Returns the original if unchanged."""
     tool_name = msg.name or "unknown"
@@ -713,6 +719,7 @@ def _patch_tool_message(
         config=config,
         sandbox=sandbox,
         thread_id=thread_id,
+        persist_blobs=persist_blobs,
     )
     update: dict[str, Any] = {}
     trigger = _effective_trigger(tool_name, config)
@@ -799,10 +806,12 @@ def _patch_result(
     outputs_path: str | None,
     sandbox: Sandbox | None = None,
     thread_id: str | None = None,
+    *,
+    persist_blobs: bool = True,
 ) -> ToolMessage | Command:
     """Apply budget to a tool call result (ToolMessage or Command)."""
     if isinstance(result, ToolMessage):
-        return _patch_tool_message(result, config, outputs_path, sandbox, thread_id)
+        return _patch_tool_message(result, config, outputs_path, sandbox, thread_id, persist_blobs=persist_blobs)
 
     update = getattr(result, "update", None)
     if not isinstance(update, dict):
@@ -810,7 +819,7 @@ def _patch_result(
 
     messages = update.get("messages")
     if isinstance(messages, ToolMessage):
-        patched = _patch_tool_message(messages, config, outputs_path, sandbox, thread_id)
+        patched = _patch_tool_message(messages, config, outputs_path, sandbox, thread_id, persist_blobs=persist_blobs)
         return result if patched is messages else dc_replace(result, update={**update, "messages": patched})
     if not isinstance(messages, (list, tuple)):
         return result
@@ -819,7 +828,7 @@ def _patch_result(
     changed = False
     for msg in messages:
         if isinstance(msg, ToolMessage):
-            patched = _patch_tool_message(msg, config, outputs_path, sandbox, thread_id)
+            patched = _patch_tool_message(msg, config, outputs_path, sandbox, thread_id, persist_blobs=persist_blobs)
             if patched is not msg:
                 changed = True
             new_messages.append(patched)
@@ -1208,6 +1217,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
                 outputs_path,
                 sandbox,
                 _resolve_thread_id(request),
+                persist_blobs=not is_incognito_runtime(getattr(request, "runtime", None)),
             )
         return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 
@@ -1231,6 +1241,7 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
                 outputs_path,
                 sandbox,
                 _resolve_thread_id(request),
+                persist_blobs=not is_incognito_runtime(getattr(request, "runtime", None)),
             )
         return _record_visible_skill_usage(result, request, skill_read_tool_names=self._skill_read_tool_names, skills_root=self._skills_root)
 

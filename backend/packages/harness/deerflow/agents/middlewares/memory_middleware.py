@@ -16,6 +16,7 @@ from deerflow.agents.memory.locale import with_memory_locale
 from deerflow.agents.middlewares.pii_redaction_middleware import _make_redactor, _redact_content, _Redactor
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.runtime.context_keys import is_incognito_runtime
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.messages import IMPORTED_HISTORY_CHANNEL, ORIGINAL_USER_CONTENT_KEY, own_messages_for_memory
@@ -197,6 +198,9 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         """Resolve one write request without invoking the manager."""
         config = self._memory_config or get_memory_config()
         if not config.enabled:
+            return None
+        if is_incognito_runtime(runtime):
+            logger.debug("Incognito run, skipping memory update")
             return None
 
         # Get thread ID from runtime context first, then fall back to LangGraph's configurable metadata
