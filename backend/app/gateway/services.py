@@ -3017,8 +3017,21 @@ async def start_run(
                     human_text = original
                 elif isinstance(original, list):
                     human_text = "\n".join(block["text"] for block in original if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str))
+            # An incognito thread binds no scheduler capability. A scheduled
+            # task is a durable user-level object — its prompt and schedule
+            # outlive the conversation and surface on the tasks page — so
+            # creating one would break the "nothing persists" promise. With no
+            # capability bound, schedule_task returns its existing 503
+            # scheduler_tools_disabled and the model tells the user it cannot
+            # create tasks in this conversation. ``metadata_record`` is the same
+            # thread_store row admission pins the marker from, so this is the
+            # authoritative verdict at no extra store cost; the reuse_thread 422
+            # guard stays as the REST and race backstop. A scheduled run never
+            # reaches here incognito: reuse_thread creation is already rejected,
+            # so an incognito thread can never be a task's origin.
+            thread_is_incognito = metadata_record is not None and metadata_record.get("incognito") is True
             scheduler_capability = None
-            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)) and not thread_is_incognito:
                 client_timezone = await _client_timezone_from_context(body.context)
                 try:
                     scheduler_capability = await prepare_scheduler_capability(

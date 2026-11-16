@@ -6503,6 +6503,55 @@ async def test_client_timezone_reaches_only_the_schedule_capability(_stub_app_co
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("incognito", [False, True])
+async def test_incognito_threads_bind_no_scheduler_capability(_stub_app_config, incognito):
+    """A scheduled task outlives the conversation, so incognito binds no capability.
+
+    Binding the capability is what makes ``schedule_task`` callable at all;
+    without it the tool reports ``scheduler_tools_disabled`` and never reaches
+    persistence. The verdict reads the same thread row admission pins, so this
+    costs no extra store call. An ordinary thread keeps the capability.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.routers.thread_runs import RunCreateRequest
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-incognito", incognito=True)
+    await thread_store.create("thread-ordinary")
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), thread_store=thread_store)
+    body = RunCreateRequest(input={"messages": [{"role": "user", "content": "Every weekday at 9, check the list"}]})
+    capability = object()
+    prepare = AsyncMock(return_value=capability)
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["ctx"] = kwargs["ctx"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services.scheduler_tools_enabled", return_value=True),
+        patch("app.gateway.scheduled_task_access.prepare_scheduler_capability", new=prepare),
+    ):
+        record = await start_run(body, "thread-incognito" if incognito else "thread-ordinary", request)
+        await record.task
+
+    if incognito:
+        prepare.assert_not_awaited()
+        assert captured["ctx"].scheduler_capability is None
+    else:
+        prepare.assert_awaited_once()
+        assert captured["ctx"].scheduler_capability is capability
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("carrier", ["context", "config.context", "config.configurable", "both-config-sections"])
 async def test_start_run_forwards_sanitized_client_context_to_runtime_context_only(_stub_app_config, carrier):
     from copy import deepcopy
