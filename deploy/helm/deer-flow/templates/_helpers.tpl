@@ -64,6 +64,13 @@ imagePullSecrets:
 {{- printf "%s:%s" .Values.gateway.initContainers.image.repository .Values.gateway.initContainers.image.tag -}}
 {{- end -}}
 
+{{/* A Deployment strategy. With `type: Recreate`, `rollingUpdate` is dropped:
+     Kubernetes rejects the pair, and a parent chart cannot null the default
+     `rollingUpdate` of this chart's values (Helm keeps subchart defaults). */}}
+{{- define "deer-flow.strategy" -}}
+{{- if eq (.type | default "") "Recreate" -}}{{- toYaml (omit . "rollingUpdate") -}}{{- else -}}{{- toYaml . -}}{{- end -}}
+{{- end -}}
+
 {{/* PVC name for the .deer-flow home directory. */}}
 {{- define "deer-flow.homePVC" -}}
 {{- printf "%s-home" (include "deer-flow.fullname" .) -}}

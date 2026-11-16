@@ -347,7 +347,10 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   string such as `"50%"`, while `0` fails the render -- disable the budget
   instead) is rendered automatically for a multi-instance gateway (same rule),
   and the rollout strategy is surge-then-drain (`maxSurge: 1`,
-  `maxUnavailable: 0`). The sandbox
+  `maxUnavailable: 0`). A single gateway whose ReadWriteOnce home PVC can't
+  attach on two nodes at once needs `gateway.strategy.type: Recreate`; the
+  chart then drops `rollingUpdate`, so the type alone is enough, also when
+  this chart is a dependency of yours. The sandbox
   provisioner is not on the single-instance list: it scales independently
   (next item).
 - **Provisioner replicas.** `provisioner.replicas` (default 1) scales the
