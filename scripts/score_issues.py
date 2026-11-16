@@ -182,6 +182,10 @@ def validate_assessment(facts: Any, issue: dict[str, Any]) -> list[str]:
     if not isinstance(facts, dict):
         return ["模型输出必须为 JSON 对象"]
     errors = []
+    try:
+        json.dumps(facts, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        errors.append("模型输出包含无效 Unicode 字符")
     if set(facts) != set(SCHEMA["properties"]):
         errors.append("输出字段缺失或包含额外字段")
     for key, values in ENUMS.items():
@@ -354,7 +358,7 @@ def evaluate_issue(
             )
             facts = parse_assessment(raw, api_format)
             errors = validate_assessment(facts, issue)
-            evaluation_failed = False
+            evaluation_failed = bool(errors)
         except urllib.error.HTTPError as err:
             errors = [f"模型调用失败（HTTP {err.code}），请检查接口、凭据或模型配置"]
         except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
@@ -718,6 +722,16 @@ def main(argv: list[str] | None = None) -> int:
         validate_issue_records(issues)
         if label_issues:
             validate_label_targets(issues, args.repo)
+        if args.input_json and args.issue is not None:
+            issues = [issue for issue in issues if issue["number"] == args.issue]
+            if not issues:
+                raise ValueError(
+                    f"Issue #{args.issue} was not found in the JSON export"
+                )
+            if len(issues) > 1:
+                raise ValueError(
+                    f"Issue #{args.issue} appears more than once in the JSON export"
+                )
     except Exception as err:
         print(f"Error loading issues: {err}", file=sys.stderr)
         return 1
@@ -770,12 +784,17 @@ def main(argv: list[str] | None = None) -> int:
         )
     )
 
+    # Escape lone surrogates without changing valid Unicode or dropping rows.
+    md_report = (
+        render_markdown_report(results)
+        .encode("utf-8", errors="backslashreplace")
+        .decode("utf-8")
+    )
     if args.output_json:
-        args.output_json.write_text(
-            json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        json_report = json.dumps(results, ensure_ascii=False, indent=2).encode(
+            "utf-8", errors="backslashreplace"
         )
-
-    md_report = render_markdown_report(results)
+        args.output_json.write_bytes(json_report)
     if args.output_md:
         args.output_md.write_text(md_report, encoding="utf-8")
     print(md_report, end="")

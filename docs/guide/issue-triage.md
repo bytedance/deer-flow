@@ -62,14 +62,17 @@ consistency, and unmerged-PR and unknown-request routing. Failures remain in the
 report with **需人工复核**, `scoring.needs_review: true`, and specific
 `scoring.validation_errors`. Returned facts remain under `llm`, including
 invalid quotes, so a maintainer can inspect what went wrong. Failed or
-incomplete API responses are also visible as unassessed entries with
+incomplete API responses and assessments that fail validation have
 `scoring.evaluation_failed: true`. Both reports retain failed and completed
-rows. If every model evaluation fails, or a worker raises an unexpected
-exception, the CLI lists the affected issue numbers on stderr and exits with
-status 1 after writing the reports.
+rows, escaping invalid Unicode while preserving valid text. If every model
+evaluation fails or a worker raises an unexpected exception, the CLI lists
+the affected issue numbers on stderr and exits with status 1 after writing
+the reports.
 
 Each JSON record must be an object with a positive integer issue number.
 Invalid records are reported by their input position before evaluation starts.
+With `--input-json`, `--issue NUMBER` scores only the matching record and
+requires that number to appear exactly once in the export.
 
 Passing these checks establishes source provenance and structural consistency.
 It does not establish that the priority is correct or that a named extension

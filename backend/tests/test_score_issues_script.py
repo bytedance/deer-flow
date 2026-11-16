@@ -283,13 +283,15 @@ def test_cli_apply_preserves_live_priority_and_skips_invalid_evidence(scorer, tr
         return subprocess.CompletedProcess(cmd, 0, json.dumps({"labels": [{"name": label} for label in live_labels]}), "")
 
     monkeypatch.setattr(scorer.subprocess, "run", gh)
-    assert scorer.main(["--repo", "bytedance/deer-flow", "--input-json", str(input_file), "--api-key", "test-key", "--output-json", str(output_file), "--apply-labels"]) == 0
+    assert scorer.main(["--repo", "bytedance/deer-flow", "--input-json", str(input_file), "--api-key", "test-key", "--output-json", str(output_file), "--apply-labels"]) == (0 if valid else 1)
     assert len(calls) == 1
     if valid:
         assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend" + ("" if live_labels else ",P2")]]
     else:
         assert gh_calls == []
-    assert json.loads(output_file.read_text())[0]["scoring"]["needs_review"] is not valid
+    scoring = json.loads(output_file.read_text())[0]["scoring"]
+    assert scoring["needs_review"] is not valid
+    assert scoring["evaluation_failed"] is not valid
 
 
 def test_empty_label_catalog_never_invents_labels(scorer, transport, issue, facts):
@@ -302,6 +304,97 @@ def test_missing_key_requires_explicit_offline_preview(scorer, monkeypatch, caps
     monkeypatch.delenv("TRIAGE_LLM_API_KEY", raising=False)
     assert scorer.main([]) == 1
     assert "Missing API key" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("label_mode", ["--dry-run", "--apply-labels"])
+def test_export_single_issue_limits_assessments_and_labels(scorer, transport, monkeypatch, tmp_path, issue, facts, capsys, label_mode):
+    source = tmp_path / "issues.json"
+    output = tmp_path / "results.json"
+    other = {**issue, "number": 43, "url": issue["url"].removesuffix("42") + "43", "title": "另一个问题"}
+    source.write_text(json.dumps([other, issue]), encoding="utf-8")
+    calls = transport(response(facts))
+    gh_calls = []
+
+    def fake_gh(cmd, **kwargs):
+        gh_calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, '{"labels": []}', "")
+
+    monkeypatch.setattr(scorer.subprocess, "run", fake_gh)
+    assert scorer.main(["--input-json", str(source), "--issue", "42", "--repo", "bytedance/deer-flow", "--api-key", "test-key", "--output-json", str(output), label_mode]) == 0
+    assert [row["number"] for row in json.loads(output.read_text(encoding="utf-8"))] == [42]
+    assert [json.loads(payload["input"][1]["content"])["title"] for _, payload in calls] == [issue["title"]]
+    if label_mode == "--dry-run":
+        commands = [line for line in capsys.readouterr().out.splitlines() if line.startswith("[dry-run]")]
+        assert len(commands) == 1 and issue["url"] in commands[0]
+        assert gh_calls == []
+    else:
+        assert gh_calls == [["gh", "issue", "view", issue["url"], "--json", "labels"], ["gh", "issue", "edit", issue["url"], "--add-label", "bug,area:backend,P2"]]
+
+
+@pytest.mark.parametrize(("numbers", "error"), [([43], "was not found"), ([42, 42], "appears more than once")])
+def test_export_single_issue_requires_one_matching_record(scorer, transport, tmp_path, issue, facts, capsys, numbers, error):
+    source = tmp_path / "issues.json"
+    source.write_text(json.dumps([{**issue, "number": number} for number in numbers]), encoding="utf-8")
+    calls = transport(response(facts))
+    assert scorer.main(["--input-json", str(source), "--issue", "42", "--api-key", "test-key"]) == 1
+    assert "Issue #42" in (stderr := capsys.readouterr().err)
+    assert error in stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("all_invalid", [True, False])
+def test_report_exit_status_counts_only_valid_assessments(scorer, monkeypatch, tmp_path, issue, facts, capsys, all_invalid):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    other = {**issue, "number": 43, "title": "另一个问题"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    usable = {**facts, "kind": "unknown", "priority": "Needs-Info", "route": "needs_info", "impact_quote": []}
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        answer = {} if all_invalid or title == other["title"] else usable
+        return io.BytesIO(json.dumps(response(answer)).encode("utf-8"))
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    assert scorer.main(["--input-json", str(source), "--api-key", "test-key", "--output-json", str(output), "--output-md", str(report)]) == (1 if all_invalid else 0)
+    rows = {row["number"]: row for row in json.loads(output.read_text(encoding="utf-8"))}
+    assert rows[42]["scoring"]["evaluation_failed"] is all_invalid
+    assert rows[43]["llm"] == {}
+    assert rows[43]["scoring"]["evaluation_failed"]
+    assert rows[43]["scoring"]["suggested_labels"] == []
+    assert "另一个问题" in report.read_text(encoding="utf-8")
+    stderr = capsys.readouterr().err
+    if all_invalid:
+        assert "#42" in stderr and "#43" in stderr
+
+
+@pytest.mark.parametrize("with_json", [True, False])
+def test_report_keeps_both_rows_when_a_model_reason_contains_a_lone_surrogate(scorer, monkeypatch, tmp_path, issue, facts, capsys, with_json):
+    source, output, report = [tmp_path / name for name in ("issues.json", "results.json", "report.md")]
+    other = {**issue, "number": 43, "title": "另一个问题"}
+    source.write_text(json.dumps([issue, other]), encoding="utf-8")
+    valid = {**facts, "reason_zh": "有效理由 🌱"}
+    invalid = {**facts, "reason_zh": "无效字符 \ud800"}
+
+    def urlopen(request, **kwargs):
+        title = json.loads(json.loads(request.data)["input"][1]["content"])["title"]
+        answer = invalid if title == other["title"] else valid
+        return io.BytesIO(json.dumps(response(answer)).encode("utf-8"))
+
+    monkeypatch.setattr(scorer.urllib.request, "urlopen", urlopen)
+    args = ["--input-json", str(source), "--api-key", "test-key", "--output-md", str(report)]
+    if with_json:
+        args.extend(["--output-json", str(output)])
+    assert scorer.main(args) == 0
+    markdown = report.read_text(encoding="utf-8")
+    assert "有效理由 🌱" in markdown
+    assert "无效字符 \\ud800" in markdown and "需人工复核" in markdown
+    assert capsys.readouterr().out == markdown
+    if with_json:
+        rows = {row["number"]: row for row in json.loads(output.read_text(encoding="utf-8"))}
+        assert rows[42]["llm"] == valid
+        assert rows[43]["llm"] == invalid
+        assert rows[43]["scoring"]["evaluation_failed"]
+        assert rows[43]["scoring"]["suggested_labels"] == []
 
 
 @pytest.mark.parametrize("all_fail", [True, False])
