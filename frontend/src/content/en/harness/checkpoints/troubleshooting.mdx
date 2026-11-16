@@ -97,7 +97,7 @@ This is not the frozen-for-correctness case: nothing about the cache can corrupt
 
 **Cause**: these routes do not map the checkpoint-mode guard. The token-usage path logs `Failed to load checkpoint for context usage on thread %s` and returns an empty usage; `/runs/wait` reports the run's error body instead of the HTTP status. The regenerate and edit-regenerate preparation routes used to fail the same way with `500`; they now reuse the shared `checkpoint_mode_errors` mapper and return the same `409`/`503` as the state endpoints.
 
-**Fix**: read the missing usage or error body as a mode mismatch. Check the thread's marker, then restart the process in the thread's mode.
+**Fix**: confirm the mode mismatch first — the thread/state endpoints return `409` with the mode text, and a null usage alone is not conclusive because configuration loading or token counting can fail too. Once confirmed, restart the process in the thread's mode.
 
 ## Storage and materialization
 
