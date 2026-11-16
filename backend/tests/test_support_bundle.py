@@ -1347,6 +1347,57 @@ def test_config_path_follows_the_env_file_selected_by_the_checkout_dotenv(tmp_pa
     assert "DEER_FLOW_CONFIG_PATH" not in os.environ
 
 
+def test_config_path_uses_the_selected_file_precedence_the_gateway_uses(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    stage = project_root / "backend"
+    stage.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (stage / "first.yaml").write_text("models:\n  - name: first\n", encoding="utf-8")
+    (stage / "second.yaml").write_text("models:\n  - name: second\n", encoding="utf-8")
+    # python-dotenv keeps the last assignment of a key, and the Gateway reads the
+    # selected env file with python-dotenv rather than the launcher's shell view.
+    # Re-parsing the file in file order would report `first.yaml`.
+    (stage / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=first.yaml\nDEER_FLOW_CONFIG_PATH=second.yaml\n", encoding="utf-8")
+    (project_root / ".env").write_text(f"DEER_FLOW_ENV_FILE={stage / 'stage.env'}\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "second"}]}
+
+
+def test_config_path_resolves_a_relative_selector_from_the_backend_directory(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=selected.yaml\n", encoding="utf-8")
+    # `make support-bundle` and the Gateway both run from `backend/`, so a
+    # relative selector names a file there, not one next to the checkout.
+    (backend / "selected.yaml").write_text("models:\n  - name: selected\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "selected"}]}
+
+
 def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir()

@@ -252,49 +252,119 @@ def _read_dotenv_assignments(env_file: Path, scope: dict[str, str], parse_dotenv
     return parse_dotenv(text, scope)
 
 
-def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
-    """Return the config-location variables the launcher resolves.
+def _checkout_dotenv_assignments(project_root: Path, environment: dict[str, str], parse_dotenv: Any) -> list[tuple[str, str]] | None:
+    """Return the checkout `.env` as the launcher reads it, or ``None``.
 
     ``environment`` is the process environment captured before the harness was
     imported. Expanding against the live ``os.environ`` would read the
     assignments that import already loaded from this same file, so a variable
     defined later in `.env` would resolve here but not in the launcher.
+    """
+    env_file = project_root / ".env"
+    if not env_file.is_file():
+        return []
+    # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the same
+    # scope: an inherited PWD is wherever the bundle happened to start.
+    scope = dict(environment)
+    scope["PWD"] = str(project_root)
+    return _read_dotenv_assignments(env_file, scope, parse_dotenv)
 
-    The launcher exports the checkout `.env`, and importing the harness then
-    loads ``DEER_FLOW_ENV_FILE`` without overriding what is already set. Follow
-    both, so a `.env` that selects a second env file reports the config path the
-    Gateway actually reads.
+
+def _installed_dotenv_module(project_root: Path) -> Any:
+    """Return ``dotenv`` as the Gateway imports it, or ``None``.
+
+    The backend dependencies are not importable from the script's own checkout
+    root: `make support-bundle` runs it from `backend/`, where `uv` put them.
+    """
+    try:
+        import dotenv  # noqa: F401
+
+        return dotenv
+    except ImportError:
+        pass
+    for candidate in sorted((project_root / "backend").glob(".venv/lib/python*/site-packages")):
+        sys.path.insert(0, str(candidate))
+        try:
+            import dotenv  # noqa: F401
+
+            return dotenv
+        except ImportError:
+            sys.path.pop(0)
+    return None
+
+
+def _follow_dotenv_assignments(assignments: list[tuple[str, str]], environment: dict[str, str], loader: Any) -> dict[str, str]:
+    """Return the assignments a runtime dotenv load would apply.
+
+    The Gateway reads these files through python-dotenv rather than the
+    launcher's shell view, and the two disagree in ways that decide which config
+    is loaded: python-dotenv expands only references the file assigns before it
+    and takes the last of two assignments to the same key. Mirroring that pass
+    keeps the bundle on the file the Gateway resolves.
+    """
+    text = "".join(f"{name}={value}\n" for name, value in assignments)
+    previous_environment = dict(os.environ)
+    os.environ.clear()
+    os.environ.update(environment)
+    try:
+        return {name: str(value) for name, value in loader.dotenv_values(stream=StringIO(text)).items() if value is not None}
+    finally:
+        os.environ.clear()
+        os.environ.update(previous_environment)
+
+
+def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
+    """Return the config-location variables the launcher resolves.
+
+    ``environment`` is the process environment captured before the harness was
+    imported.
+
+    The launcher exports the checkout `.env`, and the import then loads its
+    ``DEER_FLOW_ENV_FILE`` on top without overriding what is already set.
+    `load_selected_env_file` rejects an unusable selector and the Gateway fails
+    to start, so such a selector is returned as the startup error instead of
+    being skipped.
     """
     try:
         from dotenv_exports import parse_dotenv
     except ImportError:
         return {}
-    selected: set[str] = set()
-    env_file = project_root / ".env"
-    if env_file.is_file():
-        # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the
-        # same scope: an inherited PWD is wherever the bundle happened to start.
-        checkout_scope = dict(environment)
-        checkout_scope["PWD"] = str(project_root)
-        assignments = _read_dotenv_assignments(env_file, checkout_scope, parse_dotenv)
-        if assignments is None:
-            # Diagnostics must still work with a broken environment or unreadable .env.
-            return {}
-        for name, value in assignments:
-            checkout_scope[name] = value
-            selected.add(name)
-        environment = {**environment, **{name: checkout_scope[name] for name in selected}}
-    # `load_selected_env_file` resolves a relative selector against the backend
-    # process working directory, and skips keys the environment already defines.
-    selector = environment.get("DEER_FLOW_ENV_FILE")
+    assignments = _checkout_dotenv_assignments(project_root, environment, parse_dotenv)
+    if assignments is None:
+        # Diagnostics must still work with a broken environment or unreadable .env.
+        return {}
+    checkout_scope = dict(environment)
+    checkout_scope["PWD"] = str(project_root)
+    for name, value in assignments:
+        checkout_scope[name] = value
+    selected = {name: value for name, value in checkout_scope.items() if name in {n for n, _ in assignments}}
+    selector = selected.get("DEER_FLOW_ENV_FILE")
     if selector:
-        selected_file = _read_dotenv_assignments(Path(selector), dict(environment), parse_dotenv)
-        if selected_file is not None:
-            for name, value in selected_file:
-                if name not in environment:
-                    environment[name] = value
-                    selected.add(name)
-    return {name: environment[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
+        selected_file = Path(selector)
+        # A relative selector uses the Gateway's working directory, `backend/`.
+        if not selected_file.is_absolute():
+            selected_file = project_root / "backend" / selected_file
+        try:
+            text = selected_file.read_text(encoding="utf-8-sig")
+        except (OSError, UnicodeError):
+            text = None
+        if text is None:
+            return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
+        selected_assignments = parse_dotenv(text, environment)
+        loader = _installed_dotenv_module(project_root)
+        if loader is None:
+            for name, value in selected_assignments:
+                selected.setdefault(name, value)
+        else:
+            for name, value in _follow_dotenv_assignments(selected_assignments, environment, loader).items():
+                selected.setdefault(name, value)
+    location = {name: selected[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
+    config_path = location.get("DEER_FLOW_CONFIG_PATH")
+    if config_path and not Path(config_path).is_absolute():
+        # The Gateway resolves a relative config path from its own working
+        # directory, `backend/`, not from wherever the bundle was started.
+        location["DEER_FLOW_CONFIG_PATH"] = str(project_root / "backend" / config_path)
+    return location
 
 
 def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
