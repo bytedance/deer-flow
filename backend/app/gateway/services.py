@@ -3178,6 +3178,7 @@ async def launch_scheduled_thread_run(
     metadata: dict[str, Any] | None = None,
     origin: dict[str, Any] | None = None,
     title: str | None = None,
+    subagent_enabled: bool = False,
 ) -> dict[str, Any]:
     """Start one scheduled occurrence as an internal run.
 
@@ -3211,6 +3212,11 @@ async def launch_scheduled_thread_run(
     graph_input: dict[str, Any] = {"messages": [message]}
     if title:
         graph_input["title"] = title
+    context: dict[str, Any] = {"non_interactive": True}
+    if owner_user_id:
+        context["user_id"] = owner_user_id
+    if subagent_enabled:
+        context["subagent_enabled"] = True
     body = RunCreateRequest(
         assistant_id=assistant_id,
         input=graph_input,
@@ -3221,7 +3227,7 @@ async def launch_scheduled_thread_run(
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
         # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
+        context=context,
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,

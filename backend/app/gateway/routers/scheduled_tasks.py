@@ -153,6 +153,7 @@ class ScheduledTaskCreateRequest(BaseModel):
     thread_id: ThreadId | None = None
     context_mode: str = "fresh_thread_per_run"
     assistant_id: str | None = Field(default=None, min_length=1)
+    subagent_enabled: bool = False
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
     schedule_type: str
@@ -172,6 +173,7 @@ class ScheduledTaskUpdateRequest(BaseModel):
     context_mode: str | None = None
     thread_id: ThreadId | None = None
     assistant_id: str | None = Field(default=None, min_length=1)
+    subagent_enabled: bool | None = None
     title: str | None = Field(default=None, min_length=1)
     prompt: str | None = Field(default=None, min_length=1)
     # Allowed; when it changes, schedule_spec is required.
@@ -271,6 +273,7 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
         assistant_resolver=resolve_scheduled_task_assistant_id,
         now=datetime.now(UTC),
     )
+    definition["subagent_enabled"] = body.subagent_enabled
     definition["notification_group_connection_id"] = await _validate_notification_group(request, body.notification_group_connection_id, user_id=str(user.id))
     # After validation, so a bad request still reports what to fix: a task
     # created while this process's poller is off would silently never run.

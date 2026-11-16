@@ -1099,6 +1099,26 @@ def _create_request(**overrides):
     return scheduled_tasks.ScheduledTaskCreateRequest(**kwargs)
 
 
+@pytest.mark.asyncio
+async def test_create_and_patch_subagent_setting(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        repo = ScheduledTaskRepository(get_session_factory())
+        task = await _call_create(_create_request(subagent_enabled=True), repo=repo)
+        assert task["subagent_enabled"] is True
+        for body in (
+            scheduled_tasks.ScheduledTaskUpdateRequest(title="New title"),
+            scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=None),
+        ):
+            task = await _call_update(repo, task["id"], body)
+            assert task["subagent_enabled"] is True
+        task = await _call_update(repo, task["id"], scheduled_tasks.ScheduledTaskUpdateRequest(subagent_enabled=False))
+        assert task["subagent_enabled"] is False
+        assert (await repo.get(task["id"], user_id="user-1"))["subagent_enabled"] is False
+    finally:
+        await close_engine()
+
+
 async def _seed_task(repo: _Repo | ScheduledTaskRepository, **overrides):
     kwargs = {
         "task_id": "task-1",

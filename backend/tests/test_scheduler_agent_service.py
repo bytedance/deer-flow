@@ -79,6 +79,24 @@ async def dispatch_scheduled(tasks, service):
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("trigger", ["manual", "scheduled"])
+@pytest.mark.parametrize("subagent_enabled", [False, True])
+async def test_launch_uses_persisted_subagent_setting(scheduler, trigger, subagent_enabled):
+    _, tasks, _, service, launches, _ = scheduler
+    await create_task(tasks, **({"subagent_enabled": True} if subagent_enabled else {}))
+    task = await tasks.get("task-a", user_id="owner")
+    assert task["subagent_enabled"] is subagent_enabled
+
+    if trigger == "manual":
+        result = await service.dispatch_task(task, now=datetime.now(UTC), trigger=trigger)
+    else:
+        result = await dispatch_scheduled(tasks, service)
+
+    assert result["outcome"] == "launched"
+    assert launches[0]["subagent_enabled"] is subagent_enabled
+
+
+@pytest.mark.anyio
 async def test_launch_snapshots_goal_and_explicit_task_notes(scheduler):
     sf, tasks, _occurrences, service, launches, _deliveries = scheduler
     task = await create_task(tasks, goal_objective="Meeting preparation is complete", standing_notes=["Use the develop branch"])

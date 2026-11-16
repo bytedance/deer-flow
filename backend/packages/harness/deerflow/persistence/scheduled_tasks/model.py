@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, BigInteger, DateTime, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -26,6 +26,7 @@ class ScheduledTaskRow(Base):
     standing_notes: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     context_mode: Mapped[str] = mapped_column(String(32), default="fresh_thread_per_run")
     assistant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    subagent_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     title: Mapped[str] = mapped_column(String(255))
     prompt: Mapped[str] = mapped_column(Text)
     schedule_type: Mapped[str] = mapped_column(String(16))

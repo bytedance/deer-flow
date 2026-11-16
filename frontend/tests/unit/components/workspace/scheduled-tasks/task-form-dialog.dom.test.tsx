@@ -16,6 +16,7 @@ import {
   initialFormState,
   type TaskFormRequest,
 } from "@/components/workspace/scheduled-tasks/task-form-dialog";
+import type { Agent } from "@/core/agents/types";
 import type { ChannelConnection } from "@/core/channels/types";
 import { I18nProvider } from "@/core/i18n/context";
 import type { ScheduledTask } from "@/core/scheduled-tasks/types";
@@ -117,12 +118,18 @@ function renderForm(
   {
     locale = "en-US",
     toolEnabled = true,
-  }: { locale?: "en-US" | "zh-CN"; toolEnabled?: boolean } = {},
+    agents,
+  }: {
+    locale?: "en-US" | "zh-CN";
+    toolEnabled?: boolean;
+    agents?: Agent[];
+  } = {},
 ) {
   document.cookie = `locale=${locale}; path=/`;
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  if (agents) client.setQueryData(["agents"], agents);
   clients.push(client);
   const tree = () => (
     <QueryClientProvider client={client}>
@@ -140,6 +147,52 @@ function renderForm(
 }
 
 describe("TaskFormDialog", () => {
+  test("enables or disables subagents for a scheduled task", async () => {
+    updateTask.mockResolvedValue(task());
+    renderForm({ mode: "edit", task: task({ subagent_enabled: true }) });
+    const toggle = screen.getByRole("switch", { name: "Enable subagents" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() =>
+      expect(updateTask).toHaveBeenCalledWith("task-1", {
+        subagent_enabled: false,
+      }),
+    );
+  });
+
+  test("hides the switch for an agent that disallows delegation", () => {
+    renderForm(
+      { mode: "edit", task: task({ assistant_id: "writer" }) },
+      {
+        agents: [
+          {
+            name: "writer",
+            description: "",
+            model: null,
+            tool_groups: null,
+            skills: null,
+            allowed_subagents: [],
+          },
+        ],
+      },
+    );
+    expect(
+      screen.queryByRole("switch", { name: "Enable subagents" }),
+    ).toBeNull();
+  });
+
+  test("keeps delegation off by default and copies an opted-in task", () => {
+    const valid = { maxRuns: null, endAt: null };
+    const fresh = initialFormState({ mode: "create" }, "copy").state;
+    expect(createPayload(fresh, valid).subagent_enabled).toBeUndefined();
+    const duplicate = initialFormState(
+      { mode: "duplicate", task: task({ subagent_enabled: true }) },
+      "copy",
+    ).state;
+    expect(createPayload(duplicate, valid).subagent_enabled).toBe(true);
+  });
+
   test("a pending capability preserves the saved group through a title edit and then shows the enabled selector", async () => {
     groupNotifications.value = false;
     groupNotifications.isLoading = true;

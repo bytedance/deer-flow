@@ -4474,7 +4474,8 @@ async def test_start_run_peer_idempotent_reuse_does_not_reject_later_runs_after_
     assert follow_up.run_id != first.run_id
 
 
-def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config):
+@pytest.mark.parametrize("delegation", [{}, {"subagent_enabled": True}])
+def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_config, delegation):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import patch
@@ -4507,6 +4508,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
                     "scheduled_task_id": "task-1",
                     "scheduled_task_run_id": "task-run-1",
                 },
+                **delegation,
             )
         return captured, result
 
@@ -4515,7 +4517,7 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["context"] == {"non_interactive": True, "user_id": "user-1", **delegation}
     assert captured["scheduled_task_runtime"] == {"task_id": "task-1", "occurrence_id": "task-run-1", "user_id": "user-1"}
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",

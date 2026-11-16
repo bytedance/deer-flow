@@ -1302,6 +1302,7 @@ export const enUS: Translations = {
       schedule: "Runs",
       agent: "Agent",
       advanced: "Advanced",
+      enableSubagents: "Enable subagents",
       contextFresh: "Start a new chat for each run",
       contextReuse: "Run in an existing chat",
       chatId: "Chat ID",
