@@ -245,3 +245,57 @@ def test_download_file_does_not_reverse_resolve_non_agent_file(tmp_path):
     (tmp_path / "outputs" / "report.txt").write_text(content, encoding="utf-8")
 
     assert sandbox.download_file("/mnt/user-data/outputs/report.txt") == content.encode("utf-8")
+
+
+def test_download_file_leaves_valid_utf8_binary_overwrite_identical(tmp_path):
+    """PR #8260 (Codex P2 on #8259): a tracked path later overwritten with
+    binary data must download byte-identical, even when the bytes validly
+    decode as UTF-8 and contain a mapped host path.
+
+    The old code used a successful UTF-8 decode as the text/binary test, so
+    it reverse-resolved the host path inside the binary payload and the
+    download no longer matched the file on disk.
+    """
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/workspace/run.sh"
+    sandbox.write_file(virtual, "#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n")
+
+    host_path = os.path.realpath(tmp_path / "outputs" / "data.csv")
+    raw = f"PK\x03\x04\x00binary blob {host_path} \x01\x02 tail\n".encode("utf-8")
+    raw.decode("utf-8")  # the payload is valid UTF-8 — that must not matter
+    (tmp_path / "workspace" / "run.sh").write_bytes(raw)
+
+    assert sandbox.download_file(virtual) == raw
+
+
+def test_download_file_after_rewrite_without_translation_stays_identical(tmp_path):
+    """Rewriting a translated script through write_file with content that
+    translates nothing drops the translation record: the stored bytes are
+    verbatim agent content, not a translated write, so the download must
+    return them untouched even though they contain a host path.
+    """
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/workspace/run.sh"
+    sandbox.write_file(virtual, "#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n")
+
+    host_path = os.path.realpath(tmp_path / "outputs" / "data.csv")
+    rewritten = f"binary blob {host_path}\n"
+    sandbox.write_file(virtual, rewritten)
+
+    assert (tmp_path / "workspace" / "run.sh").read_text(encoding="utf-8") == rewritten
+    assert sandbox.download_file(virtual) == rewritten.encode("utf-8")
+
+
+def test_download_file_reverse_resolves_after_append_to_script(tmp_path):
+    """An appending translating write extends the recorded digest, so a
+    script built up over two write_file calls still reverse-resolves on
+    download, matching read_file.
+    """
+    sandbox = _sandbox(tmp_path)
+    virtual = "/mnt/user-data/workspace/run.sh"
+    sandbox.write_file(virtual, "#!/bin/sh\n")
+    sandbox.write_file(virtual, "cat /mnt/user-data/outputs/data.csv\n", append=True)
+
+    expected = b"#!/bin/sh\ncat /mnt/user-data/outputs/data.csv\n"
+    assert sandbox.read_file(virtual) == expected.decode("utf-8")
+    assert sandbox.download_file(virtual) == expected
