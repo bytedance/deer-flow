@@ -159,6 +159,7 @@ def _setup_executor_classes():
     original_executor = sys.modules.get("deerflow.subagents.executor")
     original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
     original_tool_declarations = sys.modules.get("deerflow.agents.middlewares.tool_declarations")
+    original_incognito_prompt = sys.modules.get("deerflow.agents.incognito_prompt")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
     original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
     original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
@@ -169,6 +170,7 @@ def _setup_executor_classes():
     # sys.modules makes this fixture independent of test collection order.
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
     tool_declarations_module = importlib.import_module("deerflow.agents.middlewares.tool_declarations")
+    incognito_prompt_module = importlib.import_module("deerflow.agents.incognito_prompt")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
@@ -197,6 +199,7 @@ def _setup_executor_classes():
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
     sys.modules["deerflow.agents.middlewares.tool_declarations"] = tool_declarations_module
+    sys.modules["deerflow.agents.incognito_prompt"] = incognito_prompt_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
     sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
     sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
@@ -253,6 +256,10 @@ def _setup_executor_classes():
         sys.modules["deerflow.agents.middlewares.tool_declarations"] = original_tool_declarations
     else:
         sys.modules.pop("deerflow.agents.middlewares.tool_declarations", None)
+    if original_incognito_prompt is not None:
+        sys.modules["deerflow.agents.incognito_prompt"] = original_incognito_prompt
+    else:
+        sys.modules.pop("deerflow.agents.incognito_prompt", None)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
@@ -1009,6 +1016,36 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_states_the_incognito_boundary_only_when_flagged(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A delegated incognito run carries the same temporary-chat rules."""
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        incognito_executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread", incognito=True)
+        ordinary_executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        incognito_state, _final_tools, _deferred_setup = await incognito_executor._build_initial_state("Do the task")
+        ordinary_state, _final_tools, _deferred_setup = await ordinary_executor._build_initial_state("Do the task")
+
+        incognito_system = incognito_state["messages"][0].content
+        ordinary_system = ordinary_state["messages"][0].content
+        assert "<incognito_mode>" in incognito_system
+        assert "You cannot add, update or delete memories" in incognito_system
+        assert "memory write tool" in incognito_system
+        assert "even when the task asks for it" in incognito_system
+        assert "Return your results to the lead agent" in incognito_system
+        assert "<incognito_mode>" not in ordinary_system
 
     @pytest.mark.anyio
     async def test_prompt_overlay_surrounds_complete_system_message(self, classes):

@@ -15,13 +15,14 @@ is self-hosted and does not train models on your conversations.
 
 ## Start and end
 
-Start an incognito chat from the ghost icon at the top right of a chat, or open
-`/workspace/chats/new?incognito=true`. The workspace sidebar is removed and the
-chat takes the whole window: a dark top bar around a framed conversation area,
-a dashed composer border and two notices. The first says the chat does not enter
-history, memory or search and gives the idle lifetime from the live
-configuration; the second names the third-party boundary below. Ordinary chats
-and incognito chats cannot be converted into one another.
+Start an incognito chat from the ghost icon at the top right of a blank new
+chat, or open `/workspace/chats/new?incognito=true`. A saved conversation does
+not offer the icon: an ordinary chat and an incognito chat cannot be converted
+into one another. The workspace sidebar is removed and the chat takes the whole
+window: a dark top bar around a framed conversation area, a dashed composer
+border and two notices. The first says the chat does not enter history, memory
+or search and gives the idle lifetime from the live configuration; the second
+names the third-party boundary below.
 
 Use the **×** control in the top bar to end the chat. The browser leaves immediately; the
 Gateway then schedules a short deletion grace in the background. If that
@@ -61,6 +62,25 @@ memory that already exists (injection and search) still works. Subagents stay
 available and inherit the same rule, so a delegated run neither writes blobs
 nor leaves durable batch rows behind. Everything the chat does write stays
 inside its thread directory and is removed by the same expiry sweep.
+
+## What the assistant is told
+
+The system prompt states the storage boundary rather than a list of individual
+features. It tells the assistant that the conversation is temporary and that
+neither it nor anything derived from it can be made persistent from within the
+chat, so the rule still covers a capability that is added later. It also states
+that memory writes are unavailable and that the assistant must never claim to
+have saved or remembered something; a working note such as `task_note` is a
+note for this conversation, not long-term memory.
+
+Delegated work inherits the same rule. The lead is told not to ask a subagent
+to persist anything and not to trust a report that claims it did; each
+subagent's own system prompt carries the boundary as well.
+
+The prompt keeps the third-party edge explicit: content still goes to the
+model, search and MCP services, and an external write is not undone when the
+chat ends. The interface notices are shown once; the assistant is told not to
+repeat them unless the limitation matters to the answer.
 
 ## What stays outside the boundary
 

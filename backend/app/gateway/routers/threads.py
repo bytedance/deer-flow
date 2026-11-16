@@ -1135,7 +1135,13 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     thread_store = get_thread_store(request)
     now = now_iso()
     expires_at: datetime | None = None
-    if body.incognito:
+    # The LangGraph SDK creates the thread lazily on the first submit and only
+    # forwards ``metadata``; the browser marks that implicit create there. Read
+    # the marker as the same creation intent as the top-level field, so the
+    # SDK's ensure-create stays idempotent with the REST pre-create instead of
+    # returning 409 on the visibility mismatch.
+    incognito = body.incognito or body.metadata.get("incognito") is True
+    if incognito:
         # Only incognito creation needs the configuration, and the read touches
         # the filesystem: keep ordinary creates free of it and the incognito
         # read off the event loop.
@@ -1149,15 +1155,17 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     # ``body.metadata`` is already stripped of server-reserved keys by
     # ``ThreadCreateRequest._strip_reserved`` — see the model definition.
     # A server-side caller (an extension handle) marks the thread it creates;
-    # request.state is never HTTP input.
-    metadata = dict(body.metadata)
+    # request.state is never HTTP input. The incognito marker above is a
+    # creation hint only — the column is the single source of truth, so it is
+    # not stored again in metadata.
+    metadata = {key: value for key, value in body.metadata.items() if key != "incognito"}
     if (origin := admit_origin(getattr(request.state, "run_origin", None))) is not None:
         metadata[DEERFLOW_ORIGIN_KEY] = origin
 
     # Idempotency: return existing record when already present
     existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
     if existing_record is not None:
-        return _existing_thread_or_conflict(thread_id, existing_record, incognito=body.incognito)
+        return _existing_thread_or_conflict(thread_id, existing_record, incognito=incognito)
 
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
@@ -1169,7 +1177,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
             **thread_owner_kwargs,
             metadata=metadata,
             project_id=body.project_id,
-            incognito=body.incognito,
+            incognito=incognito,
             expires_at=expires_at,
         )
     except ProjectNotAssignableError:
@@ -1190,7 +1198,7 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         # historical overwrite behavior for direct callers.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
-            return _existing_thread_or_conflict(thread_id, existing_record, incognito=body.incognito)
+            return _existing_thread_or_conflict(thread_id, existing_record, incognito=incognito)
         # The same-owner reconciliation above found nothing, yet the insert hit
         # a duplicate primary key — so the surviving row belongs to *another*
         # user. That is the ownership-conflict case, which the route already

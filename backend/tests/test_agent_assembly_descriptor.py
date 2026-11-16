@@ -244,6 +244,32 @@ class TestLeadAgentAssembly:
         assert assembly.effective_model == assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
+    def test_assemble_passes_the_admission_pinned_incognito_marker_to_the_prompt(self, monkeypatch):
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.extensions import bind_agent_build_extensions
+        from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        prompt_calls = []
+
+        def render_prompt(**kwargs):
+            prompt_calls.append(kwargs)
+            return "prompt"
+
+        monkeypatch.setattr(lead_agent_module, "apply_prompt_template", render_prompt)
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            assemble_lead_agent(
+                {
+                    "configurable": {"thread_id": "t-incognito"},
+                    "context": {INCOGNITO_CONTEXT_KEY: True},
+                }
+            )
+            assemble_lead_agent({"configurable": {"thread_id": "t-ordinary"}})
+
+        assert prompt_calls[0]["incognito"] is True
+        assert prompt_calls[1]["incognito"] is False
+
     def test_descriptor_hashes_the_same_scoped_prompt_passed_to_the_graph(self, monkeypatch):
         from deerflow_extension_api import canonical_hash
 

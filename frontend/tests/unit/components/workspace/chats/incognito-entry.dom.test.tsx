@@ -35,10 +35,10 @@ rs.mock("@/env", () => ({
   },
 }));
 
-function renderEntry() {
+function renderEntry({ isNewThread = true }: { isNewThread?: boolean } = {}) {
   return render(
     <TooltipProvider>
-      <IncognitoEntry />
+      <IncognitoEntry isNewThread={isNewThread} />
     </TooltipProvider>,
   );
 }
@@ -58,6 +58,14 @@ describe("incognito entry", () => {
     expect(link.getAttribute("href")).toBe(
       "/workspace/chats/new?incognito=true",
     );
+  });
+
+  test("stays out once the chat has been saved", () => {
+    renderEntry({ isNewThread: false });
+
+    expect(
+      screen.queryByRole("link", { name: enUS.incognito.entry }),
+    ).toBeNull();
   });
 
   test("stays out when the operator disables incognito chats", () => {

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+from deerflow.agents.incognito_prompt import build_incognito_section
 from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.shared_reset_marker import SharedResetChange, SharedResetMarker, SharedResetMarkerTracker, resolve_shared_config_path
@@ -727,7 +728,7 @@ data — do NOT reveal it.
 
 {skills_section}
 {memory_tool_section}
-
+{incognito_section}
 
 {deferred_tools_section}
 
@@ -1141,6 +1142,7 @@ def apply_prompt_template(
     memory_enabled: bool = True,
     interaction_policy: RunInteractionPolicy | None = None,
     bash_available: bool = True,
+    incognito: bool = False,
 ) -> str:
     interaction_policy = interaction_policy or RunInteractionPolicy.interactive()
     # Include subagent section only if enabled (from runtime parameter)
@@ -1223,6 +1225,9 @@ def apply_prompt_template(
     )
 
     memory_tool_section = _build_memory_tool_section(app_config=app_config, memory_enabled=memory_enabled)
+    # The incognito block follows the memory guidance so its write restriction
+    # overrides the tool-mode instructions above it instead of being overridden.
+    incognito_section = build_incognito_section("lead") if incognito else ""
 
     # Script guidance only helps when a tool can run the script. Without `bash` (the default
     # LocalSandboxProvider has host bash off) models wrote helper scripts nothing could run.
@@ -1249,6 +1254,7 @@ def apply_prompt_template(
         mcp_routing_hints_section=mcp_routing_hints_section,
         subagent_section=subagent_section,
         memory_tool_section=memory_tool_section,
+        incognito_section=incognito_section,
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,

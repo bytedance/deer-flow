@@ -508,6 +508,10 @@ export default function ChatPage() {
           ...scopedOptions?.additionalKwargs,
           ...modelInput.additionalKwargs,
         },
+        // Only the first send of a lazy new chat can trigger the SDK's
+        // implicit thread create; mark it so the create matches the row the
+        // pre-create made (an incognito row otherwise conflicts with 409).
+        incognito: isNewThread && isIncognito,
       };
       const sendPromise = sendMessage(
         threadId,
@@ -531,6 +535,7 @@ export default function ChatPage() {
       isNewThread,
       projectParam,
       incognitoParam,
+      isIncognito,
       setThreadId,
       setIsNewThread,
     ],
@@ -702,7 +707,7 @@ export default function ChatPage() {
               )}
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <IncognitoEntry />
+              <IncognitoEntry isNewThread={isNewThread} />
               {!isNewThread &&
                 !isMock &&
                 env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (

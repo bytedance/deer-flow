@@ -27,6 +27,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
+from deerflow.agents.incognito_prompt import build_incognito_section
 from deerflow.agents.middlewares.audit_context import (
     LOOP_DETECTION_RECORDER_CONTEXT_KEY,
     TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
@@ -1710,6 +1711,10 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        if self.incognito:
+            # Framework policy follows a custom subagent prompt so the
+            # temporary-chat boundary never depends on its author repeating it.
+            system_parts.append(build_incognito_section("subagent"))
         if self.context_snapshot is not None:
             system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same

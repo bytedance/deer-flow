@@ -112,6 +112,40 @@ def test_idempotent_create_never_converts_visibility():
     assert demote.status_code == 409
 
 
+def test_metadata_marker_seeds_an_incognito_thread_for_the_sdk_create():
+    """The LangGraph SDK's implicit create can only carry metadata.
+
+    On the first submit the SDK creates the thread itself and forwards the
+    submit metadata; the browser marks an incognito send there. The Gateway
+    must read that marker as the creation intent, otherwise the SDK's create
+    sees a visibility mismatch against the REST pre-create and answers 409.
+    """
+    client = TestClient(_build_app())
+    thread_id = uuid4().hex
+    body = {"thread_id": thread_id, "metadata": {"incognito": True}}
+
+    created = client.post("/api/threads", json=body)
+
+    assert created.status_code == 200, created.text
+    assert created.json()["incognito"] is True
+    # The column is the single source of truth; the hint is not re-stored.
+    assert "incognito" not in created.json()["metadata"]
+    assert [thread["thread_id"] for thread in client.post("/api/threads/search", json={}).json()] == []
+
+    # The SDK repeats its ensure-create while the chat is still lazy.
+    again = client.post("/api/threads", json=body)
+    assert again.status_code == 200
+
+
+def test_metadata_marker_never_converts_an_ordinary_thread():
+    client = TestClient(_build_app())
+    ordinary_id = _create(client)
+
+    response = client.post("/api/threads", json={"thread_id": ordinary_id, "metadata": {"incognito": True}})
+
+    assert response.status_code == 409
+
+
 def test_move_rejects_incognito_thread():
     client = TestClient(_build_app())
     thread_id = _create(client, incognito=True)

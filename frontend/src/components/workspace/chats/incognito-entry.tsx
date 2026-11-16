@@ -15,12 +15,19 @@ import { Tooltip } from "../tooltip";
  * top-right cluster. The sidebar carries no incognito item: the mode starts
  * from the surface it applies to.
  */
-export function IncognitoEntry() {
+export function IncognitoEntry({ isNewThread }: { isNewThread: boolean }) {
   const { t } = useI18n();
   const { enabled } = useIncognitoFeature();
-  // A static demo has no Gateway, so the entry would lead to a dead page, and
-  // an operator can disable new incognito chats entirely.
-  if (!enabled || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true") {
+  // Only a blank new chat offers the entry: a saved conversation is already
+  // committed to its visibility, and turning it into a temporary chat is not
+  // something the storage boundary permits. A static demo has no Gateway, so
+  // the entry would lead to a dead page, and an operator can disable new
+  // incognito chats entirely.
+  if (
+    !isNewThread ||
+    !enabled ||
+    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
+  ) {
     return null;
   }
   return (

@@ -1576,6 +1576,13 @@ idempotent while the stored mode matches; a stored mode that differs answers
 `409` (`Thread already exists with a different visibility mode`), and an
 expired tombstone answers `410` (`This incognito thread has expired`).
 
+`metadata: {"incognito": true}` is accepted as the same creation intent as the
+top-level field. The LangGraph SDK creates a thread implicitly on the first
+submit and can only forward metadata, so the browser uses this marker to make
+that implicit create match the incognito pre-create instead of conflicting
+with it. The marker is a hint, not stored metadata; the response column is the
+single source of truth.
+
 #### End an Incognito Thread
 
 ```http

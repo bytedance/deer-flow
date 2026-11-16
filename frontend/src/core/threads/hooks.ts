@@ -149,6 +149,14 @@ type SendMessageOptions = {
    */
   conversationReferences?: string[];
   /**
+   * Marks the first send of a lazy incognito new chat. The LangGraph SDK
+   * creates the thread implicitly on submit and can only forward `metadata`;
+   * the Gateway reads `metadata.incognito` as the creation hint, so that
+   * implicit create matches the REST pre-create instead of conflicting with
+   * its visibility mode. Only set while the thread row is still ours to seed.
+   */
+  incognito?: boolean;
+  /**
    * Invoked exactly once when the send is genuinely dispatched: after the
    * in-flight guard and after any attachments upload, right before the run is
    * submitted. It never fires for a dropped send or one whose attachments fail
@@ -3243,6 +3251,10 @@ export function useThreadStream({
             // custom events, while subgraph frames would leak a delegated
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
+            // The SDK's implicit thread create carries this to the Gateway;
+            // without it the create looks like an ordinary chat against the
+            // incognito pre-created row and is rejected with 409.
+            metadata: options?.incognito ? { incognito: true } : undefined,
             config: {
               recursion_limit: THREAD_RUN_RECURSION_LIMIT,
             },
