@@ -1261,3 +1261,54 @@ def test_config_path_follows_dotenv_override(tmp_path, monkeypatch):
     # The staged lookup must not leak into the process environment.
     assert "DEER_FLOW_CONFIG_PATH" not in os.environ
     assert "DEER_FLOW_PROJECT_ROOT" not in os.environ
+
+
+def test_config_path_expands_pwd_like_the_launcher(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (project_root / "custom.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    (project_root / ".env").write_text('DEER_FLOW_CONFIG_PATH="$PWD/custom.yaml"\n', encoding="utf-8")
+    # serve.sh runs the dotenv parser from the checkout, so `$PWD` is the checkout
+    # rather than wherever the bundle happened to be started.
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("PWD", str(tmp_path / "elsewhere"))
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    assert triage["signals"]["config_missing"] is False
+
+
+def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_SUPPORT_BUNDLE_PROBE=leaked\nDEER_FLOW_PROJECT_ROOT=/elsewhere\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.delenv("DEER_FLOW_SUPPORT_BUNDLE_PROBE", raising=False)
+    # Importing the harness loads a dotenv file into the process environment. Point
+    # it at the checkout `.env` so the import really mutates `os.environ`, then let
+    # a fresh import run instead of a cached module.
+    monkeypatch.setenv("DEER_FLOW_ENV_FILE", str(project_root / ".env"))
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    # Later diagnostics and the doctor child must see the environment this process
+    # started with, not the variables the import loaded.
+    assert "DEER_FLOW_SUPPORT_BUNDLE_PROBE" not in os.environ
+    assert os.environ.get("DEER_FLOW_PROJECT_ROOT") is None

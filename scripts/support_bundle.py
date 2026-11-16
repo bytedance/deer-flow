@@ -244,21 +244,27 @@ CONFIG_LOCATION_ENV_VARS = ("DEER_FLOW_CONFIG_PATH", "DEER_FLOW_PROJECT_ROOT")
 
 
 def _dotenv_config_location(project_root: Path) -> dict[str, str]:
-    """Return the config-location variables the checkout `.env` sets."""
+    """Return the config-location variables the checkout `.env` exports."""
     env_file = project_root / ".env"
     if not env_file.is_file():
         return {}
     try:
-        from dotenv import dotenv_values
-        from dotenv.parser import parse_stream
+        from dotenv_exports import parse_dotenv
 
-        with open(env_file, encoding="utf-8") as stream:
-            unquoted = {binding.key for binding in parse_stream(stream) if binding.key and binding.original.string.split("=", 1)[-1].lstrip()[:1] not in ("'", '"')}
-        values = dotenv_values(env_file)
+        text = env_file.read_text(encoding="utf-8-sig")
     except (ImportError, OSError, UnicodeError):
         # Diagnostics must still work with a broken environment or unreadable .env.
         return {}
-    return {name: (os.path.expanduser(values[name]) if name in unquoted else values[name]) for name in CONFIG_LOCATION_ENV_VARS if values.get(name) is not None}
+    # The launcher expands `$PWD`/`$NAME` against the checkout, so stage the
+    # same scope: an inherited PWD is wherever the bundle happened to start.
+    scope = dict(os.environ)
+    scope["PWD"] = str(project_root)
+    assignments = dict(parse_dotenv(text, scope))
+    return {
+        name: assignments[name]
+        for name in CONFIG_LOCATION_ENV_VARS
+        if name in assignments
+    }
 
 
 def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
@@ -269,34 +275,36 @@ def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
     is the Gateway's own startup error, so it is reported in the bundle instead
     of silently falling back to the checkout ``config.yaml``.
     """
+    # Importing the harness loads the checkout `.env` into `os.environ`, and the
+    # lookup below stages the launcher's view. Snapshot before the import so a
+    # fresh import leaves later diagnostics and the doctor child with the
+    # environment this process started with, including on the error paths.
+    previous = dict(os.environ)
     try:
-        from deerflow.config.app_config import AppConfig
-    except Exception as exc:
-        return project_root / "config.yaml", f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})"
+        try:
+            from deerflow.config.app_config import AppConfig
+        except Exception as exc:
+            return project_root / "config.yaml", f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})"
 
-    # The harness reads the process environment, so stage the launcher's view
-    # for the duration of the lookup only: the checkout `.env` wins for these
-    # two variables, and the checkout stands in for an unset runtime root.
-    previous = {name: os.environ.get(name) for name in CONFIG_LOCATION_ENV_VARS}
-    os.environ.update(_dotenv_config_location(project_root))
-    if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
-        os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
-    try:
-        return AppConfig.resolve_config_path(), None
-    except FileNotFoundError as exc:
-        config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
-        if not config_env:
-            # Nothing at the default locations: a plain missing config.
-            return project_root / "config.yaml", None
-        return Path(config_env), str(exc)
-    except ValueError as exc:
-        return project_root / "config.yaml", str(exc)
+        # The harness reads the process environment, so stage the launcher's view
+        # for the duration of the lookup only: the checkout `.env` wins for these
+        # two variables, and the checkout stands in for an unset runtime root.
+        os.environ.update(_dotenv_config_location(project_root))
+        if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
+            os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
+        try:
+            return AppConfig.resolve_config_path(), None
+        except FileNotFoundError as exc:
+            config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
+            if not config_env:
+                # Nothing at the default locations: a plain missing config.
+                return project_root / "config.yaml", None
+            return Path(config_env), str(exc)
+        except ValueError as exc:
+            return project_root / "config.yaml", str(exc)
     finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
+        os.environ.clear()
+        os.environ.update(previous)
 
 
 def collect_config_summary(config_path: Path, error: str | None = None) -> Any:
