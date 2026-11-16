@@ -1465,6 +1465,58 @@ def test_config_path_resolves_a_relative_selector_from_the_backend_directory(tmp
     assert config_summary == {"models": [{"name": "selected"}]}
 
 
+def test_config_path_keeps_an_inherited_override_over_the_selected_file(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "inherited.yaml").write_text("models:\n  - name: inherited\n", encoding="utf-8")
+    (backend / "selected.yaml").write_text("models:\n  - name: selected\n", encoding="utf-8")
+    # `load_selected_env_file` uses python-dotenv's `override=False`, so a
+    # variable the launcher already exported keeps its value. Letting the
+    # selected file win would report a YAML the Gateway never loads.
+    (backend / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=selected.yaml\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", "inherited.yaml")
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "inherited"}]}
+
+
+def test_config_path_expands_the_selected_file_from_the_backend_directory(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (project_root / "root.yaml").write_text("models:\n  - name: root\n", encoding="utf-8")
+    (backend / "backend.yaml").write_text("models:\n  - name: backend\n", encoding="utf-8")
+    # The Gateway imports the selected file from `backend/`, so its `$PWD` is
+    # that directory. Carrying the launcher's checkout `PWD` into this pass would
+    # report the YAML at the checkout root instead.
+    (backend / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=${PWD}/backend.yaml\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "backend"}]}
+
+
 def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir()

@@ -338,27 +338,34 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
     if assignments is None:
         # Diagnostics must still work with a broken environment or unreadable .env.
         return {}
-    checkout_scope = dict(environment)
-    checkout_scope["PWD"] = str(project_root)
+    # The launcher exports the checkout `.env` over the environment it inherited,
+    # so this is the environment the Gateway starts with before it imports.
+    base = dict(environment)
+    base["PWD"] = str(project_root)
     for name, value in assignments:
-        checkout_scope[name] = value
-    selected = {name: value for name, value in checkout_scope.items() if name in {n for n, _ in assignments}}
-    selector = selected.get("DEER_FLOW_ENV_FILE")
+        base[name] = value
+    selected = dict(base)
+    selector = base.get("DEER_FLOW_ENV_FILE")
     if selector:
         selected_file = Path(selector)
         # A relative selector uses the Gateway's working directory, `backend/`.
         if not selected_file.is_absolute():
             selected_file = project_root / "backend" / selected_file
+        # The Gateway imports the selected file from `backend/`, so its `$PWD`
+        # is that directory rather than the checkout the launcher used.
+        gateway_environment = {**base, "PWD": str(project_root / "backend")}
         loader = _installed_dotenv_module(project_root)
         if loader is None:
             try:
                 text = selected_file.read_text(encoding="utf-8-sig")
             except (OSError, UnicodeError):
                 return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
-            for name, value in parse_dotenv(text, environment):
+            for name, value in parse_dotenv(text, gateway_environment):
                 selected.setdefault(name, value)
         else:
-            assignments = _read_selected_env_file(selected_file, checkout_scope, loader)
+            # `load_selected_env_file` loads with `override=False`, so a variable
+            # the launcher already exported keeps its value over the file's.
+            assignments = _read_selected_env_file(selected_file, gateway_environment, loader)
             if assignments is None:
                 return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
             for name, value in assignments.items():
