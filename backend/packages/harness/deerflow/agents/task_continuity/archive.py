@@ -88,13 +88,51 @@ _CJK_RUN_RE = re.compile(rf"[{_CJK}]")
 
 def _token_spans(folded: str):
     """Preserve indexed token positions in casefolded text without changing tokenization."""
+    previous_end = None
     for match in _TOKEN_RE.finditer(folded):
         word = match.group()
+        # A two-character compound across a script boundary ("A股", "d打") is what the
+        # old tokenizer stored for every run of word characters that contained CJK.
+        # Emitting it again keeps archives written before #8297 searchable: their index
+        # holds "a股" and never the split "a" / "股". It is also what makes a mixed-script
+        # query specific - without it, "A股" matches any source holding an "a" or a "股".
+        if previous_end is not None and previous_end == match.start():
+            yield folded[previous_end - 1 : match.start() + 1], previous_end - 1, match.start() + 1
         if _CJK_RUN_RE.match(word):
-            for index in range(max(1, len(word) - 1)):
-                yield word[index : index + 2], match.start() + index, match.start() + min(index + 2, len(word))
+            for offset in range(max(1, len(word) - 1)):
+                yield word[offset : offset + 2], match.start() + offset, match.start() + min(offset + 2, len(word))
         else:
             yield word, match.start(), match.end()
+        previous_end = match.end()
+
+
+# Bumped whenever the terms produced by _token_spans change. Archives written by an
+# older version have to be re-indexed, otherwise a query tokenized the new way cannot
+# match index terms stored the old way (#8297 review: "A股" was stored as "a股", and a
+# new query for it produced "a" and "股", so the archived source stopped matching).
+TOKENIZER_VERSION = 2
+
+
+def rebuild_index(db) -> int:
+    """Re-index every stored source with the current tokenizer. Returns rows updated."""
+    updated = 0
+    for rowid, payload in db.execute("SELECT rowid, payload FROM sources").fetchall():
+        try:
+            text = json.loads(payload).get("text", "")
+        except (TypeError, ValueError):
+            continue
+        db.execute("UPDATE sources SET words=? WHERE rowid=?", (index_text(text), rowid))
+        updated += 1
+    return updated
+
+
+def stored_tokenizer_version(db) -> int | None:
+    """The tokenizer version an archive was written with; None when it predates the marker."""
+    try:
+        row = db.execute("SELECT value FROM meta WHERE key='tokenizer_version'").fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row and str(row[0]).isdigit() else None
 
 
 def _tokens(text: str) -> list[str]:
@@ -168,6 +206,12 @@ def capture(state: dict, runtime, messages, config) -> dict:
             # against stale retention state. Rollback restores evicted rows if
             # the replacement still cannot fit within SQLite's page ceiling.
             db.execute("BEGIN IMMEDIATE")
+            # Heal an archive written by an older tokenizer before adding to it: new terms
+            # cannot match index terms stored the old way.
+            db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
+                rebuild_index(db)
+                db.execute("INSERT OR REPLACE INTO meta VALUES ('tokenizer_version', ?)", (str(TOKENIZER_VERSION),))
             exists = db.execute("SELECT 1 FROM batches WHERE id=?", (batch,)).fetchone()
             created = db.execute("SELECT COALESCE(MAX(created) + 1, 1) FROM batches").fetchone()[0]
             expired = db.execute("SELECT id FROM batches WHERE id != ? ORDER BY created DESC LIMIT -1 OFFSET ?", (batch, config.max_batches - 1)).fetchall()
@@ -222,11 +266,19 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                 if source_id:
                     rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND id=? ORDER BY rowid LIMIT 1", [*batches, source_id])
                 else:
-                    match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     role_filter = " AND json_extract(payload, '$.role') = ?" if role is not None else ""
-                    parameters = [match, *batches, *([role] if role is not None else [])]
-                    # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
-                    rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
+                    if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
+                        # The archive still holds index terms from the older tokenizer and this
+                        # path is read-only, so match the stored text directly for now; the next
+                        # capture rebuilds the index in place.
+                        like = " OR ".join(["lower(payload) LIKE ?" for _ in keywords])
+                        parameters = [*batches, *[f"%{term}%" for term in keywords], *([role] if role is not None else [])]
+                        rows = db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}) AND ({like}){role_filter} ORDER BY rowid", parameters)
+                    else:
+                        match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
+                        parameters = [match, *batches, *([role] if role is not None else [])]
+                        # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
+                        rows = db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)
                 for (payload,) in rows:
                     row = json.loads(payload)
                     # Repeated archives share one result slot; keep FTS order

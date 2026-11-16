@@ -1124,3 +1124,83 @@ def test_latin_product_name_stays_searchable_after_capture(scoped):
     }
     archived = json.loads(history_search.func(scoped, "ThinkPad"))["results"]
     assert len(archived) == 1, "compaction must not turn a Latin word into two-character index terms"
+
+
+def _archive_db(runtime):
+    """The SQLite file the archive writes for this runtime's scope."""
+    from pathlib import Path as _Path
+
+    path, _owner = archive.scope(runtime)
+    assert _Path(path).exists(), f"archive db not created at {path}"
+    return _Path(path)
+
+
+def test_archive_written_by_the_old_tokenizer_stays_searchable(scoped):
+    """A source indexed before #8297 keeps matching after the tokenizer change.
+
+    Before the split fix the tokenizer stored "A股" as the two-character term "a股";
+    a query tokenized the new way would produce "a" and "股" and miss it. The read path
+    must fall back to the stored text until a capture rebuilds the index, and the rebuild
+    must then keep the source findable through the normal FTS path.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    from deerflow.agents.task_continuity.archive import TOKENIZER_VERSION
+
+    first = HumanMessage(content="持仓 A股 的说明", id="u-old")
+    scoped.state = {"messages": [first]}
+    # Captured sources get a digest id; read it while the message is still active.
+    source_id = _json.loads(history_search.func(scoped, "A股"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [first], TaskContinuityConfig(enabled=True)),
+    }
+    assert [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]] == [source_id]
+
+    db_path = _archive_db(scoped)
+    # Rewind the archive to what the old tokenizer would have stored.
+    with _sqlite3.connect(db_path) as db:
+        db.execute("UPDATE sources SET words='a股'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    # Read-only lookup cannot rebuild, so it must fall back to the stored text.
+    found = [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]]
+    assert source_id in found, f"an old archive must still match, got {found}"
+
+    # The next capture rebuilds in place and records the new version.
+    second = HumanMessage(content="再记一条 B股 的说明", id="u-new")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [second], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(db_path) as db:
+        assert int(db.execute("SELECT value FROM meta WHERE key='tokenizer_version'").fetchone()[0]) == TOKENIZER_VERSION
+        rows = db.execute("SELECT words FROM sources WHERE id=?", (source_id,)).fetchone()
+        assert "a股" in rows[0] and "a" in rows[0].split(), "rebuilt index keeps the compound and the split term"
+
+    found = [row["id"] for row in _json.loads(history_search.func(scoped, "A股"))["results"]]
+    assert source_id in found, f"after the rebuild the FTS path must still find it, got {found}"
+
+
+def test_mixed_script_query_returns_the_exact_source(scoped):
+    """A mixed-script query must not be diluted by its fragments.
+
+    Splitting "A股" into "a" and "股" alone matches every source holding either fragment;
+    with the result cap that can push the exact source out. Keeping the compound as a term
+    is what makes the query specific.
+    """
+    import json as _json
+
+    noise = [HumanMessage(content=f"条目 {index} 提到 a 或 股 其中之一", id=f"n{index}") for index in range(9)]
+    exact = HumanMessage(content="持仓 A股 的说明", id="exact")
+    scoped.state = {"messages": [exact]}
+    exact_id = _json.loads(history_search.func(scoped, "A股"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [*noise, exact], TaskContinuityConfig(enabled=True)),
+    }
+
+    rows = _json.loads(history_search.func(scoped, "A股"))["results"]
+    assert exact_id in [row["id"] for row in rows], f"the exact source must survive the result cap, got {[row['id'] for row in rows]}"
