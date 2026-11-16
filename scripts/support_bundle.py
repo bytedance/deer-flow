@@ -293,24 +293,29 @@ def _installed_dotenv_module(project_root: Path) -> Any:
     return None
 
 
-def _follow_dotenv_assignments(assignments: list[tuple[str, str]], environment: dict[str, str], loader: Any) -> dict[str, str]:
-    """Return the assignments a runtime dotenv load would apply.
+def _read_selected_env_file(selected_file: Path, environment: dict[str, str], loader: Any) -> dict[str, str] | None:
+    """Return the assignments the Gateway's dotenv load applies, or ``None``.
 
-    The Gateway reads these files through python-dotenv rather than the
-    launcher's shell view, and the two disagree in ways that decide which config
-    is loaded: python-dotenv expands only references the file assigns before it
-    and takes the last of two assignments to the same key. Mirroring that pass
-    keeps the bundle on the file the Gateway resolves.
+    ``load_selected_env_file`` hands the file to python-dotenv after the launcher
+    exported the checkout `.env`, so expansion sees those exports and only
+    `${NAME}` is substituted. Parsing the file the launcher's way first and then
+    handing python-dotenv the rewritten result expands a bare `$NAME` that the
+    Gateway leaves literal, which points the bundle at a file the Gateway never
+    reads.
     """
-    text = "".join(f"{name}={value}\n" for name, value in assignments)
+    try:
+        text = selected_file.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeError):
+        return None
     previous_environment = dict(os.environ)
     os.environ.clear()
     os.environ.update(environment)
     try:
-        return {name: str(value) for name, value in loader.dotenv_values(stream=StringIO(text)).items() if value is not None}
+        values = loader.dotenv_values(stream=StringIO(text))
     finally:
         os.environ.clear()
         os.environ.update(previous_environment)
+    return {name: str(value) for name, value in values.items() if value is not None}
 
 
 def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> dict[str, str]:
@@ -344,19 +349,19 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
         # A relative selector uses the Gateway's working directory, `backend/`.
         if not selected_file.is_absolute():
             selected_file = project_root / "backend" / selected_file
-        try:
-            text = selected_file.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeError):
-            text = None
-        if text is None:
-            return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
-        selected_assignments = parse_dotenv(text, environment)
         loader = _installed_dotenv_module(project_root)
         if loader is None:
-            for name, value in selected_assignments:
+            try:
+                text = selected_file.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError):
+                return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
+            for name, value in parse_dotenv(text, environment):
                 selected.setdefault(name, value)
         else:
-            for name, value in _follow_dotenv_assignments(selected_assignments, environment, loader).items():
+            assignments = _read_selected_env_file(selected_file, checkout_scope, loader)
+            if assignments is None:
+                return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
+            for name, value in assignments.items():
                 selected.setdefault(name, value)
     location = {name: selected[name] for name in CONFIG_LOCATION_ENV_VARS if name in selected}
     config_path = location.get("DEER_FLOW_CONFIG_PATH")
