@@ -11,6 +11,7 @@ import os
 import posixpath
 import shutil
 import stat
+import unicodedata
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -28,6 +29,13 @@ from deerflow.skills.security_static_scanner import (
 from deerflow.utils.host_paths import windows_incompatible_segment
 
 logger = logging.getLogger(__name__)
+
+# Mirror the path limits export.py applies to installed skills, so an archive
+# that cannot be listed or extracted fails as a validation error instead of an
+# OS error during installation.
+_MAX_MEMBER_PATH_BYTES = 1024
+_MAX_MEMBER_DEPTH = 32
+_MAX_MEMBER_SEGMENT_BYTES = 255
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
@@ -149,6 +157,11 @@ def safe_extract_skill_archive(
         # it lives in the extraction path every install goes through.
         raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
 
+    # Validate every member before writing anything, so an archive whose paths
+    # cannot form a file tree fails without leaving a partial install.
+    planned: list[tuple[zipfile.ZipInfo, tuple[str, ...]]] = []
+    seen_files: set[tuple[str, ...]] = set()
+    seen_dirs: set[tuple[str, ...]] = set()
     for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
@@ -158,14 +171,42 @@ def safe_extract_skill_archive(
             continue
 
         normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
-        for segment in PurePosixPath(normalized_name).parts:
+        parts = PurePosixPath(normalized_name).parts
+        if not parts or normalized_name in ("", "."):
+            raise ValueError(f"Archive member path is not extractable: {info.filename!r}")
+        if len(parts) > _MAX_MEMBER_DEPTH:
+            raise ValueError(f"Archive member path is too deep: {info.filename!r}")
+        if len(normalized_name.encode("utf-8")) > _MAX_MEMBER_PATH_BYTES:
+            raise ValueError(f"Archive member path is too long: {info.filename!r}")
+        for segment in parts:
+            if len(segment.encode("utf-8")) > _MAX_MEMBER_SEGMENT_BYTES:
+                raise ValueError(f"Archive member path segment is too long: {info.filename!r}")
             reason = windows_incompatible_segment(segment)
             if reason is not None:
                 # Extraction creates one host path component per segment; a
                 # Windows device name cannot become one, and the same names are
                 # already refused for support-file writes and skill names.
                 raise ValueError(f"Archive member path is not portable to Windows: {info.filename!r} ({reason})")
-        member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
+
+        # Compare NFC+casefolded keys so case-insensitive and normalization-
+        # sensitive filesystems cannot turn a distinct path into a collision.
+        key = tuple(unicodedata.normalize("NFC", part).casefold() for part in parts)
+        if any(key[:index] in seen_files for index in range(1, len(key))):
+            raise ValueError(f"Archive member path conflicts with a file member: {info.filename!r}")
+        if info.is_dir():
+            if key in seen_files:
+                raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
+            seen_dirs.add(key)
+        else:
+            if key in seen_dirs:
+                raise ValueError(f"Archive contains conflicting member paths: {info.filename!r}")
+            seen_files.add(key)
+        for index in range(1, len(key)):
+            seen_dirs.add(key[:index])
+        planned.append((info, parts))
+
+    for info, parts in planned:
+        member_path = dest_root.joinpath(*parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
         member_path.parent.mkdir(parents=True, exist_ok=True)

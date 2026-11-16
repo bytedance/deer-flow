@@ -948,3 +948,117 @@ class TestInstallSkillFromArchive:
         result = get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
         assert result["success"] is True
         assert result["skill_name"] == "my-skill"
+
+
+# ---------------------------------------------------------------------------
+# Unextractable member trees
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"a": "file", "a/b": "nested"},
+        {"a/b": "nested", "a": "file"},
+    ],
+)
+def test_safe_extract_rejects_file_and_directory_collisions(tmp_path, members):
+    zip_path = tmp_path / "collision.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+@pytest.mark.parametrize("name", ["", "."])
+def test_safe_extract_rejects_members_that_normalize_to_the_root(tmp_path, name):
+    zip_path = tmp_path / "root.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(name, "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="not extractable"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_allows_explicit_directory_before_nested_file(tmp_path):
+    zip_path = tmp_path / "ok.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a/", "")
+        zf.writestr("a/b.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        safe_extract_skill_archive(zf, dest)
+    assert (dest / "a" / "b.txt").read_text() == "x"
+
+
+def test_scan_archive_preflight_tolerates_empty_member_name(tmp_path):
+    from deerflow.skills.skillscan.orchestrator import scan_archive_preflight
+
+    zip_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("", "x")
+    result = scan_archive_preflight(zip_path)
+    assert result is not None
+
+
+@pytest.mark.parametrize(
+    "members",
+    [
+        {"Report": "x", "report/slides/lesson.pptx": "y"},
+        {"report/slides/lesson.pptx": "y", "Report": "x"},
+        {"Café": "x", "Café/slides/a.pptx": "y"},
+        {"Café/slides/a.pptx": "y", "Café": "x"},
+    ],
+)
+def test_safe_extract_rejects_case_and_unicode_collisions(tmp_path, members):
+    zip_path = tmp_path / "fold.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for name, content in members.items():
+            zf.writestr(name, content)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="conflict"):
+            safe_extract_skill_archive(zf, dest)
+    assert not any(dest.rglob("*"))
+
+
+def test_safe_extract_rejects_overlong_path_segment(tmp_path):
+    zip_path = tmp_path / "long-segment.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("x" * 300 + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="segment is too long"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_rejects_deep_paths(tmp_path):
+    zip_path = tmp_path / "deep.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("/".join(["d"] * 33) + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="too deep"):
+            safe_extract_skill_archive(zf, dest)
+
+
+def test_safe_extract_rejects_overlong_paths(tmp_path):
+    zip_path = tmp_path / "long-path.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("/".join(["d" * 40] * 30) + "/a.txt", "x")
+    dest = tmp_path / "out"
+    dest.mkdir()
+    with zipfile.ZipFile(zip_path) as zf:
+        with pytest.raises(ValueError, match="too long"):
+            safe_extract_skill_archive(zf, dest)
