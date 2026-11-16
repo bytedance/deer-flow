@@ -1,6 +1,4 @@
 import type { AIMessage, Message, Run } from "@langchain/langgraph-sdk";
-import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
-import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
@@ -21,6 +19,8 @@ import {
 import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import type { ThreadsClient } from "@langchain/langgraph-sdk/client";
+import { useStream } from "@langchain/langgraph-sdk/react";
 
 import { getAPIClient } from "../api";
 import { GatewayApiError } from "../api/errors";
@@ -66,6 +66,7 @@ import {
   searchThreadsByArchive,
   type ThreadMetadataPatch,
 } from "./api";
+import { isHistoryError, withHistoryErrorTagging } from "./history-error";
 import {
   dedupeMessagesByIdentity,
   insertByTrustedSeq,
@@ -2571,7 +2572,10 @@ export function useThreadStream({
   );
 
   const thread = useStream<AgentThreadState>({
-    client: getAPIClient(isMock),
+    // Tagged so `onError` can tell a failed history fetch from a refused run:
+    // the SDK reports both without run metadata, but only the refusal means
+    // the send never became a turn.
+    client: withHistoryErrorTagging(getAPIClient(isMock)),
     assistantId,
     threadId: onStreamThreadId,
     reconnectOnMount: true,
@@ -2778,7 +2782,10 @@ export function useThreadStream({
       // text and draft for a retry. `run` is only present once the Gateway
       // created the run (which is what `acceptPendingSend` records), so an
       // error carrying run metadata is a later stream failure, not this send.
-      if (!run) {
+      // A failed history fetch also arrives here without run metadata, but that
+      // send can still be accepted afterwards: settle it from its own
+      // run-creation result instead of rejecting it (#8092 review).
+      if (!run && !isHistoryError(error)) {
         rejectPendingSend(error);
       }
       if (pendingApprovalSubmissionRef.current) {

@@ -20,6 +20,7 @@ import {
   buildComposerDraftKey,
   readComposerDraft,
 } from "@/core/threads/composer-draft";
+import { markHistoryError } from "@/core/threads/history-error";
 import { useThreadStream } from "@/core/threads/hooks";
 
 // Drives the real composer through the real sendMessage, as the chat pages
@@ -217,4 +218,29 @@ it("does not reject an accepted send when its stream fails later", async () => {
   // the already-sent text back or resurrect the retired draft.
   await waitFor(() => expect(textbox().value).toBe(""));
   expect(storedDraft()).toBeUndefined();
+});
+
+it("settles a send that a failed history fetch reported from its run-creation result", async () => {
+  renderChat();
+  await submitAndWaitForDispatch();
+
+  // The SDK reports a failed `getHistory` through the same `onError`, without
+  // run metadata. That does not refuse the run: the send must stay pending and
+  // be settled by the run's own creation, or a delivered draft stays behind.
+  const historyError = new Error("HTTP 404");
+  markHistoryError(historyError);
+  await act(async () => {
+    streamMock.callbacks.onError?.(historyError, undefined);
+  });
+  expect(textbox().value).toBe("Keep this request");
+
+  await act(async () => {
+    streamMock.callbacks.onCreated?.({
+      thread_id: "thread-1",
+      run_id: "run-1",
+    });
+  });
+
+  await waitFor(() => expect(textbox().value).toBe(""));
+  await waitFor(() => expect(storedDraft()).toBeUndefined());
 });
