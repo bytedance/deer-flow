@@ -1366,6 +1366,52 @@ async def test_fair_batch_keeps_same_thread_fifo(sqlite_repos, cap):
     assert batch == ["a-older"]
 
 
+@pytest.mark.parametrize("status", ["running", "launching"])
+async def test_queue_age_cutoff_keeps_active_same_thread_fifo_blocker(sqlite_repos, status):
+    sf, task_repo, run_repo = sqlite_repos
+    now = datetime.now(UTC)
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-old-active",
+        user_id=OWNER_A,
+        status=status,
+        thread_id="reuse-thread",
+    )
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-blocked-queued",
+        user_id=OWNER_A,
+        thread_id="reuse-thread",
+    )
+    await _owned_occurrence(
+        task_repo,
+        run_repo,
+        "a-healthy-queued",
+        user_id=OWNER_A,
+        thread_id="other-thread",
+    )
+
+    # The timeout applies to waiting rows, not to an older active execution.
+    async with sf() as session:
+        blocker = await session.get(ScheduledTaskRunRow, "a-old-active")
+        assert blocker is not None
+        blocker.created_at = now - timedelta(hours=1)
+        await session.commit()
+
+    cutoff = now - timedelta(minutes=5)
+    batch = await run_repo.list_queued_runs(
+        limit=16,
+        per_user_max_concurrent_runs=2,
+        created_after=cutoff,
+    )
+
+    # The active run still blocks its thread. Its newer queued row must not
+    # consume the owner's one remaining slot ahead of unrelated healthy work.
+    assert [row["id"] for row in batch] == ["a-healthy-queued"]
+
+
 async def test_orphan_queued_row_is_still_drained(sqlite_repos):
     _sf, task_repo, run_repo = sqlite_repos
     await _owned_occurrence(task_repo, run_repo, "a-running", user_id=OWNER_A, status="running")
