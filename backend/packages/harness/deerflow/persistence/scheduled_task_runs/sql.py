@@ -880,6 +880,33 @@ class ScheduledTaskRunRepository:
                 return False
             if row.status in TERMINAL_RUN_STATUSES:
                 if row.run_id is None:
+                    # A newer occurrence may already own the active slot when
+                    # this late launch returns. Reviving this terminal row in
+                    # that case would violate uq_scheduled_task_run_active and
+                    # abort the launch path; preserve the terminal outcome but
+                    # attach the durable run for completion and later fencing.
+                    newer_active = await session.scalar(
+                        select(ScheduledTaskRunRow.id)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            ScheduledTaskRunRow.id != run_record_id,
+                            ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                        )
+                        .limit(1)
+                    )
+                    if newer_active is not None:
+                        # The terminal occurrence never started; its durable
+                        # run row carries the real start. Backfilling
+                        # started_at here would place it after finished_at.
+                        row.run_id = run_id
+                        await session.commit()
+                        logger.warning(
+                            "Scheduled task-run %s launched durable run %s while occurrence %s holds the active slot; keeping the terminal status",
+                            run_record_id,
+                            run_id,
+                            newer_active,
+                        )
+                        return True
                     # Timeout/pause can terminalize a claim that recovery
                     # briefly returned to ``queued`` while Gateway admission
                     # was still completing.  A returned durable run is the
