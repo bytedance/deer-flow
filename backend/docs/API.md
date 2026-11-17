@@ -1986,7 +1986,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
-- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+- `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie. A `new_email` that another account already uses returns `400` `email_already_exists`, including an address registered while the request runs, and changes nothing.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
