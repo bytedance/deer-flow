@@ -60,33 +60,23 @@ pnpm catalog:sync   # after a change to the capability catalog
 
 ## Sidebar menu
 
-- **`nav-registry.ts` is the one list of core entries** the sidebar and dialog
-  render from. Add an item with a stable `key`, `order`, `t` label and gate;
-  renaming a shipped key drops its saved position.
+- **`nav-registry.ts` is the one list of core entries.** Add an item with a
+  stable `key`, `order`, label and gate; renaming a shipped key drops its saved
+  position.
 - **Pick the treatment by what the destination can still do.** `isEnabled:
-false` hides an entry users cannot access (Usage without `runs:read`).
-  `isDisabled: true` greys a page that cannot work (Agents with `agents_api`
-  off) and needs a `disabledReason`; the entry stays visible and movable. A
-  usable page under a degraded state stays a normal link with an in-page notice
-  (Scheduled tasks while the scheduler is paused).
-- **`NavGateContext` has one boolean per real switch**: `{ user, staticMode,
-agentsEnabled }`. Reuse the feature's own cache hook (e.g.
-  `useAgentsApiEnabled`) in `nav-gate.ts`; do not query `/api/features` again or
-  call feature hooks from the sidebar and dialog.
-- **`nav-layout.ts` owns the stored shape.** Pinned entries (**New chat**,
-  header only, `showInMenu: false`) never enter it; disabled entries stay
-  visible and follow it. The parser tolerates unknown, duplicate and malformed
-  keys; a saved layout outlives them.
-- **Saving merges hidden keys.** `mergeNavLayout` reattaches a hidden key to its
-  visible neighbor (or the group end when none remain), so another account or a
-  newer feature keeps that position.
+false` hides an entry users cannot access; `isDisabled: true` greys a page
+  that cannot work and needs a `disabledReason`; a degraded page stays a normal
+  link with an in-page notice.
+- **`NavGateContext` carries one boolean per real switch.** Reuse the feature's
+  own cache hook in `nav-gate.ts`; do not call feature hooks from the sidebar or
+  dialog.
+- **`nav-layout.ts` owns the stored shape.** Pinned entries never enter it;
+  disabled entries stay in it. `mergeNavLayout` reattaches each hidden key to its
+  visible neighbor, so another account keeps that position.
 - **A cross-group drag keeps both `SortableContext` lists fixed.** Moving the
-  active row between them remounts refs and React loops ("Maximum update depth
-  exceeded"). Show a `dropTarget` insertion line and commit on drop.
-- **Plugin pages stay in `PluginNavigation`**: they follow the core menu and are
-  not customizable yet; that needs `namespace/surfaceId` addressing.
-- **The layout is device-local.** Accounts in one browser share it; another
-  browser does not; server sync is a separate change.
+  active row remounts refs and React loops ("Maximum update depth exceeded").
+  Show a `dropTarget` line and commit on drop.
+- **Plugin pages stay in `PluginNavigation`** and are not customizable yet.
 
 ## Composer references
 
