@@ -627,3 +627,55 @@ def test_stopped_task_info_detaches_goal_verdict_and_keeps_identity():
     with pytest.raises(TypeError):
         stopped.stop.goal_verdict["satisfied"] = True  # type: ignore[index]
     assert hash(stopped) == hash(info)
+    assert stopped == info
+    assert {info: "span"}[stopped] == "span"
+
+
+def test_task_info_with_read_only_data_survives_asdict_deepcopy_and_pickle():
+    import copy
+    import dataclasses
+    import json
+    import pickle
+
+    from deerflow.extensions.notify import read_only_copy, stopped_task_info
+
+    info = dataclasses.replace(_info(), metadata=read_only_copy({"scheduled_task_id": "t1", "labels": {"team": ["a", "b"]}}))
+    stopped = stopped_task_info(info, status="success", goal_verdict={"satisfied": True, "evidence": [{"k": "v"}]})
+
+    for value in (TaskInfo(task_id="t", run_id="r", thread_id="th", kind="lead"), info, stopped):
+        exported = dataclasses.asdict(value)
+        json.dumps(exported)
+        assert copy.deepcopy(value) == value
+        assert pickle.loads(pickle.dumps(value)) == value
+    exported = dataclasses.asdict(stopped)
+    assert exported["metadata"] == {"scheduled_task_id": "t1", "labels": {"team": ("a", "b")}}
+    assert exported["stop"]["goal_verdict"]["evidence"][0] == {"k": "v"}
+    assert pickle.loads(pickle.dumps(stopped)).stop == stopped.stop
+
+
+def test_read_only_copy_freezes_nested_values():
+    from deerflow.extensions.notify import read_only_copy
+
+    source = {"labels": {"team": "a"}, "items": [{"k": "v"}]}
+    snapshot = read_only_copy(source)
+    source["labels"]["team"] = "b"
+    assert snapshot["labels"]["team"] == "a"
+    for mutate in (
+        lambda: snapshot.__setitem__("x", 1),
+        lambda: snapshot["labels"].pop("team"),
+        lambda: snapshot["labels"].update(team="b"),
+        lambda: snapshot["items"][0].clear(),
+        lambda: snapshot.setdefault("x", 1),
+    ):
+        with pytest.raises(TypeError):
+            mutate()
+    with pytest.raises(AttributeError):
+        snapshot["items"].append({})  # type: ignore[attr-defined]
+    assert snapshot == {"labels": {"team": "a"}, "items": ({"k": "v"},)}
+
+
+def test_stopped_task_info_carries_persisted_flag():
+    from deerflow.extensions.notify import stopped_task_info
+
+    assert stopped_task_info(_info(), status="success").stop.persisted is True
+    assert stopped_task_info(_info(), status="success", persisted=False).stop.persisted is False

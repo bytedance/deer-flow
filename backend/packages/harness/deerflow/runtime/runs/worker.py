@@ -2336,6 +2336,7 @@ async def run_agent(
                                 status=record.status.value,
                                 error=record.error,
                                 goal_verdict=record.goal_verdict,
+                                persisted=not record.ownership_lost and getattr(record, "terminal_status_persisted", True),
                             ),
                             lead_task_outcome(
                                 aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),

@@ -166,6 +166,11 @@ Frozen dataclass, set on the `TaskInfo` passed to `on_task_stop`.
 | `status`       | `str`                       | required |
 | `error`        | `str \| None`               | `None`   |
 | `goal_verdict` | `Mapping[str, Any] \| None` | `None`   |
+| `persisted`    | `bool`                      | `True`   |
+
+### `ReadOnlyDict`
+
+The type of `TaskInfo.metadata` and `TaskStopDetail.goal_verdict`: a `dict` subclass that rejects item assignment and deletion. Nested mappings are `ReadOnlyDict` too and lists become tuples. `dataclasses.asdict()`, `copy.deepcopy()`, pickling and `json.dumps()` work; `dict(value)` returns a mutable copy.
 
 ### `TaskOutcome`
 

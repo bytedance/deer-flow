@@ -88,15 +88,20 @@ class TaskLifecycleContributor(Protocol):
 
 ### TaskStopDetail
 
-`info.stop` 携带结果背后的细节。Lead 运行的状态在图结束后才由宿主决定（模型重试后仍失败时，图会正常结束），因此基于回调的追踪看不到它；`on_task_stop` 在状态持久化之后运行。
+`info.stop` 携带结果背后的细节。Lead 运行的状态在图结束后才由宿主决定（模型重试后仍失败时，图会正常结束），因此基于回调的追踪看不到它；`on_task_stop` 在宿主尝试持久化状态之后运行。
 
 | 字段           | Lead 运行                                           | 子 Agent                                       |
 | -------------- | --------------------------------------------------- | ---------------------------------------------- |
-| `status`       | 运行状态：`success`、`error`、`timeout` 或 `interrupted` | `completed`、`failed`、`cancelled` 或 `timed_out` |
+| `status`       | 运行状态：`success`、`error`、`timeout`、`interrupted` 或 `waiting_for_input` | `completed`、`failed`、`cancelled` 或 `timed_out` |
 | `error`        | 运行上保存的简短错误信息（如有）                    | 执行的错误信息（如有）                         |
 | `goal_verdict` | 评估过目标时，目标评估器结论的只读副本              | `None`                                         |
+| `persisted`    | 宿主无法确认终态写入时为 `False`                    | `True`                                         |
 
-带目标的定时运行，在状态为 `success` 但 `goal_verdict` 缺失或未 `satisfied` 时记为未达成（unmet）。`stop` 只设置在传给 `on_task_stop` 的 `info` 上；任务存储中的 `TaskInfo` 保持 `stop=None`。
+`waiting_for_input` 是可恢复的暂停，而非终态失败：运行因审批或向用户提问而停下，其粗粒度结果为 `failed`。请读取 `stop.status` 区分两者；回应请求会启动一个新的运行，并有各自的开始与停止。
+
+`persisted=False` 表示运行存储拒绝了终态写入，或 worker 失去了运行的所有权。此时 `status` 是 worker 暂存的状态，存储中的运行可能仍为 `running` 或带有其他 worker 的结果。请照常释放按任务保存的状态，但不要把该状态当作最终结果上报。
+
+带目标的定时运行，在状态为 `success` 但 `goal_verdict` 缺失或未 `satisfied` 时记为未达成（unmet）。`stop` 只设置在传给 `on_task_stop` 的 `info` 上；任务存储中的 `TaskInfo` 保持 `stop=None`。`stop` 与 `metadata` 不参与相等比较和哈希，因此停止时的 `info` 能找到以开始时的 `info` 为键保存的状态。两者都是 `ReadOnlyDict` 快照：嵌套映射为只读，列表转为元组，`dataclasses.asdict()` 和 `json.dumps()` 均可使用。
 
 ### 示例
 

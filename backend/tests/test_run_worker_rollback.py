@@ -2033,6 +2033,59 @@ async def test_task_stop_carries_final_status_error_and_run_metadata_for_llm_err
     assert info.stop.error == "Connection error."
     assert info.stop.goal_verdict is None
     assert info.metadata == start.metadata
+    assert info.stop.persisted is True
+    assert info == start
+
+
+@pytest.mark.anyio
+async def test_task_stop_flags_a_staged_status_the_run_store_did_not_confirm(monkeypatch):
+    """A rejected terminal write must not reach observers as a confirmed final status."""
+    from deerflow_extension_api import TaskOutcome
+
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", "researcher")
+    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
+    original_persist = run_manager._persist_status
+
+    async def reject_terminal_writes(rec, status, **kwargs):
+        if status not in (RunStatus.pending, RunStatus.running):
+            return False
+        return await original_persist(rec, status, **kwargs)
+
+    monkeypatch.setattr(run_manager, "_persist_status", reject_terminal_writes)
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="done")]}
+
+    stops = []
+
+    class Recorder:
+        async def on_task_stop(self, _app_store, _task_store, info, outcome):
+            stops.append((info, outcome))
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:task-stop-unconfirmed"):
+        registry.task_lifecycle(Recorder())
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, extensions=registry.build()),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.terminal_status_persisted is False
+    [(info, outcome)] = stops
+    assert outcome is TaskOutcome.COMPLETED
+    assert info.stop is not None
+    assert info.stop.status == "success"
+    assert info.stop.persisted is False
 
 
 @pytest.mark.anyio

@@ -10,13 +10,13 @@ import logging
 import threading
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from types import MappingProxyType
 from typing import Any
 
 from deerflow_extension_api import (
     EXTENSION_TASK_STORE_KEY,
     CompactionEvent,
     ExtensionData,
+    ReadOnlyDict,
     SystemModelRequest,
     SystemModelResult,
     SystemOperationKind,
@@ -55,8 +55,12 @@ def subagent_task_outcome(*, cancelled: bool, succeeded: bool) -> TaskOutcome:
 
 
 def read_only_copy(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    """Detach host-owned run data before handing it to extensions."""
-    return MappingProxyType(copy.deepcopy(dict(value or {})))
+    """Detach host-owned run data before handing it to extensions.
+
+    Every nested level is frozen, so observers that share one snapshot cannot
+    change what the next observer reads.
+    """
+    return ReadOnlyDict(copy.deepcopy(dict(value or {})))
 
 
 def stopped_task_info(
@@ -65,6 +69,7 @@ def stopped_task_info(
     status: str,
     error: str | None = None,
     goal_verdict: Mapping[str, Any] | None = None,
+    persisted: bool = True,
 ) -> TaskInfo:
     """Return ``info`` carrying the task's final state, for ``on_task_stop``."""
     return dataclasses.replace(
@@ -73,6 +78,7 @@ def stopped_task_info(
             status=status,
             error=error,
             goal_verdict=read_only_copy(goal_verdict) if goal_verdict is not None else None,
+            persisted=persisted,
         ),
     )
 

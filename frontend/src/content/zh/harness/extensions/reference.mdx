@@ -166,6 +166,11 @@ class TaskLifecycleContributor(Protocol):
 | `status`       | `str`                       | 必填   |
 | `error`        | `str \| None`               | `None` |
 | `goal_verdict` | `Mapping[str, Any] \| None` | `None` |
+| `persisted`    | `bool`                      | `True` |
+
+### `ReadOnlyDict`
+
+`TaskInfo.metadata` 与 `TaskStopDetail.goal_verdict` 的类型：拒绝条目赋值和删除的 `dict` 子类。嵌套映射同样是 `ReadOnlyDict`，列表转为元组。`dataclasses.asdict()`、`copy.deepcopy()`、pickle 和 `json.dumps()` 均可使用；`dict(value)` 返回可变副本。
 
 ### `TaskOutcome`
 

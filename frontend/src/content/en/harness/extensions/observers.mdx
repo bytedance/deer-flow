@@ -89,15 +89,20 @@ The mapping is deliberately conservative. A subagent that hit its token or turn 
 
 ### TaskStopDetail
 
-`info.stop` carries the detail behind the outcome. The host decides a lead run's status after the graph has ended (a model that fails after retries ends the graph normally), so callback-based tracing cannot see it; `on_task_stop` runs after it is persisted.
+`info.stop` carries the detail behind the outcome. The host decides a lead run's status after the graph has ended (a model that fails after retries ends the graph normally), so callback-based tracing cannot see it; `on_task_stop` runs after the host has tried to persist it.
 
 | Field          | Lead run                                                                 | Subagent                                                  |
 | -------------- | ------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `status`       | The run status: `success`, `error`, `timeout` or `interrupted`           | `completed`, `failed`, `cancelled` or `timed_out`         |
+| `status`       | The run status: `success`, `error`, `timeout`, `interrupted` or `waiting_for_input` | `completed`, `failed`, `cancelled` or `timed_out` |
 | `error`        | The short error message stored on the run, if any                        | The execution's error message, if any                     |
 | `goal_verdict` | A read-only copy of the goal evaluator's verdict when a goal was evaluated | `None`                                                  |
+| `persisted`    | `False` when the host could not confirm the terminal write               | `True`                                                    |
 
-A scheduled run with a goal objective counts as unmet when its status is `success` but `goal_verdict` is missing or not `satisfied`. `stop` is set only on the `info` passed to `on_task_stop`; the `TaskInfo` in the task store keeps `stop=None`.
+`waiting_for_input` is a resumable pause, not a terminal failure: the run stopped for an approval or a question to the user, and its outcome is the coarse `failed`. Read `stop.status` to tell the two apart; answering the request starts a new run with its own start and stop.
+
+With `persisted=False`, the run store rejected the terminal write or the worker lost ownership of the run. `status` is then the worker's staged status, and the stored run may still say `running` or carry another worker's result. Release your per-task state as usual, but do not report the status as final.
+
+A scheduled run with a goal objective counts as unmet when its status is `success` but `goal_verdict` is missing or not `satisfied`. `stop` is set only on the `info` passed to `on_task_stop`; the `TaskInfo` in the task store keeps `stop=None`. `stop` and `metadata` are excluded from equality and hashing, so the stop `info` finds state you stored under the start `info`. Both are `ReadOnlyDict` snapshots: nested mappings are read-only and lists become tuples, and `dataclasses.asdict()` and `json.dumps()` work on them.
 
 ### Example
 
