@@ -2030,6 +2030,10 @@ sandbox:
 # shared by ordinary `task` calls and durable batches. Waiting work is async;
 # queued subagents do not occupy a scheduler thread.
 subagent_runtime:
+  # Optional history for ordinary task delegates under a persistent parent
+  # graph. Currently supports only file-backed SQLite checkpoint storage.
+  # Restart Gateway after changing; independent of run_events.backend.
+  checkpoint_enabled: false
   max_running: 3
   max_queued: 64
   admission_policy: queue       # queue or reject when all slots are occupied
