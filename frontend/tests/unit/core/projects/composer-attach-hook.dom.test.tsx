@@ -45,6 +45,7 @@ function ComposerProbe({ threadId }: { threadId: string }) {
 }
 
 afterEach(() => {
+  rs.restoreAllMocks();
   cleanup();
   observed.current = [];
   observed.set = () => {
@@ -167,11 +168,9 @@ test("clearing after a successful send drops the pending list for good", () => {
 });
 
 test("a failed storage write still updates the mounted composer", () => {
-  const setItem = rs
-    .spyOn(window.sessionStorage, "setItem")
-    .mockImplementation(() => {
-      throw new DOMException("full", "QuotaExceededError");
-    });
+  rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+    throw new DOMException("full", "QuotaExceededError");
+  });
 
   render(
     <StrictMode>
@@ -185,17 +184,13 @@ test("a failed storage write still updates the mounted composer", () => {
     }),
   ).not.toThrow();
   expect(observed.current).toEqual([ATTACHMENT]);
-
-  setItem.mockRestore();
 });
 
 test("a failed storage removal still clears the mounted composer", () => {
   stageProjectAttachment("thread-1", ATTACHMENT);
-  const removeItem = rs
-    .spyOn(window.sessionStorage, "removeItem")
-    .mockImplementation(() => {
-      throw new DOMException("blocked", "SecurityError");
-    });
+  rs.spyOn(window.sessionStorage, "removeItem").mockImplementation(() => {
+    throw new DOMException("blocked", "SecurityError");
+  });
 
   render(
     <StrictMode>
@@ -210,6 +205,4 @@ test("a failed storage removal still clears the mounted composer", () => {
     }),
   ).not.toThrow();
   expect(observed.current).toEqual([]);
-
-  removeItem.mockRestore();
 });
