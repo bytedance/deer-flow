@@ -34,6 +34,8 @@ _ALL_PERMISSIONS = [
     Permissions.MEMORY_WRITE,
     Permissions.AGENTS_READ,
     Permissions.AGENTS_WRITE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,

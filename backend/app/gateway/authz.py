@@ -85,6 +85,10 @@ class Permissions:
     AGENTS_READ = "agents:read"
     AGENTS_WRITE = "agents:write"
 
+    # Scheduled task configuration and history
+    SCHEDULES_READ = "schedules:read"
+    SCHEDULES_WRITE = "schedules:write"
+
 
 class AuthContext:
     """Authentication context for the current request.
@@ -169,6 +173,8 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.MEMORY_WRITE,
     Permissions.AGENTS_READ,
     Permissions.AGENTS_WRITE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
     Permissions.PROJECTS_READ,
     Permissions.PROJECTS_WRITE,
     Permissions.PROJECTS_DELETE,

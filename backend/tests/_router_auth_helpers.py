@@ -54,6 +54,8 @@ _STUB_PERMISSIONS: list[str] = [
     Permissions.MEMORY_WRITE,
     Permissions.AGENTS_READ,
     Permissions.AGENTS_WRITE,
+    Permissions.SCHEDULES_READ,
+    Permissions.SCHEDULES_WRITE,
 ]
 
 

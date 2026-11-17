@@ -517,6 +517,82 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
     assert is_pat_allowed_route("GET", "/api/threads") is False
 
 
+def test_pat_agent_and_schedule_policy_admits_scoped_routes():
+    """Agent and scheduler routes stay explicit in the PAT boundary.
+
+    The route decorators below the middleware enforce the new resource scopes
+    and the existing thread/run permissions. This assertion keeps a future
+    route addition from becoming PAT-reachable without a deliberate policy
+    entry, while preserving the session-only user-profile surface.
+    """
+    from app.gateway.auth.pat import is_pat_allowed_route
+
+    allowed = [
+        ("GET", "/api/agents"),
+        ("POST", "/api/agents"),
+        ("GET", "/api/agents/check"),
+        ("POST", "/api/agents/import"),
+        ("GET", "/api/agents/researcher"),
+        ("PUT", "/api/agents/researcher"),
+        ("DELETE", "/api/agents/researcher"),
+        ("GET", "/api/agents/researcher/export"),
+        ("GET", "/api/agent-tool-groups"),
+        ("GET", "/api/scheduled-tasks"),
+        ("POST", "/api/scheduled-tasks"),
+        ("POST", "/api/scheduled-tasks/preview-cron"),
+        ("GET", "/api/scheduled-tasks/task-1"),
+        ("PATCH", "/api/scheduled-tasks/task-1"),
+        ("DELETE", "/api/scheduled-tasks/task-1"),
+        ("POST", "/api/scheduled-tasks/task-1/pause"),
+        ("POST", "/api/scheduled-tasks/task-1/resume"),
+        ("POST", "/api/scheduled-tasks/task-1/trigger"),
+        ("GET", "/api/scheduled-tasks/task-1/runs"),
+        ("GET", "/api/threads/t1/scheduled-tasks"),
+        ("GET", "/api/threads/t1/scheduled-task-events"),
+    ]
+    for method, path in allowed:
+        assert is_pat_allowed_route(method, path), f"{method} {path} must be PAT-admitted"
+
+    denied = [
+        ("GET", "/api/user-profile"),
+        ("PUT", "/api/user-profile"),
+        ("GET", "/api/agents/import"),
+        ("GET", "/api/agents/researcher/export/extra"),
+        ("GET", "/api/scheduled-tasks/preview-cron"),
+        ("GET", "/api/scheduled-tasks/task-1/unknown"),
+        ("POST", "/api/threads/t1/scheduled-tasks"),
+    ]
+    for method, path in denied:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} must stay PAT-denied"
+
+
+def test_pat_agent_and_schedule_policy_matches_mounted_routes():
+    """Every mounted agent and schedule route is explicitly PAT-admitted."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers import agents, scheduled_tasks
+
+    def concrete(path: str) -> str:
+        return path.replace("{name}", "researcher").replace("{task_id}", "task-1").replace("{thread_id}", "t1")
+
+    for router in (agents.router, scheduled_tasks.router):
+        for route in router.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            path = concrete(route.path)
+            for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+                if route.path in {"/api/user-profile"}:
+                    assert not is_pat_allowed_route(method, path)
+                else:
+                    assert is_pat_allowed_route(method, path), f"{method} {path} is implemented but PAT-denied"
+
+
+def test_pat_scope_validation_accepts_agent_and_schedule_scopes(client):
+    created = _create_pat(client, scopes=["agents:read", "agents:write", "schedules:read", "schedules:write"])
+    assert created["scopes"] == ["agents:read", "agents:write", "schedules:read", "schedules:write"]
+
+
 def test_pat_runs_policy_admits_exactly_the_mounted_routes():
     """The runs subtree is enumerated, not wildcarded: every GET/POST route
     the thread_runs router actually implements is admitted (derived from the

@@ -92,7 +92,8 @@ Content-Type: application/json
 ```
 
 - `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
-  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`, `agents:read`,
+  `agents:write`, `schedules:read`, `schedules:write`. A PAT can only
   *narrow* its owning user's permissions, never widen them.
 - `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
 
@@ -138,7 +139,8 @@ Revocation is immediate.
   creation (the default `reject` stays at `runs:create`). Joining a run's
   stream is pure observation — an observer disconnecting never cancels the run.
 - **Route-level default-deny:** PAT requests are admitted only to the
-  thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
+  thread/run lifecycle routes and the explicitly scoped agent and scheduled-task
+  routes — `POST /api/threads`
   (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
   /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
   `branches` subroutes, and exactly the implemented `/runs` subroutes
@@ -149,7 +151,12 @@ Revocation is immediate.
   `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
-  Every other authenticated route — memory, agents, models, MCP/skills
+  Agent access covers the user-scoped `/api/agents` catalog, tool-group
+  metadata and package import/export routes. Scheduled-task access covers
+  `/api/scheduled-tasks` and the thread schedule history routes. These require
+  `agents:read|write` or `schedules:read|write` together with the existing
+  thread/run permissions enforced by each handler.
+  Every other authenticated route — memory, user profiles, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
@@ -1738,7 +1745,9 @@ GET /api/threads/{thread_id}/artifacts/{path}
 
 Owner-scoped task management for `/workspace/scheduled-tasks`. Reads need
 `threads:read`; mutations need `threads:write`, and create, update, resume and
-trigger also need `runs:create`.
+trigger also need `runs:create`. PAT callers additionally need
+`schedules:read` for reads and `schedules:write` for mutations. The existing
+thread and run permissions still apply to PAT requests.
 
 ```http
 GET    /api/scheduled-tasks
