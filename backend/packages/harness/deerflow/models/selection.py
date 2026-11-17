@@ -71,9 +71,12 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
             candidates = [model for model in models if _matches(model_name, model)]
     else:
         candidates = [model for model in models if _matches(query, model)]
-    # "Use Python to ..." is an ordinary task. Unknown versioned or explicitly
-    # named models, however, must not fall through to a misleading model reply.
-    if not candidates and model_name is None and not re.search(r"\bv\d|模型|\bmodel\b", query, re.IGNORECASE):
+    # "Use Python to ..." is an ordinary task. A versioned query ("v4.1") still
+    # names a model the user expects, so it must not fall through to a run on
+    # the default. The noun alone is task wording: "a regression model" and
+    # "the attached model" describe the work, and treating them as a missing
+    # model name would block the request.
+    if not candidates and model_name is None and not re.search(r"\bv\d", query, re.IGNORECASE):
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:

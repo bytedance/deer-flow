@@ -84,6 +84,23 @@ def test_ordinary_tasks_quotes_and_conditional_text_are_not_controls(text):
     assert resolve_model_control(text, [DS, OPUS])["status"] == "none"
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use a regression model to analyze these sales figures",
+        "Use a data model to design the database schema",
+        "Use the attached model to forecast next month's revenue",
+        "Please use a statistical model to explain the results",
+        "Use Python 3.11 to run the script",
+        "用回归模型分析这些销售数据",
+    ],
+)
+def test_model_as_a_common_noun_stays_task_text(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    assert result["task_offset"] == 0
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"
