@@ -1346,7 +1346,9 @@ async def test_cancelling_a_recovered_workflow_keeps_child_cleanup_authorized(pl
         assert runs.entered.is_set(), "recovered workflow never re-admitted its child"
         # The delegated handle is the only authorized path to the running child;
         # revoking before cleanup would strand it in needs_reconciliation.
-        assert (await actions["cancel"]({"run_id": run_id}, context(runs)))["status"] == "cancelling"
+        # Cancel on the replacement service: the fixture's actions are bound to
+        # the original, which stop() already made unavailable.
+        assert (await replacement.cancel({"run_id": run_id}, context(runs)))["status"] == "cancelling"
         await asyncio.wait_for(replacement.wait_idle(run_id), 10)
         final = await replacement.get({"run_id": run_id}, context(runs))
         assert final["status"] == "cancelled", (final.get("error"), [(s["step_id"], s["status"], s.get("error")) for s in final["steps"]])
