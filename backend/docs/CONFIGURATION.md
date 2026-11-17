@@ -983,6 +983,8 @@ tools:
     # api_key: $TAVILY_API_KEY  # Optional
 ```
 
+Tavily search and fetch initialize their HTTPS clients on a worker thread so TLS trust loading does not block other agent runs. A tool cancelled during initialization closes its client before returning without sending a request.
+
 For Tavily, `include_domains` and `exclude_domains` are deployment-only options
 read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
 For a non-empty `include_domains`, DeerFlow also sends `include_domains_mode: filter`
