@@ -160,6 +160,8 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
     schema change. Entries are keyed by both the config ``name`` and the
     provider ``model`` id (plus lowercase variants), because
     ``token_usage_by_model`` buckets carry the provider-reported model name.
+    It reads the live config, so async routes call it through
+    ``asyncio.to_thread``.
     """
     try:
         models = get_app_config().models
@@ -339,7 +341,7 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
         run_where += (RunRow.user_id == user_id,)
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
 
     async with sf() as session:
         total_runs = await session.scalar(select(func.count()).select_from(RunRow).where(*run_where)) or 0
@@ -430,7 +432,7 @@ async def console_runs(
     async with sf() as session:
         rows = (await session.execute(stmt)).all()
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
     has_more = len(rows) > limit
     now = datetime.now(UTC)
     items: list[ConsoleRunItem] = []
@@ -501,7 +503,7 @@ async def console_usage(
         d = (start_local + timedelta(days=i)).isoformat()
         day_buckets[d] = ConsoleUsageDay(date=d)
 
-    pricing = _build_pricing_map()
+    pricing = await asyncio.to_thread(_build_pricing_map)
     by_model: dict[str, ConsoleUsageModelBreakdown] = {}
     total_tokens = 0
     total_runs = 0

@@ -21,7 +21,9 @@ Current MVP capabilities:
 - Persist a due execution as `queued` when its reused thread or the global execution budget is busy, then launch it when capacity is available; queued occurrences survive Gateway restarts and fail after `scheduler.queue_timeout_seconds`
 - Retrying a busy scheduled task keeps its execution slot while an earlier recovery pass is still in progress.
 - A scheduled run whose completion hook fails is finalized from its durable terminal run on the next scheduler poll instead of staying `running` until a restart.
+- A storage or bookkeeping error on one occurrence during queue cleanup or dispatch is logged without stopping the remaining occurrences and healthy due tasks in that poll. The affected occurrence remains subject to normal queue and lease recovery; persistent storage failures can delay its recovery. A run that has exceeded `scheduler.queue_timeout_seconds` never starts while cleanup is retried, and expired rows do not consume capacity or fair-queue slots from healthy waiting work; they stay queued until a later timeout sweep records the skip.
 - A recurring task whose saved schedule can no longer be computed (for example, its timezone is missing from the time zone database after an upgrade) is paused with the reason as its last error, and every other task keeps running. Resuming it reports the problem until you fix the schedule.
+- A late failure or busy-thread retry from a recovered scheduled launch no longer releases the execution slot of the newer claim that replaced it.
 - Share execution slots fairly between task owners: one owner may have at most `scheduler.max_concurrent_runs_per_user` scheduled runs starting or running at a time (default 2, never more than `max_concurrent_runs`; `0` turns the per-owner cap off), and the waiting queue is drained owner by owner, so one owner's backlog never holds back another owner's run. A run that waits longer than `scheduler.queue_timeout_seconds` is skipped, and its history reads "Skipped: it waited too long for a free slot"
 - Freeze a task's definition while an occurrence is `queued`, `launching`, or `running`, so a durable occurrence cannot silently pick up a different prompt, thread, or schedule; transitioning a task to paused or deleting it cancels an existing waiting occurrence, while `launching`/`running` work must finish before those mutations are retried and an explicit manual trigger may still wait and run without resuming a paused schedule
 - Pause, resume, trigger, inspect history, and delete tasks
@@ -46,6 +48,8 @@ Current MVP limits:
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
 In the task form, switching an hourly, daily, weekly, or monthly schedule to **Custom cron** starts from its current timing, including selected weekdays or day of the month. Switching back to Custom cron after preset edits uses those edits rather than an older expression.
+
+Presets cover minute 0-59, hour 0-23 and day of month 1-31. An expression outside those ranges stays Custom and keeps its original text. Creating or duplicating a task with an invalid expression, or updating its schedule configuration while the expression is invalid, returns `422` from the Gateway. Editing only other fields, such as the title, leaves the schedule configuration out of the update request and does not revalidate the unchanged expression.
 
 ## Control proactive IM notifications
 

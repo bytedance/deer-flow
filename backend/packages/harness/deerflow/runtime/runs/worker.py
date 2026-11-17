@@ -62,6 +62,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import (
+    AGENT_AUTH_CONTEXT_KEY,
     CHECKPOINT_AGENT_NAME_METADATA_KEY,
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
@@ -359,6 +360,9 @@ async def _persist_delivery_receipt(
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 _RECURSION_CAPPED_STOP_REASON = "recursion_capped"
+# Stream error frames and the /wait error envelope share one name for a run that
+# ends in error without an exception; the Gateway spells it the same way.
+_RUN_ERROR_NAME = "RunError"
 _RECURSION_CAPPED_LISTED_OUTPUTS = 5
 
 
@@ -624,6 +628,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             CONVERSATION_READER_CONTEXT_KEY,
             SCHEDULER_CAPABILITY_CONTEXT_KEY,
             AGENT_RUNS_CONTEXT_KEY,
+            AGENT_AUTH_CONTEXT_KEY,
             "__run_input_control",
             "__tool_approval_runtime",
             "_hitl_disabled_resume_escape",
@@ -657,6 +662,7 @@ def _build_runtime_context(
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     scheduler_capability: SchedulerRunCapability | None = None,
+    agent_mcp_authority: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -686,6 +692,8 @@ def _build_runtime_context(
         runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if scheduler_capability is not None:
         runtime_ctx[SCHEDULER_CAPABILITY_CONTEXT_KEY] = scheduler_capability
+    if agent_mcp_authority is not None:
+        runtime_ctx[AGENT_AUTH_CONTEXT_KEY] = agent_mcp_authority
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -751,6 +759,7 @@ class RunContext:
     conversation_reader: Any | None = field(default=None)
     agent_runs: Any | None = field(default=None)
     scheduler_capability: SchedulerRunCapability | None = field(default=None)
+    agent_mcp_authority: Any | None = field(default=None)
     # Server-selected occurrence identity. Metadata alone never activates a goal.
     scheduled_task_runtime: Mapping[str, Any] | None = field(default=None)
     # Host-only preflight under durable run ownership; failures reject execution.
@@ -765,6 +774,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(SCHEDULER_CAPABILITY_CONTEXT_KEY, None)
         configurable.pop(AGENT_RUNS_CONTEXT_KEY, None)
+        configurable.pop(AGENT_AUTH_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -1376,6 +1386,7 @@ async def run_agent(
             ctx.agent_runs,
             thread_incarnation=thread_incarnation,
             scheduler_capability=ctx.scheduler_capability,
+            agent_mcp_authority=ctx.agent_mcp_authority,
         )
         # A disabled all-reject escape still needs the HITL hook to consume the
         # pending interrupt. The assembly marker makes that hook deny rather
@@ -1871,6 +1882,12 @@ async def run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
+            # Deliberately no `error` frame here, unlike the delivery check below.
+            # The fallback was streamed and stored as a visible assistant message
+            # carrying the provider failure (tagged `deerflow_error_fallback`), so
+            # this turn never looked like a silent success; a frame would only
+            # duplicate that notice. The record still commits `error` for
+            # accounting and retry purposes.
             error_msg = llm_error_fallback_message
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
@@ -1929,6 +1946,17 @@ async def run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # The run record is terminal `error`, so the stream must say the
+                # same thing: the web UI raises its run-failure toast only for an
+                # `error` frame, and streaming IM channels mark a turn failed only
+                # on that frame. Without it they report a successful turn while
+                # the record (and /wait) report the failure.
+                delivery_frame = {"message": delivery_error, "name": _RUN_ERROR_NAME}
+                if record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True):
+                    await bridge.publish(run_id, "error", delivery_frame)
+                else:
+                    terminal_error_frame = delivery_frame
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
@@ -2106,6 +2134,11 @@ async def run_agent(
                     receipt_persisted = await _persist_delivery_receipt(event_store, thread_id=thread_id, run_id=run_id, content=delivery_content)
                     if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
                         await run_manager.set_status(run_id, RunStatus.error, error=_DELIVERY_RECEIPT_FAILED_ERROR, persist=False)
+                        # Same invariant as the completion branch: the record is now
+                        # `error`, so the stream must not end as a success. Frames
+                        # already deferred and published below the finalizer run
+                        # before END.
+                        terminal_error_frame = {"message": _DELIVERY_RECEIPT_FAILED_ERROR, "name": _RUN_ERROR_NAME}
 
                 if not record.ownership_lost and journal is not None and persist_completion:
                     try:

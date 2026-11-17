@@ -168,10 +168,8 @@ describe("ArtifactFileDetail unknown file types", () => {
       expect(view.queryByTestId("artifact-source")).toBeNull();
       expect(view.queryByRole("button", { name: "Edit" })).toBeNull();
       expect(
-        view.getByRole("link", { name: "Download" }).getAttribute("href"),
-      ).toBe(
-        `/backend/api/threads/${THREAD_ID}/artifacts/mnt/user-data/outputs/${filename}?download=true`,
-      );
+        view.getAllByRole("button", { name: `Download ${filename}` }),
+      ).toHaveLength(2);
     },
   );
 });

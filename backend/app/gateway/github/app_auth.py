@@ -16,6 +16,12 @@ installation id, with a 55-minute TTL so we refresh well before the
 60-minute GitHub limit. If two webhook deliveries land within a few
 seconds we'll mint two tokens — that's fine and well under any
 rate limit.
+
+Building the App JWT reads the private key and signs with it, so the
+async mint runs it in a worker thread. Parsing a PEM key is the costly
+step (tens of ms for RSA-2048, holding the GIL, so a worker thread alone
+would still stall the event loop), so the parsed key is reused for as
+long as the configured PEM text stays the same.
 """
 
 from __future__ import annotations
@@ -23,9 +29,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import jwt
@@ -66,6 +74,12 @@ _install_locks: dict[int, asyncio.Lock] = {}
 # Guards the _install_locks map itself — only held while we look up /
 # insert the per-installation lock, never while we hold one.
 _install_locks_lock = asyncio.Lock()
+
+# The most recently parsed App private key, as ``(pem_text, key)``. A
+# changed PEM (a rotated env var or key file) is parsed again on the next
+# mint. The lock keeps concurrent worker-thread mints from parsing twice.
+_signing_key: tuple[str, Any] | None = None
+_signing_key_lock = threading.Lock()
 
 
 async def _lock_for(installation_id: int) -> asyncio.Lock:
@@ -114,6 +128,24 @@ def load_app_private_key() -> str:
     return p.read_text(encoding="utf-8")
 
 
+def _app_signing_key() -> Any:
+    """Return the App private key ready for RS256, parsing it only when it changed.
+
+    The PEM is still read on every call, so a rotated key is used by the
+    next mint without a restart.
+    """
+    global _signing_key
+    pem = load_app_private_key()
+    with _signing_key_lock:
+        cached = _signing_key
+        if cached is not None and cached[0] == pem:
+            return cached[1]
+        # Same parsing (and the same errors) as passing the PEM to jwt.encode.
+        key = jwt.get_algorithm_by_name("RS256").prepare_key(pem)
+        _signing_key = (pem, key)
+        return key
+
+
 def mint_app_jwt(*, now: float | None = None) -> str:
     """Sign a short-lived JWT identifying this App to GitHub.
 
@@ -132,7 +164,7 @@ def mint_app_jwt(*, now: float | None = None) -> str:
         # numeric App id rendered as a decimal string.
         "iss": str(app_id()),
     }
-    return jwt.encode(payload, load_app_private_key(), algorithm="RS256")
+    return jwt.encode(payload, _app_signing_key(), algorithm="RS256")
 
 
 async def _request_new_installation_token(
@@ -141,8 +173,10 @@ async def _request_new_installation_token(
     client: httpx.AsyncClient | None = None,
 ) -> _CachedToken:
     """Hit ``POST /app/installations/{id}/access_tokens`` once."""
+    # Reading the key file and signing are blocking; keep them off the loop.
+    app_jwt = await asyncio.to_thread(mint_app_jwt)
     headers = {
-        "Authorization": f"Bearer {mint_app_jwt()}",
+        "Authorization": f"Bearer {app_jwt}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
@@ -224,6 +258,11 @@ async def mint_installation_token(
 
 
 def _clear_token_cache_for_tests() -> None:
-    """Drop every cached token. Tests reach for this between cases."""
+    """Drop every cached token and the parsed key. Tests reach for this between cases."""
+    global _signing_key
     _token_cache.clear()
     _install_locks.clear()
+    # Under the lock, so a mint parsing in a worker thread finishes first
+    # instead of storing its key after the reset.
+    with _signing_key_lock:
+        _signing_key = None

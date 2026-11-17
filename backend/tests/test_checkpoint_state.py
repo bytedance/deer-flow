@@ -96,6 +96,33 @@ def test_mutation_graph_bakes_snapshot_frequency_into_fallback_schema() -> None:
     assert low_cadence.channels["messages"].snapshot_frequency == 250
 
 
+def _langgraph_refused_node_names() -> list[str]:
+    from langgraph._internal._constants import RESERVED
+    from langgraph.constants import END, START
+
+    return sorted({START, END, *RESERVED, "a|b", "a:b", "branch:x"})
+
+
+@pytest.mark.parametrize("as_node", _langgraph_refused_node_names())
+def test_validate_state_mutation_node_rejects_every_name_langgraph_refuses(as_node: str) -> None:
+    """The client check and LangGraph's compile must refuse the same names."""
+    from deerflow.runtime.checkpoint_state import build_state_mutation_graph, validate_state_mutation_node
+
+    with pytest.raises(ValueError):
+        build_state_mutation_graph(as_node, "full")
+    with pytest.raises(ValueError):
+        validate_state_mutation_node(as_node)
+
+
+@pytest.mark.parametrize("as_node", ["manual_state_update", "agent", "messages", "__start", "start", "a b", "é", "x" * 5000])
+def test_validate_state_mutation_node_accepts_names_langgraph_compiles(as_node: str) -> None:
+    """Names LangGraph compiles stay accepted, so the check never rejects a working update."""
+    from deerflow.runtime.checkpoint_state import build_state_mutation_graph, validate_state_mutation_node
+
+    assert as_node in build_state_mutation_graph(as_node, "full").nodes
+    assert validate_state_mutation_node(as_node) == as_node
+
+
 def test_sync_accessor_binds_persistence_guards_operations_and_preserves_input() -> None:
     graph = FakeGraph()
     saver = FakeCheckpointer()
