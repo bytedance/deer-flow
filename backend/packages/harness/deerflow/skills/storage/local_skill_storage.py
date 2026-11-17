@@ -231,8 +231,18 @@ class LocalSkillStorage(SkillStorage):
         with self._skill_projection_mutation(names=(skill_name,)):
             with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
                 staging_target = Path(staging_root) / skill_name
-                if _host_path_length(staging_target) >= _publication_path_limit(custom_dir):
+                publication_limit = _publication_path_limit(custom_dir)
+                if _host_path_length(staging_target) >= publication_limit:
                     raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path is too long for this filesystem")
+                # The staging root's temp-dir name lengthens every member path, so
+                # a nested member can outgrow the limit while the skill root fits.
+                # Check members before copying: copytree wraps a child's
+                # ENAMETOOLONG in shutil.Error, which carries no errno/winerror for
+                # the translation below to recognize.
+                for member in skill_dir.rglob("*"):
+                    relative = member.relative_to(skill_dir)
+                    if _host_path_length(staging_target / relative) >= publication_limit:
+                        raise ValueError(f"Skill '{skill_name}' cannot be published: the temporary publication path for '{relative.as_posix()}' is too long for this filesystem")
                 try:
                     shutil.copytree(skill_dir, staging_target)
                     _move_staged_skill_into_reserved_target(staging_target, target)

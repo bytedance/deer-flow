@@ -474,6 +474,31 @@ class TestInstallSkillFromArchive:
         with pytest.raises(ValueError, match="publication path is too long"):
             get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
 
+    def test_rejects_nested_member_whose_staging_path_is_too_long(self, tmp_path, monkeypatch):
+        zip_path = tmp_path / "nested-skill.skill"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr(
+                "nested-skill/SKILL.md",
+                "---\nname: nested-skill\ndescription: A test skill\n---\n\n# nested-skill\n",
+            )
+            zf.writestr("nested-skill/references/very/deep/guide.md", "# Guide\n")
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        # The staged skill root fits the limit; only the nested member exceeds it,
+        # as when the staging temp-dir name lengthens a path that fits at its
+        # final location.
+        monkeypatch.setattr(
+            "deerflow.skills.installer._host_path_length",
+            lambda path, **kwargs: 100 if path.name == "guide.md" else 10,
+        )
+        monkeypatch.setattr(
+            "deerflow.skills.storage.local_skill_storage._publication_path_limit",
+            lambda root: 50,
+        )
+        with pytest.raises(ValueError, match="publication path for 'references/very/deep/guide.md' is too long"):
+            get_or_new_skill_storage(skills_path=skills_root).install_skill_from_archive(zip_path)
+        assert not (skills_root / "custom" / "nested-skill").exists()
+
     def test_success(self, tmp_path):
         zip_path = self._make_skill_zip(tmp_path)
         skills_root = tmp_path / "skills"
