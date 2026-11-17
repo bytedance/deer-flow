@@ -645,7 +645,7 @@ async def get_memory_config_endpoint(request: Request) -> MemoryConfigResponse:
         }
         ```
     """
-    config = get_memory_config()
+    config = await asyncio.to_thread(get_memory_config)
     return MemoryConfigResponse(
         enabled=config.enabled,
         mode=config.mode,
@@ -670,7 +670,7 @@ async def get_memory_status(request: Request, agent_name: str | None = None) -> 
     Returns:
         Combined memory configuration and current data.
     """
-    config = get_memory_config()
+    config = await asyncio.to_thread(get_memory_config)
     manager = await asyncio.to_thread(get_memory_manager)
     selected_agent = _management_agent_name_or_501(manager, agent_name)
     memory_data = await _get_memory_or_501(

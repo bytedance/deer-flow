@@ -79,6 +79,9 @@ workflow's test-file list in step with the marker. Run the bundled suites with
 Every test under `blocking_io/` runs with a detector that fails on a blocking
 call made on the event loop through DeerFlow code. Add a case there when you add
 an async entry point that touches files, subprocesses or a synchronous SDK.
+The detector raises `BlockingError`, which is an `Exception`, so code that
+catches `Exception` hides a blocking call from it. On such a path, assert where
+the call ran, not only that the request succeeded.
 `@pytest.mark.allow_blocking_io` is for a test that needs the unguarded behaviour
 and states why.
 
