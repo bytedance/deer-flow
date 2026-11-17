@@ -2280,11 +2280,21 @@ only when the agent is expected to edit files or run commands for a trusted
 task.
 
 Pi can run as an external coding agent through the community `pi-acp` adapter.
-Install the adapter in the Gateway environment before starting DeerFlow:
+The adapter launches the separate `pi` executable, so install both packages in
+the Gateway environment before starting DeerFlow. `pi-acp` currently requires
+Node.js 22+ and pi 0.81.0+:
 
 ```bash
+npm install --global @earendil-works/pi-coding-agent
 npm install --global pi-acp
 ```
+
+Configure pi's model provider and API key separately for the user that runs the
+Gateway. For interactive providers, complete pi's terminal login in that same
+environment (for example, `pi --terminal-login`), or provide the provider's
+documented environment variables. The `pi` executable and its credentials must
+be available inside the Gateway container; installing or authenticating them
+only on the Docker host is not sufficient.
 
 ```yaml
 acp_agents:
@@ -2295,9 +2305,14 @@ acp_agents:
     auto_approve_permissions: false
 ```
 
-Node.js and `pi-acp` must be available on the Gateway process's `PATH`. When
+Node.js, `pi-acp`, and `pi` must be available on the Gateway process's `PATH`. When
 the Gateway runs in Docker, install them inside the Gateway image or container.
-Keep `auto_approve_permissions` disabled for untrusted tasks. Alternatively,
+Pi executes its filesystem and shell tools directly in its working environment.
+`auto_approve_permissions` only controls permission requests sent through ACP;
+leaving it disabled does not sandbox these direct operations. Run untrusted Pi
+tasks in an independently isolated process, container, or VM with only the
+required files, credentials, and network access. Keep
+`auto_approve_permissions` disabled for untrusted tasks. Alternatively,
 set `command: npx` and `args: ["-y", "pi-acp"]` to fetch the adapter on demand;
 this requires `npx` on the Gateway's `PATH` and may require network access at
 startup. Preinstalling the adapter lets deployment tooling control its version
