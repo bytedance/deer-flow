@@ -531,13 +531,21 @@ wheels = [
 
 [[package]]
 name = "boxlite"
-version = "0.9.7"
+version = "0.13.1"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/77/34fe448e7a1411b95c33df673305d64bacdfb031a5faae9faec82a32eaf8/boxlite-0.9.7-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:715ba342a80432279115ad41edf42b92993134402a7f4c73f23eb1327aa7ec29", size = 35518202, upload-time = "2026-07-01T12:55:41.757Z" },
-    { url = "https://files.pythonhosted.org/packages/02/2f/8ebf72c81afd07b3779ce206e85b32cf7b7baed98b811e966508ab9509cc/boxlite-0.9.7-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:01a2dd8b871213beb037a0c332bd94d9568aea7db0c1d39385ae789b73610055", size = 37616271, upload-time = "2026-07-01T12:55:45.01Z" },
-    { url = "https://files.pythonhosted.org/packages/5f/32/6d9d8e9dca8f6e387dfe874a6872b49529b7795b75e814b2a75015a66036/boxlite-0.9.7-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:2281d4613af8f56e05856883aac2cbaf0028d50895a67299cd4932585661f13a", size = 33781989, upload-time = "2026-07-01T12:55:47.944Z" },
-    { url = "https://files.pythonhosted.org/packages/e0/79/068b8a7de1fc9724d89ca7086754f0e6c6c80f8c74f9d95267006c49fe33/boxlite-0.9.7-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:b8e68f2efe493112445f3150adac74de592974ba9c05025440e0ddf54870bc53", size = 35519183, upload-time = "2026-07-01T12:55:50.896Z" },
+    { url = "https://files.pythonhosted.org/packages/ef/39/b5a1780730db9bb82e3f4c518c1482647c73db3c4658b395dbd8b18f1cf0/boxlite-0.13.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:563e1a211a8beb8a10f06423b2e1c148341d7bb013ce3d7444fa627c50c28f07", size = 41401539, upload-time = "2026-11-12T13:33:43.567Z" },
+    { url = "https://files.pythonhosted.org/packages/ff/1e/44aeec26f92c9545ea7aff05980765290edcc4210415b711eb97c5c496f9/boxlite-0.13.1-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:d2139a074f44d9162d7106f40c248ff1df98f1a797fb75c52c32f1976eea59d9", size = 43710599, upload-time = "2026-11-12T13:33:48.129Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/0b/269cfad786f4a80fd2abc62bd18a22ef767cb7471642cd346ee8d015e61d/boxlite-0.13.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6943e0b482912cba3d6a2d692bac409a1c091661cb8eef96b793ae4c29f7f27c", size = 40087058, upload-time = "2026-11-12T13:33:53.245Z" },
+    { url = "https://files.pythonhosted.org/packages/88/04/7e3951cd35fb7260e1a74f764b568509e521e56f6bd0ca0727ef3bea31c9/boxlite-0.13.1-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:155e143034f12199b8f1489a353aaea1737e316984f645a2e8d12c7f12960946", size = 41403145, upload-time = "2026-11-12T13:33:58.31Z" },
+    { url = "https://files.pythonhosted.org/packages/89/28/f36960c7aa5b82a4565fde01d4583b82205af18e7f64833a453f6e392212/boxlite-0.13.1-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:0b797066c5ac34b83ee9880d7ad8bbf39e10c267bc14653ba68a277913079f62", size = 43709157, upload-time = "2026-11-12T13:34:03.288Z" },
+    { url = "https://files.pythonhosted.org/packages/62/00/b1c9879ba5937222aff5197dd3159318d5fa9539ce0980e81fb737aa0bd5/boxlite-0.13.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:5025165376379b7d908e2fe6f793f879c685e6574470c30ce45828235855363b", size = 40087172, upload-time = "2026-11-12T13:34:08.474Z" },
+    { url = "https://files.pythonhosted.org/packages/69/50/68f6b03b0afd2391507d4e1445eadb307002f4809325bef65c93ebedfcb5/boxlite-0.13.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:eb7215ed9a5c9a1815b6af417705e2a25dfe51d9e3a2d4bd475c9f6f1361ca42", size = 41396634, upload-time = "2026-11-12T13:34:12.966Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/5a/4b2bdb6a3f2965d01f4c36fa967668a6c9ab19e6aa7b0674a60787050292/boxlite-0.13.1-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:c88ae3076918c7bf7693cebe60a13b7e3b5043535e6ca548b2090139a8b49f15", size = 43709413, upload-time = "2026-11-12T13:34:18.671Z" },
+    { url = "https://files.pythonhosted.org/packages/90/66/e6d2d048da59ceae70fd62bccfefe072221ce6b4110729e05a1a36bb134a/boxlite-0.13.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:e89f98303ad4f2bed52269c4214d37d71a4eb4e24e6772ff7e4d125b0cd28add", size = 40080914, upload-time = "2026-11-12T13:34:23.412Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/94/e8119bf8411eb64aac492ce6cd395a9c734204c7574d2eb186f5fff89e21/boxlite-0.13.1-cp314-cp314t-macosx_14_0_arm64.whl", hash = "sha256:36a5fc5a5141d58dfd30e70f41813c9ec2840a26d1aea50a3da641c3ab82845b", size = 41405387, upload-time = "2026-11-12T13:34:28.758Z" },
+    { url = "https://files.pythonhosted.org/packages/55/a6/53a65db73a8918e04271446c3d3bd3e02e68d91a6e66ef9785f7a7d47e7b/boxlite-0.13.1-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:40292dc96bcc8a3ef6cc9394a6faf019775f2704a2f8c3997a7746c0a0f50a91", size = 43716915, upload-time = "2026-11-12T13:34:33.754Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/3d/1535b33d78cbfff43278414d28aa24d53aee25c3d98851e503cac663dafc/boxlite-0.13.1-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:753243bdd066d89c3563584153bcd206bc1deed4fe8b062949b6a6e9bda96c6f", size = 40090514, upload-time = "2026-11-12T13:34:39.143Z" },
 ]
 
 [[package]]
@@ -1168,11 +1176,11 @@ wheels = [
 
 [[package]]
 name = "dnspython"
-version = "2.9.0"
+version = "2.9.2"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ef/4a/50822184bd67cc6493f0fb6a880749158fcd31ab3fa07409acfd91f9fc85/dnspython-2.9.0.tar.gz", hash = "sha256:b44dc6b18f07a8b1c56676a19fbfdb5209415b046a9cece286baafa87ff3f7f1", size = 423560, upload-time = "2026-10-09T00:07:24.352Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/76/49/900383b471c645a3c397f47b3211d1fcecb3a540c98f683494cdf86b33de/dnspython-2.9.2.tar.gz", hash = "sha256:8d4d39a513e649d634004ce4d39ade2352efcea472a0247535a5c2d18a9d7ba9", size = 455484, upload-time = "2026-11-03T23:56:53.601Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/10/02/cdcc9b7c051786a103c3b09e1003a82fa0c66bcb91ffbdabcfbf7b4163b9/dnspython-2.9.0-py3-none-any.whl", hash = "sha256:9a4aedb833c3c1b49214d04d44d3032ab7a9135f7c1d29a549b4ff78fd82fda9", size = 354822, upload-time = "2026-10-09T00:07:22.622Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/0c/5346358b3a20275d256978c35203ddc2c8617f78c1b23795b79ba22ced6d/dnspython-2.9.2-py3-none-any.whl", hash = "sha256:af15f7d385a6ae2fb35a796fde2138004c8c42c7389090e2addc83e3b3340fd8", size = 360455, upload-time = "2026-11-03T23:56:52.088Z" },
 ]
 
 [[package]]
