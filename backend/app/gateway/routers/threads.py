@@ -38,6 +38,12 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
+)
 from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager, get_run_store
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
@@ -59,7 +65,6 @@ from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
-from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
@@ -102,8 +107,6 @@ from deerflow.utils.time import coerce_iso, now_iso
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/threads", tags=["threads"])
 
-_CHECKPOINT_MODE_ERRORS = (CheckpointModeMismatchError, CheckpointModeReconfigurationError)
-
 
 def _optional_run_event_store(request: Request) -> Any:
     """Return the run event store, or ``None`` when the app has none wired.
@@ -114,20 +117,6 @@ def _optional_run_event_store(request: Request) -> Any:
     endpoints that cannot work without a feed.
     """
     return getattr(request.app.state, "run_event_store", None)
-
-
-def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException:
-    """Map checkpoint-mode guard failures to precise HTTP statuses.
-
-    A mismatch means the thread's persisted checkpoints conflict with the
-    process's frozen mode (operator-actionable, 409); a reconfiguration means
-    the process itself is mid mode-flip (transient, 503). Both must surface
-    their message — a generic 500 would force operators to grep logs to
-    discover the root cause after a mode flip.
-    """
-    if isinstance(exc, CheckpointModeMismatchError):
-        return HTTPException(status_code=409, detail=f"Thread {thread_id}: {exc}")
-    return HTTPException(status_code=503, detail=str(exc))
 
 
 # Metadata keys that the server controls; clients are not allowed to set
