@@ -101,6 +101,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.goal_progress import observe_goal_operations
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.run_origin import origin_kind_of
+from deerflow.runtime.runs.admission import RunAdmissionRejected
 from deerflow.runtime.runs.schemas import GOAL_RUN_HARD_STOP_REASONS
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
@@ -829,7 +830,9 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     # Called after durable same-thread admission is active and before the first
-    # checkpoint read. Failures are isolated from the run outcome.
+    # checkpoint read. Ordinary failures are isolated from the run outcome;
+    # raising ``RunAdmissionRejected`` fails the run because a host
+    # precondition (for example the incognito verdict) could not be verified.
     on_run_admitted: Any | None = field(default=None)
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
@@ -1355,6 +1358,13 @@ async def run_agent(
         if ctx.on_run_admitted is not None:
             try:
                 await ctx.on_run_admitted(record, config)
+            except RunAdmissionRejected:
+                # The host could not establish a precondition that protects
+                # durable storage. The outer handler marks the run failed;
+                # continuing would run the agent under the wrong persistence
+                # policy (for example as an ordinary run on an incognito
+                # thread, writing memory and shared blobs).
+                raise
             except Exception:
                 logger.warning("Run admission hook failed for %s (non-fatal)", run_id, exc_info=True)
 

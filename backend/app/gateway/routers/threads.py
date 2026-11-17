@@ -49,7 +49,7 @@ from app.gateway.checkpoint_mode_errors import (
 from app.gateway.checkpoint_mode_errors import (
     checkpoint_mode_http_error as _checkpoint_mode_http_error,
 )
-from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager, get_run_store
+from app.gateway.deps import get_checkpointer, get_config, get_current_user_from_request, get_run_event_store, get_run_manager
 from app.gateway.history_seed import reserve_history_seed, write_history_seed
 from app.gateway.hitl_approval import find_pending_interrupts
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
@@ -76,6 +76,7 @@ from deerflow.persistence.thread_meta import (
     THREAD_INCOGNITO_ENDED_METADATA_KEY,
     THREAD_PINNED_METADATA_KEY,
     THREAD_PROJECT_METADATA_KEY,
+    ThreadCreateConflictError,
     ThreadOwnershipConflictError,
     is_incognito_expired,
 )
@@ -813,10 +814,28 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     Cleans DeerFlow-managed thread directories, removes checkpoint data,
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
+
+    An incognito thread is refused: this best-effort path would delete its
+    tombstone (making the id reusable) and would not retry a partial purge.
+    Ending it through ``POST /api/threads/{thread_id}/incognito/end`` keeps
+    the tombstone and routes deletion through the sweep's checked purge.
     """
     run_manager = get_run_manager(request)
     try:
         async with goal_thread_lock(thread_id):
+            thread_store = getattr(request.app.state, "thread_store", None)
+            if thread_store is not None:
+                # The permission decorator already authorized this caller, so
+                # read the row unscoped: an unowned legacy row must not skip
+                # the guard merely because it has no owner to match.
+                record = await thread_store.get(thread_id, user_id=None)
+                if record is not None and record.get("incognito") is True:
+                    if is_incognito_expired(record):
+                        raise HTTPException(status_code=410, detail="This incognito thread has expired")
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Incognito chats cannot be deleted directly. End the chat with POST /api/threads/{thread_id}/incognito/end.",
+                    )
             async with run_manager.reserve_thread_operation(
                 thread_id,
                 kind=ThreadOperationKind.delete,
@@ -853,12 +872,24 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     return await purge_thread_data(thread_id, app_state=request.app.state, user_id=get_effective_user_id())
 
 
+class ThreadPurgeIncomplete(RuntimeError):
+    """A purge step failed while the caller required complete deletion.
+
+    The interactive delete route is best-effort: it already returned control
+    to the user, so a failed auxiliary cleanup is logged and the thread row is
+    gone. The incognito sweep cannot treat content deletion that way — a
+    thread whose runs or events survived must stay on the retry list — so it
+    raises this after every step has been attempted.
+    """
+
+
 async def purge_thread_data(
     thread_id: str,
     *,
     app_state: Any,
     user_id: str | None,
     delete_meta_row: bool = True,
+    require_complete: bool = False,
 ) -> ThreadDeleteResponse:
     """Delete a thread's data while its durable exclusive reservation is held.
 
@@ -866,6 +897,16 @@ async def purge_thread_data(
     orchestration; every accessor below reads ``app.state`` and nothing else
     from the request. ``delete_meta_row=False`` keeps the row for the sweep's
     tombstone, which must survive the purge.
+
+    ``require_complete`` turns the content stores below (runs, run events,
+    feedback, scheduled-task events, MCP tasks, read markers) into a checked
+    contract: every step is still attempted, but any failure raises
+    :class:`ThreadPurgeIncomplete` at the end. A configured store that is
+    absent on this deployment is skipped, not counted as a failure. Browser
+    and MCP sessions are runtime resources rather than stored content, so
+    their teardown stays best-effort and is not retried. The incognito sweep
+    uses this so a partial purge keeps its retry marker; the delete route
+    keeps the best-effort behavior.
     """
     from app.gateway.deps import get_thread_store
 
@@ -876,17 +917,25 @@ async def purge_thread_data(
     run_manager = get_run_manager(request)
     batch_repo = getattr(request.app.state, "subagent_batch_repo", None)
     approval_store = getattr(request.app.state, "approval_store", None)
+    # Declared before the first optional store so a failing step is recorded
+    # and the purge continues: the strict caller raises only after every step
+    # has been attempted.
+    purge_failures: list[str] = []
     if approval_store is not None:
         await await_drained(approval_store.delete_thread(thread_id, user_id=user_id))
     if batch_repo is not None:
-        await batch_repo.suppress_thread_continuations(thread_id)
-        # Suppression only fences in-flight continuations; the durable batch
-        # rows (each item's prompt text, the execution_spec) stay readable.
-        # Remove them so a swept incognito thread and a user delete both leave
-        # nothing behind. Batch rows are owner-scoped, so this needs a resolved
-        # user_id; a None owner (migration/CLI purge) skips it.
-        if user_id is not None:
-            await batch_repo.delete_by_thread(thread_id, user_id=user_id)
+        try:
+            await batch_repo.suppress_thread_continuations(thread_id)
+            # Suppression only fences in-flight continuations; the durable batch
+            # rows (each item's prompt text, the execution_spec) stay readable.
+            # Remove them so a swept incognito thread and a user delete both leave
+            # nothing behind. Batch rows are owner-scoped, so this needs a resolved
+            # user_id; a None owner (migration/CLI purge) skips it.
+            if user_id is not None:
+                await batch_repo.delete_by_thread(thread_id, user_id=user_id)
+        except Exception:
+            purge_failures.append("subagent batches")
+            logger.debug("Could not delete subagent batch rows for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
@@ -919,12 +968,13 @@ async def purge_thread_data(
     # are deleted, so the durable thread-operation reservation protecting this
     # very request survives until ``reserve_thread_operation`` exits. Third-party
     # RunStore implementations that predate the capability are skipped.
-    try:
-        delete_runs = getattr(get_run_store(request), "delete_by_thread", None)
-        if delete_runs is not None:
+    delete_runs = getattr(getattr(request.app.state, "run_store", None), "delete_by_thread", None)
+    if delete_runs is not None:
+        try:
             await delete_runs(thread_id, user_id=user_id)
-    except Exception:
-        logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
+        except Exception:
+            purge_failures.append("runs")
+            logger.debug("Could not delete run records for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Drop this worker's in-memory copies too. ``RunManager.get()`` and
     # ``list_by_thread()`` answer from the process-local registry before the
@@ -941,11 +991,13 @@ async def purge_thread_data(
     # thread's feed readable again through GET /threads/{id}/messages. A legacy
     # store that predates the owner-scoped signature is still called, with the
     # old contract.
-    try:
-        delete_events = get_run_event_store(request).delete_by_thread
-        await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
-    except Exception:
-        logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
+    delete_events = getattr(getattr(request.app.state, "run_event_store", None), "delete_by_thread", None)
+    if delete_events is not None:
+        try:
+            await delete_events(thread_id, **_event_delete_owner_kwargs(delete_events, user_id))
+        except Exception:
+            purge_failures.append("run events")
+            logger.debug("Could not delete run events for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove persisted feedback best-effort. This cleans existing rows; fencing
     # already-admitted writes across thread deletion is a separate lifecycle
@@ -956,7 +1008,20 @@ async def purge_thread_data(
         if feedback_repo is not None:
             await feedback_repo.delete_by_thread(thread_id, user_id=user_id)
     except Exception:
+        purge_failures.append("feedback")
         logger.debug("Could not delete feedback for thread %s (not critical)", sanitize_log_param(thread_id))
+
+    # Remove tracked MCP tasks (best-effort). Their rows hold the remote task's
+    # result and input payloads, and the poller can keep a row readable long
+    # after the conversation is gone. Skipped on the memory backend, which has
+    # no MCP task repository.
+    try:
+        mcp_task_repo = getattr(request.app.state, "mcp_task_repo", None)
+        if mcp_task_repo is not None:
+            await mcp_task_repo.delete_by_thread(thread_id, user_id=user_id)
+    except Exception:
+        purge_failures.append("MCP tasks")
+        logger.debug("Could not delete MCP tasks for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove thread_meta row (best-effort) — required for sqlite backend
     # so the deleted thread no longer appears in /threads/search. The
@@ -966,6 +1031,7 @@ async def purge_thread_data(
             thread_store = get_thread_store(request)
             await thread_store.delete(thread_id, user_id=user_id)
         except Exception:
+            purge_failures.append("thread metadata")
             logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove the chat's scheduled-task lifecycle lines (best-effort). They are
@@ -980,15 +1046,18 @@ async def purge_thread_data(
         if task_event_repo is not None:
             await task_event_repo.delete_by_thread(thread_id, user_id=user_id)
     except Exception:
+        purge_failures.append("scheduled task events")
         logger.debug("Could not delete scheduled task events for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Remove every user's read marker for the thread (best-effort): the thread
-    # is gone, so its unread state is meaningless for all of them.
+    # is gone, so its unread state is meaningless for all of them. The row is
+    # persisted content, so a failure is part of the checked contract.
     try:
         thread_read_repo = getattr(request.app.state, "thread_read_repo", None)
         if thread_read_repo is not None:
             await thread_read_repo.delete_by_thread(thread_id)
     except Exception:
+        purge_failures.append("read markers")
         logger.debug("Could not delete read markers for thread %s (not critical)", sanitize_log_param(thread_id))
 
     # Tear down any live browser session (best-effort). Sessions are keyed only
@@ -1018,6 +1087,11 @@ async def purge_thread_data(
         await get_session_pool().close_thread_scope(user_id=user_id, thread_id=thread_id)
     except Exception:
         logger.debug("Could not close MCP sessions for %s (not critical)", sanitize_log_param(thread_id))
+
+    if require_complete and purge_failures:
+        # The caller (the incognito sweep) holds the row open for a retry, so
+        # report which stores survived instead of pretending the purge is done.
+        raise ThreadPurgeIncomplete(f"Purge for thread {thread_id} left data in: {', '.join(purge_failures)}")
 
     return response
 
@@ -1187,15 +1261,16 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
     except ThreadOwnershipConflictError:
         # Do not reveal that a caller-chosen id belongs to another user.
         raise HTTPException(status_code=404, detail="Thread not found") from None
-    except IntegrityError:
+    except (IntegrityError, ThreadCreateConflictError):
         # The idempotency read above and this insert are not atomic: a
         # another worker's request for the same thread_id can commit in between, so
         # the SQL-backed store rejects ours on the duplicate primary key.
         # Honour the documented idempotency contract by resolving the
         # now-existing record — running the same owner reconciliation the fast
         # path does — instead of surfacing the conflict as a 500. Same-process
-        # HTTP creates share the lifecycle lock; the memory store retains its
-        # historical overwrite behavior for direct callers.
+        # HTTP creates share the lifecycle lock. ThreadCreateConflictError is
+        # the memory store's equivalent: it refuses to overwrite an incognito
+        # row (live or tombstoned) instead of silently replacing it.
         existing_record = await _resolve_existing_thread(thread_store, thread_id, thread_owner_user_id, thread_owner_kwargs)
         if existing_record is not None:
             return _existing_thread_or_conflict(thread_id, existing_record, incognito=incognito)

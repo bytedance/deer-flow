@@ -254,6 +254,11 @@ class _SchedulerCapability:
             origin = await self._thread_store.get(self._origin_thread_id, user_id=self._owner_id) if self._origin_thread_id else None
             if origin is None or origin.get("user_id") != self._owner_id:
                 raise scheduler_error(404, "conversation_not_found", "Originating conversation not found")
+            if origin.get("incognito") is True:
+                # Defense in depth: capability binding already withholds the
+                # capability for an incognito origin, so this only fires when a
+                # thread flipped after the grant was minted.
+                raise scheduler_error(422, "incognito_thread_not_schedulable", "An incognito thread cannot be managed by a scheduled task")
 
     async def _task(self, task_id: Any) -> dict[str, Any]:
         """A task this conversation may manage: created here, or one whose run this conversation is."""
@@ -552,7 +557,10 @@ async def prepare_scheduler_capability(
     if mode is RunInteractionMode.INTERACTIVE:
         origin_thread_id = thread_id
         origin = await threads.get(origin_thread_id, user_id=owner_id)
-        if origin is None or origin.get("user_id") != owner_id:
+        # A capability minted for an incognito conversation would let a run
+        # whose chat is being purged keep writing listable task rows, so the
+        # grant is withheld here as well as at the conversation layer.
+        if origin is None or origin.get("user_id") != owner_id or origin.get("incognito") is True:
             return None
     elif mode is RunInteractionMode.SCHEDULED and source == AUTH_SOURCE_INTERNAL and isinstance(scheduled_task_runtime, Mapping):
         task_id = scheduled_task_runtime.get("task_id")

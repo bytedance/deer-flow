@@ -15,7 +15,7 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, Final
 
@@ -101,6 +101,18 @@ class ThreadOwnershipConflictError(Exception):
     """Raised when create would overwrite a thread owned by another user."""
 
 
+class ThreadCreateConflictError(Exception):
+    """Raised when create would overwrite a row the caller must not replace.
+
+    The memory store historically overwrote a duplicate id, while the SQL
+    store's primary key rejects the insert. An incognito row is the one record
+    that must survive external writes: overwriting a tombstone would let the
+    id be reused, and overwriting a live incognito row would silently convert
+    or extend it. A store raises this instead, and the Gateway resolves the
+    existing row through its idempotent-create path (410 expired, 409 mode
+    mismatch, or the existing row itself)."""
+
+
 class ThreadMetaStore(abc.ABC):
     @abc.abstractmethod
     async def create(
@@ -181,10 +193,24 @@ class ThreadMetaStore(abc.ABC):
         remove_metadata_keys: tuple[str, ...] = (),
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
+        """Update the display name and remove caller-selected stale metadata.
+
+        Must be a no-op for an incognito tombstone (``status="expired"``): run
+        finalization on another worker can reach it after the sweep purged the
+        thread, and writing the title back would leave content on a row that
+        reads no longer resolve.
+        """
         pass
 
     @abc.abstractmethod
     async def update_status(self, thread_id: str, status: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+        """Update the run status.
+
+        Like :meth:`update_display_name`, this must never overwrite an
+        incognito tombstone. A resurrected row would resolve for its owner
+        again while ``expires_at`` is already cleared, so the sweep would never
+        select it for deletion.
+        """
         pass
 
     @abc.abstractmethod
@@ -229,6 +255,22 @@ class ThreadMetaStore(abc.ABC):
     # DeerFlow implement the full lifecycle.
     # ------------------------------------------------------------------
 
+    async def incognito_ids(self, thread_ids: Sequence[str], *, user_id: str | None | _AutoSentinel = AUTO) -> set[str]:
+        """Return the subset of ``thread_ids`` that name incognito threads.
+
+        The run-activity feed must never list an incognito thread, and it
+        holds a page of ids rather than records; this lets it filter them in
+        one call. Missing and foreign rows are not returned. The base
+        implementation performs one owner-scoped :meth:`get` per id; the SQL
+        store overrides it with a single query.
+        """
+        found: set[str] = set()
+        for thread_id in thread_ids:
+            record = await self.get(thread_id, user_id=user_id)
+            if record is not None and record.get("incognito") is True:
+                found.add(thread_id)
+        return found
+
     async def list_due_incognito(self, *, now: datetime | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Return incognito rows whose deadline passed, oldest deadline first.
 
@@ -251,9 +293,10 @@ class ThreadMetaStore(abc.ABC):
         Called on run admission and run completion, i.e. exactly when the
         thread is active. Moving to an earlier deadline is allowed (the
         absolute ceiling wins) but never extends a thread beyond it. Returns
-        ``False`` for missing/non-incognito/tombstoned rows and for a thread
-        the owner already ended, whose grace deadline must not grow back into
-        a full idle window.
+        ``False`` for missing/non-incognito/tombstoned rows, for a row whose
+        deadline already passed (expiry is not undone by activity, even before
+        the sweep reaches it), and for a thread the owner already ended, whose
+        grace deadline must not grow back into a full idle window.
         """
         return False
 
@@ -265,13 +308,16 @@ class ThreadMetaStore(abc.ABC):
         """
         return False
 
-    async def begin_incognito_expiry(self, thread_id: str) -> bool:
+    async def begin_incognito_expiry(self, thread_id: str, *, now: datetime | None = None) -> bool:
         """Write the tombstone before any data is purged.
 
         Clears the thread's content from the row (display name, metadata,
         project membership) and marks it ``expired`` so reads stop resolving
-        it even if the purge below fails halfway. Idempotent; returns ``False``
-        only when the row is missing or not incognito.
+        it even if the purge below fails halfway. Returns ``False`` when the
+        row is missing, not incognito, or its deadline is still in the future;
+        the sweep's due list is a snapshot, so a concurrent renewal must win
+        over a stale batch entry. An already-tombstoned row whose deadline is
+        past returns ``True`` again so a failed purge retries.
         """
         return False
 

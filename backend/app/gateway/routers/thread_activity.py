@@ -112,9 +112,26 @@ async def list_thread_activity(
         latest.pop(thread_id, None)
         latest[thread_id] = ThreadActivityItem(thread_id=thread_id, origin_kind=origin_kind, status=str(row.get("status") or ""))
 
+    threads = list(latest.values())
+    # An incognito thread must never appear on an activity surface. It cannot
+    # be a server-originated run's target today (it is not a valid scheduled
+    # task reuse target, and IM/extension callers cannot create one), so this
+    # is defense in depth. A store failure keeps the page: the feed is
+    # owner-scoped and only prompts a sidebar refetch, whose own list excludes
+    # incognito threads.
+    thread_store = getattr(state, "thread_store", None)
+    incognito_ids = getattr(thread_store, "incognito_ids", None)
+    if threads and callable(incognito_ids):
+        try:
+            hidden = await incognito_ids([item.thread_id for item in threads], user_id=user_id)
+        except Exception:
+            hidden = set()
+        if hidden:
+            threads = [item for item in threads if item.thread_id not in hidden]
+
     return ThreadActivityResponse(
         cursor=next_cursor,
-        threads=list(latest.values()),
+        threads=threads,
         truncated=truncated,
         read_version=await read_repo.read_version(user_id=user_id),
     )

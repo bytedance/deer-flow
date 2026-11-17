@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import event
+from sqlalchemy import event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,14 +45,15 @@ async def _create_working_task(
     task_id: str,
     now: datetime,
     user_id: str = "user-1",
+    thread_id: str = "thread-1",
     remote_task_id: str | None = None,
     thread_incarnation: str | None = None,
 ) -> dict:
     async with repo._sf() as session:
-        if await session.get(ThreadMetaRow, "thread-1") is None:
+        if await session.get(ThreadMetaRow, thread_id) is None:
             session.add(
                 ThreadMetaRow(
-                    thread_id="thread-1",
+                    thread_id=thread_id,
                     incarnation=None,
                     user_id=user_id,
                     metadata_json={},
@@ -64,7 +65,7 @@ async def _create_working_task(
     return await repo.create(
         task_id=task_id,
         user_id=user_id,
-        thread_id="thread-1",
+        thread_id=thread_id,
         expected_thread_incarnation=thread_incarnation,
         run_id="run-1",
         tool_call_id="call-1",
@@ -122,6 +123,40 @@ async def _pause_claim_mutation(monkeypatch, operation):
             if not task.done():
                 task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_delete_by_thread_removes_every_incarnation_and_reports_count(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-a1", now=now, thread_id="thread-a")
+    await _create_working_task(repo, task_id="task-a2", now=now, thread_id="thread-a")
+    await _create_working_task(repo, task_id="task-other", now=now, thread_id="thread-b")
+
+    # Thread cleanup is not incarnation-scoped: every task row for the thread
+    # goes, or its result payload would outlive the conversation.
+    assert await repo.delete_by_thread("thread-a", user_id="user-1") == 2
+    async with repo._sf() as session:
+        remaining = (await session.execute(select(McpTaskRow.id).order_by(McpTaskRow.id))).scalars().all()
+    assert remaining == ["task-other"]
+
+
+@pytest.mark.asyncio
+async def test_delete_by_thread_is_owner_scoped_on_a_legacy_shared_thread(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    # A legacy thread row with no owner matches every user's incarnation lock,
+    # so two users' tasks can share one thread id.
+    async with repo._sf() as session:
+        session.add(ThreadMetaRow(thread_id="shared", incarnation=None, user_id=None, metadata_json={}, created_at=now, updated_at=now))
+        await session.commit()
+    await _create_working_task(repo, task_id="alice-task", now=now, user_id="alice", thread_id="shared")
+    await _create_working_task(repo, task_id="bob-task", now=now, user_id="bob", thread_id="shared")
+
+    assert await repo.delete_by_thread("shared", user_id="alice") == 1
+    async with repo._sf() as session:
+        remaining = (await session.execute(select(McpTaskRow.id))).scalars().all()
+    assert remaining == ["bob-task"]
 
 
 @pytest.mark.asyncio

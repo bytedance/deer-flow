@@ -87,6 +87,7 @@ import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
+import { shouldRequestIncognitoEnd } from "./incognito-end";
 import { IncognitoEntry } from "./incognito-entry";
 import {
   IncognitoNotices,
@@ -325,6 +326,13 @@ export default function ChatPage() {
   // itself, and an unassigned row would make this later idempotent create a
   // membership no-op. The same pre-create keeps that materialized row from
   // being an ordinary chat when the user is in an incognito entry.
+
+  // The id of the thread row this page has created on the server. `isNewThread`
+  // flips only when the first run starts, but the project/incognito pre-create
+  // (and the goal endpoint) materialize the row earlier. The incognito × must
+  // end that row even while `isNewThread` is still true.
+  const createdThreadRowIdRef = useRef<string | null>(null);
+
   const ensureThreadRow = useCallback(async () => {
     if (!projectParam && !incognitoParam) {
       return;
@@ -335,6 +343,7 @@ export default function ChatPage() {
         projectParam ?? undefined,
         incognitoParam,
       );
+      createdThreadRowIdRef.current = threadId;
       // Keep confirmed membership/visibility available while the first
       // metadata read is pending or fails after the composer materializes
       // this new thread.
@@ -421,6 +430,7 @@ export default function ChatPage() {
         // Idempotent with the incognito pre-create above; the mode must match
         // the existing row or the server answers 409.
         await createThread(threadId, undefined, incognitoParam);
+        createdThreadRowIdRef.current = threadId;
         if (submissionEpochRef.current !== submissionEpoch)
           throw new Error("thread-submission-stale");
       }
@@ -579,11 +589,20 @@ export default function ChatPage() {
   }, [thread]);
   // End the chat and leave in the same click: the Gateway schedules the purge
   // after the grace period, and a lost request still leaves the idle lifetime
-  // to delete the thread. Only a materialized row can be ended; a lazy new
-  // chat has nothing on the server to purge.
+  // to delete the thread. The call is gated on a server row existing, not on
+  // `isNewThread`: the pre-create materializes the row before the first run
+  // flips that flag, so a lazy new chat has nothing to end while a
+  // pre-created one must still be ended.
   const handleEndIncognito = useCallback(() => {
     const endedThreadId = threadId;
-    if (!isNewThread && !isMock) {
+    if (
+      shouldRequestIncognitoEnd({
+        isNewThread,
+        isMock,
+        threadId: endedThreadId,
+        createdThreadId: createdThreadRowIdRef.current,
+      })
+    ) {
       void endIncognitoThread(endedThreadId).catch(() => {
         toast.error(t.incognito.endFailed);
       });

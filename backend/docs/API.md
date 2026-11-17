@@ -1545,6 +1545,10 @@ DELETE /api/threads/{thread_id}
   this response until the durable delete reservation is released or reconciled.
   In a single-worker deployment with ownership heartbeats disabled, a stranded
   reservation is reconciled at Gateway startup.
+- `409` for an incognito thread (`Incognito chats cannot be deleted directly.`):
+  this route removes the metadata row, which would make the thread ID reusable,
+  and its purge is best-effort. Use `POST /api/threads/{thread_id}/incognito/end`
+  instead. An already-expired incognito thread answers `410`.
 
 Deleting a thread also removes every user's read marker for it.
 
@@ -1591,23 +1595,43 @@ POST /api/threads/{thread_id}/incognito/end
 
 Answers `204`. The Gateway schedules deletion after
 `incognito.end_grace_seconds` in the background, and the deadline no longer
-moves. `409` when the thread is not incognito. Once the thread has expired it
-is no longer visible to its owner, so the route answers `404` like any read; a
-deadline that passes mid-request answers `410`.
+moves. Repeating the request is idempotent and answers `204` again without
+pushing the deadline out. `409` when the thread is not incognito. Once the
+thread has expired it is no longer visible to its owner, so the route answers
+`404` like any read; a deadline that passes mid-request answers `410`.
 
 **Lifetime.** `expires_at` moves forward on run admission and run completion
-but never past `created_at + incognito.max_lifetime_seconds`. An expired thread
-answers `404` on read routes; the tombstone row keeps its ID from being reused.
+but never past `created_at + incognito.max_lifetime_seconds`. A deadline that
+has already passed is final: a run finishing after it cannot push it out again,
+and a tombstone is not revived by late status or title writes from a run that
+was finalizing elsewhere. The worker also rechecks the thread row immediately
+before the agent starts, so a run admitted concurrently with the sweep fails
+instead of executing against purged data. An expired thread answers `404` on
+read routes; the tombstone row keeps its ID from being reused. A run submitted
+to an expired incognito thread is rejected with `404` before admission. If the
+thread store cannot be read at that point, admission fails with `503` instead
+of proceeding as an ordinary run, because the ordinary path would write
+user-level memory and shared blobs.
+
+The sweep rechecks each deadline under the row lock before it tombstones a
+thread, so a run that renewed a thread after the batch was read is left alone.
 The sweep purges the thread directory, checkpoints, run and event records,
-feedback, scheduled-task lines, read markers, durable subagent-batch rows and
-browser/MCP sessions through the same orchestration as a user delete.
+feedback, scheduled-task lines, tracked MCP task records, read markers, durable
+subagent-batch rows and browser/MCP sessions through the same orchestration as
+a user delete. A failed content step (runs, events, feedback, scheduled-task
+lines, MCP tasks, read markers and batch rows) keeps `expires_at` set so the
+next pass retries, and `expires_at` is cleared only after all of them succeed.
+Browser and MCP sessions are runtime resources, so their teardown is
+best-effort and is not retried.
 
 **REST backstops.** An incognito thread cannot be branched (`409`), moved into
-a project (`409`), shared (`409`), or used as the `reuse_thread` target of a
-scheduled task (`422`, error code `incognito_thread_not_schedulable`). A chat
-run in an incognito thread binds no scheduler capability, so `schedule_task`
-answers its existing `scheduler_tools_disabled` `503` and the model tells the
-user it cannot create tasks in this conversation.
+a project (`409`), shared (`409`), deleted through `DELETE /api/threads/{id}`
+(`409`, use the end route), or used as the `reuse_thread` target of a
+scheduled task on create or update (`422`, error code
+`incognito_thread_not_schedulable`). A chat run in an incognito thread binds no
+scheduler capability, so `schedule_task` answers its existing
+`scheduler_tools_disabled` `503` and the model tells the user it cannot create
+tasks in this conversation.
 
 **Feature flag.** `GET /api/features` includes:
 

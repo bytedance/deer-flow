@@ -198,6 +198,20 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return None
             return self._row_to_dict(row)
 
+    async def incognito_ids(self, thread_ids, *, user_id: str | None | _AutoSentinel = AUTO) -> set[str]:
+        """Return the incognito subset of ``thread_ids`` in one query."""
+        if not thread_ids:
+            return set()
+        resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.incognito_ids")
+        stmt = select(ThreadMetaRow.thread_id).where(
+            ThreadMetaRow.thread_id.in_(thread_ids),
+            ThreadMetaRow.incognito.is_(True),
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+        async with self._sf() as session:
+            return set((await session.scalars(stmt)).all())
+
     async def check_access(self, thread_id: str, user_id: str, *, require_existing: bool = False) -> bool:
         """Check if ``user_id`` has access to ``thread_id``.
 
@@ -339,6 +353,13 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row = result.scalar_one_or_none()
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
+            if row.incognito is True and row.status == THREAD_INCOGNITO_EXPIRED_STATUS:
+                # A tombstone is terminal. Run finalization on another Gateway
+                # process can reach here after the sweep has purged the thread;
+                # writing the title back would leave content on a row reads no
+                # longer resolve.
+                await session.rollback()
+                return
             row.display_name = display_name
             metadata = dict(row.metadata_json or {})
             for key in remove_metadata_keys:
@@ -354,11 +375,20 @@ class ThreadMetaRepository(ThreadMetaStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
+        """Update the run status without ever reviving an incognito tombstone.
+
+        A run finishes after another Gateway process swept its thread; the
+        tombstone is the authoritative state, so the row is left untouched.
+        The predicate is part of the UPDATE so the check is atomic with it.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
         # The owner condition stays in the UPDATE itself. A separate ownership
         # read leaves a window in which the row can move to another owner, and
         # the write would then land on that owner's thread.
-        stmt = update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id)
+        stmt = update(ThreadMetaRow).where(
+            ThreadMetaRow.thread_id == thread_id,
+            ~((ThreadMetaRow.incognito.is_(True)) & (ThreadMetaRow.status == THREAD_INCOGNITO_EXPIRED_STATUS)),
+        )
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         async with self._sf() as session:
@@ -507,6 +537,14 @@ class ThreadMetaRepository(ThreadMetaStore):
             if (row.metadata_json or {}).get(THREAD_INCOGNITO_ENDED_METADATA_KEY) is True:
                 await session.rollback()
                 return False
+            deadline = _as_utc(row.expires_at)
+            if deadline is not None and deadline <= moment:
+                # Expiry is not reversible by activity: once the deadline has
+                # passed the thread is gone to its owner, so a run finishing
+                # before the sweep reaches it must not push the deadline out
+                # and pull it back from the due list.
+                await session.rollback()
+                return False
             created = _as_utc(row.created_at) or moment
             # The absolute ceiling wins even when it shortens the deadline.
             row.expires_at = min(moment + idle_ttl, created + max_lifetime)
@@ -525,16 +563,27 @@ class ThreadMetaRepository(ThreadMetaStore):
                 await session.rollback()
                 return False
             metadata = dict(row.metadata_json or {})
+            if metadata.get(THREAD_INCOGNITO_ENDED_METADATA_KEY) is True:
+                # Ending is idempotent: a repeated request must not keep
+                # pushing the purge deadline out while the user waits for the
+                # thread to disappear.
+                await session.rollback()
+                return True
             metadata[THREAD_INCOGNITO_ENDED_METADATA_KEY] = True
             row.metadata_json = metadata
             row.expires_at = moment + grace
             await session.commit()
             return True
 
-    async def begin_incognito_expiry(self, thread_id: str) -> bool:
+    async def begin_incognito_expiry(self, thread_id: str, *, now: datetime | None = None) -> bool:
+        moment = now or datetime.now(UTC)
         async with self._sf() as session:
             row = await self._locked_row(session, thread_id)
-            if row is None or row.incognito is not True:
+            deadline = _as_utc(row.expires_at) if row is not None else None
+            # The due list is a snapshot: a run completion may have renewed the
+            # deadline in between. Recheck under the row lock so the renewal
+            # wins; only an actually-due row is tombstoned.
+            if row is None or row.incognito is not True or deadline is None or deadline > moment:
                 await session.rollback()
                 return False
             row.status = THREAD_INCOGNITO_EXPIRED_STATUS

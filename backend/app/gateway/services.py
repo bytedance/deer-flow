@@ -64,6 +64,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     is_valid_thread_incarnation,
 )
+from deerflow.persistence.thread_meta import is_incognito_expired
 from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
@@ -2902,12 +2903,39 @@ async def start_run(
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
 
-        # The incognito marker and its deadline renewal are stamped by the
-        # durable admission hook (``deps._run_admission_hook``), which runs
-        # after the run holds its same-thread reservation. Reading the thread
-        # row here would add a second, pre-admission store call to every run
-        # and makes tests/operators whose store blocks at admission hang
-        # before the worker can start.
+        async def admission_thread_verdict() -> bool | None:
+            """Read the thread's incognito verdict, or ``None`` when no row exists.
+
+            A store failure is fatal: the run cannot choose its persistence
+            policy on a guess, because the ordinary path writes user-level
+            memory and shared blobs. Called under the goal lock so the sweep
+            and the delete route cannot change the row between this read and
+            durable admission.
+            """
+            try:
+                thread = await run_ctx.thread_store.get(thread_id, user_id=None)
+            except Exception as exc:
+                logger.warning(
+                    "Unable to read thread state for %s at run admission (fatal)",
+                    sanitize_log_param(thread_id),
+                    exc_info=True,
+                )
+                raise HTTPException(status_code=503, detail="Unable to verify thread state") from exc
+            if thread is None:
+                return None
+            if thread.get("incognito") is not True:
+                return False
+            if is_incognito_expired(thread):
+                raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+            return True
+
+        # The incognito verdict is pinned here, under the same goal lock the
+        # delete route and the lifetime sweep take, before this run can write
+        # anything (checkpoint seeding included). A tombstone or a deadline
+        # that passed while the request waited means the owner's thread is
+        # already gone; admitting it would create data no later sweep can
+        # reach. The admission hook renews the deadline once the run holds its
+        # durable reservation and no longer has to discover the verdict.
 
         async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
@@ -3023,30 +3051,45 @@ async def start_run(
             # creating one would break the "nothing persists" promise. With no
             # capability bound, schedule_task returns its existing 503
             # scheduler_tools_disabled and the model tells the user it cannot
-            # create tasks in this conversation. ``metadata_record`` is the same
-            # thread_store row admission pins the marker from, so this is the
-            # authoritative verdict at no extra store cost; the reuse_thread 422
-            # guard stays as the REST and race backstop. A scheduled run never
-            # reaches here incognito: reuse_thread creation is already rejected,
-            # so an incognito thread can never be a task's origin.
-            thread_is_incognito = metadata_record is not None and metadata_record.get("incognito") is True
+            # create tasks in this conversation. The pre-admission read is the
+            # primary verdict; ``metadata_record`` is the fresher thread_store
+            # row and can also confirm an ordinary thread whose row was created
+            # after admission. When neither source knows (metadata setup timed
+            # out on a thread that did not exist yet), fail closed: a durable
+            # task is worse than a missing convenience tool.
+            pre_admission_verdict = (config.get("context") or {}).get(INCOGNITO_CONTEXT_KEY)
+            if pre_admission_verdict is True or (metadata_record is not None and metadata_record.get("incognito") is True):
+                thread_is_incognito = True
+                thread_incognito_known = True
+            elif metadata_record is not None or pre_admission_verdict is False:
+                thread_is_incognito = False
+                thread_incognito_known = True
+            else:
+                thread_is_incognito = False
+                thread_incognito_known = False
             scheduler_capability = None
-            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)) and not thread_is_incognito:
-                client_timezone = await _client_timezone_from_context(body.context)
-                try:
-                    scheduler_capability = await prepare_scheduler_capability(
-                        request,
-                        user=internal_owner_user or user,
-                        thread_id=thread_id,
-                        run_id=record.run_id,
-                        assistant_id=scope_assistant_id,
-                        original_user_text=human_text,
-                        interaction_policy=resolve_run_interaction_policy(config),
-                        scheduled_task_runtime=scheduled_task_runtime,
-                        client_timezone=client_timezone,
+            if scheduler_tools_enabled(getattr(run_ctx, "app_config", None)):
+                if thread_incognito_known and not thread_is_incognito:
+                    client_timezone = await _client_timezone_from_context(body.context)
+                    try:
+                        scheduler_capability = await prepare_scheduler_capability(
+                            request,
+                            user=internal_owner_user or user,
+                            thread_id=thread_id,
+                            run_id=record.run_id,
+                            assistant_id=scope_assistant_id,
+                            original_user_text=human_text,
+                            interaction_policy=resolve_run_interaction_policy(config),
+                            scheduled_task_runtime=scheduled_task_runtime,
+                            client_timezone=client_timezone,
+                        )
+                    except Exception:
+                        logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
+                elif not thread_incognito_known:
+                    logger.warning(
+                        "Scheduler capability withheld for %s: thread incognito state is unknown",
+                        sanitize_log_param(thread_id),
                     )
-                except Exception:
-                    logger.warning("Scheduler tool capability is unavailable for this run", exc_info=True)
             execution_context = replace(run_ctx, scheduler_capability=scheduler_capability) if scheduler_capability is not None else run_ctx
             artifact_imports = getattr(request.state, "extension_artifact_imports", None)
             artifact_lifetime = None
@@ -3096,6 +3139,19 @@ async def start_run(
 
         try:
             async with goal_thread_lock(thread_id):
+                # Recheck access and the thread's lifecycle under the same lock
+                # the delete route and the sweep take. A strict caller may have
+                # observed the thread before a concurrent delete removed it;
+                # the incognito read additionally refuses a tombstone or a
+                # deadline that passed while this request waited. Both happen
+                # before checkpoint-history seeding, which can write events.
+                if require_existing_thread and not await thread_access_allowed():
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                incognito_verdict = await admission_thread_verdict()
+                if require_existing_thread and incognito_verdict is None:
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                if incognito_verdict is not None:
+                    config.setdefault("context", {})[INCOGNITO_CONTEXT_KEY] = incognito_verdict
                 await ensure_checkpoint_history_seeded(
                     request,
                     thread_id=thread_id,
@@ -3104,12 +3160,12 @@ async def start_run(
                 from app.gateway.share_fork import ensure_share_import_history_marked
 
                 await ensure_share_import_history_marked(request, thread_id, threads=run_ctx.thread_store, metadata_timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS)
-                # A strict caller may have observed the thread before a
-                # concurrent delete removed it while checkpoint preparation
-                # yielded. Recheck immediately before durable admission. The
-                # delete route holds a durable thread-operation reservation,
-                # so after this point either the run or the delete wins; they
-                # cannot both succeed across Gateway workers.
+                # Seeding and share-import marking yield and can write events. A
+                # strict caller may have observed the thread before a concurrent
+                # delete removed it in that window; recheck so the delete and
+                # the run cannot both succeed. The delete route holds a durable
+                # reservation, so after this point the run's own admission
+                # decides the winner across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 admission_run_id = str(uuid.uuid4())

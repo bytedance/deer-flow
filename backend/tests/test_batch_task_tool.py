@@ -122,16 +122,16 @@ async def test_batch_task_is_explicit_idempotent_submission(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("marker", [True, "true", 1, None])
-async def test_batch_task_records_only_the_server_incognito_marker_in_spec(
+async def test_batch_task_refuses_incognito_and_records_only_an_exact_true_marker(
     monkeypatch,
     marker,
 ) -> None:
-    """The durable execution_spec carries the marker so any worker replays it.
+    """A re-attached batch tool refuses an incognito run.
 
-    A batch worker may run on another process after a restart, reconstructing
-    its executor purely from the stored spec. Recording the admission-pinned
-    marker there is what keeps a delegated incognito run's blob writes off
-    across that boundary. Only the exact boolean ``True`` is recorded.
+    New incognito runs never bind the batch tools. If one is reached anyway,
+    the exact boolean ``True`` must refuse before anything is submitted. Any
+    other marker value is ordinary, and the durable execution_spec records
+    nothing (legacy rows keep their own marker for cross-process replay).
     """
     from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 
@@ -144,7 +144,7 @@ async def test_batch_task_records_only_the_server_incognito_marker_in_spec(
     runtime = _runtime()
     runtime.context[INCOGNITO_CONTEXT_KEY] = marker
 
-    await tool_module.batch_task.coroutine(
+    command = await tool_module.batch_task.coroutine(
         runtime=runtime,
         title="Research",
         items=[BatchTaskItem(key="record-1", prompt="Process one")],
@@ -152,12 +152,15 @@ async def test_batch_task_records_only_the_server_incognito_marker_in_spec(
         tool_call_id="call-1",
     )
 
-    request = submitter.submit.await_args.args[0]
-    recorded = request.execution_spec.get(INCOGNITO_CONTEXT_KEY)
     if marker is True:
-        assert recorded is True
-    else:
-        assert recorded is None
+        message = _message(command)
+        assert message.status == "error"
+        assert "incognito" in message.content
+        submitter.submit.assert_not_awaited()
+        return
+
+    request = submitter.submit.await_args.args[0]
+    assert request.execution_spec.get(INCOGNITO_CONTEXT_KEY) is None
 
 
 @pytest.mark.asyncio

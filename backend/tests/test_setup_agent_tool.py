@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
 # --- Helpers ---
@@ -47,6 +48,20 @@ def _call_setup_agent(tmp_path: Path, soul: str, description: str, agent_name: s
 
 
 # --- Agent name validation tests ---
+
+
+def test_setup_agent_refuses_in_an_incognito_chat(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    runtime = _DummyRuntime(context={"agent_name": "test-agent", INCOGNITO_CONTEXT_KEY: True}, tool_call_id="tool-1")
+
+    result = setup_agent.func(soul="test soul", description="desc", runtime=runtime)
+
+    messages = result.update["messages"]
+    assert len(messages) == 1
+    assert messages[0].status == "error"
+    assert "incognito" in messages[0].content
+    # Agent creation persists outside the chat, so nothing may be written.
+    assert not (tmp_path / "users" / "test-user-autouse" / "agents").exists()
 
 
 def test_setup_agent_rejects_invalid_agent_name_before_writing(tmp_path, monkeypatch):

@@ -1,6 +1,7 @@
 """HTTP and conversation admission must not silently move nonexistent local times."""
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
@@ -70,6 +71,31 @@ async def test_shared_admission_rejects_nonexistent_wall_time(timezone, wall_tim
     assert caught.value.detail["message"].startswith(f"{field}: ")
     assert "does not exist" in caught.value.detail["message"]
     assert timezone in caught.value.detail["message"]
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_moving_a_task_onto_an_incognito_thread():
+    thread_store = SimpleNamespace(
+        check_access=AsyncMock(return_value=True),
+        get=AsyncMock(return_value={"thread_id": "secret", "user_id": "owner", "incognito": True}),
+    )
+    body = ScheduledTaskUpdateRequest(context_mode="reuse_thread", thread_id="secret")
+
+    # A PATCH can move a task onto another conversation just as create can
+    # mint one on it, so it must apply the same incognito rule.
+    with pytest.raises(HTTPException) as caught:
+        await validate_scheduled_task_update(
+            _existing("UTC"),
+            body.model_dump(exclude_unset=True),
+            user_id="owner",
+            thread_store=thread_store,
+            scheduler_config=SchedulerConfig(),
+            assistant_resolver=AsyncMock(),
+            used=0,
+            now=NOW,
+        )
+    assert caught.value.status_code == 422
+    assert caught.value.detail["code"] == "incognito_thread_not_schedulable"
 
 
 @pytest.mark.parametrize(("timezone", "wall_time"), GAPS)

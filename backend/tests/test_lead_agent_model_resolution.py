@@ -732,7 +732,7 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
         "reasoning_effort": "high",
         "app_config": app_config,
     }
-    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, mcp_plugins=None, include_conversation_reader=False, app_config=app_config, chat_model=result["model"])
+    get_available_tools.assert_called_once_with(model_name="context-model", groups=None, subagent_enabled=True, incognito=False, mcp_plugins=None, include_conversation_reader=False, app_config=app_config, chat_model=result["model"])
     assert result["model"] is not None
 
 
@@ -782,6 +782,51 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
 
     assert [tool.name for tool in result["tools"]] == (["bash", "setup_agent"] if is_bootstrap else ["bash"])
     assert captured_prompt_policy["policy"].mode.value == "scheduled"
+
+
+def test_make_lead_agent_withholds_setup_agent_in_an_incognito_bootstrap_run(monkeypatch):
+    """Agent creation is durable, so an incognito bootstrap run cannot offer it."""
+    from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+
+    import deerflow.tools as tools_module
+
+    def _named_tool(name: str):
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    captured_kwargs: dict = {}
+
+    def _assemble(**kwargs):
+        captured_kwargs.update(kwargs)
+        return [_named_tool("bash")]
+
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: app_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", _assemble)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", create_autospec(lead_agent_module.build_middlewares, return_value=[]))
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "prompt")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    result = lead_agent_module.make_lead_agent(
+        {
+            "context": {
+                "model_name": "safe-model",
+                "thinking_enabled": False,
+                "subagent_enabled": False,
+                "non_interactive": True,
+                "is_bootstrap": True,
+                INCOGNITO_CONTEXT_KEY: True,
+            }
+        }
+    )
+
+    assert [tool.name for tool in result["tools"]] == ["bash"]
+    # The durable-batch gate lives inside tool assembly, so the flag has to
+    # reach it from the bootstrap path too.
+    assert captured_kwargs["incognito"] is True
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
@@ -1580,6 +1625,7 @@ def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch, mcp_
         groups=None,
         mcp_plugins=mcp_plugins,
         subagent_enabled=False,
+        incognito=False,
         include_conversation_reader=False,
         app_config=app_config,
         chat_model=ANY,

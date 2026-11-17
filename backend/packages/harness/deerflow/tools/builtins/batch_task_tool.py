@@ -25,7 +25,7 @@ from deerflow.mcp_scope import (
     THREAD_INCARNATION_METADATA_GUARD_KEY,
     runtime_thread_incarnation,
 )
-from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY, is_incognito_runtime
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.subagents.batch_runtime import (
     BatchItemInput,
@@ -197,6 +197,15 @@ async def batch_task(
             An active Goal resumes only from external waiting and within its existing limits.
     """
     submitter = _batch_submitter()
+    # Defence in depth: the lead-agent assembly already withholds the batch
+    # tools in incognito runs. Durable rows store each item's prompt and
+    # execution spec and outlive the chat, so a re-attached copy must refuse.
+    if is_incognito_runtime(runtime):
+        return _result(
+            tool_call_id,
+            content="Error: batch_task is unavailable in an incognito chat. Durable batch rows outlive the conversation; use the ordinary task tool for subagents here.",
+            error=True,
+        )
     if submitter is None:
         return _result(
             tool_call_id,

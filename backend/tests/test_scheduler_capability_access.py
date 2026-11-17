@@ -135,6 +135,26 @@ async def test_noninteractive_runs_without_private_occurrence_authority_get_no_g
 
 
 @pytest.mark.asyncio
+async def test_incognito_origin_withholds_the_gateway_grant(monkeypatch):
+    prepare, _, _, _, threads, *_ = _setup(monkeypatch)
+    threads.get.return_value = {"user_id": "alice", "incognito": True}
+    # A task minted in an incognito chat would keep writing listable rows for
+    # a conversation that is about to be purged.
+    assert await prepare() is None
+
+
+@pytest.mark.asyncio
+async def test_existing_grant_rejects_an_origin_that_became_incognito(monkeypatch):
+    prepare, repo, _, _, threads, *_ = _setup(monkeypatch)
+    capability = await prepare()
+    threads.get.return_value = {"user_id": "alice", "incognito": True}
+    result = await capability.manage(action="list", request={})
+    assert result["status_code"] == 422
+    assert result["code"] == "incognito_thread_not_schedulable"
+    repo.list_manageable_from_thread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_session_principal_and_permission_ceiling_cannot_be_widened(monkeypatch):
     prepare, repo, _, _, _, _, resolve, request = _setup(monkeypatch, permissions=("threads:read",))
     capability = await prepare()

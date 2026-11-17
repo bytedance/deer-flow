@@ -38,8 +38,10 @@ async def sweep_expired_incognito_threads(app: Any, *, now: datetime | None = No
     """Purge one batch of expired incognito threads; return how many finished.
 
     A thread with work in flight is skipped: its reservation refuses the
-    delete, its data stays intact, and the next sweep retries it. Every other
-    failure leaves the tombstone in place and is retried the same way.
+    delete, its data stays intact, and the next sweep retries it. A batch
+    entry whose deadline was renewed after the due list was read is skipped
+    too, and every other failure leaves the tombstone in place and is retried
+    the same way.
     """
     store = getattr(app.state, "thread_store", None)
     run_manager = getattr(app.state, "run_manager", None)
@@ -56,13 +58,18 @@ async def sweep_expired_incognito_threads(app: Any, *, now: datetime | None = No
         try:
             async with goal_thread_lock(thread_id):
                 async with run_manager.reserve_thread_operation(thread_id, kind=ThreadOperationKind.delete, user_id=user_id):
-                    await store.begin_incognito_expiry(thread_id)
+                    # The due list is a snapshot; a run admission or completion
+                    # may have renewed the deadline since it was read. The
+                    # store rechecks under its row lock and reports whether the
+                    # row is still due, so a renewed thread is left alone.
+                    if not await store.begin_incognito_expiry(thread_id):
+                        continue
                     # Imported lazily: the delete core lives with the threads
                     # router, and importing that module here would pull the
                     # whole router graph into app startup before it is needed.
                     from app.gateway.routers.threads import purge_thread_data
 
-                    await purge_thread_data(thread_id, app_state=app.state, user_id=user_id, delete_meta_row=False)
+                    await purge_thread_data(thread_id, app_state=app.state, user_id=user_id, delete_meta_row=False, require_complete=True)
                     await store.finish_incognito_expiry(thread_id)
             purged += 1
         except ConflictError:

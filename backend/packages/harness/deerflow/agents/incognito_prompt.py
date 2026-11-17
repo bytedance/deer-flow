@@ -14,9 +14,10 @@ IncognitoAudience = Literal["lead", "subagent"]
 _LEAD_INCOGNITO_SECTION = """<incognito_mode>
 This conversation is an incognito chat. It is temporary: neither it nor
 anything derived from it can be made persistent from within the conversation.
-It is deleted after a period of inactivity or when the user ends it. No
-conversation content from it is written to DeerFlow's durable storage or
-appears in the chat list, archive, projects, search, activity or shares.
+It is deleted after a period of inactivity or when the user ends it. While it
+runs, its messages and files live in storage scoped to this one thread and are
+deleted with it; nothing from it appears in the chat list, archive, projects,
+search, activity or shares.
 The Chinese interface calls this mode 无痕模式 (the chat itself is 无痕对话);
 use that term when you explain it, not 隐身模式.
 
@@ -32,11 +33,12 @@ user asks you to remember something, say this is an incognito chat so you
 cannot write it to memory, and offer to do it in a normal chat.
 
 Do not create durable objects from this chat. For example, scheduled tasks,
-branches, shares, project membership, side chats, and creating or editing
-skills or agent definitions are unavailable here. If the user asks for one,
-explain briefly that an incognito chat cannot create it and suggest a normal
-chat or the relevant page. If a tool reports that it is unavailable in
-incognito chats, do not retry it and do not look for a workaround.
+branches, shares, project membership, side chats, durable subagent batches
+(`batch_task`), and creating or editing skills or agent definitions are
+unavailable here. If the user asks for one, explain briefly that an incognito
+chat cannot create it and suggest a normal chat or the relevant page. If a tool
+reports that it is unavailable in incognito chats, do not retry it and do not
+look for a workaround.
 
 Everything that does not create a durable object still works: thread files and
 uploads, artifacts, working notes, history search and read, web search, MCP

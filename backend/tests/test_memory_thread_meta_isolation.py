@@ -13,7 +13,7 @@ import pytest
 from langgraph.store.memory import InMemoryStore
 
 from deerflow.persistence.projects import ProjectNotAssignableError
-from deerflow.persistence.thread_meta import ThreadOwnershipConflictError
+from deerflow.persistence.thread_meta import THREAD_INCOGNITO_EXPIRED_STATUS, ThreadCreateConflictError, ThreadOwnershipConflictError
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
@@ -94,6 +94,39 @@ async def test_duplicate_create_rejects_different_owner_without_overwrite(store)
     with _as_user(USER_A):
         fetched = await store.get("foreign-duplicate")
     assert fetched == original
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_refuses_to_overwrite_a_live_incognito_row(store):
+    with _as_user(USER_A):
+        original = await store.create("incognito-duplicate", incognito=True, metadata={"keep": True})
+        with pytest.raises(ThreadCreateConflictError):
+            await store.create("incognito-duplicate", display_name="replacement")
+        fetched = await store.get("incognito-duplicate")
+
+    assert fetched is not None
+    assert fetched["incognito"] is True
+    assert fetched["display_name"] == original["display_name"]
+    assert fetched["metadata"] == {"keep": True}
+    assert fetched["created_at"] == original["created_at"]
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_create_refuses_to_overwrite_an_incognito_tombstone(store):
+    """The SQL store rejects this id at the primary key; memory must not revive it."""
+    with _as_user(USER_A):
+        await store.create("incognito-tombstone", incognito=True)
+        await store.update_status("incognito-tombstone", THREAD_INCOGNITO_EXPIRED_STATUS)
+        with pytest.raises(ThreadCreateConflictError):
+            await store.create("incognito-tombstone", display_name="replacement")
+        fetched = await store.get("incognito-tombstone")
+
+    assert fetched is not None
+    assert fetched["incognito"] is True
+    assert fetched["status"] == THREAD_INCOGNITO_EXPIRED_STATUS
+    assert fetched["display_name"] is None
 
 
 @pytest.mark.anyio

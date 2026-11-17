@@ -12,6 +12,7 @@ from deerflow.config.agents_config import SOUL_FILENAME, validate_agent_name
 from deerflow.config.paths import get_paths
 from deerflow.knowledge_scope import canonicalize_knowledge_scope
 from deerflow.persistence.agents import get_agent_store
+from deerflow.runtime.context_keys import is_incognito_runtime
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 from deerflow.utils.atomic_write import cleanup_failed_atomic_write
@@ -68,6 +69,22 @@ def setup_agent(
         description: One-line description of what the agent does.
         skills: Optional list of skill names this agent should use. None means use all enabled skills, empty list means no skills.
     """
+
+    # Defence in depth — the lead-agent factory already withholds this tool
+    # from incognito runs. Creating an agent writes a durable per-user record
+    # and SOUL.md, so a re-attached tool must still refuse inside the chat.
+    if is_incognito_runtime(runtime):
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content="Error: setup_agent is unavailable in an incognito chat. Creating an agent persists data outside this conversation and would outlive it.",
+                        tool_call_id=runtime.tool_call_id,
+                        status="error",
+                    )
+                ]
+            }
+        )
 
     # Reject empty / whitespace-only soul before touching the filesystem.
     # Without this guard the tool would happily persist an empty SOUL.md and

@@ -8,6 +8,7 @@ through ``RunRepository.put`` so ``origin_kind`` is derived as in production.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import httpx
@@ -21,6 +22,8 @@ from app.gateway.routers import features, thread_activity, threads
 from deerflow.persistence.base import Base
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunChangeClockRow, RunRow
+from deerflow.persistence.thread_meta import ThreadMetaRepository
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_reads import ThreadReadMarkerRow, ThreadReadRepository, ThreadReadVersionRow
 from deerflow.runtime.run_origin import DEERFLOW_ORIGIN_KEY, make_origin
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -36,18 +39,19 @@ async def repositories(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'activity.db'}")
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow)]))
+            await conn.run_sync(lambda sync: Base.metadata.create_all(sync, tables=[m.__table__ for m in (RunRow, RunChangeClockRow, ThreadReadMarkerRow, ThreadReadVersionRow, ThreadMetaRow)]))
         sf = async_sessionmaker(engine, expire_on_commit=False)
-        yield RunRepository(sf), ThreadReadRepository(sf)
+        yield RunRepository(sf), ThreadReadRepository(sf), ThreadMetaRepository(sf)
     finally:
         await engine.dispose()
 
 
 @asynccontextmanager
-async def client_for(run_store, read_repo, *, user=_ALICE):
+async def client_for(run_store, read_repo, metas, *, user=_ALICE):
     app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True)
     app.state.run_store = run_store
     app.state.thread_read_repo = read_repo
+    app.state.thread_store = metas
     app.include_router(thread_activity.router)
     app.include_router(threads.router)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://activity.test") as client:
@@ -69,7 +73,7 @@ async def poll(client, cursor=None, **params):
 
 @pytest.mark.asyncio
 async def test_first_poll_only_seeds_at_the_callers_head(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         await put_run(runs, "run-1", "sched", origin="schedule")
         seeded = await poll(client)
         assert seeded["threads"] == []
@@ -84,7 +88,7 @@ async def test_first_poll_only_seeds_at_the_callers_head(tmp_path):
 
 @pytest.mark.asyncio
 async def test_user_without_runs_seeds_at_zero_and_sees_the_first_scheduled_run(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         seeded = await poll(client)
         assert seeded["cursor"] == "0:"
         await put_run(runs, "run-1", "sched", origin="schedule", status="running")
@@ -94,7 +98,7 @@ async def test_user_without_runs_seeds_at_zero_and_sees_the_first_scheduled_run(
 
 @pytest.mark.asyncio
 async def test_cursor_advances_to_the_last_returned_row_without_skips_or_repeats(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         cursor = (await poll(client))["cursor"]
         for index in range(5):
             await put_run(runs, f"run-{index}", f"thread-{index}", origin="schedule")
@@ -115,7 +119,7 @@ async def test_cursor_advances_to_the_last_returned_row_without_skips_or_repeats
 
 @pytest.mark.asyncio
 async def test_interactive_changes_advance_the_cursor_but_are_not_returned(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         cursor = (await poll(client))["cursor"]
         await put_run(runs, "chat-1", "chat", status="pending")
         await put_run(runs, "chat-1", "chat", status="running")
@@ -129,7 +133,7 @@ async def test_interactive_changes_advance_the_cursor_but_are_not_returned(tmp_p
 
 @pytest.mark.asyncio
 async def test_new_server_runs_are_listed_once_per_thread_with_latest_status(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         cursor = (await poll(client))["cursor"]
         await put_run(runs, "run-s", "sched", origin="schedule", status="running")
         await put_run(runs, "run-im", "im", origin="im_channel", status="running")
@@ -142,14 +146,27 @@ async def test_new_server_runs_are_listed_once_per_thread_with_latest_status(tmp
 
 
 @pytest.mark.asyncio
+async def test_incognito_threads_are_not_listed(tmp_path):
+    """The feed's only reach is an exact id; an incognito id must never surface."""
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
+        cursor = (await poll(client))["cursor"]
+        await metas.create("secret", user_id=ALICE, incognito=True, expires_at=datetime.now(UTC) + timedelta(hours=1))
+        await put_run(runs, "run-secret", "secret", origin="schedule")
+        await put_run(runs, "run-open", "open", origin="schedule")
+        page = await poll(client, cursor)
+        assert [item["thread_id"] for item in page["threads"]] == ["open"]
+        assert page["cursor"] != cursor
+
+
+@pytest.mark.asyncio
 async def test_other_users_runs_never_appear_even_with_their_cursor(tmp_path):
-    async with repositories(tmp_path) as (runs, reads):
-        async with client_for(runs, reads, user=_BOB) as bob:
+    async with repositories(tmp_path) as (runs, reads, metas):
+        async with client_for(runs, reads, metas, user=_BOB) as bob:
             bob_cursor = (await poll(bob))["cursor"]
         await put_run(runs, "run-bob", "bob-thread", user_id=BOB, origin="schedule")
         # Bob's run in a thread shared with Alice.
         await put_run(runs, "run-bob-shared", "shared", user_id=BOB, origin="im_channel")
-        async with client_for(runs, reads) as alice:
+        async with client_for(runs, reads, metas) as alice:
             assert (await poll(alice, bob_cursor))["threads"] == []
             assert (await poll(alice, "0:"))["threads"] == []
             assert (await poll(alice))["cursor"] == "0:"
@@ -158,7 +175,7 @@ async def test_other_users_runs_never_appear_even_with_their_cursor(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cursor", ["", "abc", "12", "-1:run", "1:run:x", "01:run", "1: run", "9" * 20 + ":r", f"{2**63}:r", "1:" + "r" * 65, "1:" + "r" * 200])
 async def test_malformed_cursor_is_rejected(tmp_path, cursor):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         response = await client.get("/api/thread-activity", params={"cursor": cursor})
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == "invalid_cursor"
@@ -166,7 +183,7 @@ async def test_malformed_cursor_is_rejected(tmp_path, cursor):
 
 @pytest.mark.asyncio
 async def test_largest_change_seq_is_a_valid_cursor(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         cursor = f"{2**63 - 1}:r"
         page = await poll(client, cursor)
         assert page["threads"] == [] and page["cursor"] == cursor
@@ -174,8 +191,9 @@ async def test_largest_change_seq_is_a_valid_cursor(tmp_path):
 
 @pytest.mark.asyncio
 async def test_read_version_moves_only_when_a_read_clears_something(tmp_path):
-    async with repositories(tmp_path) as (runs, reads), client_for(runs, reads) as client:
+    async with repositories(tmp_path) as (runs, reads, metas), client_for(runs, reads, metas) as client:
         await put_run(runs, "run-1", "sched", origin="schedule")
+        await metas.create("sched", user_id=ALICE)
         cursor = (await poll(client))["cursor"]
 
         cleared = await client.post("/api/threads/sched/read")

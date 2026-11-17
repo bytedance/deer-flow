@@ -35,6 +35,20 @@ def test_durable_batch_guidance_allows_only_explicit_prerequisites(monkeypatch) 
     assert "depends_on" not in prompt_module._build_subagent_section(3, batch_enabled=False)
 
 
+def test_incognito_prompt_hides_durable_batch_guidance(monkeypatch) -> None:
+    """Incognito runs do not bind the batch tools, so the prompt must not advertise them."""
+    import deerflow.subagents.batch_runtime as batch_runtime
+
+    monkeypatch.setattr(batch_runtime, "is_subagent_batch_runtime_available", lambda: True)
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+
+    ordinary = prompt_module.apply_prompt_template(subagent_enabled=True)
+    incognito = prompt_module.apply_prompt_template(subagent_enabled=True, incognito=True)
+
+    assert "Explicit durable batch mode" in ordinary
+    assert "Explicit durable batch mode" not in incognito
+
+
 def test_hard_vetoes_apply_to_parallel_dispatch_not_single_agent_chains(monkeypatch) -> None:
     section = _build_section(monkeypatch)
 

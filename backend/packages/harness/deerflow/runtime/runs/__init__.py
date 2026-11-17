@@ -1,5 +1,6 @@
 """Run lifecycle management for LangGraph Platform API compatibility."""
 
+from .admission import RunAdmissionRejected
 from .manager import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, CancelOutcome, ConflictError, RunIdempotencyKeyMismatch, RunIdempotencyUnsupported, RunManager, RunRecord, UnsupportedStrategyError
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
 from .worker import RunContext, run_agent
@@ -9,6 +10,7 @@ __all__ = [
     "ConflictError",
     "DisconnectMode",
     "ORPHAN_RECOVERY_STOP_REASON",
+    "RunAdmissionRejected",
     "RunContext",
     "RunIdempotencyKeyMismatch",
     "RunIdempotencyUnsupported",

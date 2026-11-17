@@ -1,10 +1,12 @@
 """The batch worker rebuilds the incognito verdict from the durable spec.
 
-A batch item can execute on another process after a restart, where the only
-record of the parent run is the stored ``execution_spec``. Reconstructing the
-executor's ``incognito`` flag from that spec is what keeps a delegated
-incognito run's shared blob writes off across the process boundary, matching
-the in-process task-tool propagation.
+Incognito runs no longer bind the durable batch tools, so this path now serves
+rows created before that change (and any re-attached caller). It stays because
+those rows must not lose their blob-write protection when a worker replays
+them: a batch item can execute on another process after a restart, where the
+only record of the parent run is the stored ``execution_spec``. Reconstructing
+the executor's ``incognito`` flag from that spec matches the in-process
+task-tool propagation those rows were created with.
 """
 
 from types import SimpleNamespace

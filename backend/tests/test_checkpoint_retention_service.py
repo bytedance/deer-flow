@@ -1024,6 +1024,12 @@ async def test_gateway_context_keeps_agent_runs_binding_and_retention_hooks(monk
         async def handle_run_completion(self, record: Any) -> None:
             completed.append(record)
 
+    class EmptyThreadStore:
+        # The admission hook reads the row to pin the incognito verdict; a
+        # missing row means an ordinary (or not-yet-created) thread.
+        async def get(self, thread_id: str, *, user_id: str | None = None) -> None:
+            return None
+
     request = SimpleNamespace(
         app=SimpleNamespace(
             state=SimpleNamespace(
@@ -1032,7 +1038,7 @@ async def test_gateway_context_keeps_agent_runs_binding_and_retention_hooks(monk
                 checkpointer=wrapped,
                 store=object(),
                 run_event_store=object(),
-                thread_store=object(),
+                thread_store=EmptyThreadStore(),
             )
         )
     )

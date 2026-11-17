@@ -2782,8 +2782,15 @@ async def test_pending_cancel_bypasses_thread_metadata_and_logs_failure(_stub_ap
     from deerflow.runtime.runs.store.memory import MemoryRunStore
 
     metadata_started = asyncio.Event()
+    reads = 0
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, *, user_id=None):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            # Admission verdict read: no metadata row exists yet, so the run
+            # is admitted without waiting for the (hanging) metadata store.
+            return None
         metadata_started.set()
         try:
             await asyncio.Event().wait()
@@ -2832,8 +2839,14 @@ async def test_thread_metadata_timeout_logs_and_run_still_starts(_stub_app_confi
 
     metadata_started = asyncio.Event()
     run_agent_called = asyncio.Event()
+    reads = 0
 
-    async def get_thread(_thread_id):
+    async def get_thread(_thread_id, *, user_id=None):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            # Admission verdict read: no metadata row exists yet.
+            return None
         metadata_started.set()
         await asyncio.Event().wait()
 
@@ -4426,14 +4439,9 @@ def test_start_run_project_resolution_failure_degrades_to_unassigned(_stub_app_c
     async def _scenario():
         request, _run_store, _thread_store = _make_start_run_persistence_context()
 
-        class _BoomThreadStore:
-            async def get(self, thread_id, **kwargs):
-                raise RuntimeError("database is down")
-
-            async def check_access(self, thread_id, user_id, **kwargs):
-                return True
-
-        request.app.state.thread_store = _BoomThreadStore()
+        # Project resolution fails because no project repository is configured.
+        # An unreadable *thread* store would now fail admission fatally (503),
+        # so the resolution seam is the project side, not the thread read.
         request.state = SimpleNamespace(auth_source="session", user=SimpleNamespace(id="u1", system_role="user"))
         body = SimpleNamespace(
             assistant_id="lead_agent",
@@ -6509,8 +6517,9 @@ async def test_incognito_threads_bind_no_scheduler_capability(_stub_app_config, 
 
     Binding the capability is what makes ``schedule_task`` callable at all;
     without it the tool reports ``scheduler_tools_disabled`` and never reaches
-    persistence. The verdict reads the same thread row admission pins, so this
-    costs no extra store call. An ordinary thread keeps the capability.
+    persistence. The verdict comes from the thread row ``start_run`` reads
+    under the goal lock, so this adds no second interpretation of the thread. An
+    ordinary thread keeps the capability.
     """
     from unittest.mock import AsyncMock, patch
 
@@ -6549,6 +6558,155 @@ async def test_incognito_threads_bind_no_scheduler_capability(_stub_app_config, 
     else:
         prepare.assert_awaited_once()
         assert captured["ctx"].scheduler_capability is capability
+
+
+@pytest.mark.asyncio
+async def test_scheduler_capability_is_withheld_when_thread_state_is_unknown(_stub_app_config):
+    """A durable task is worse than a missing tool when the verdict is absent."""
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _SlowCreateStore(MemoryThreadMetaStore):
+        async def create(self, *_args, **_kwargs):
+            await asyncio.Event().wait()
+
+    # No row exists at admission (a brand-new interactive thread), so the
+    # pre-admission verdict is unknown; the metadata setup then times out.
+    thread_store = _SlowCreateStore(InMemoryStore())
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), thread_store=thread_store)
+    body = _run_create_request()
+    prepare = AsyncMock(return_value=object())
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["ctx"] = kwargs["ctx"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services.scheduler_tools_enabled", return_value=True),
+        patch("app.gateway.services._THREAD_METADATA_SETUP_TIMEOUT_SECONDS", 0.05),
+        patch("app.gateway.scheduled_task_access.prepare_scheduler_capability", new=prepare),
+    ):
+        record = await start_run(body, "thread-state-unknown", request)
+        await record.task
+
+    prepare.assert_not_awaited()
+    assert captured["ctx"].scheduler_capability is None
+
+
+@pytest.mark.asyncio
+async def test_start_run_rejects_an_expired_incognito_thread_before_admission(_stub_app_config):
+    """A run admitted to a tombstoned thread would write data no sweep can reach."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create("thread-expired", incognito=True, expires_at=datetime.now(UTC) - timedelta(minutes=1))
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), thread_store=thread_store)
+    body = _run_create_request()
+    started = False
+
+    async def fake_run_agent(*_args, **_kwargs):
+        nonlocal started
+        started = True
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        with pytest.raises(HTTPException) as caught:
+            await start_run(body, "thread-expired", request)
+
+    assert caught.value.status_code == 404
+    assert not started
+
+
+@pytest.mark.asyncio
+async def test_start_run_fails_closed_when_the_thread_verdict_cannot_be_read(_stub_app_config):
+    """Choosing a persistence policy on an unreadable store would leak writes."""
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    class _BrokenStore:
+        async def get(self, *_args, **_kwargs):
+            raise RuntimeError("thread store down")
+
+        async def check_access(self, *_args, **_kwargs):
+            return True
+
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), thread_store=_BrokenStore())
+    body = _run_create_request()
+    started = False
+
+    async def fake_run_agent(*_args, **_kwargs):
+        nonlocal started
+        started = True
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        with pytest.raises(HTTPException) as caught:
+            await start_run(body, "thread-unreadable", request)
+
+    assert caught.value.status_code == 503
+    assert not started
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("thread_id", "incognito", "expected"), [("thread-live-secret", True, True), ("thread-live-plain", False, False)])
+async def test_start_run_pins_the_incognito_verdict_before_admission(_stub_app_config, thread_id, incognito, expected):
+    from unittest.mock import AsyncMock, patch
+
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.services import start_run
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    thread_store = MemoryThreadMetaStore(InMemoryStore())
+    await thread_store.create(thread_id, incognito=incognito)
+    request = _make_start_run_request(RunManager(store=MemoryRunStore()), thread_store=thread_store)
+    body = _run_create_request()
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*_args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services.scheduler_tools_enabled", return_value=True),
+        patch("app.gateway.scheduled_task_access.prepare_scheduler_capability", new=AsyncMock(return_value=None)),
+    ):
+        record = await start_run(body, thread_id, request)
+        await record.task
+
+    # The verdict reaches the worker before durable admission; the hook no
+    # longer has to discover it, and a later metadata timeout cannot erase it.
+    assert captured["config"]["context"][INCOGNITO_CONTEXT_KEY] is expected
 
 
 @pytest.mark.asyncio

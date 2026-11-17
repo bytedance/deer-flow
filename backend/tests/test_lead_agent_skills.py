@@ -553,6 +553,68 @@ def test_make_lead_agent_drops_update_agent_on_github_channel(monkeypatch):
     assert "read_file" in tool_names
 
 
+def test_make_lead_agent_drops_update_agent_in_an_incognito_run(monkeypatch):
+    """An incognito run must not mutate the agent for every later chat."""
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=None))
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [NamedTool("bash")])
+
+    mock_app_config = MagicMock()
+    mock_app_config.database.checkpoint_delta.snapshot_frequency = 10
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    kwargs_incognito = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {INCOGNITO_CONTEXT_KEY: True}})
+    tool_names = [t.name for t in kwargs_incognito["tools"]]
+    assert "update_agent" not in tool_names
+    assert "bash" in tool_names
+
+
+def test_make_lead_agent_passes_the_incognito_flag_to_tool_assembly(monkeypatch):
+    """Durable batch tools are gated inside assembly, so the flag must reach it."""
+    from unittest.mock import MagicMock
+
+    from deerflow.agents.lead_agent import agent as lead_agent_module
+    from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
+
+    captured: dict = {}
+
+    def _assemble(**kwargs):
+        captured.update(kwargs)
+        return [NamedTool("bash")]
+
+    monkeypatch.setattr(lead_agent_module, "_resolve_model_name", lambda x=None, **kwargs: "default-model")
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: "model")
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: "mock_prompt")
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda x, *, user_id=None: AgentConfig(name="test", skills=None))
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda available_skills, *, app_config, user_id=None: [_make_skill("legacy", None)])
+    monkeypatch.setattr("deerflow.tools.get_available_tools", _assemble)
+
+    mock_app_config = MagicMock()
+    mock_app_config.database.checkpoint_delta.snapshot_frequency = 10
+    mock_app_config.get_model_config.return_value = SimpleNamespace(supports_thinking=False, supports_vision=False)
+    monkeypatch.setattr(lead_agent_module, "get_app_config", lambda: mock_app_config)
+
+    lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {INCOGNITO_CONTEXT_KEY: True}})
+    assert captured["incognito"] is True
+
+    captured.clear()
+    lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}})
+    assert captured["incognito"] is False
+
+
 def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch):
     """Direct invocation and non-webhook channels still get ``update_agent``.
 

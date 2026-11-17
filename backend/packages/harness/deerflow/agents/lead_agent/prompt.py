@@ -1167,7 +1167,9 @@ def apply_prompt_template(
             total,
             app_config=app_config,
             allowed_subagents=allowed_subagents,
-            batch_enabled=is_subagent_batch_runtime_available(),
+            # Durable batch tools are withheld in incognito runs, so the prompt
+            # must not advertise a mode the run cannot dispatch.
+            batch_enabled=is_subagent_batch_runtime_available() and not incognito,
             lead_bash_available=bash_available,
         )
     else:

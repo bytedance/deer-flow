@@ -37,7 +37,8 @@ from deerflow.config.channel_leader_lease_config import CHANNEL_LEADER_LEASE_FIE
 from deerflow.config.credentials_key import CREDENTIALS_KEY_ENV_VAR, CREDENTIALS_KEY_FILENAME, GENERATE_KEY_COMMAND, CredentialsKeyError, parse_credentials_keys
 from deerflow.config.deployment_config import multi_instance_declaration
 from deerflow.persistence.feedback import FeedbackRepository
-from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunContext, RunManager, StreamBridge
+from deerflow.persistence.thread_meta import is_incognito_expired
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, STARTUP_ORPHAN_RECOVERY_ERROR, RunAdmissionRejected, RunContext, RunManager, StreamBridge
 from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.runs.store.base import RunStore
@@ -1352,28 +1353,66 @@ def get_subagent_batch_service(request: Request):
 
 
 def _run_admission_hook(*, checkpointer: Any, thread_store: Any | None = None, app_config: Any | None = None):
-    """Prune metadata leaves and pin the incognito marker inside the admission fence."""
+    """Re-verify the incognito verdict, then prune metadata leaves and renew.
+
+    ``start_run`` pins the verdict before durable admission, but the row can
+    change before the worker starts: another Gateway process may sweep an
+    expired thread or delete it. A pinned ``True`` is therefore rechecked
+    against the live row, and an unreadable store raises
+    :class:`RunAdmissionRejected` instead of silently running as an ordinary
+    conversation and writing memory or shared blobs. A caller that reaches the
+    worker without the pre-check (an embedded host) gets its first read here.
+    """
 
     async def handle(record: Any, config: dict[str, Any]) -> None:
-        # Admission is activity: renew the idle deadline while this run holds
-        # its durable same-thread reservation, so the sweep cannot delete it
-        # mid-turn and a blocked/uncallable thread store cannot stall run
-        # admission before the worker starts. This is best-effort by design:
-        # a failed renewal leaves the old deadline, never the run unprotected
-        # from the normal completion renewal.
-        if thread_store is not None and app_config is not None:
+        context = config.get("context")
+        if not isinstance(context, dict):
+            context = None
+        verdict = context.get(INCOGNITO_CONTEXT_KEY) if context is not None else None
+        if thread_store is not None and app_config is not None and (verdict is None or verdict is True):
             try:
                 thread = await thread_store.get(record.thread_id, user_id=None)
+            except Exception as exc:
+                logger.warning(
+                    "Incognito admission lookup failed for thread %s (fatal)",
+                    record.thread_id,
+                    exc_info=True,
+                )
+                raise RunAdmissionRejected("Unable to verify the thread's incognito state") from exc
+            if verdict is None:
                 if thread is not None and thread.get("incognito") is True:
-                    config.setdefault("context", {})[INCOGNITO_CONTEXT_KEY] = True
+                    if is_incognito_expired(thread):
+                        raise RunAdmissionRejected("This incognito thread has expired")
+                    verdict = True
+                else:
+                    verdict = False
+                if context is None:
+                    context = {}
+                    config["context"] = context
+                context[INCOGNITO_CONTEXT_KEY] = verdict
+            elif thread is None or thread.get("incognito") is not True:
+                # The pinned verdict is a hint, not proof. If the row is gone
+                # (another process deleted it) or was recreated as an ordinary
+                # thread, fail closed rather than start an incognito run whose
+                # policy no longer matches the stored thread.
+                raise RunAdmissionRejected("This incognito thread is no longer available")
+            elif is_incognito_expired(thread):
+                # The sweep writes the tombstone before purging; a run that was
+                # admitted before the race must not execute afterwards and
+                # recreate content that no later sweep will select.
+                raise RunAdmissionRejected("This incognito thread has expired")
+            if verdict is True:
+                # Renewal is activity, not the verdict: a failed renewal keeps
+                # the old deadline and never turns the run ordinary.
+                try:
                     await thread_store.renew_incognito(
                         record.thread_id,
                         idle_ttl=timedelta(seconds=app_config.incognito.idle_ttl_seconds),
                         max_lifetime=timedelta(seconds=app_config.incognito.max_lifetime_seconds),
                         user_id=None,
                     )
-            except Exception:
-                logger.warning("Incognito admission renewal failed for thread %s (non-fatal)", record.thread_id, exc_info=True)
+                except Exception:
+                    logger.warning("Incognito admission renewal failed for thread %s (non-fatal)", record.thread_id, exc_info=True)
         try:
             from app.gateway.checkpoint_retention import enforce_completed_run_retention
 

@@ -137,6 +137,9 @@ def make_authed_test_app(
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
+    # Routes that read the row themselves (the delete guard) see a missing one;
+    # a MagicMock attribute is not awaitable.
+    repo.get = AsyncMock(return_value=None)
     app.state.thread_store = repo
 
     return app

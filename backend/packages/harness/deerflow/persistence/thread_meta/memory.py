@@ -20,6 +20,7 @@ from deerflow.persistence.thread_meta.base import (
     THREAD_INCOGNITO_ENDED_METADATA_KEY,
     THREAD_INCOGNITO_EXPIRED_STATUS,
     THREAD_PINNED_METADATA_KEY,
+    ThreadCreateConflictError,
     ThreadMetaStore,
     ThreadOwnershipConflictError,
     _as_utc,
@@ -81,6 +82,13 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             existing = await self._store.aget(THREADS_NS, thread_id)
             if existing is not None and resolved_user_id is not None and existing.value.get("user_id") != resolved_user_id:
                 raise ThreadOwnershipConflictError(thread_id)
+            # The SQL store rejects this id at the primary key; the memory
+            # store used to overwrite it. An incognito row must survive every
+            # create: a tombstone keeps its id from being reused, and a live
+            # row must not be converted or have its deadline reset. Raise so
+            # the Gateway resolves the existing row (410/409/idempotent 200).
+            if existing is not None and existing.value.get("incognito") is True:
+                raise ThreadCreateConflictError(thread_id)
             now = now_iso()
             record: dict[str, Any] = {
                 "thread_id": thread_id,
@@ -200,6 +208,10 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_display_name")
             if record is None:
                 return
+            if record.get("incognito") is True and record.get("status") == THREAD_INCOGNITO_EXPIRED_STATUS:
+                # A tombstone is terminal: run finalization must not write the
+                # title back onto a thread the sweep has purged.
+                return
             record["display_name"] = display_name
             metadata = dict(record.get("metadata") or {})
             for key in remove_metadata_keys:
@@ -209,9 +221,14 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             await self._store.aput(THREADS_NS, thread_id, record)
 
     async def update_status(self, thread_id: str, status: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+        """Update the run status without ever reviving an incognito tombstone."""
         async with self._thread_locks.hold(thread_id):
             record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_status")
             if record is None:
+                return
+            if record.get("incognito") is True and record.get("status") == THREAD_INCOGNITO_EXPIRED_STATUS:
+                # The sweep's tombstone is authoritative; a run finalizing
+                # after it must not turn the row back into a live thread.
                 return
             record["status"] = status
             record["updated_at"] = now_iso()
@@ -291,6 +308,11 @@ class MemoryThreadMetaStore(ThreadMetaStore):
                 return False
             if (record.get("metadata") or {}).get(THREAD_INCOGNITO_ENDED_METADATA_KEY) is True:
                 return False
+            deadline = _as_utc(record.get("expires_at"))
+            if deadline is not None and deadline <= moment:
+                # Expiry is not reversible by activity: a run finishing before
+                # the sweep reaches an already-gone thread must not extend it.
+                return False
             created = _as_utc(record.get("created_at")) or moment
             record["expires_at"] = coerce_iso(min(moment + idle_ttl, created + max_lifetime))
             await self._store.aput(THREADS_NS, thread_id, record)
@@ -303,16 +325,28 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             if record is None or record.get("incognito") is not True or record.get("status") == THREAD_INCOGNITO_EXPIRED_STATUS:
                 return False
             metadata = dict(record.get("metadata") or {})
+            if metadata.get(THREAD_INCOGNITO_ENDED_METADATA_KEY) is True:
+                # Ending is idempotent: a repeated request must not keep
+                # pushing the purge deadline out while the user waits for the
+                # thread to disappear.
+                return True
             metadata[THREAD_INCOGNITO_ENDED_METADATA_KEY] = True
             record["metadata"] = metadata
             record["expires_at"] = coerce_iso(moment + grace)
             await self._store.aput(THREADS_NS, thread_id, record)
             return True
 
-    async def begin_incognito_expiry(self, thread_id: str) -> bool:
+    async def begin_incognito_expiry(self, thread_id: str, *, now: datetime | None = None) -> bool:
+        moment = now or datetime.now(UTC)
         async with self._thread_locks.hold(thread_id):
             item = await self._store.aget(THREADS_NS, thread_id)
             if item is None or item.value.get("incognito") is not True:
+                return False
+            # The due list is a snapshot: a run completion may have renewed the
+            # deadline in between. Recheck under the thread lock so the renewal
+            # wins; only an actually-due row is tombstoned.
+            deadline = _as_utc(item.value.get("expires_at"))
+            if deadline is None or deadline > moment:
                 return False
             record = dict(item.value)
             record["status"] = THREAD_INCOGNITO_EXPIRED_STATUS

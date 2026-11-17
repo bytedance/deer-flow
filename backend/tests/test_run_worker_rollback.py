@@ -163,6 +163,70 @@ async def test_admission_cleanup_finishes_before_first_checkpoint_read(monkeypat
 
 
 @pytest.mark.anyio
+async def test_admission_rejection_fails_the_run_before_the_agent_starts():
+    """A host that cannot establish a durable-storage precondition aborts the run."""
+    from deerflow.runtime.runs import RunAdmissionRejected
+
+    manager = RunManager()
+    record = await manager.create("thread-admission-reject")
+    agent_started = asyncio.Event()
+
+    class EmptyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            agent_started.set()
+            yield {"messages": []}
+
+    async def reject_admission(_record, _config) -> None:
+        raise RunAdmissionRejected("incognito verdict unavailable")
+
+    await run_agent(
+        _lease_test_bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, on_run_admitted=reject_admission),
+        agent_factory=lambda **_kwargs: EmptyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert "incognito verdict unavailable" in (record.error or "")
+    assert not agent_started.is_set()
+
+
+@pytest.mark.anyio
+async def test_ordinary_admission_hook_failure_stays_non_fatal():
+    """Bookkeeping failures (cleanup, renewal) must not strand an admitted run."""
+    manager = RunManager()
+    record = await manager.create("thread-admission-warning")
+    ran = False
+
+    class EmptyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            nonlocal ran
+            ran = True
+            yield {"messages": []}
+
+    async def failing_admission(_record, _config) -> None:
+        raise RuntimeError("cleanup failed")
+
+    await run_agent(
+        _lease_test_bridge(),
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, on_run_admitted=failing_admission),
+        agent_factory=lambda **_kwargs: EmptyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert ran
+
+
+@pytest.mark.anyio
 async def test_run_agent_releases_execution_lease_when_graph_raises():
     provider = MagicMock()
     provider.get.return_value = MagicMock()

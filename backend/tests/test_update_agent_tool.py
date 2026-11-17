@@ -18,6 +18,7 @@ import yaml
 from langchain.tools import ToolRuntime
 
 from deerflow.config.agents_config import AgentConfig
+from deerflow.runtime.context_keys import INCOGNITO_CONTEXT_KEY
 from deerflow.tools.builtins.update_agent_tool import update_agent
 
 DEFAULT_USER = "test-user-autouse"  # matches the autouse fixture in tests/conftest.py
@@ -114,6 +115,21 @@ def test_update_agent_rejects_invalid_agent_name(patched_paths):
 
     msg = result.update["messages"][0]
     assert "Invalid agent name" in msg.content
+
+
+def test_update_agent_refuses_in_an_incognito_chat(tmp_path, patched_paths):
+    _seed_agent(tmp_path)
+    runtime = _runtime(agent_name="test-agent")
+    runtime.context[INCOGNITO_CONTEXT_KEY] = True
+
+    result = update_agent.func(runtime=runtime, soul="new soul")
+
+    msg = result.update["messages"][0]
+    assert msg.status == "error"
+    assert "incognito" in msg.content
+    # The seeded agent is untouched: the change would have persisted outside
+    # the chat and stayed visible in every later conversation.
+    assert (_user_agent_dir(tmp_path) / "SOUL.md").read_text(encoding="utf-8") == "old soul"
 
 
 def test_update_agent_rejects_unknown_agent(tmp_path, patched_paths):

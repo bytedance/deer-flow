@@ -39,6 +39,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import get_agent_store
 from deerflow.persistence.agents.file import FileAgentStore
+from deerflow.runtime.context_keys import is_incognito_runtime
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -118,6 +119,12 @@ def update_agent(
 
     def _err(message: str) -> Command:
         return Command(update={"messages": [ToolMessage(content=f"Error: {message}", tool_call_id=tool_call_id, status="error")]})
+
+    # Defence in depth — the lead-agent factory already withholds this tool
+    # from incognito runs. The write is durable and visible in every later
+    # ordinary conversation, so a re-attached tool must refuse on its own.
+    if is_incognito_runtime(runtime):
+        return _err("update_agent is unavailable in an incognito chat. Agent changes persist outside this conversation and would outlive it.")
 
     # Defence in depth — the lead-agent factory already withholds this
     # tool from webhook-channel runs (see ``_WEBHOOK_CHANNELS`` in

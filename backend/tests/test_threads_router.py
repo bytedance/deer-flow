@@ -511,6 +511,32 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     assert not thread_dir.exists()
 
 
+def test_delete_thread_route_refuses_an_incognito_thread() -> None:
+    """The best-effort delete would drop the tombstone and make the id reusable."""
+    app, store, _checkpointer = _build_thread_app()
+
+    async def _seed():
+        await store.aput(
+            THREADS_NS,
+            "thread-incognito",
+            {
+                "thread_id": "thread-incognito",
+                "status": "idle",
+                "incognito": True,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+
+    asyncio.run(_seed())
+    with TestClient(app) as client:
+        response = client.delete("/api/threads/thread-incognito")
+
+    assert response.status_code == 409
+    assert "incognito/end" in response.json()["detail"]
+    assert asyncio.run(store.aget(THREADS_NS, "thread-incognito")) is not None
+
+
 def test_delete_thread_route_closes_browser_session(tmp_path):
     """Deleting a thread tears down its live browser session so a later caller
     who reuses the id cannot inherit the retained page/cookies."""

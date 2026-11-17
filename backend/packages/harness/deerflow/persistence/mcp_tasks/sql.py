@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from sqlalchemy import and_, case, or_, select, text, update
+from sqlalchemy import and_, case, delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -296,6 +296,23 @@ class McpTaskRepository:
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def delete_by_thread(self, thread_id: str, *, user_id: str | None) -> int:
+        """Delete every tracked MCP task for a thread; return the row count.
+
+        Thread lifecycle cleanup is not incarnation-scoped: a purge must also
+        remove rows left by an earlier incarnation, or their result payloads
+        (the tool output the user asked to forget) outlive the thread. A
+        ``None`` owner purges the thread across owners, as the migration and
+        CLI callers require; an explicit owner scopes the delete to that user.
+        """
+        stmt = delete(McpTaskRow).where(McpTaskRow.thread_id == thread_id)
+        if user_id is not None:
+            stmt = stmt.where(McpTaskRow.user_id == user_id)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return int(result.rowcount or 0)
 
     async def claim_due_tasks(
         self,

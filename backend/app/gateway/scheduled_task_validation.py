@@ -355,6 +355,13 @@ async def validate_scheduled_task_update(
             raise scheduler_error(422, "reuse_thread_requires_thread", "reuse_thread requires thread_id")
         if not await thread_store.check_access(str(effective_thread_id), user_id, require_existing=True):
             raise scheduler_error(404, "thread_not_found", "Thread not found")
+        thread = await thread_store.get(str(effective_thread_id), user_id=user_id)
+        if thread is not None and thread.get("incognito") is True:
+            # Same rule as create: a task that outlives the thread would pin
+            # its transcript in a durable, listable surface. A PATCH can move
+            # a task onto such a thread just as a create can, so the check
+            # runs on the effective thread, not only on a field the request set.
+            raise scheduler_error(422, "incognito_thread_not_schedulable", "An incognito thread cannot be reused by a scheduled task")
     elif effective_context_mode == "fresh_thread_per_run":
         updates["thread_id"] = None
     if "timezone" in updates:

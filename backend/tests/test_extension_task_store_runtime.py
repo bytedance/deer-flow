@@ -146,6 +146,7 @@ def _subagent_env():
     # mock; otherwise isolated execution depends on earlier test collection.
     import importlib
 
+    importlib.import_module("deerflow.agents.incognito_prompt")
     importlib.import_module("deerflow.agents.middlewares.audit_context")
     importlib.import_module("deerflow.authz.principal")
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_SUBAGENT_MODULES}

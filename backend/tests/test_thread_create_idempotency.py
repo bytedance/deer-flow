@@ -141,6 +141,47 @@ async def test_racing_creates_preserve_first_thread(thread_store, monkeypatch, a
 
 
 @pytest.mark.anyio
+async def test_create_racing_an_incognito_tombstone_answers_410(thread_store, monkeypatch):
+    """A create that loses the idempotency read to an incognito row must not revive it.
+
+    The memory store used to overwrite the row while the SQL store rejected
+    the insert at the primary key; both now resolve through the route's
+    idempotent-create recovery to the same 410.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    await thread_store.create(
+        "expired-create",
+        user_id=str(USER.id),
+        incognito=True,
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    original_get = thread_store.get
+    reads = 0
+
+    async def observed_get(thread_id, **kwargs):
+        nonlocal reads
+        if thread_id == "expired-create":
+            reads += 1
+            if reads == 1:
+                # The racing request read the id before this row existed.
+                return None
+        return await original_get(thread_id, **kwargs)
+
+    monkeypatch.setattr(thread_store, "get", observed_get)
+    app = app_for(thread_store, InMemorySaver())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/api/threads", json={"thread_id": "expired-create"})
+
+    assert response.status_code == 410, response.text
+    assert response.json()["detail"] == "This incognito thread has expired"
+    row = await original_get("expired-create", user_id=str(USER.id))
+    assert row is not None
+    assert row["incognito"] is True
+    assert row["metadata"] == {}
+
+
+@pytest.mark.anyio
 async def test_cancelled_waiter_keeps_other_threads_available(thread_store, monkeypatch):
     attempted = asyncio.Event()
     real_lock = threads.goal_thread_lock

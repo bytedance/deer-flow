@@ -418,6 +418,12 @@ async def test_gateway_tool_assembly_gating_and_config_binding(env, monkeypatch)
         raw = await tools["read_batch_result"].coroutine(runtime=runtime(), batch_id=batch)
         assert json.loads(raw)["status"] == "ok" and len(raw) <= 500
         assert "read_batch_result" not in {t.name for t in get_available_tools(app_config=config, subagent_enabled=False)}
+        # An incognito run keeps the in-process task tool but never the durable
+        # batch family: those rows store prompts and execution specs and would
+        # outlive the chat.
+        incognito_names = {t.name for t in get_available_tools(app_config=config, subagent_enabled=True, incognito=True)}
+        assert incognito_names.isdisjoint({"batch_task", "batch_status", "cancel_batch", "read_batch_result"})
+        assert "task" in incognito_names
         set_subagent_batch_submitter(None)
         assert json.loads(await tools["read_batch_result"].coroutine(runtime=runtime(), batch_id=batch)) == {"status": "unavailable"}
         assert "read_batch_result" not in {t.name for t in get_available_tools(app_config=config, subagent_enabled=True)}
