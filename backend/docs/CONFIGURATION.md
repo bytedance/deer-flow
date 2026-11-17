@@ -933,6 +933,16 @@ agent_storage:
 - `agent_storage` is restart-required (the backend is captured at Gateway lifespan startup).
 - In a multi-worker Postgres deployment (`GATEWAY_WORKERS > 1`), leaving `agent_storage.backend: file` logs a startup warning — agents written to one node's local disk are invisible to the others, which is exactly the divergence the `db` backend fixes.
 
+Managed subagents also follow this backend selection. With `file`, their directory
+must support hard links: creation atomically publishes a fully written temporary
+file without replacing an existing name. Workers sharing that directory therefore
+return one HTTP 201 and one HTTP 409 for concurrent same-name creates. Other
+filesystem errors propagate rather than falling back to an overwrite.
+Gateway startup probes hard-link creation once per worker in that directory,
+off the event loop, and logs a warning if the probe fails. Startup continues;
+use a volume with working hard links or migrate to `backend: db` before creating
+managed subagents on an incompatible volume. Probe files are removed afterward.
+
 Migrating an existing install from `file` to `db`:
 
 Run from the repository root using the backend's `uv` environment. The importer
@@ -972,6 +982,8 @@ tools:
     exclude_domains: []         # Optional: domains to exclude from search results
     # api_key: $TAVILY_API_KEY  # Optional
 ```
+
+Tavily search and fetch initialize their HTTPS clients on a worker thread so TLS trust loading does not block other agent runs. A tool cancelled during initialization closes its client before returning without sending a request.
 
 For Tavily, `include_domains` and `exclude_domains` are deployment-only options
 read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
@@ -2101,6 +2113,8 @@ models:
 - `DEER_FLOW_CREDENTIALS_KEY` - At-rest encryption key(s) for stored credentials; comma-separate to rotate. See [Credentials encryption key](#credentials-encryption-key-deer_flow_credentials_key)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+Search, fetch and capture providers treat an example value that `.env.example` ships (such as `your-jina-api-key`, matched exactly) as unset, in `config.yaml` and in the environment alike: a keyless provider such as the Jina Reader uses its free tier, and a provider that needs a key reports it missing. Any other value is sent as written, so a self-hosted token you chose keeps working. Browserless reads `BROWSERLESS_TOKEN` only when its `token` field is omitted, so a blank or placeholder `token` is not replaced by the variable. `make doctor` applies the same rules and names the variable or field that still holds a placeholder, including `JINA_API_KEY` and `YDC_API_KEY` for the keyless providers.
 
 ## Backend dotenv selection
 

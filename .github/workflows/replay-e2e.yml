@@ -71,21 +71,27 @@ jobs:
     name: Layer 2 — full-stack render (no API key)
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # Match the locked Playwright runtime so the image supplies its browsers.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble
+      options: --ipc=host
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
           # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
           version: "0.11.1"
+      - name: Install container-compatible Python
+        run: uv python install 3.12
       - name: Install backend dependencies (replay gateway)
         working-directory: backend
-        run: uv sync --group dev
+        run: |
+          uv sync --group dev
+          uv run --no-sync python -c 'import ssl, sqlite3'
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -97,9 +103,13 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
-      - name: Install Playwright Chromium
+      - name: Verify Playwright Chromium
         working-directory: frontend
-        run: npx playwright install chromium --with-deps
+        run: >-
+          node --input-type=module -e
+          'import { chromium } from "@playwright/test";
+          const browser = await chromium.launch();
+          await browser.close();'
       - name: Full-stack replay render (DOM assertions are the gate)
         working-directory: frontend
         run: pnpm exec playwright test -c playwright.real-backend.config.ts

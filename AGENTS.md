@@ -35,6 +35,9 @@ Humans start at [README.md](README.md), [CONTRIBUTING.md](CONTRIBUTING.md) and
 Nginx serves the frontend, proxies `/api/*` to the Gateway and rewrites
 `/api/langgraph/*` to the Gateway's native routes.
 
+Before changing ingress, port bindings or provisioner mounts, read
+[service topology details](docs/agent-service-topology.md).
+
 ## Repository map
 
 | Path | Content |
@@ -109,3 +112,11 @@ Values, defaults, field lists, function inventories, test names, issue numbers
 and history stay in the code, the tests and git. Write full sentences in the
 positive form and give the reason. `make check-agent-guidance` enforces the size
 budget.
+
+### Office preview example
+
+`examples/deerflow-extension-office-preview/` packages Office readers through the
+optional `artifactPreviews` browser contract. Keep parser dependencies and resources
+in the extension; rebuild its manifest and static module graph after UI changes.
+Test packaged assets with the Office E2E fixtures; rendering must preserve original
+downloads and state its search limits.
