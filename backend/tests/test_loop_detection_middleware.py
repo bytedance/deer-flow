@@ -11,13 +11,15 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain.agents import create_agent
+from langchain_core.language_models import BaseChatModel
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import tool as as_tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
-from pydantic import PrivateAttr
+from pydantic import ConfigDict, PrivateAttr
 
 from deerflow.agents.middlewares import loop_detection_middleware as loop_detection_module
 from deerflow.agents.middlewares.loop_detection_middleware import (
@@ -27,9 +29,15 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
     LoopDetectionMiddleware,
     _hash_tool_calls,
 )
+from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.thread_state import ThreadState
 from deerflow.approvals.middleware import ToolApprovalMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.hitl_approval_config import HitlApprovalConfig
+from deerflow.runtime.runs.input_control import RunInputControl
+from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 def _make_runtime(thread_id="test-thread", run_id="test-run"):
@@ -2102,6 +2110,10 @@ class TestToolCallBatchDecisions:
         }
         assert not mw._pending_warnings.get(_pending_key())
         # A run that dropped calls at a limit is capped, even though it goes on.
+        # The admitted calls still run, so the run context, which other
+        # middlewares read as "the run is ending", is written when it ends.
+        assert "stop_reason" not in runtime.context
+        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: result[LOOP_CAP_STATE_KEY]}, runtime)
         assert runtime.context["stop_reason"] == "loop_capped"
         assert mw.consume_stop_reason("test-run") == "loop_capped"
         journal.record_middleware.assert_called_once()
@@ -2455,7 +2467,9 @@ class TestPerToolCapState:
         for sent in captured:
             assert [m.name for m in sent.messages] == ["summary", "loop_warning"]
             assert "skipped 2 of the 4 tool calls" in sent.messages[-1].content
-        # The resumed run is capped before any of its own responses is checked.
+        # The resumed run reports the cap when it ends, not while it runs.
+        assert "stop_reason" not in runtime.context
+        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: request.state[LOOP_CAP_STATE_KEY]}, runtime)
         assert runtime.context["stop_reason"] == "loop_capped"
         assert mw.consume_stop_reason("resumed-run") == "loop_capped"
 
@@ -2605,9 +2619,11 @@ class TestPerToolCapState:
         assert notice.name == "loop_warning"
         assert "skipped 2 of the 4 tool calls in your last response because a tool reached" in notice.content
         assert name not in notice.content
-        assert resumed.context["stop_reason"] == "loop_capped"
         # Once delivered, the record stays as the mark of a capped execution.
-        assert mw.after_model(_make_state(content="done", loop_cap=written), resumed) == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {}}}
+        delivered = mw.after_model(_make_state(content="done", loop_cap=written), resumed)
+        assert delivered == {LOOP_CAP_STATE_KEY: {"run_id": "resumed-run", "tools": {}}}
+        mw.after_agent({"messages": [AIMessage(content="done")], **delivered}, resumed)
+        assert resumed.context["stop_reason"] == "loop_capped"
 
     def test_more_tools_than_a_record_holds_keeps_the_existing_caps(self):
         mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=2)
@@ -2671,6 +2687,8 @@ class TestPerToolCapState:
 
         stopped = result["messages"][0]
         assert stopped.tool_calls == []
+        # No call is left to guard, so this is a terminal stop: reported at once.
+        assert runtime.context["stop_reason"] == "loop_capped"
         assert "[FORCED STOP] Tool a called 3 times" in stopped.content
         assert result[LOOP_CAP_STATE_KEY] == {"run_id": "test-run", "tools": {"a": 3}}
         assert mw.consume_stop_reason("test-run") == "loop_capped"
@@ -2772,6 +2790,158 @@ class TestPerToolCapState:
         assert loop.consume_stop_reason("present-run") == "loop_capped"
 
 
+class _SteerableBatchModel(BaseChatModel):
+    """First answers with ``first``; once a run input arrives, applies it; otherwise wraps up."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    first: list
+    entered: Any = None
+    release: Any = None
+    calls: int = 0
+
+    @property
+    def _llm_type(self):
+        return "steerable-batch"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if any(m.additional_kwargs.get("run_input_id") for m in messages):
+            applied = any(isinstance(m, ToolMessage) and m.name == "apply_extra" for m in messages)
+            message = AIMessage(content="New requirement applied") if applied else AIMessage(content="", tool_calls=[{"name": "apply_extra", "args": {}, "id": "extra"}])
+        else:
+            self.calls += 1
+            message = AIMessage(content="", tool_calls=self.first) if self.calls == 1 else AIMessage(content="Wrapped up")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if self.entered is not None and self.calls == 0:
+            self.entered.set()
+            await self.release.wait()
+        return self._generate(messages)
+
+
+class TestPartialCapKeepsRunGuards:
+    """Calls that survive a partial cap still run, so the checks other middlewares apply to calls must still apply.
+
+    Those middlewares read ``stop_reason`` in the run context as "the run is ending" and skip their checks.
+    Middleware order follows the lead chain: input admission first, the todo middleware before loop
+    detection, end-of-graph input handling last.
+    """
+
+    BATCH = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
+
+    @staticmethod
+    async def _input_control():
+        store = MemoryRunStore()
+        await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+        inputs = RunInputs(store, "run", "owner", "worker")
+        return inputs, RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=InMemorySaver())
+
+    @staticmethod
+    def _tools(executed):
+        @as_tool
+        async def write_out(value: str) -> str:
+            """Write a value."""
+            executed.append(value)
+            return "ok"
+
+        @as_tool
+        async def apply_extra() -> str:
+            """Apply the new requirement."""
+            executed.append("new")
+            return "updated"
+
+        return [write_out, apply_extra]
+
+    @pytest.mark.asyncio
+    async def test_input_that_arrives_during_inference_cancels_the_admitted_calls(self):
+        inputs, control = await self._input_control()
+        executed, entered, release = [], asyncio.Event(), asyncio.Event()
+        model = _SteerableBatchModel(first=self.BATCH, entered=entered, release=release)
+        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
+        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
+        graph = create_agent(model, tools=self._tools(executed), middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
+        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context=context))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await inputs.submit("update", "Do the new work instead", "steer")
+            release.set()
+            await asyncio.wait_for(run, 5)
+        finally:
+            release.set()
+            await asyncio.gather(run, return_exceptions=True)
+            await control.close()
+
+        # The two calls the cap admitted are obsolete after the steer and must not run.
+        assert executed == ["new"]
+        assert context["stop_reason"] == "loop_capped"
+
+    @pytest.mark.asyncio
+    async def test_input_that_arrives_as_the_run_finishes_is_applied(self, monkeypatch):
+        inputs, control = await self._input_control()
+        closing, release = asyncio.Event(), asyncio.Event()
+        original_close = inputs.close
+
+        async def gated_close(delivered=None):
+            if not closing.is_set():
+                closing.set()
+                await release.wait()
+            return await original_close(delivered)
+
+        monkeypatch.setattr(inputs, "close", gated_close)
+        executed = []
+        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
+        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
+        graph = create_agent(_SteerableBatchModel(first=self.BATCH), tools=self._tools(executed), middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
+        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, {"configurable": {"thread_id": "thread"}}, context=context))
+        try:
+            await asyncio.wait_for(closing.wait(), 5)
+            await inputs.submit("last", "Apply this correction", "steer")
+            release.set()
+            await asyncio.wait_for(run, 5)
+            state = await inputs.read()
+        finally:
+            release.set()
+            await asyncio.gather(run, return_exceptions=True)
+            await control.close()
+
+        assert sorted(executed) == ["new", "old-0", "old-1"]
+        assert [item["status"] for item in state["items"]] == ["applied"]
+        assert context["stop_reason"] == "loop_capped"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_parallel_write_todos_next_to_a_dropped_call_are_still_rejected(self, use_async):
+        executed = []
+
+        @as_tool
+        def write_out(value: str) -> str:
+            """Write a value."""
+            executed.append(value)
+            return "ok"
+
+        batch = [
+            {"name": "write_todos", "args": {"todos": [{"content": "plan A", "status": "in_progress"}]}, "id": "todo_a"},
+            {"name": "write_todos", "args": {"todos": [{"content": "plan B", "status": "in_progress"}]}, "id": "todo_b"},
+            *self.BATCH,
+        ]
+        middleware = [TodoMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)]
+        context = {"thread_id": "todo-thread", "run_id": "todo-run"}
+        graph = create_agent(_SteerableBatchModel(first=batch), tools=[write_out], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=InMemorySaver())
+        inputs, config = {"messages": [HumanMessage(content="Plan and write")]}, {"configurable": {"thread_id": "todo-thread"}}
+
+        result = await graph.ainvoke(inputs, config, context=context) if use_async else graph.invoke(inputs, config, context=context)
+
+        todo_results = [m.status for m in result["messages"] if isinstance(m, ToolMessage) and m.tool_call_id in ("todo_a", "todo_b")]
+        # Each call replaces the whole plan, so two in one response are rejected rather than raced.
+        assert todo_results == ["error", "error"]
+        assert not result.get("todos")
+        assert sorted(executed) == ["old-0", "old-1"]
+        assert context["stop_reason"] == "loop_capped"
+
+
 class TestCapSurvivesApprovalPauseAndRestart:
     """Drive a real approval pause and checkpoint resume; each step builds a new graph and new middleware."""
 
@@ -2832,7 +3002,8 @@ class TestCapSurvivesApprovalPauseAndRestart:
         assert not executed
         assert self._pending_call_ids(paused) == ["w0"]
         assert cap_record(graph) == {"run_id": "paused-run", "tools": {"external_write": 2}, "notice": {"total": 3, "skipped": 2, "tools": ["external_write"]}}
-        assert paused_context["stop_reason"] == "loop_capped"
+        # The admitted call is still pending, so the run is not reported as ending.
+        assert "stop_reason" not in paused_context
 
         # 2. Restart, then resume under a new run id. The model retries the capped tool next to another call.
         retry = [{"name": "external_write", "id": "w9", "args": {"value": "v9"}}, {"name": "note", "id": "n0", "args": {"text": "kept"}}]

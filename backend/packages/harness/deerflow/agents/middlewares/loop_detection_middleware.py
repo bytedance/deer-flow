@@ -69,7 +69,9 @@ Stop-reason surfacing (#3875 Phase 2):
   :meth:`consume_stop_reason`. The executor collects that reason alongside
   the token-budget guard's so a loop-capped run surfaces as
   ``completed + loop_capped`` and the lead/ledger can tell it was capped
-  without parsing result text.
+  without parsing result text. A per-tool cap writes ``runtime.context`` only
+  when the run ends, because other middlewares read that key mid-run as
+  "the run is ending" (see ``_mark_capped``).
 """
 
 from __future__ import annotations
@@ -1062,27 +1064,34 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         run_id = self._get_run_id(runtime)
         return None if run_id is None else str(run_id)
 
-    def _mark_capped(self, runtime: Runtime, *, overwrite: bool = False) -> None:
+    def _mark_capped(self, runtime: Runtime, *, terminal: bool = False) -> None:
         """Surface ``stop_reason=loop_capped`` for the current run (#3875 Phase 2).
 
         A cap does not raise: the run finishes with an answer, so without this
         the caller would see a clean completion. The subagent executor reads
-        the reason through ``consume_stop_reason``; the lead worker reads
-        ``runtime.context`` (#4176), which Goal continuation and the todo
-        reminder also check. Written under the lock to match
+        the reason through ``consume_stop_reason`` after the run returns, so
+        that channel is written at once. Written under the lock to match
         ``TokenBudgetMiddleware``: the lead agent's middleware instance is
         shared across concurrent Gateway threads.
 
-        A run that only carries a cap from before a pause passes
-        ``overwrite=False``, so it does not replace another guard's reason.
+        ``runtime.context`` is two signals at once. The worker (#4176) and Goal
+        continuation read it when the run is over, but run-input admission, the
+        todo middleware and the end-of-graph input handling read it while the
+        run goes on, as "the run is ending: skip your checks". That holds only
+        when the response has no call left. ``terminal`` marks that case and
+        writes the context now, replacing another guard's reason as every hard
+        stop does. A run that dropped only some calls still executes the
+        others, which must pass those checks, so its context reason is written
+        by ``after_agent`` instead (see ``_finish``).
         """
         thread_id, run_id = self._run_scope_key(runtime)
         with self._lock:
             self._stop_reason[run_id] = "loop_capped"
             self._stop_reason_thread_id[run_id] = thread_id
-        ctx = getattr(runtime, "context", None)
-        if isinstance(ctx, dict) and (overwrite or ctx.get("stop_reason") is None):
-            ctx["stop_reason"] = "loop_capped"
+        if terminal:
+            ctx = getattr(runtime, "context", None)
+            if isinstance(ctx, dict):
+                ctx["stop_reason"] = "loop_capped"
 
     @staticmethod
     def _admitted_calls(last_msg, decision: _LoopDecision) -> list[dict]:
@@ -1102,9 +1111,8 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         next_cap = cap
         if cap is not None:
             # The run carries a cap from an earlier response, possibly from
-            # before an approval pause; ``wrap_model_call`` marked it capped.
-            # The model has now answered the request that explained the cap,
-            # so the notice is delivered.
+            # before an approval pause. The model has now answered the request
+            # that explained the cap, so the notice is delivered.
             next_cap = replace(cap, run_id=self._record_run_id(runtime), notice=None)
 
         update: dict = {}
@@ -1130,10 +1138,10 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 # warning is delivered via ``wrap_model_call`` below.
                 self._queue_pending_warning(runtime, decision.message)
             else:
-                self._mark_capped(runtime, overwrite=True)
                 last_msg = state.get("messages", [])[-1]
                 kept = self._admitted_calls(last_msg, decision) if decision.action == "reject_excess" else []
                 capped_tools = _recordable_caps(cap.tools if cap is not None else {}, decision.limits)
+                self._mark_capped(runtime, terminal=not kept)
                 if kept:
                     # Run the calls within the limit and drop the rest. Like a
                     # warning, the explanation reaches the model on its next
@@ -1186,9 +1194,16 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         update = None
         cap = _read_loop_cap(state.get(LOOP_CAP_STATE_KEY))
         if cap is not None:
-            # A resumed run can end without another model call. It is still
-            # capped, and it now owns the cap for any later entry of this run.
+            # The run is over, so the report no longer suspends any check.
+            # ``after_agent`` hooks run in reverse middleware order, so the
+            # end-of-graph input handling appended after this middleware has
+            # already run. Another guard's reason, set earlier, is kept. This
+            # also covers a resumed run that ends without another model call,
+            # and it hands the cap to this run for any later entry of it.
             self._mark_capped(runtime)
+            ctx = getattr(runtime, "context", None)
+            if isinstance(ctx, dict) and ctx.get("stop_reason") is None:
+                ctx["stop_reason"] = "loop_capped"
             run_id = self._record_run_id(runtime)
             if cap.run_id != run_id:
                 update = {LOOP_CAP_STATE_KEY: replace(cap, run_id=run_id).dump()}
@@ -1291,7 +1306,6 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         cap = _read_loop_cap(state.get(LOOP_CAP_STATE_KEY)) if isinstance(state, Mapping) else None
         if cap is None:
             return []
-        self._mark_capped(request.runtime)
         text = cap.notice_text()
         return [text] if text else []
 

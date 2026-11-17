@@ -52,9 +52,18 @@ cap, and a notice for the model.
 - **Every later call to a capped tool is dropped**, whatever the window counts.
   Other tools in the same response run under their own limits. A response that
   calls only capped tools stops the run.
-- **The run is `loop_capped` from the first dropped call**, in the run record
-  and in a subagent result, although it goes on to wrap up. Goal continuation
-  stands down on that reason, and the todo completion reminder stays quiet.
+- **A run that dropped a call is `loop_capped`** in the run record and in a
+  subagent result, although it goes on to wrap up. Goal continuation stands
+  down on that reason. The calls that survive still run, so the reason enters
+  the run context only when the run ends: other middlewares read
+  `stop_reason` there as "the run is ending" and skip their checks. Until
+  then, input that arrives mid-run still cancels the response's planned calls,
+  parallel `write_todos` calls are still rejected, input that arrives as the
+  run finishes is still applied, and the todo completion reminder works as in
+  any run. If another guard already set a reason, that reason is reported. A
+  response with no call left is a terminal stop and is reported at once, as
+  before. A run that pauses for approval reports no reason; the run that
+  resumes it reports `loop_capped` when it ends.
 - **The model is told on its next call** how many calls of its last response
   were skipped and how many were passed on, followed by the wrap-up
   instructions. The text reports admission, not execution: an admitted call can
@@ -62,10 +71,11 @@ cap, and a notice for the model.
   notice is read from the record on every model call and cleared once the model
   has answered, so a retried call gets it again. It quotes tool names and
   counts only, never arguments, because it is added inside PII redaction.
-- **The record is checkpointed**, so the cap, the notice and `loop_capped`
-  survive an approval pause, the new `run_id` of the resume, a Gateway restart
-  and context compaction. A resumed run adopts the record and is marked
-  `loop_capped` again. Its frequency window starts empty, as for any new run.
+- **The record is checkpointed**, so the cap and the notice survive an
+  approval pause, the new `run_id` of the resume, a Gateway restart and
+  context compaction. A resumed run adopts the record and reports
+  `loop_capped` when it ends. Its frequency window starts empty, as for any new
+  run.
 - **A new task gets a fresh budget.** `before_agent` runs when a task enters
   the graph and not when a paused run resumes, so it expires a record that
   another run left behind. A later entry of the same run, such as a hidden goal
