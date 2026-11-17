@@ -8,8 +8,13 @@
   handler on the calling thread, so a provider that sent the request through a
   sync ``httpx.Client`` would pass the thread assertion; the recorded client
   factory catches that.
+* The tool keeps ownership of the client through cancellation: a client built
+  after the caller was cancelled is still closed, a repeated cancellation does
+  not cut the close short, and a cleanup failure is logged without its message.
 """
 
+import asyncio
+import logging
 import ssl
 import threading
 from pathlib import Path
@@ -103,3 +108,165 @@ async def test_olostep_tls_setup_runs_off_loop(tool_name, monkeypatch) -> None:
     assert contexts
     assert len(clients) == 1
     assert clients[0].is_closed
+
+
+def _patch_httpx(monkeypatch, async_client) -> None:
+    monkeypatch.setattr(olostep_tools, "httpx", SimpleNamespace(AsyncClient=async_client, HTTPStatusError=httpx.HTTPStatusError))
+
+
+def _post():
+    return olostep_tools._post("synthetic-key", "/v1/searches", {"query": "synthetic query"})
+
+
+async def test_olostep_closes_client_if_cancelled_during_setup(monkeypatch) -> None:
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    real_client = httpx.AsyncClient
+    clients = []
+
+    def construct(**kwargs):
+        assert threading.get_ident() != loop_thread, "the constructor must not run on the event loop"
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(10), "the constructor was never released"
+            client = real_client(**kwargs)
+            clients.append(client)
+            return client
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    async def unexpected_send(self, request, **kwargs):
+        pytest.fail("a cancelled construction must not send a request")
+
+    _patch_httpx(monkeypatch, construct)
+    monkeypatch.setattr(real_client, "send", unexpected_send)
+    pending = asyncio.create_task(_post())
+    start_waiter = asyncio.create_task(started.wait())
+    try:
+        done, _ = await asyncio.wait({pending, start_waiter}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+        if pending in done:
+            await pending
+        assert start_waiter in done, "the constructor never started"
+
+        pending.cancel()
+        await asyncio.sleep(0)  # Deliver cancellation while construction is still gated.
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await asyncio.wait_for(finished.wait(), timeout=10)
+        assert len(clients) == 1
+        assert clients[0].is_closed
+    finally:
+        release.set()
+        pending.cancel()
+        start_waiter.cancel()
+        await asyncio.gather(pending, start_waiter, return_exceptions=True)
+        if started.is_set():
+            await asyncio.wait_for(finished.wait(), timeout=10)
+        for client in clients:
+            if not client.is_closed:
+                await client.aclose()
+
+
+class _GatedCloseTransport(httpx.AsyncBaseTransport):
+    """Answers every request, then holds ``aclose`` until the test releases it."""
+
+    def __init__(self) -> None:
+        self.closing = asyncio.Event()
+        self.release = asyncio.Event()
+        self.closed = False
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request, json=_PAYLOADS["web_search"])
+
+    async def aclose(self) -> None:
+        self.closing.set()
+        await self.release.wait()
+        self.closed = True
+
+
+async def test_olostep_drains_client_close_through_repeated_cancellation(monkeypatch) -> None:
+    real_client = httpx.AsyncClient
+    transport = _GatedCloseTransport()
+    _patch_httpx(monkeypatch, lambda **kwargs: real_client(transport=transport, **kwargs))
+
+    pending = asyncio.create_task(_post())
+    try:
+        await asyncio.wait_for(transport.closing.wait(), timeout=10)
+
+        pending.cancel()
+        await asyncio.sleep(0)
+        pending.cancel()  # A second cancellation must not cut the close short.
+        await asyncio.sleep(0)
+        assert not pending.done(), "the tool returned while the transport was still closing"
+        assert not transport.closed
+
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert transport.closed
+    finally:
+        transport.release.set()
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.parametrize("failure_phase", ["construction", "close"])
+async def test_olostep_logs_cleanup_failures_during_repeated_cancellation(monkeypatch, caplog, failure_phase) -> None:
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    started, finished = asyncio.Event(), asyncio.Event()
+    release = threading.Event()
+    close_threads = []
+    secret = "synthetic-sensitive-value"
+    caplog.set_level(logging.ERROR)
+
+    async def close():
+        close_threads.append(threading.get_ident())
+        raise RuntimeError(secret)
+
+    def construct(**kwargs):
+        assert threading.get_ident() != loop_thread
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(10), "the constructor was never released"
+            if failure_phase == "construction":
+                raise RuntimeError(secret)
+            return SimpleNamespace(aclose=close)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    _patch_httpx(monkeypatch, construct)
+    pending = asyncio.create_task(_post())
+    start_waiter = asyncio.create_task(started.wait())
+    try:
+        done, _ = await asyncio.wait({pending, start_waiter}, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+        if pending in done:
+            await pending
+        assert start_waiter in done, "the constructor never started"
+
+        pending.cancel()
+        await asyncio.sleep(0)  # Enter cleanup while construction is still gated.
+        pending.cancel()
+        await asyncio.sleep(0)  # Cancel the drain before its worker fails.
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        await asyncio.wait_for(finished.wait(), timeout=10)
+
+        assert close_threads == ([loop_thread] if failure_phase == "close" else [])
+        errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "RuntimeError" in errors[0].getMessage()
+        assert secret not in errors[0].getMessage()
+    finally:
+        release.set()
+        pending.cancel()
+        start_waiter.cancel()
+        await asyncio.gather(pending, start_waiter, return_exceptions=True)
+        if started.is_set():
+            await asyncio.wait_for(finished.wait(), timeout=10)

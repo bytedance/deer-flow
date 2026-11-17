@@ -16,7 +16,9 @@ Get one at https://www.olostep.com/dashboard/api-keys.
 This module is self-contained (httpx only, no Olostep SDK and no new
 dependency). Both tools are coroutines over ``httpx.AsyncClient``. The config
 read and the client construction (TLS setup) run off the event loop; the
-request itself is awaited on the loop.
+request itself is awaited on the loop. The tool keeps ownership of the client
+through cancellation: a client built after the caller was cancelled is still
+closed, and the close is drained before the tool returns.
 """
 
 import asyncio
@@ -31,6 +33,7 @@ from deerflow.community.provider_credentials import redact_secret, resolve_api_k
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.url_safety import safe_public_result_url
 from deerflow.config import get_app_config
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -87,13 +90,39 @@ def _missing_key_message(tool_name: str) -> str:
     return "OLOSTEP_API_KEY is not configured"
 
 
+async def _open_client() -> httpx.AsyncClient:
+    # HTTPX loads TLS trust synchronously. Own the construction task so a
+    # cancellation can still close the client that the worker returns.
+    construction = asyncio.create_task(asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S))
+    try:
+        return await asyncio.shield(construction)
+    except asyncio.CancelledError:
+
+        async def close_after_construction() -> None:
+            try:
+                client = await construction
+                await client.aclose()
+            except Exception as exc:
+                logger.error("Olostep HTTP client cleanup after cancellation failed (%s)", type(exc).__name__)
+
+        # Report failures inside the owned task before a repeated cancellation
+        # makes await_drained discard its outcome.
+        await await_drained(close_after_construction())
+        raise
+
+
 async def _post(api_key: str, path: str, body: dict) -> object:
-    async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
+    client = await _open_client()
+    try:
         response = await client.post(
             f"{_OLOSTEP_BASE_URL}{path}",
             json=body,
             headers={"Authorization": f"Bearer {api_key}"},
         )
+    finally:
+        # Drain the close so a repeated cancellation cannot leave the tool
+        # while the transport is still shutting down.
+        await await_drained(client.aclose())
     response.raise_for_status()
     return response.json()
 
