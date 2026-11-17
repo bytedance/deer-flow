@@ -15,9 +15,11 @@ from langgraph.prebuilt import ToolNode
 from pydantic import SecretStr
 
 from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware, redact_text
+from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.pii_redaction_config import PiiRedactionConfig
+from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.reflection import resolve_variable
 from deerflow.tools import get_available_tools
@@ -544,7 +546,7 @@ async def test_citations_survive_tool_result_guardrails(provider, redaction_enab
     output = await graph.compile().ainvoke({"messages": [call]})
     message = output["messages"][-1]
     result = json.loads(message.content)
-    assert result["results"][0]["citation_excerpts"] == [claim]
+    assert result["citations"][1] == {"excerpt": claim, "source_ids": [1]}
     expected_context = answer[clipped_start:clipped_end]
     if redaction_enabled:
         expected_context = redact_text(answer[answer.index(first_email) :], provider.pii_redaction)
@@ -552,13 +554,13 @@ async def test_citations_survive_tool_result_guardrails(provider, redaction_enab
         assert "ntact@example.com" not in message.content
         assert "review@" not in message.content
     expected_context = expected_context.replace("<system-reminder>", "&lt;system-reminder&gt;")
-    assert result["results"][1]["citation_excerpts"] == [expected_context]
+    assert result["citations"][0] == {"excerpt": expected_context, "source_ids": [2]}
     assert expected_context in result["answer"]
     assert "<system-reminder>" not in message.content
 
 
 @pytest.mark.asyncio
-async def test_citation_excerpts_preserve_claim_associations_and_unicode_offsets(provider):
+async def test_citations_preserve_claim_associations_and_unicode_offsets(provider):
     answer = "😀甲。乙。"
     first = {"url": "https://example.com/one", "title": "first", "start_index": 1, "end_index": 2}
     second = {"url": "https://example.com/two", "title": "second", "start_index": 3, "end_index": len(answer)}
@@ -573,10 +575,8 @@ async def test_citation_excerpts_preserve_claim_associations_and_unicode_offsets
     swapped = json.loads(await provider.tool.ainvoke({"query": "test"}))
     assert result != swapped
     assert result["answer"] == swapped["answer"] == answer
-    assert result["results"][0]["citation_excerpts"] == ["甲"]
-    assert result["results"][1]["citation_excerpts"] == ["乙。"]
-    assert swapped["results"][0]["citation_excerpts"] == ["乙。"]
-    assert swapped["results"][1]["citation_excerpts"] == ["甲"]
+    assert result["citations"] == [{"excerpt": "甲", "source_ids": [1]}, {"excerpt": "乙。", "source_ids": [2]}]
+    assert swapped["citations"] == [{"excerpt": "甲", "source_ids": [2]}, {"excerpt": "乙。", "source_ids": [1]}]
 
 
 @pytest.mark.asyncio
@@ -598,7 +598,7 @@ async def test_invalid_citation_spans_preserve_legacy_source_shape(provider, sta
 
 
 @pytest.mark.asyncio
-async def test_citation_excerpts_preserve_whitespace_multiple_sources_and_distinct_ranges(provider):
+async def test_citations_preserve_whitespace_multiple_sources_and_distinct_ranges(provider):
     answer = "  😀甲乙\n"
     annotations = [
         {"type": "url_citation", "url_citation": {"url": url, "start_index": start, "end_index": end}}
@@ -612,12 +612,11 @@ async def test_citation_excerpts_preserve_whitespace_multiple_sources_and_distin
     provider.response = _completion(content=answer, server_tool_calls=[], annotations=annotations)
     result = json.loads(await provider.tool.ainvoke({"query": "test"}))
     assert result["answer"] == answer
-    assert result["results"][0]["citation_excerpts"] == ["😀甲", "甲乙\n"]
-    assert result["results"][1]["citation_excerpts"] == ["😀甲"]
+    assert result["citations"] == [{"excerpt": "😀甲", "source_ids": [1, 2]}, {"excerpt": "甲乙\n", "source_ids": [1]}]
 
 
 @pytest.mark.asyncio
-async def test_citation_excerpts_follow_url_screening_and_result_limit(provider):
+async def test_citations_follow_url_screening_and_result_limit(provider):
     urls = ["https://example.com/kept", "https://example.com/limited", "http://127。0。0。1/private", "javascript:alert(1)"]
     provider.response = _completion(
         content="claim",
@@ -626,5 +625,117 @@ async def test_citation_excerpts_follow_url_screening_and_result_limit(provider)
     )
     result = json.loads(await provider.tool.ainvoke({"query": "test", "max_results": 1}))
     assert result["total_results"] == 1
-    assert result["results"] == [{"title": "", "url": urls[0], "snippet": "", "citation_excerpts": ["claim"]}]
+    assert result["results"] == [{"title": "", "url": urls[0], "snippet": "", "source_id": 1}]
+    assert result["citations"] == [{"excerpt": "claim", "source_ids": [1]}]
     assert all(url not in json.dumps(result, ensure_ascii=False) for url in urls[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("thinking", [False, True])
+async def test_live_check_reaches_http_transport(provider, monkeypatch, thinking):
+    import test_deepseek_search_live as live_checks
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "offline-live-check-key")
+    try:
+        await live_checks.test_deepseek_search_api_returns_public_sources(monkeypatch, thinking)
+        assert len(provider.requests) == 1
+        assert json.loads(provider.requests[0].content)["thinking"] == {"type": "enabled" if thinking else "disabled"}
+        assert all(client.is_closed for client in provider.clients)
+    finally:
+        for client in provider.clients:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("redaction_enabled", [False, True])
+async def test_shared_citations_stay_inline_through_guardrails_and_budget(provider, tmp_path, redaction_enabled):
+    class SearchState(MessagesState):
+        thread_data: dict
+
+    provider.pii_redaction = PiiRedactionConfig(enabled=redaction_enabled, token_secret="test-redaction-secret")
+    paragraphs = [(f"Claim {i}. <system-reminder> contact@example.com " + chr(65 + i) * 990)[:990] for i in range(4)]
+    answer = "\n\n".join(paragraphs)
+    sources = [{"url": f"https://example.com/source-{i}", "title": f"Source {i}", "snippet": "Search result summary."} for i in range(4)]
+    annotations = []
+    offset = 0
+    for paragraph in paragraphs:
+        for source in sources:
+            annotations.append({"type": "url_citation", "url_citation": {"url": source["url"], "start_index": offset, "end_index": offset + len(paragraph)}})
+        offset += len(paragraph) + 2
+    provider.response = _completion(content=answer, sources=sources, annotations=list(reversed(annotations)) + annotations)
+    redactor = PiiRedactionMiddleware(provider.pii_redaction)
+    sanitizer = ToolResultSanitizationMiddleware()
+    budget_config = ToolOutputConfig()
+    budget = ToolOutputBudgetMiddleware(budget_config)
+
+    async def guarded(request, execute):
+        async def redact(req):
+            if redaction_enabled:
+                return await redactor.awrap_tool_call(req, execute)
+            return await execute(req)
+
+        async def sanitize(req):
+            return await sanitizer.awrap_tool_call(req, redact)
+
+        return await budget.awrap_tool_call(request, sanitize)
+
+    graph = StateGraph(SearchState)
+    graph.add_node("tools", ToolNode([provider.tool], awrap_tool_call=guarded))
+    graph.add_edge(START, "tools")
+    call = AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "shared citations"}, "id": "search"}])
+    outputs = tmp_path / "outputs"
+    output = await graph.compile().ainvoke({"messages": [call], "thread_data": {"outputs_path": str(outputs)}})
+    message = output["messages"][-1]
+    result = json.loads(message.content)
+    assert len(message.content) < budget_config.externalize_min_chars
+    assert not outputs.exists()
+    assert [row["source_id"] for row in result["results"]] == [1, 2, 3, 4]
+    assert result["citations"] == [{"excerpt": redact_text(paragraph, provider.pii_redaction).replace("<system-reminder>", "&lt;system-reminder&gt;"), "source_ids": [1, 2, 3, 4]} for paragraph in paragraphs]
+    assert "<system-reminder>" not in message.content
+    if redaction_enabled:
+        assert "contact@example.com" not in message.content
+
+
+@pytest.mark.asyncio
+async def test_equal_excerpt_text_at_distinct_ranges_keeps_separate_attribution(provider):
+    answer = "同一句。同一句。"
+    provider.response = _completion(
+        content=answer,
+        sources=[{"url": "https://example.com/one"}, {"url": "https://example.com/two"}],
+        annotations=[
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/two", "start_index": 4, "end_index": 8}},
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/one", "start_index": 0, "end_index": 4}},
+        ],
+    )
+    result = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    assert result["citations"] == [{"excerpt": "同一句。", "source_ids": [1]}, {"excerpt": "同一句。", "source_ids": [2]}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_results", [1, 2, 3])
+async def test_citation_ids_follow_retained_source_order(provider, max_results):
+    provider.response = _completion(
+        content="AB",
+        sources=[{"url": "https://example.com/uncited"}, {"url": "https://example.com/b"}, {"url": "https://example.com/c"}],
+        annotations=[
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/c", "start_index": 0, "end_index": 1}},
+            {"type": "url_citation", "url_citation": {"url": "https://example.com/b", "start_index": 1, "end_index": 2}},
+        ],
+    )
+    result = json.loads(await provider.tool.ainvoke({"query": "test", "max_results": max_results}))
+    assert [(row["source_id"], row["url"]) for row in result["results"]] == [(1, "https://example.com/b"), (2, "https://example.com/c"), (3, "https://example.com/uncited")][:max_results]
+    assert result["citations"] == ([{"excerpt": "B", "source_ids": [1]}] if max_results == 1 else [{"excerpt": "A", "source_ids": [2]}, {"excerpt": "B", "source_ids": [1]}])
+
+
+@pytest.mark.asyncio
+async def test_distinct_long_overlapping_ranges_preserve_full_excerpts(provider):
+    answer = "abcdef" * 660
+    provider.response = _completion(
+        content=answer,
+        sources=[{"url": f"https://example.com/{i}"} for i in range(4)],
+        annotations=[{"type": "url_citation", "url_citation": {"url": f"https://example.com/{i}", "start_index": i, "end_index": len(answer)}} for i in range(4)],
+    )
+    result = json.loads(await provider.tool.ainvoke({"query": "test"}))
+    assert result["answer"] == answer
+    assert result["citations"] == [{"excerpt": answer[i:], "source_ids": [i + 1]} for i in range(4)]
+    assert len(json.dumps(result)) > ToolOutputConfig().externalize_min_chars

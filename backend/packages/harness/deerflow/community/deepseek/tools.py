@@ -147,19 +147,23 @@ def _normalize(data: object, query: str, max_results: int, pii_config: PiiRedact
     # 优先保留回答实际引用的来源，同时保留搜索结果提供的摘要。
     results.sort(key=lambda result: result["url"] not in cited_urls)
     results = results[:max_results]
-    retained_spans = list(dict.fromkeys(span for result in results for span in spans_by_url.get(result["url"], {})))
-    if retained_spans:
-        excerpts = dict(zip(retained_spans, redact_text_excerpts(answer, retained_spans, pii_config), strict=True))
-        for result in results:
-            if spans := spans_by_url.get(result["url"]):
-                result["citation_excerpts"] = [excerpts[span] for span in spans]
-    return {
+    output = {
         "query": query,
         "total_results": len(results),
         "results": results,
         "answer": answer,
         "truncated": finish_reason == "length",
     }
+    retained_spans = sorted({span for result in results for span in spans_by_url.get(result["url"], {})})
+    if retained_spans:
+        source_ids_by_span: dict[tuple[int, int], list[int]] = {span: [] for span in retained_spans}
+        for source_id, result in enumerate(results, start=1):
+            result["source_id"] = source_id
+            for span in spans_by_url.get(result["url"], {}):
+                source_ids_by_span[span].append(source_id)
+        excerpts = redact_text_excerpts(answer, retained_spans, pii_config)
+        output["citations"] = [{"excerpt": excerpt, "source_ids": source_ids_by_span[span]} for span, excerpt in zip(retained_spans, excerpts, strict=True)]
+    return output
 
 
 def _prepare() -> tuple[dict[str, Any], httpx.AsyncClient | None, str | None, PiiRedactionConfig]:
@@ -186,6 +190,11 @@ async def _close_prepared_client(preparation: asyncio.Task) -> None:
 @tool("web_search", parse_docstring=True)
 async def web_search_tool(query: str, max_results: int = _DEFAULT_MAX_RESULTS) -> str:
     """Search the web using DeepSeek and return an answer with source links.
+
+    Returns JSON with an answer and results containing title, url, and snippet.
+    When citations are available, results also have source_id values, and each
+    citations entry pairs an excerpt with source_ids referring to those results.
+    Resolve source_ids to result titles and URLs when writing Markdown citations.
 
     Args:
         query: Search keywords or a research question describing what to find.
