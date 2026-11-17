@@ -39,6 +39,7 @@ const mocks = rs.hoisted(() => {
     }),
     deleteMutate: rs.fn(),
     attachMutate: rs.fn(),
+    routerPush: rs.fn(),
     promoteMutate: rs.fn(),
     fetchPreview:
       rs.fn<
@@ -158,7 +159,7 @@ rs.mock("@/env", () => ({
 }));
 
 rs.mock("next/navigation", () => ({
-  useRouter: () => ({ push: rs.fn() }),
+  useRouter: () => ({ push: mocks.routerPush }),
 }));
 
 // The real preview pulls Streamdown/KaTeX into the worker bundle (several GB
@@ -190,6 +191,7 @@ import { I18nProvider } from "@/core/i18n/context";
 import type { ProjectDocumentPreview } from "@/core/projects/api";
 import type {
   Project,
+  AttachProjectDocumentResult,
   ProjectDocument,
   ProjectThread,
   ProjectThreadFileGroup,
@@ -604,6 +606,58 @@ describe("ProjectDocumentsSection", () => {
     expect(within(dialog).queryByText("Archived chat")).toBeNull();
     fireEvent.click(screen.getByTestId("attach-thread-load-more"));
     expect(mocks.fetchNextThreadsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes and navigates after attach when session storage persistence fails", async () => {
+    mocks.documents = [makeDocument()];
+    mocks.threadsPages = [
+      [
+        makeAgentThread({
+          thread_id: "thread-target",
+          values: { title: "Target chat" },
+        }),
+      ],
+    ];
+    const attached: AttachProjectDocumentResult = {
+      filename: "roadmap.md",
+      size_bytes: 2048,
+      virtual_path: "/mnt/user-data/uploads/roadmap.md",
+      artifact_url:
+        "/api/threads/thread-target/artifacts/mnt/user-data/uploads/roadmap.md",
+    };
+    mocks.attachMutate.mockImplementation(
+      (
+        input: { documentId: string; threadId: string },
+        options: {
+          onSuccess?: (result: AttachProjectDocumentResult) => void;
+        },
+      ) => {
+        expect(input).toEqual({
+          documentId: "doc-1",
+          threadId: "thread-target",
+        });
+        options.onSuccess?.(attached);
+      },
+    );
+    rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError");
+    });
+
+    render(<ProjectDocumentsSection project={makeProject()} threads={[]} />, {
+      wrapper: Wrapper,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Attach to chat/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Target chat" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(mocks.routerPush).toHaveBeenCalledWith(
+        "/workspace/chats/thread-target",
+      );
+    });
   });
 
   it("flags a truncated thread group, requests the API max file limit, and links to the thread", () => {

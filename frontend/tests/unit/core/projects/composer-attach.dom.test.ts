@@ -24,6 +24,7 @@ const OTHER: AttachProjectDocumentResult = {
 };
 
 afterEach(() => {
+  rs.restoreAllMocks();
   window.sessionStorage.clear();
 });
 
@@ -62,28 +63,20 @@ test("a corrupt staged payload is dropped, not thrown", () => {
 });
 
 test("a storage read failure degrades to an empty pending list", () => {
-  const getItem = rs
-    .spyOn(window.sessionStorage, "getItem")
-    .mockImplementation(() => {
-      throw new DOMException("blocked", "SecurityError");
-    });
+  rs.spyOn(window.sessionStorage, "getItem").mockImplementation(() => {
+    throw new DOMException("blocked", "SecurityError");
+  });
 
   expect(() => readProjectAttachments("thread-1")).not.toThrow();
   expect(readProjectAttachments("thread-1")).toEqual([]);
-
-  getItem.mockRestore();
 });
 
 test("a storage write failure does not interrupt staging", () => {
-  const setItem = rs
-    .spyOn(window.sessionStorage, "setItem")
-    .mockImplementation(() => {
-      throw new DOMException("full", "QuotaExceededError");
-    });
+  rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+    throw new DOMException("full", "QuotaExceededError");
+  });
 
   expect(() => stageProjectAttachment("thread-1", ATTACHMENT)).not.toThrow();
-
-  setItem.mockRestore();
 });
 
 test("a failed cleanup does not interrupt reading a corrupt payload", () => {
@@ -91,31 +84,35 @@ test("a failed cleanup does not interrupt reading a corrupt payload", () => {
     "deerflow.project-attachment.thread-1",
     "{not json",
   );
-  const removeItem = rs
-    .spyOn(window.sessionStorage, "removeItem")
-    .mockImplementation(() => {
-      throw new DOMException("blocked", "SecurityError");
-    });
+  rs.spyOn(window.sessionStorage, "removeItem").mockImplementation(() => {
+    throw new DOMException("blocked", "SecurityError");
+  });
 
   expect(() => readProjectAttachments("thread-1")).not.toThrow();
   expect(readProjectAttachments("thread-1")).toEqual([]);
-
-  removeItem.mockRestore();
 });
 
 test("a failed storage removal does not interrupt retiring sent attachments", () => {
   stageProjectAttachment("thread-1", ATTACHMENT);
-  const removeItem = rs
-    .spyOn(window.sessionStorage, "removeItem")
-    .mockImplementation(() => {
-      throw new DOMException("blocked", "SecurityError");
-    });
+  rs.spyOn(window.sessionStorage, "removeItem").mockImplementation(() => {
+    throw new DOMException("blocked", "SecurityError");
+  });
 
   expect(() =>
     retireProjectAttachments("thread-1", [ATTACHMENT]),
   ).not.toThrow();
+});
 
-  removeItem.mockRestore();
+test("a failed storage write does not interrupt retiring remaining attachments", () => {
+  stageProjectAttachment("thread-1", ATTACHMENT);
+  stageProjectAttachment("thread-1", OTHER);
+  rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+    throw new DOMException("full", "QuotaExceededError");
+  });
+
+  expect(() =>
+    retireProjectAttachments("thread-1", [ATTACHMENT]),
+  ).not.toThrow();
 });
 
 test("the pre-list single-object payload shape reads as a one-element list", () => {
