@@ -191,7 +191,6 @@ import { I18nProvider } from "@/core/i18n/context";
 import type { ProjectDocumentPreview } from "@/core/projects/api";
 import type {
   Project,
-  AttachProjectDocumentResult,
   ProjectDocument,
   ProjectThread,
   ProjectThreadFileGroup,
@@ -270,10 +269,51 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  rs.restoreAllMocks();
   rs.clearAllMocks();
+  window.sessionStorage.clear();
 });
 
 describe("ProjectDocumentsSection", () => {
+  it.each(["getItem", "setItem"] as const)(
+    "closes the attach picker and navigates after ingestion succeeds even if %s fails",
+    async (method) => {
+      mocks.documents = [makeDocument()];
+      mocks.threadsPages = [
+        [makeAgentThread({ values: { title: "Target chat" } })],
+      ];
+      mocks.attachMutate.mockImplementationOnce((_variables, options) => {
+        options.onSuccess?.({
+          filename: "roadmap.md",
+          size_bytes: 2048,
+          virtual_path: "/mnt/user-data/uploads/roadmap.md",
+          artifact_url:
+            "/api/threads/thread-a/artifacts/mnt/user-data/uploads/roadmap.md",
+        });
+      });
+      render(<ProjectDocumentsSection project={makeProject()} threads={[]} />, {
+        wrapper: Wrapper,
+      });
+      fireEvent.click(screen.getByRole("button", { name: /Attach to chat/ }));
+      const dialog = await screen.findByRole("dialog");
+      rs.spyOn(window.sessionStorage, method).mockImplementation(() => {
+        throw new DOMException(
+          "Storage unavailable",
+          method === "setItem" ? "QuotaExceededError" : "SecurityError",
+        );
+      });
+
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Target chat" }),
+      );
+
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(mocks.routerPush).toHaveBeenCalledWith(
+        "/workspace/chats/thread-a",
+      );
+    },
+  );
+
   it("renders shelf rows with the provenance badge for thread-sourced documents", () => {
     mocks.documents = [
       makeDocument({
@@ -606,58 +646,6 @@ describe("ProjectDocumentsSection", () => {
     expect(within(dialog).queryByText("Archived chat")).toBeNull();
     fireEvent.click(screen.getByTestId("attach-thread-load-more"));
     expect(mocks.fetchNextThreadsPage).toHaveBeenCalledTimes(1);
-  });
-
-  it("closes and navigates after attach when session storage persistence fails", async () => {
-    mocks.documents = [makeDocument()];
-    mocks.threadsPages = [
-      [
-        makeAgentThread({
-          thread_id: "thread-target",
-          values: { title: "Target chat" },
-        }),
-      ],
-    ];
-    const attached: AttachProjectDocumentResult = {
-      filename: "roadmap.md",
-      size_bytes: 2048,
-      virtual_path: "/mnt/user-data/uploads/roadmap.md",
-      artifact_url:
-        "/api/threads/thread-target/artifacts/mnt/user-data/uploads/roadmap.md",
-    };
-    mocks.attachMutate.mockImplementation(
-      (
-        input: { documentId: string; threadId: string },
-        options: {
-          onSuccess?: (result: AttachProjectDocumentResult) => void;
-        },
-      ) => {
-        expect(input).toEqual({
-          documentId: "doc-1",
-          threadId: "thread-target",
-        });
-        options.onSuccess?.(attached);
-      },
-    );
-    rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
-      throw new DOMException("full", "QuotaExceededError");
-    });
-
-    render(<ProjectDocumentsSection project={makeProject()} threads={[]} />, {
-      wrapper: Wrapper,
-    });
-    fireEvent.click(screen.getByRole("button", { name: /Attach to chat/ }));
-    const dialog = await screen.findByRole("dialog");
-    fireEvent.click(
-      within(dialog).getByRole("button", { name: "Target chat" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.queryByRole("dialog")).toBeNull();
-      expect(mocks.routerPush).toHaveBeenCalledWith(
-        "/workspace/chats/thread-target",
-      );
-    });
   });
 
   it("flags a truncated thread group, requests the API max file limit, and links to the thread", () => {

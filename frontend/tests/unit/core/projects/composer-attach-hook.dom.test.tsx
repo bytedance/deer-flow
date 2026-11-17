@@ -1,6 +1,6 @@
 import { afterEach, expect, rs, test } from "@rstest/core";
-import { act, cleanup, render } from "@testing-library/react";
-import { StrictMode } from "react";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { StrictMode, type Dispatch, type SetStateAction } from "react";
 
 import {
   stageProjectAttachment,
@@ -24,12 +24,12 @@ const OTHER: AttachProjectDocumentResult = {
     "/api/threads/thread-1/artifacts/mnt/user-data/uploads/notes.txt",
 };
 
-// Latest hook state, exposed to assertions without a DOM surface. The probe
+// Latest hook state, exposed to assertions alongside a DOM surface. The probe
 // keeps the setter reachable so tests can drive removal/clear like the
 // composer's chip button and onSent callback do.
 const observed: {
   current: AttachProjectDocumentResult[];
-  set: (value: AttachProjectDocumentResult[]) => void;
+  set: Dispatch<SetStateAction<AttachProjectDocumentResult[]>>;
 } = {
   current: [],
   set: () => {
@@ -41,12 +41,16 @@ function ComposerProbe({ threadId }: { threadId: string }) {
   const [attachments, setAttachments] = useStagedProjectAttachments(threadId);
   observed.current = attachments;
   observed.set = setAttachments;
-  return null;
+  return (
+    <output aria-label="Pending attachments">
+      {attachments.map((item) => item.filename).join(", ")}
+    </output>
+  );
 }
 
 afterEach(() => {
-  rs.restoreAllMocks();
   cleanup();
+  rs.restoreAllMocks();
   observed.current = [];
   observed.set = () => {
     throw new Error("composer probe not mounted");
@@ -167,42 +171,58 @@ test("clearing after a successful send drops the pending list for good", () => {
   expect(observed.current).toEqual([]);
 });
 
-test("a failed storage write still updates the mounted composer", () => {
-  rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
-    throw new DOMException("full", "QuotaExceededError");
+test("a denied read still mounts an empty composer and allows local attachment changes", () => {
+  rs.spyOn(window.sessionStorage, "getItem").mockImplementation(() => {
+    throw new DOMException("Read denied", "SecurityError");
   });
-
   render(
     <StrictMode>
       <ComposerProbe threadId="thread-1" />
     </StrictMode>,
   );
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe("");
 
-  expect(() =>
-    act(() => {
-      observed.set([ATTACHMENT]);
-    }),
-  ).not.toThrow();
-  expect(observed.current).toEqual([ATTACHMENT]);
+  act(() => observed.set([ATTACHMENT]));
+
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe(
+    "roadmap.md",
+  );
 });
 
-test("a failed storage removal still clears the mounted composer", () => {
+test("quota failures still update visible attachments and the next functional updater", () => {
   stageProjectAttachment("thread-1", ATTACHMENT);
-  rs.spyOn(window.sessionStorage, "removeItem").mockImplementation(() => {
-    throw new DOMException("blocked", "SecurityError");
-  });
-
   render(
     <StrictMode>
       <ComposerProbe threadId="thread-1" />
     </StrictMode>,
   );
+  rs.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+    throw new DOMException("Storage full", "QuotaExceededError");
+  });
 
-  expect(observed.current).toEqual([ATTACHMENT]);
-  expect(() =>
-    act(() => {
-      observed.set([]);
-    }),
-  ).not.toThrow();
+  act(() => observed.set([OTHER]));
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe(
+    "notes.txt",
+  );
+  act(() => observed.set((previous) => [...previous, ATTACHMENT]));
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe(
+    "notes.txt, roadmap.md",
+  );
+});
+
+test("denied removal still clears visible attachments after a send", () => {
+  stageProjectAttachment("thread-1", ATTACHMENT);
+  render(
+    <StrictMode>
+      <ComposerProbe threadId="thread-1" />
+    </StrictMode>,
+  );
+  rs.spyOn(window.sessionStorage, "removeItem").mockImplementation(() => {
+    throw new DOMException("Removal denied", "SecurityError");
+  });
+
+  act(() => observed.set([]));
+
+  expect(screen.getByLabelText("Pending attachments").textContent).toBe("");
   expect(observed.current).toEqual([]);
 });
