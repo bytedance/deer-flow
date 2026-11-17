@@ -873,6 +873,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         await init_engine_from_config(config.database)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
+        # The peer is closed before the parent saver, including partial
+        # startup failure. Its own shutdown fences and drains isolated tasks.
+        from deerflow.subagents.checkpoints import subagent_checkpoint_runtime
+
+        await stack.enter_async_context(subagent_checkpoint_runtime(config, app.state.checkpointer))
         app.state.store = await stack.enter_async_context(make_store(config))
 
         # Record the checkpointer/Store backend and the provisioner endpoint
