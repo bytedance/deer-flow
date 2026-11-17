@@ -579,7 +579,12 @@ async def change_password(request: Request, response: Response, body: ChangePass
     if user.needs_setup and body.new_email is not None:
         user.needs_setup = False
 
-    await provider.update_user(user)
+    try:
+        await provider.update_user(user)
+    except ValueError:
+        # The address was registered between the pre-check above and this
+        # write; the repository rejected it and wrote nothing.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already in use").model_dump())
 
     # Re-issue cookie with new token_version
     token = create_access_token(str(user.id), token_version=user.token_version)
