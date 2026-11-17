@@ -14,10 +14,6 @@
 
 ### 新增
 
-- **沙箱：** OpenSandbox provider 支持 `sandbox.resource`（limits）与
-  `sandbox.resource_requests`（requests，仅 Kubernetes 运行时生效），并在创建沙箱时传入。
-  未设置时保持 SDK 默认的 1 CPU / 2Gi。`config_version` 67。([#8305](https://github.com/bytedance/deer-flow/pull/8305))
-
 - **子智能体：** 后台批次可声明条目前置关系，并可登记一次主 Agent 接续，在批次结束后完成
   用户已要求的汇总或交付。接续保留持久化启动记录、取消和授权检查；启用 Goal 时仍由 Goal 负责续跑。([#7839](https://github.com/bytedance/deer-flow/pull/7839))
 
