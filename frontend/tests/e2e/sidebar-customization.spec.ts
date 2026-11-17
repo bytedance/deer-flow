@@ -370,26 +370,14 @@ test.describe("sidebar customization", () => {
     await page.goto("/workspace/chats/new");
     await expect(navButtons(page).first()).toContainText("Chats");
 
-    const moreButton = sidebar(page).getByRole("button", {
-      name: "More",
-      exact: true,
-    });
-    await moreButton.focus();
-    await page.keyboard.press("Enter");
-    const customizeItem = page.getByRole("menuitem", {
-      name: "Customize menu",
-    });
-    // The menu moves focus to its first item asynchronously after opening;
-    // press Enter only once the item owns focus.
-    await expect(customizeItem).toBeFocused();
-    await page.keyboard.press("Enter");
-
-    const dialog = customizeDialog(page);
-    await expect(dialog).toBeVisible();
-
+    // The shared helper clicks the More menu; what this test covers is where
+    // focus lands after dismissal.
+    const dialog = await openCustomizeDialog(page);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
-    await expect(moreButton).toBeFocused();
+    await expect(
+      sidebar(page).getByRole("button", { name: "More", exact: true }),
+    ).toBeFocused();
   });
 
   test("keeps Cmd+K working after search is moved into More", async ({
