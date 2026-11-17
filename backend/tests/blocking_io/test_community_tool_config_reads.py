@@ -171,17 +171,41 @@ def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize(("module", "invoke", "expected_reads"), _CASES)
 async def test_async_community_tool_resolves_config_off_the_loop(module: ModuleType, invoke: Callable[[Path], Any], expected_reads: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     reads = _ConfigReads()
+    loop_thread = threading.get_ident()
+    client_threads: list[int] = []
+    blocking_errors: list[BlockingError] = []
     monkeypatch.setattr(module, "get_app_config", reads)
+
+    if module is firecrawl_tools:
+        original_factory = module._get_firecrawl_client
+
+        def record_firecrawl_construction(*args: Any, **kwargs: Any) -> Any:
+            client_threads.append(threading.get_ident())
+            try:
+                return original_factory(*args, **kwargs)
+            except BlockingError as exc:
+                # The tool's public error boundary catches Exception; retain the
+                # detector result here so a blocking constructor cannot pass silently.
+                blocking_errors.append(exc)
+                raise
+
+        monkeypatch.setattr(module, "_get_firecrawl_client", record_firecrawl_construction)
 
     try:
         await invoke(tmp_path)
+    except BlockingError:
+        raise
     except Exception:
         # Tools without an error boundary surface the stubbed network failure;
         # only where and how often the config was read matters here.
         pass
 
     assert len(reads.threads) == expected_reads
-    assert threading.get_ident() not in reads.threads
+    assert loop_thread not in reads.threads
+    if module is firecrawl_tools:
+        assert len(client_threads) == 1
+        assert loop_thread not in client_threads
+        assert blocking_errors == []
 
 
 async def test_blocking_probe_inline_config_read_actually_trips_the_gate(monkeypatch: pytest.MonkeyPatch) -> None:
