@@ -688,7 +688,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 row["status"] = "failed"
             response["error"] = str(exc)[:240] if isinstance(exc, ValueError) else "Agent step failed"
         finally:
-            if replay and "error" in response:
+            if replay and "error" in response and not (entry["cancel"].is_set() and row is not None and row["status"] == "cancelled"):
+                # A replayed step error is fenced as uncertain — unless the
+                # error is the workflow stopping while its re-dispatched child
+                # was already cancelled and observed, which is deterministic.
                 entry["fault"] = "Recovered child outcome requires reconciliation"
                 if row:
                     row["status"] = "needs_reconciliation"
