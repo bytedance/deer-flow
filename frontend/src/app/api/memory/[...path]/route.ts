@@ -10,7 +10,7 @@ function buildBackendUrl(request: NextRequest, pathname: string) {
   const base =
     process.env.NEXT_PUBLIC_BACKEND_BASE_URL ??
     getGatewayConfig().internalGatewayUrl;
-  const url = new URL(`${base.replace(/\/+$/, "")}${pathname}`);
+  const url = new URL(`${base.trim().replace(/\/+$/, "")}${pathname}`);
   url.search = request.nextUrl.search;
   return url;
 }
