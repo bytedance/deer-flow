@@ -59,6 +59,11 @@ imagePullSecrets:
 {{- printf "%s:%s" .Values.nginx.image.repository .Values.nginx.image.tag -}}
 {{- end -}}
 
+{{/* Image of the gateway's init containers (init-home, init-extensions). */}}
+{{- define "deer-flow.initImage" -}}
+{{- printf "%s:%s" .Values.gateway.initContainers.image.repository .Values.gateway.initContainers.image.tag -}}
+{{- end -}}
+
 {{/* PVC name for the .deer-flow home directory. */}}
 {{- define "deer-flow.homePVC" -}}
 {{- printf "%s-home" (include "deer-flow.fullname" .) -}}

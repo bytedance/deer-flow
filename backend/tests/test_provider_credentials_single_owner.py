@@ -28,7 +28,10 @@ These tests pin three things the extraction must not silently give back:
 """
 
 import ast
+import importlib
+import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -105,6 +108,52 @@ def test_resolve_api_key_normalizes_without_rejecting(raw: Any, expected: str | 
 
 
 @pytest.mark.parametrize(
+    "raw",
+    [
+        "your-jina-api-key",
+        "  your-tavily-api-key\n",
+        SecretStr("your-infoquest-api-key"),
+        "your-github-token",
+        "your-feishu-app-secret",
+    ],
+)
+def test_resolve_api_key_reads_an_env_template_placeholder_as_unset(raw: Any) -> None:
+    """``make config`` copies ``.env.example`` verbatim, so its ``your-...`` values are not keys."""
+    assert owner.resolve_api_key(raw) is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "sk-your-jina-api-key",
+        "your-jina-api-key-2f9c",
+        "jina_your-key",
+        "yourkey",
+        "your-monkey",
+        "your-key",
+        "YOUR-EXA-API-KEY",
+        "your-review-team-token",
+        "your-browserless-token",
+    ],
+)
+def test_resolve_api_key_keeps_values_the_template_does_not_ship(raw: str) -> None:
+    """Self-hosted Browserless and LightRAG take a token the operator chose, whatever it looks like."""
+    assert owner.resolve_api_key(raw) == raw
+    assert not owner.is_template_placeholder(raw)
+
+
+def test_placeholders_are_exactly_the_values_env_example_ships() -> None:
+    """A new template value must be added here, or an install copied from it sends the placeholder again."""
+    template = (COMMUNITY_ROOT.parents[4] / ".env.example").read_text(encoding="utf-8")
+    shipped = set(re.findall(r"=(your-[a-z0-9-]+)", template))
+    assert shipped, "found no example values in .env.example"
+    assert shipped == owner.ENV_TEMPLATE_PLACEHOLDERS
+    for value in shipped:
+        assert owner.is_template_placeholder(value)
+        assert owner.resolve_api_key(value) is None
+
+
+@pytest.mark.parametrize(
     ("value", "secret", "expected"),
     [
         (f"a {PROVIDER_KEY} b {PROVIDER_KEY} c", PROVIDER_KEY, f"a {owner.REDACTION_MARKER} b {owner.REDACTION_MARKER} c"),
@@ -168,6 +217,40 @@ def test_folded_providers_reduced_their_adapters_to_delegation(provider: str) ->
     assert _single_delegation(redact, "redact_secret"), f"{provider}.client._redact must stay a single delegation"
 
     assert not hasattr(faces["tools"], "_redact_api_key"), f"{provider} grew a private redaction copy again"
+
+
+def _tool_config(extra: dict[str, Any]):
+    return SimpleNamespace(get_tool_config=lambda name: SimpleNamespace(model_extra=dict(extra)))
+
+
+# Values ``.env.example`` ships: an install copied from the old template holds them.
+TEMPLATE_CONFIG_VALUE = "your-tavily-api-key"
+TEMPLATE_ENV_VALUE = "your-serper-api-key"
+
+# provider module, environment variable, how the provider resolves its key
+ENV_KEY_READERS = [
+    ("brave", "BRAVE_SEARCH_API_KEY", lambda tools: tools._get_api_key("web_search")),
+    ("serper", "SERPER_API_KEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": TEMPLATE_CONFIG_VALUE})),
+    ("serply", "SERPLY_API_KEY", lambda tools: tools._get_api_key("web_search")),
+    ("sofya", "SOFYA_API_KEY", lambda tools: tools._get_api_key("web_search")),
+    ("specstream", "SPECSTREAM_API_KEY", lambda tools: tools._get_api_key("web_search")),
+    ("tencent_wsa", "TENCENTCLOUD_WSA_APIKEY", lambda tools: tools._get_api_key("web_search", extras={"api_key": TEMPLATE_CONFIG_VALUE})),
+    ("unbrowse", "UNBROWSE_API_KEY", lambda tools: tools._get_api_key("web_fetch")),
+    ("youcom", "YDC_API_KEY", lambda tools: tools._resolve_tool_settings("web_search")[0]),
+]
+
+
+@pytest.mark.parametrize(("provider", "env_name", "read_key"), ENV_KEY_READERS, ids=[case[0] for case in ENV_KEY_READERS])
+def test_search_and_fetch_providers_drop_the_env_template_placeholder(provider: str, env_name: str, read_key, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An ``.env`` made from the old template still holds ``your-...-api-key``; it must read as unset, not be sent."""
+    tools = importlib.import_module(f"deerflow.community.{provider}.tools")
+    monkeypatch.setattr(tools, "get_app_config", lambda: _tool_config({"api_key": TEMPLATE_CONFIG_VALUE}))
+
+    monkeypatch.setenv(env_name, TEMPLATE_ENV_VALUE)
+    assert read_key(tools) is None
+
+    monkeypatch.setenv(env_name, f" {PROVIDER_KEY}\n")
+    assert read_key(tools) == PROVIDER_KEY
 
 
 def test_lightrag_still_accepts_an_unconfigured_key() -> None:
@@ -242,7 +325,46 @@ def test_owner_holds_each_rule_exactly_once() -> None:
     assert src.count('"[REDACTED]"') == 1
     assert src.count("get_secret_value()") == 1
     assert sum(1 for node in _code_nodes(tree) if isinstance(node, ast.Attribute) and node.attr == "password") == 1
-    assert {f.name for f in _functions(tree)} == {"resolve_api_key", "redact_secret", "reject_url_userinfo"}
+    assert {f.name for f in _functions(tree)} == {"is_template_placeholder", "resolve_api_key", "redact_secret", "reject_url_userinfo"}
+
+
+_CREDENTIAL_ENV_NAME = re.compile(r"_(?:API_?KEY|TOKEN|SECRET)$")
+
+
+def _credential_env_reads(tree: ast.Module) -> list[tuple[ast.Call, ast.AST | None]]:
+    """``os.getenv``/``os.environ.get`` calls that read a credential variable, with their parent node."""
+    constants = {target.id: node.value.value for node in tree.body if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str) for target in node.targets if isinstance(target, ast.Name)}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    reads = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and node.args and isinstance(node.func, ast.Attribute)):
+            continue
+        func = node.func
+        is_getenv = func.attr == "getenv" and getattr(func.value, "id", None) == "os"
+        is_environ_get = func.attr == "get" and isinstance(func.value, ast.Attribute) and func.value.attr == "environ"
+        if not (is_getenv or is_environ_get):
+            continue
+        arg = node.args[0]
+        name = arg.value if isinstance(arg, ast.Constant) else constants.get(getattr(arg, "id", None))
+        if isinstance(name, str) and _CREDENTIAL_ENV_NAME.search(name):
+            reads.append((node, parents.get(node)))
+    return reads
+
+
+def test_search_and_fetch_providers_read_environment_keys_through_the_owner() -> None:
+    """A private strip-and-send copy keeps sending the ``.env.example`` placeholder an old ``.env`` still holds.
+
+    Sandbox providers are out of scope: they are not search or fetch providers,
+    and their keys configure the sandbox backend rather than a request header.
+    """
+    offenders = []
+    for path in _provider_files():
+        if path.relative_to(COMMUNITY_ROOT).parts[0].endswith("sandbox"):
+            continue
+        for call, parent in _credential_env_reads(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+            if not (isinstance(parent, ast.Call) and getattr(parent.func, "id", None) == "resolve_api_key" and parent.args[:1] == [call]):
+                offenders.append(f"{path.relative_to(COMMUNITY_ROOT)}:{call.lineno}")
+    assert offenders == [], f"wrap the environment read in resolve_api_key: {offenders}"
 
 
 def test_settings_models_reject_userinfo_through_the_shared_validator() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections.abc import Callable
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 _BLOCKED_HOSTNAMES = {"localhost", "metadata.google.internal"}
 _IDNA_DOT_TRANSLATION = str.maketrans("\u3002\uff0e\uff61", "...")
@@ -142,6 +142,33 @@ def resolve_public_addresses(
     return candidates
 
 
+def _parse_url(value: str) -> ParseResult | None:
+    """Parse a URL, returning ``None`` for malformed input.
+
+    ``urlparse`` raises ``ValueError`` for some malformed authorities (for
+    example an unmatched IPv6 bracket). The validators' contract is to return an
+    ``"Error: ..."`` string, so callers must never see that exception.
+
+    A raw bracket in the userinfo slot is malformed per RFC 3986. Modern CPython
+    rejects some of those forms inside ``urlparse`` already, but which ones
+    differs across versions, so rejecting all of them here keeps the result
+    version-independent; this also blocks the ``[literal]@[IPv6]`` shape that
+    ``urlparse`` accepts without complaint. Mirrors the SkillScan host parser
+    (#8017). Non-string input is malformed too, matching
+    :func:`safe_public_result_url`.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return None
+    userinfo, _, _ = parsed.netloc.rpartition("@")
+    if "[" in userinfo or "]" in userinfo:
+        return None
+    return parsed
+
+
 def validate_public_http_url(
     url: str,
     *,
@@ -167,7 +194,9 @@ def validate_public_http_url(
     crawl4ai, fastcrw, firecrawl) resolve on their own side and cannot be pinned
     from here.
     """
-    parsed = urlparse(url)
+    parsed = _parse_url(url)
+    if parsed is None:
+        return "Error: URL could not be parsed"
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return "Error: Only http:// and https:// URLs are supported"
 
@@ -216,7 +245,9 @@ def validate_delegated_backend_url(
     :func:`resolve_public_addresses`; from a coroutine, call it via
     ``asyncio.to_thread``.
     """
-    parsed = urlparse(base_url)
+    parsed = _parse_url(base_url)
+    if parsed is None:
+        return "Error: Backend URL could not be parsed"
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return "Error: Only http:// and https:// backend URLs are supported"
 

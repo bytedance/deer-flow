@@ -34,6 +34,8 @@ make test-blocking-io
   would overwrite the thread view of an SDK client. Consumers that only handle the
   root run ignore namespaced frames.
 
+- **Memory writers fence the captured generation.** After waiting for the stream Condition, check `retired` and `ended` before allocating an event ID or appending; rejected writes consume no sequence number, and END is idempotent for that generation.
+
 ## Checkpoints
 
 - **The channel mode is fixed for the life of the process.** A reader in `full`
@@ -73,6 +75,16 @@ make test-blocking-io
   matches the durable row.
 - **An evidence receipt needs the worker's own final acknowledgement.** An
   unknown or cancelled write outcome yields no receipt.
+
+## Goals
+
+- **Goal synthesis is read-only.** `runtime/goal_synthesis.py` composes the
+  `/goal from-chat` objective from the recent agreement; the Gateway route owns
+  the save. It treats the conversation as data, applies the evaluator's PII
+  redaction and oneshot-LLM path, excludes evidence tool results, keeps the
+  newest turn within its own 12,000-character budget even when a single paste
+  exceeds it, and caps the compaction summary at half so recent constraints
+  retain room.
 
 ## Server-installed capabilities
 

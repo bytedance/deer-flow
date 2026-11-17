@@ -46,6 +46,10 @@ through `scripts/pnpm.py`.
 
 ## Conventions the tools do not enforce
 
+- **Public shares stay outside the workspace auth layout.** Read snapshots
+  without session credentials, rewrite file links through their manifest, and
+  authenticate only when importing into a workspace. See
+  [sharing](../docs/guide/sharing.md).
 - **`src/components/ui/` and `src/components/ai-elements/` are generated** from
   component registries. Change them by regenerating, because a manual edit is
   lost on the next update.
@@ -67,6 +71,10 @@ through `scripts/pnpm.py`.
   `pnpm dev -- --hostname 0.0.0.0`.
 - **`make build-static` produces a read-only demo.** Gateway reads come from
   bundled fixtures, and writes fail locally.
+
+File attachments use typed session errors, preserving per-file causes independently
+of display text. Preview and upload ownership, Office worker budgets and resource
+regressions: [file preview ownership](docs/file-preview-ownership.md).
 
 <!-- BEGIN:nextjs-agent-rules -->
 
