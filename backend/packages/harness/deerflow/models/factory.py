@@ -34,6 +34,7 @@ _MODEL_METADATA_FIELDS: frozenset[str] = frozenset(
         "when_thinking_disabled",
         "thinking",
         "supports_vision",
+        "fallback_models",
         # Runtime/UI metadata used to size the context indicator. Provider
         # clients do not accept this as a model-constructor argument.
         "context_window",
@@ -539,7 +540,16 @@ def _apply_openai_responses_api_default(model_class: type, model_settings_from_c
     )
 
 
-def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *, app_config: AppConfig | None = None, attach_tracing: bool = True, model_overrides: dict | None = None, **kwargs) -> BaseChatModel:
+def create_chat_model(
+    name: str | None = None,
+    thinking_enabled: bool = False,
+    *,
+    app_config: AppConfig | None = None,
+    attach_tracing: bool = True,
+    model_overrides: dict | None = None,
+    disable_provider_retries: bool = False,
+    **kwargs,
+) -> BaseChatModel:
     """Create a chat model instance from the config.
 
     Args:
@@ -563,6 +573,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             the model) and ``session_id`` / ``user_id`` metadata never reach the trace
             because the model becomes a nested observation whose ``langfuse_*`` keys
             get stripped.
+        disable_provider_retries: When True, disable provider/SDK retries so an
+            outer model-fallback policy owns the bounded attempt count.
 
     Returns:
         A chat model instance.
@@ -592,6 +604,13 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     # value exactly as it would a profile-native one.
     if model_overrides:
         model_settings_from_config.update({key: value for key, value in model_overrides.items() if value is not None})
+    if disable_provider_retries:
+        kwargs.pop("max_retries", None)
+        kwargs.pop("retry_max_attempts", None)
+        if "max_retries" in model_class.model_fields:
+            model_settings_from_config["max_retries"] = 0
+        if "retry_max_attempts" in model_class.model_fields:
+            model_settings_from_config["retry_max_attempts"] = 1
     # The per-request reasoning effort layers the same way. The regular lead-agent
     # build forwards the key even when None (neither the request nor the custom
     # agent chose one), so it must leave kwargs: a profile that also yields

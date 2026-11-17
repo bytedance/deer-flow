@@ -39,6 +39,8 @@ def _make_model(
     when_thinking_disabled: dict | None = None,
     thinking: dict | None = None,
     max_tokens: int | None = None,
+    fallback_models: list[str] | None = None,
+    **provider_settings,
 ) -> ModelConfig:
     return ModelConfig(
         name=name,
@@ -53,6 +55,8 @@ def _make_model(
         when_thinking_disabled=when_thinking_disabled,
         thinking=thinking,
         supports_vision=False,
+        fallback_models=fallback_models or [],
+        **provider_settings,
     )
 
 
@@ -75,6 +79,11 @@ class FakeChatModel(BaseChatModel):
 
     def _stream(self, *args, **kwargs):  # type: ignore[override]
         raise NotImplementedError
+
+
+class RetryAwareFakeChatModel(FakeChatModel):
+    max_retries: int = 3
+    retry_max_attempts: int = 3
 
 
 def _patch_factory(monkeypatch, app_config: AppConfig, model_class=FakeChatModel):
@@ -118,6 +127,28 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
 
     # resolve_class is called — if we reach here without ValueError, the correct model was used
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
+
+
+def test_fallback_model_build_disables_provider_retries_and_strips_profile_metadata(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model("primary", fallback_models=["backup"], max_retries=5, retry_max_attempts=5),
+            _make_model("backup"),
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=RetryAwareFakeChatModel)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(
+        name="primary",
+        app_config=cfg,
+        attach_tracing=False,
+        disable_provider_retries=True,
+    )
+
+    assert FakeChatModel.captured_kwargs["max_retries"] == 0
+    assert FakeChatModel.captured_kwargs["retry_max_attempts"] == 1
+    assert "fallback_models" not in FakeChatModel.captured_kwargs
 
 
 def test_legacy_chatopenai_config_uses_empty_choice_guard():

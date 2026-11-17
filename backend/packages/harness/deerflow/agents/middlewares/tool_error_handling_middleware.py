@@ -380,6 +380,10 @@ def _build_runtime_middlewares(
     app_config: AppConfig,
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
+    model_name: str | None = None,
+    thinking_enabled: bool = False,
+    reasoning_effort: str | None = None,
+    model_overrides: dict | None = None,
     lazy_init: bool = True,
     receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
@@ -445,7 +449,16 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 
         tail.append(DanglingToolCallMiddleware())
-    tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
+    model_config = app_config.get_model_config(model_name) if model_name else None
+    failover_kwargs = {}
+    if model_config is not None and model_config.fallback_models:
+        failover_kwargs = {
+            "model_name": model_name,
+            "thinking_enabled": thinking_enabled,
+            "reasoning_effort": reasoning_effort,
+            "model_overrides": model_overrides,
+        }
+    tail.append(LLMErrorHandlingMiddleware(app_config=app_config, **failover_kwargs))
 
     # ToolReceiptMiddleware is the outermost wrap_tool_call layer: Guardrail,
     # SandboxAudit, ReadBeforeWrite, and ToolProgress can all short-circuit a
@@ -574,6 +587,10 @@ def _build_runtime_middlewares(
 def build_lead_runtime_middlewares(
     *,
     app_config: AppConfig,
+    model_name: str | None = None,
+    thinking_enabled: bool = False,
+    reasoning_effort: str | None = None,
+    model_overrides: dict | None = None,
     lazy_init: bool = True,
     authorization_provider=None,
     deferred_setup: "DeferredToolSetup | None" = None,
@@ -587,6 +604,10 @@ def build_lead_runtime_middlewares(
         app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
+        model_name=model_name,
+        thinking_enabled=thinking_enabled,
+        reasoning_effort=reasoning_effort,
+        model_overrides=model_overrides,
         lazy_init=lazy_init,
         # The lead renders the receipt ledger only while processing subagent
         # results (default "delegation_only"); stamping stays always-on.
@@ -604,6 +625,8 @@ def build_subagent_runtime_middlewares(
     *,
     app_config: AppConfig | None = None,
     model_name: str | None = None,
+    thinking_enabled: bool = False,
+    reasoning_effort: str | None = None,
     lazy_init: bool = True,
     deferred_setup: "DeferredToolSetup | None" = None,
     mcp_routing_middleware: AgentMiddleware | None = None,
@@ -628,6 +651,9 @@ def build_subagent_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
+        model_name=model_name,
+        thinking_enabled=thinking_enabled,
+        reasoning_effort=reasoning_effort,
         lazy_init=lazy_init,
         # Subagent chains always render the ledger: citations are produced in
         # the subagent context — no ledger, no citations, Layer 1 goes inert.

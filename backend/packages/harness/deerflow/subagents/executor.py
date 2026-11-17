@@ -1191,6 +1191,7 @@ class SubagentExecutor:
         # Preserve the original request for the factory's validation and logs.
         # Provider construction can read local credentials (the Codex provider
         # loads the CLI auth.json), so keep the build off the event loop.
+        model_build_options = {"disable_provider_retries": True} if getattr(model_config, "fallback_models", ()) else {}
         model = await run_assembly(
             create_chat_model,
             name=self.model_name,
@@ -1198,6 +1199,7 @@ class SubagentExecutor:
             reasoning_effort=self.reasoning_effort,
             app_config=app_config,
             attach_tracing=False,
+            **model_build_options,
         )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
@@ -1222,6 +1224,12 @@ class SubagentExecutor:
             "available_skills": self._available_skill_names,
             "user_id": self.user_id or DEFAULT_USER_ID,
         }
+        if getattr(model_config, "fallback_models", ()):
+            middleware_kwargs.update(
+                model_name=self.model_name,
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=self.reasoning_effort,
+            )
         if extensions is not None:
             middleware_kwargs["extensions"] = extensions
         authz_provider = getattr(self, "_authz_provider", None)

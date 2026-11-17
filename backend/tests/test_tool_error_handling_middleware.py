@@ -9,6 +9,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphInterrupt
 
+from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     ToolErrorHandlingMiddleware,
     build_lead_runtime_middlewares,
@@ -43,18 +44,30 @@ def _module(name: str, **attrs):
     return module
 
 
-def _make_app_config(*, supports_vision: bool = False) -> AppConfig:
+def _make_app_config(*, supports_vision: bool = False, fallback_models: list[str] | None = None) -> AppConfig:
+    models = [
+        ModelConfig(
+            name="test-model",
+            display_name="test-model",
+            description=None,
+            use="langchain_openai:ChatOpenAI",
+            model="test-model",
+            supports_vision=supports_vision,
+            fallback_models=fallback_models or [],
+        )
+    ]
+    models.extend(
+        ModelConfig(
+            name=name,
+            display_name=name,
+            description=None,
+            use="langchain_openai:ChatOpenAI",
+            model=name,
+        )
+        for name in fallback_models or []
+    )
     return AppConfig(
-        models=[
-            ModelConfig(
-                name="test-model",
-                display_name="test-model",
-                description=None,
-                use="langchain_openai:ChatOpenAI",
-                model="test-model",
-                supports_vision=supports_vision,
-            )
-        ],
+        models=models,
         sandbox=SandboxConfig(use="test"),
         guardrails=GuardrailsConfig(enabled=False),
         circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
@@ -208,6 +221,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
     assert captured["app_config"] is app_config
+
     # 10 baseline (InputSanitization, KnowledgeScope, ToolOutputBudget, ToolResultSanitization,
     # ThreadData, Sandbox, DanglingToolCall, LLMErrorHandling, SandboxAudit,
     # ToolErrorHandling)
@@ -257,6 +271,17 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
     assert activation_idx < durable_idx < date_idx == len(middlewares) - 2
+
+
+def test_lead_and_subagent_llm_middlewares_receive_configured_fallbacks():
+    app_config = _make_app_config(fallback_models=["backup"])
+
+    lead = build_lead_runtime_middlewares(app_config=app_config, model_name="test-model")
+    subagent = build_subagent_runtime_middlewares(app_config=app_config, model_name="test-model")
+
+    for middleware_chain in (lead, subagent):
+        error_middleware = next(mw for mw in middleware_chain if isinstance(mw, LLMErrorHandlingMiddleware))
+        assert error_middleware.fallback_model_names == ("backup",)
 
 
 def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:

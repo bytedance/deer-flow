@@ -489,6 +489,9 @@ def build_middlewares(
     agent_name: str | None = None,
     custom_middlewares: list[AgentMiddleware] | None = None,
     *,
+    thinking_enabled: bool = False,
+    reasoning_effort: str | None = None,
+    model_overrides: dict | None = None,
     available_skills: set[str] | None = None,
     memory_enabled: bool = True,
     owns_agent_skill_projection: bool = True,
@@ -544,10 +547,15 @@ def build_middlewares(
     from deerflow.extensions import get_agent_build_extensions
 
     resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
-    runtime_middleware_kwargs = {
-        "app_config": resolved_app_config,
-        "lazy_init": True,
-    }
+    runtime_middleware_kwargs = {"app_config": resolved_app_config, "lazy_init": True}
+    runtime_model_config = resolved_app_config.get_model_config(model_name) if model_name else None
+    if runtime_model_config is not None and runtime_model_config.fallback_models:
+        runtime_middleware_kwargs.update(
+            model_name=model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            model_overrides=model_overrides,
+        )
     if available_skills is not None:
         runtime_middleware_kwargs["available_skills"] = available_skills
     if not owns_agent_skill_projection:
@@ -1208,7 +1216,14 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             container_base_path=container_base_path,
             skill_authorization=skill_authorization,
         )
-        chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False)
+        model_factory_options = {"disable_provider_retries": True} if model_config.fallback_models else {}
+        chat_model = create_chat_model(
+            name=model_name,
+            thinking_enabled=thinking_enabled,
+            app_config=resolved_app_config,
+            attach_tracing=False,
+            **model_factory_options,
+        )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config, chat_model=chat_model) + [setup_agent]
         configured_tools = raw_tools
         configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
@@ -1248,6 +1263,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             memory_enabled=memory_enabled,
             owns_agent_skill_projection=False,
             app_config=resolved_app_config,
+            thinking_enabled=thinking_enabled,
             deferred_setup=setup,
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
@@ -1360,7 +1376,16 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Resolve the model once so tool guidance uses the same effective settings.
-    chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
+    model_factory_options = {"disable_provider_retries": True} if model_config.fallback_models else {}
+    chat_model = create_chat_model(
+        name=model_name,
+        thinking_enabled=thinking_enabled,
+        reasoning_effort=reasoning_effort,
+        app_config=resolved_app_config,
+        attach_tracing=False,
+        model_overrides=agent_model_overrides,
+        **model_factory_options,
+    )
     raw_tools = get_available_tools(
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
@@ -1418,6 +1443,15 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
+        **(
+            {
+                "thinking_enabled": thinking_enabled,
+                "reasoning_effort": reasoning_effort,
+                "model_overrides": agent_model_overrides,
+            }
+            if model_config.fallback_models
+            else {}
+        ),
     )
     middlewares, declared_authorized = narrow_declared_tools(
         middlewares,
