@@ -1,12 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Install a skill and link it to the project's skills/custom directory
 # Usage: ./skills/install-skill.sh <owner/repo@skill-name>
 # Example: ./skills/install-skill.sh vercel-labs/agent-skills@vercel-react-best-practices
 
-set -e
+set -euo pipefail
 
-if [[ -z "$1" ]]; then
+if [[ -z "${1:-}" ]]; then
   echo "Usage: $0 <owner/repo@skill-name>"
   echo "Example: $0 vercel-labs/agent-skills@vercel-react-best-practices"
   exit 1
@@ -32,14 +32,12 @@ find_project_root() {
     fi
     dir="$(dirname "$dir")"
   done
-  echo ""
   return 1
 }
 
-PROJECT_ROOT=$(find_project_root)
-
-if [[ -z "$PROJECT_ROOT" ]]; then
-  echo "Error: Could not find project root (deer-flow.code-workspace not found)"
+if ! PROJECT_ROOT="$(find_project_root)"; then
+  echo "Error: This helper must be run from a DeerFlow checkout (deer-flow.code-workspace not found)." >&2
+  echo "In an isolated sandbox, use the existing user-scoped skill management flow instead." >&2
   exit 1
 fi
 
