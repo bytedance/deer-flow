@@ -73,7 +73,9 @@ This section accumulates work toward the **2.3.0** milestone
   (`postgres://admin:hunter2@host`) and an `Authorization` or `Cookie` header
   value (`Authorization: Bearer ...`) used to reach the platform verbatim; both
   now read `[redacted]`, and the scheme with the rest of the sentence stays
-  readable. A URL without credentials is unchanged. ([#8250])
+  readable. A URL without credentials is unchanged. A `Cookie` header or a
+  `Digest` credential is replaced through the end of the line, so text that
+  follows it on the same line is removed as well. ([#8250])
 
 - **frontend:** Cron presets in the task form now require minute 0-59, hour
   0-23 and day of month 1-31, so an out-of-range expression such as

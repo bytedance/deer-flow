@@ -322,7 +322,9 @@ def test_redact_egress_text_scrubs_the_whole_digest_credential():
 
     assert nonce not in redacted
     assert response not in redacted
-    assert "Authorization: Digest [redacted]" in redacted
+    # The Digest rule runs to the end of the line, so the prose after the header
+    # goes with it; the guide and changelog describe that.
+    assert redacted == "sent Authorization: Digest [redacted]"
 
 
 def test_redact_egress_text_scrubs_a_pem_block_behind_a_header_name():
