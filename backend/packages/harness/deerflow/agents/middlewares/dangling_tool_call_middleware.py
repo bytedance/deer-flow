@@ -20,7 +20,7 @@ to the end of the message list as before_model + add_messages reducer would do.
 
 import json
 import logging
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable
 from typing import override
 
@@ -118,13 +118,36 @@ def _relabel_tool_call_ids(tool_calls: list, msg_index: int, source: str) -> tup
     return relabeled, assigned, changed
 
 
-def _turn_malformed_result_count(messages: list, start: int) -> int:
-    """Count the unpaired results issued by the turn opened at ``start``."""
+def _explicit_sentinel_ids(tool_calls: list[dict]) -> Counter:
+    """Count a turn's *explicit* call ids that happen to read as a producer sentinel.
+
+    A provider may legitimately issue an opaque id such as ``"missing_id"``. A result
+    carrying that exact id answers that call, so it must be reserved for it before the
+    sentinel is read as "this call had no id" and offered to a null-id sibling.
+    """
+    return Counter(tc_id for tc in tool_calls if _valid_tool_call_id(tc_id := tc.get("id")) and _absent_tool_call_id(tc_id))
+
+
+def _claim_explicit_id(explicit_ids: Counter, result: ToolMessage) -> bool:
+    """Consume one exact explicit-id match for ``result``; True when it had one."""
+    if explicit_ids[result.tool_call_id] <= 0:
+        return False
+    explicit_ids[result.tool_call_id] -= 1
+    return True
+
+
+def _turn_malformed_result_count(messages: list, start: int, explicit_ids: Counter) -> int:
+    """Count the unpaired results issued by the turn opened at ``start``.
+
+    Results claimed by an exact explicit-id match are already paired, so they do not
+    count towards the malformed calls' positional tie-break.
+    """
+    remaining = Counter(explicit_ids)
     count = 0
     for msg in messages[start + 1 :]:
         if getattr(msg, "type", None) == "ai":
             break
-        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id):
+        if isinstance(msg, ToolMessage) and _absent_tool_call_id(msg.tool_call_id) and not _claim_explicit_id(remaining, msg):
             count += 1
     return count
 
@@ -405,6 +428,9 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         # Whether this turn's results line up 1:1 with its malformed calls, which is what
         # lets position break a tie between otherwise indistinguishable siblings.
         positional = False
+        # Explicit call ids in the current turn that share a sentinel's spelling, with
+        # how many exact-match results each may still claim.
+        explicit_ids: Counter = Counter()
 
         for index, msg in enumerate(messages):
             if getattr(msg, "type", None) == "ai":
@@ -435,7 +461,8 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     update[field] = {**additional_kwargs, "tool_calls": relabeled} if field == "additional_kwargs" else relabeled
 
                 open_calls = assigned
-                positional = _turn_malformed_result_count(messages, index) == len(assigned)
+                explicit_ids = _explicit_sentinel_ids(DanglingToolCallMiddleware._message_tool_calls(msg))
+                positional = _turn_malformed_result_count(messages, index, explicit_ids) == len(assigned)
                 if update:
                     rewritten[index] = msg.model_copy(update=update)
                 continue
@@ -444,6 +471,10 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
             # below keeps it instead of dropping it as an orphan. Results carrying a
             # producer sentinel are still unpaired — the sentinel is not the call's id.
             if not isinstance(msg, ToolMessage) or not _absent_tool_call_id(msg.tool_call_id):
+                continue
+            # An exact match against an explicit call id in this turn wins over the
+            # fallback reading: the result already pairs with that call as-is.
+            if _claim_explicit_id(explicit_ids, msg):
                 continue
             synthetic = _claim_synthetic_id(open_calls, msg, positional)
             if synthetic is not None:

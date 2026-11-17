@@ -193,3 +193,48 @@ def test_every_producer_missing_id_fallback_is_a_known_absent_spelling():
     assert fallbacks, "scanner found no producers; the AST match has drifted"
     unknown = {where: spelling for where, spelling in fallbacks.items() if spelling and spelling not in _ABSENT_TOOL_CALL_ID_SPELLINGS}
     assert not unknown, f"add these to _ABSENT_TOOL_CALL_ID_SPELLINGS: {unknown}"
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+def test_explicit_call_id_matching_a_sentinel_spelling_keeps_its_result(spelling):
+    """A provider's explicit opaque ID wins over the fallback reading of the same spelling."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "bash", "id": spelling, "args": {"command": "explicit"}},
+            {"name": "bash", "id": None, "args": {"command": "null"}},
+        ],
+    )
+    result = ToolMessage(content="EXPLICIT", tool_call_id=spelling, name="bash")
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, result])
+
+    assert patched is not None
+    wire_call, explicit_result, null_result = map(_convert_message_to_dict, patched)
+    explicit_id, null_id = (tc["id"] for tc in wire_call["tool_calls"])
+    assert explicit_id == spelling
+    assert (explicit_result["tool_call_id"], explicit_result["content"]) == (explicit_id, "EXPLICIT")
+    assert null_result["tool_call_id"] == null_id
+    assert patched[2].status == "error"
+    assert patched[2].content != "EXPLICIT"
+
+
+@pytest.mark.parametrize("spelling", sorted(_ABSENT_TOOL_CALL_ID_SPELLINGS))
+def test_explicit_call_id_claims_first_then_sentinel_falls_back(spelling):
+    """With a result for each call, the explicit call takes its exact match and the rest fall back."""
+    call = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "bash", "id": spelling, "args": {"command": "explicit"}},
+            {"name": "bash", "id": None, "args": {"command": "null"}},
+        ],
+    )
+    results = [
+        ToolMessage(content="EXPLICIT", tool_call_id=spelling, name="bash"),
+        ToolMessage(content="NULL", tool_call_id=spelling, name="bash"),
+    ]
+    patched = DanglingToolCallMiddleware()._build_patched_messages([call, *results])
+
+    assert patched is not None
+    explicit_id, null_id = (tc["id"] for tc in patched[0].tool_calls)
+    assert explicit_id == spelling
+    assert [(message.tool_call_id, message.content) for message in patched[1:]] == [(explicit_id, "EXPLICIT"), (null_id, "NULL")]
