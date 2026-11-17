@@ -2219,7 +2219,8 @@ hitl_approval:
 #     # Pi coding agent through the community ACP adapter (`pi-acp`).
 #     # Requires Node.js 22+ and pi 0.81.0+. Install both in the Gateway environment:
 #     # npm install --global @earendil-works/pi-coding-agent pi-acp
-#     # Configure pi's model provider/API key separately (for example, `pi --terminal-login`).
+#     # Configure pi's model provider/API key for the Gateway user.
+#     # For interactive sign-in, start `pi` and run `/login` in its terminal UI.
 #     command: pi-acp
 #     args: []
 #     # Alternatively, fetch the adapter on demand (requires network access):

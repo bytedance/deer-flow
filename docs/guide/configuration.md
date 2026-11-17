@@ -420,7 +420,7 @@ fences, including unclosed fences, in complete and streamed replies.
    npm install --global pi-acp
    ```
 
-   Configure pi's model provider and API key separately for the user that runs the Gateway. For interactive providers, complete pi's terminal login in that same environment (for example, `pi --terminal-login`), or provide the provider's documented environment variables. The `pi` executable and its credentials must be available inside the Gateway container; installing or authenticating them only on the Docker host is not sufficient.
+   Configure pi's model provider and API key separately for the user that runs the Gateway. For interactive providers, start `pi` in that same environment, then run `/login` in Pi's terminal UI and select your provider. Alternatively, provide the provider's documented environment variables. The `pi` executable and its credentials must be available inside the Gateway container; installing or authenticating them only on the Docker host is not sufficient.
 
    ```yaml
    acp_agents:
