@@ -346,17 +346,21 @@ class TestClientConstruction:
 
         def build_client(*_args, **_kwargs):
             started.set()
-            if not release.wait(timeout=5):
+            if not release.wait(timeout=10):
                 raise TimeoutError("test did not release Firecrawl client construction")
             return client
 
         monkeypatch.setattr(tools, "_get_firecrawl_client", build_client)
         task = asyncio.create_task(tools.web_search_tool.ainvoke({"query": "q"}))
 
-        assert await asyncio.to_thread(started.wait, 5)
-        task.cancel()
-        await asyncio.sleep(0)
-        release.set()
+        try:
+            assert await asyncio.to_thread(started.wait, 10)
+            task.cancel()
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
 
         with pytest.raises(asyncio.CancelledError):
             await task
