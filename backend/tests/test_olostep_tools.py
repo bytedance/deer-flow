@@ -264,3 +264,23 @@ class TestWebFetch:
 
         assert await self._fetch(olostep) == "Error: OLOSTEP_API_KEY is not configured"
         assert olostep.requests == []
+
+
+@pytest.mark.parametrize("source", ["config", "env"])
+@pytest.mark.parametrize("tool_name", ["web_search", "web_fetch"])
+async def test_env_template_placeholder_reads_as_unconfigured(olostep, monkeypatch, source, tool_name):
+    # `make config` copies .env.example verbatim, so its sample value must not be sent as a key.
+    placeholder = "your-olostep-api-key"
+    if source == "config":
+        _set_config(monkeypatch, {"api_key": placeholder})
+    else:
+        _set_config(monkeypatch, {})
+        monkeypatch.setenv("OLOSTEP_API_KEY", placeholder)
+
+    if tool_name == "web_search":
+        result = (await _search(olostep))["error"]
+    else:
+        result = await olostep.tools.web_fetch_tool.ainvoke({"url": _URL})
+
+    assert "OLOSTEP_API_KEY is not configured" in result
+    assert olostep.requests == []
