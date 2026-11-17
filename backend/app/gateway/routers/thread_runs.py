@@ -42,6 +42,12 @@ from app.gateway.checkpoint_lineage import (
     resolve_history_versions,
     resolve_stamp_candidate_versions,
 )
+from app.gateway.checkpoint_mode_errors import (
+    CHECKPOINT_MODE_ERRORS as _CHECKPOINT_MODE_ERRORS,
+)
+from app.gateway.checkpoint_mode_errors import (
+    checkpoint_mode_http_error as _checkpoint_mode_http_error,
+)
 from app.gateway.context_usage import build_context_usage
 from app.gateway.conversation_reader import (
     default_history_hidden_run_ids as _default_history_hidden_run_ids,
@@ -746,7 +752,10 @@ async def _find_base_checkpoint_before_human(
     *,
     head_checkpoint: Any | None = None,
 ) -> Any:
-    accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    try:
+        accessor, base_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     if head_checkpoint is not None:
         try:
             return await find_checkpoint_before_message(
@@ -780,6 +789,8 @@ async def _find_base_checkpoint_before_human(
             versions, parent_versions = await resolve_stamp_candidate_versions(accessor, item, parent, version_cache)
             if not _is_duration_only_checkpoint(item, history_index, versions=versions, parent_versions=parent_versions):
                 checkpoints.append(item)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception as exc:
         logger.exception("Failed to list checkpoints for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to inspect checkpoint history") from exc
@@ -870,9 +881,14 @@ async def _find_interrupted_target_run_id(
 
 
 async def _prepare_regenerate_payload(thread_id: str, message_id: str, request: Request) -> RegeneratePrepareResponse:
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for regenerate thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc
@@ -962,9 +978,14 @@ async def _prepare_edit_regenerate_payload(
     if not normalized_text:
         raise HTTPException(status_code=409, detail="Edited message cannot be empty")
 
-    accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
     try:
+        accessor, latest_config = await build_thread_checkpoint_state_accessor(request, thread_id=thread_id)
         latest_checkpoint = await accessor.aget(latest_config)
+    except _CHECKPOINT_MODE_ERRORS as exc:
+        raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    except HTTPException:
+        # Config-loading and other route-level errors keep their status/detail.
+        raise
     except Exception as exc:
         logger.exception("Failed to read latest checkpoint for edit replay thread %s", thread_id)
         raise HTTPException(status_code=500, detail="Failed to read latest checkpoint") from exc

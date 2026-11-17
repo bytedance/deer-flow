@@ -66,6 +66,7 @@ with best-effort cleanup, preserving the original publication outcome.
 - **A scan selects candidates; it grants nothing.** After you take the row locks,
   check status and lease expiry again. The row can have been requeued and
   reclaimed while recovery waited, also by the same process.
+  Late launch writes require the `attempt_count` generation from `claim_queued_run`.
 - **Check expiry against the database clock after the lock wait.** The
   transaction-start time is already stale. A lease that expires exactly at scan
   time is still live.

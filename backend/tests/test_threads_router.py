@@ -4809,6 +4809,65 @@ def test_update_thread_state_real_mutation_graph_finishes_without_scheduling(mon
     assert body["next"] == []
 
 
+def _use_real_mutation_graph(monkeypatch) -> None:
+    real_mutation_builder = gateway_services.build_checkpoint_state_mutation_accessor
+
+    async def mutation_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        return real_mutation_builder(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", mutation_boundary)
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+@pytest.mark.parametrize("as_node", ["__start__", "__end__", "__interrupt__", "a:b", "a|b"])
+def test_update_thread_state_rejects_an_as_node_langgraph_cannot_compile(monkeypatch, mode, as_node) -> None:
+    """A node name the mutation graph cannot register is the client's input error, not a 500."""
+    import asyncio
+
+    app, _store, checkpointer = _build_thread_app()
+    app.state.checkpoint_channel_mode = mode
+    _use_real_mutation_graph(monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        created = client.post("/api/threads", json={"thread_id": "state-bad-node", "metadata": {}})
+        assert created.status_code == 200, created.text
+        response = client.post("/api/threads/state-bad-node/state", json={"values": {"title": "Renamed"}, "as_node": as_node})
+        state = client.get("/api/threads/state-bad-node/state")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"][0]["loc"] == ["body", "as_node"]
+    assert state.status_code == 200, state.text
+    assert state.json()["values"].get("title") != "Renamed"
+
+    async def _count() -> int:
+        return len([item async for item in checkpointer.alist({"configurable": {"thread_id": "state-bad-node"}})])
+
+    assert asyncio.run(_count()) == 1
+
+
+@pytest.mark.parametrize(("as_node", "expected_writer"), [("custom_editor", "custom_editor"), ("", "manual_state_update"), (None, "manual_state_update")])
+def test_update_thread_state_keeps_accepting_compilable_as_node_values(monkeypatch, as_node, expected_writer) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    _use_real_mutation_graph(monkeypatch)
+    recorded: list[str] = []
+    real_boundary = threads.build_thread_checkpoint_state_mutation_accessor
+
+    async def recording_boundary(request, *, thread_id, as_node, checkpoint_id=None):
+        recorded.append(as_node)
+        return await real_boundary(request, thread_id=thread_id, as_node=as_node, checkpoint_id=checkpoint_id)
+
+    monkeypatch.setattr(threads, "build_thread_checkpoint_state_mutation_accessor", recording_boundary)
+
+    with TestClient(app) as client:
+        created = client.post("/api/threads", json={"thread_id": "state-good-node", "metadata": {}})
+        assert created.status_code == 200, created.text
+        response = client.post("/api/threads/state-good-node/state", json={"values": {"title": "Renamed"}, "as_node": as_node})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["values"]["title"] == "Renamed"
+    assert recorded == [expected_writer]
+
+
 def test_update_thread_state_forks_from_checkpoint_object(monkeypatch) -> None:
     app, _store, _checkpointer = _build_thread_app()
     thread_id = "state-checkpoint-object"
