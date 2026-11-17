@@ -2418,7 +2418,12 @@ async def run_agent(
 
                 terminal_stream_authorized = not record.ownership_lost and record.status not in (RunStatus.pending, RunStatus.running) and getattr(record, "terminal_status_persisted", True)
                 if terminal_stream_authorized:
-                    if terminal_error_frame is not None:
+                    # A staged frame predates the final outcome: an accepted
+                    # cancellation can still win after the frame was staged (one
+                    # that arrives while scheduled-goal cleanup runs, for
+                    # example), so publish it only when the committed outcome is
+                    # the error it describes.
+                    if terminal_error_frame is not None and record.status == RunStatus.error:
                         await bridge.publish(
                             run_id,
                             "error",
