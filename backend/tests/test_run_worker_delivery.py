@@ -29,6 +29,22 @@ def _make_bridge():
     return SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
 
 
+class _RecordingBridge:
+    """A stream bridge that keeps every published event in order."""
+
+    def __init__(self):
+        self.events: list[tuple[str, object]] = []
+
+    async def publish(self, run_id, event, payload=None, **kwargs):
+        self.events.append((event, payload))
+
+    async def publish_end(self, run_id, **kwargs):
+        self.events.append(("end", None))
+
+    async def cleanup(self, run_id, **kwargs):
+        return None
+
+
 async def _delivery_events(store: MemoryRunEventStore, thread_id: str, run_id: str) -> list[dict]:
     events = await store.list_events(thread_id, run_id)
     return [e for e in events if e["event_type"] == "run.delivery"]
@@ -280,6 +296,168 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
     assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_unpresented_outputs_publish_an_error_frame_before_end(monkeypatch):
+    """A run failed by delivery verification must say so on the stream.
+
+    The record and ``/wait`` report the failure; the web UI raises its run-failure
+    toast and streaming IM channels mark a turn failed only on an ``error`` frame,
+    so without one they present the turn as a successful answer.
+    """
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+    bridge = _RecordingBridge()
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert [payload for event, payload in bridge.events if event == "error"] == [
+        {
+            "message": "Artifact delivery incomplete: no produced output artifact was presented",
+            "name": "RunError",
+        }
+    ]
+    assert bridge.events[-1][0] == "end"
+
+
+@pytest.mark.anyio
+async def test_unpersisted_delivery_receipt_publishes_an_error_frame_before_end(monkeypatch):
+    """The receipt failure also flips the record to ``error``; the stream must follow."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._persist_delivery_receipt",
+        AsyncMock(return_value=False),
+    )
+    bridge = _RecordingBridge()
+
+    class PresentingAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "present_files", "args": {}}])
+            journal._remember_current_run_tool_calls(ai, caller="lead_agent")
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/report.md"],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    }
+                ),
+                run_id=uuid4(),
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: PresentingAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
+    assert [payload for event, payload in bridge.events if event == "error"] == [
+        {
+            "message": "Artifact delivery verification failed: terminal delivery receipt could not be persisted",
+            "name": "RunError",
+        }
+    ]
+    assert bridge.events[-1][0] == "end"
+
+
+@pytest.mark.anyio
+async def test_unconfirmed_delivery_terminal_status_defers_the_error_frame_until_end(monkeypatch):
+    """A delivery failure defers the frame while its terminal status is not durable.
+
+    The worker publishes the ``error`` frame directly only once the record is
+    terminal *and* persisted, and hands it to the finalizer otherwise. A
+    store-backed run whose first terminal write fails (a transient store outage)
+    therefore publishes the frame after the finalizer's retry confirmed the row —
+    and only because that retry succeeded, so a stream that never reaches ``end``
+    never carries the frame.
+    """
+    order: list[str] = []
+
+    class FlakyTerminalRunStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.terminal_write_attempts = 0
+
+        async def update_status(self, run_id, status, *, error=None, stop_reason=None, **kwargs):
+            terminal = status not in {"pending", "running"}
+            if terminal:
+                self.terminal_write_attempts += 1
+                if self.terminal_write_attempts == 1:
+                    raise RuntimeError("transient run store outage")
+            updated = await super().update_status(run_id, status, error=error, stop_reason=stop_reason, **kwargs)
+            if terminal and updated:
+                order.append("durable-error")
+            return updated
+
+    class OrderingBridge:
+        async def publish(self, _run_id, event, payload=None, **kwargs):
+            if event == "error":
+                order.append("stream-error")
+
+        async def publish_end(self, _run_id, **kwargs):
+            order.append("stream-end")
+
+        async def cleanup(self, _run_id, **kwargs):
+            return None
+
+    run_store = FlakyTerminalRunStore()
+    run_manager = RunManager(store=run_store)
+    record = await run_manager.create("thread-1")
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
+    )
+
+    class ProseOnlyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            yield {"messages": [AIMessage(content="SESSION SUMMARY")]}
+
+    await run_agent(
+        OrderingBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda *, config: ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert run_store.terminal_write_attempts == 2
+    assert order == ["durable-error", "stream-error", "stream-end"]
+    assert record.status == RunStatus.error
+    assert (await run_store.get(record.run_id))["status"] == "error"
 
 
 @pytest.mark.anyio

@@ -1,4 +1,4 @@
-"""Startup-only process capacity for native subagent execution."""
+"""Startup-only capacity and checkpoint settings for native subagents."""
 
 from typing import Literal
 
@@ -6,7 +6,12 @@ from pydantic import BaseModel, Field
 
 
 class SubagentRuntimeConfig(BaseModel):
-    """Process-local admission and execution limits shared by all subagents."""
+    """Process-local execution capacity and optional native task history."""
+
+    checkpoint_enabled: bool = Field(
+        default=False,
+        description="Persist native task checkpoint history through a loop-owned saver. Requires file-backed SQLite checkpoint storage and a Gateway restart.",
+    )
 
     max_running: int = Field(
         default=3,

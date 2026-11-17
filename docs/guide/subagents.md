@@ -1,5 +1,84 @@
 # Sub-Agents
 
+## Optional checkpoint history
+
+The Gateway can save checkpoint history for ordinary subagent executions. This
+is disabled by default.
+
+The default configuration already sets `database.backend` to `sqlite`.
+Keep the `database:` settings unchanged. In `config.yaml`, set
+`subagent_runtime.checkpoint_enabled` to `true`:
+
+```yaml
+subagent_runtime:
+  checkpoint_enabled: true
+```
+
+Restart the Gateway for the change to take effect. Parent and child checkpoints are saved in the same SQLite database selected by the host. When the host uses the default `database:` configuration, this is `deerflow.db` under `database.sqlite_dir`.
+
+This option currently supports SQLite; PostgreSQL and memory storage are not
+supported. Both `full` and `delta` checkpoint channel modes are supported. Keep
+the database on persistent storage to retain history across Gateway or
+container restarts. This option is independent of `run_events.backend`, which
+can remain `memory`.
+
+The Gateway owns a second saver on the persistent subagent event loop. Subagents
+using this checkpoint runtime share it, while the parent keeps its own saver and
+both connect to the same checkpoint database. Each child execution gets a
+distinct non-root namespace under its parent node. Child messages remain outside
+the parent transcript and its root message stream.
+
+The normal `task` delegation flow supplies the required parent graph context.
+Calling the executor directly from a parent graph node can also save history
+when it inherits that context and uses the installed checkpoint runtime.
+This option covers direct delegation from the parent graph. If a subagent
+dispatches another subagent, the nested execution runs with checkpoint history
+disabled. Tool calls and results within a recorded subagent can still be
+retained in its checkpoint history. Checkpoint history for items executed through `batch_task` is not included.
+
+Child checkpoint metadata includes `deerflow_subagent_execution_id` and
+`deerflow_subagent_name`, plus `deerflow_parent_run_id` and
+`deerflow_subagent_tool_call_id` when those identities are available. Use the
+server execution ID to distinguish attempts; provider tool-call IDs can repeat.
+The inherited checkpoint parent map retains the parent checkpoint reference.
+Readers can use these fields to attribute retained history without inferring
+ownership from timestamps. Concurrent children do not have a single global
+execution order.
+
+This option stores historical evidence and adds checkpoint writes and storage
+usage. It does not add a history UI or automatic subagent recovery. Standalone
+embedded clients and direct factories retain their existing checkpoint-disabled
+behavior unless they explicitly install the matching checkpoint resource
+lifetime around a persistent parent graph.
+
+Child checkpoint history is not automatically pruned by the existing checkpoint
+retention policies. Each child execution has its own namespace, whose latest
+checkpoint and ancestor chain are protected. Deleting the entire thread is
+currently the only supported way to reclaim this history. Storage usage grows
+with retained child executions.
+
+The Gateway closes admission and drains child execution, stream cleanup and
+checkpoint writes before closing the child saver. The parent saver remains open
+through that drain.
+
+### Checkpoint resource ownership
+
+All native subagents share one persistent event loop. The Gateway installs the
+optional child saver inside the parent saver's lifetime. Capture that runtime
+before dispatch and replace the inherited saver in a copied runnable config;
+LangGraph's inherited reference takes precedence over a compile-time saver.
+Identify strict-msgpack serializer clones by their underlying connection,
+because a clone can share its original saver's connection and lock.
+
+Extend the ambient checkpoint namespace with the server execution ID and retain
+its parent map. Keep checkpoint coordinates out of the explicit child invocation
+config, which can reset the namespace on newer LangGraph versions. Drain complete
+child execution and cleanup before closing the saver or stopping its owner loop.
+Delta schema normalization can copy middleware; audit both global authorization
+and subagent tool restrictions on the final instances before creating the graph.
+
+## Delegation behavior
+
 Web chats accept direct model choices such as “ask MODEL to handle this”, “use MODEL for this turn”, and “from now on use MODEL”; Chinese equivalents are supported too. A child choice leaves the main model unchanged, a one-turn choice leaves defaults unchanged, and a conversation choice uses the existing browser-local thread override without changing account preferences. Choices resolve against available configurations and optional `models[].aliases`; ambiguous names or scopes show a selection card before execution, while delegation still requires enabled subagents (Ultra mode).
 
 When a sub-agent ends with `return_direct=True` tools, including tools contributed by extension middleware, their outputs are returned in tool-call order. A failed tool marks the task as failed while preserving the batch outputs.
@@ -85,9 +164,12 @@ After Stop interrupts a delegated task before it returns a reply, the next user
 turn marks that earlier task as cancelled in the agent's durable context so it
 can retry. Existing replies are preserved. Older replies without status metadata
 may still appear in progress; their outcome is not inferred from their text.
-The durable delegation ledger distinguishes calls by run and provider tool-call
-ID, so a later user turn can reuse an ID without replacing earlier work or
-losing that turn's per-run delegation count.
+The durable delegation ledger distinguishes calls by run, provider tool-call
+ID and the response that issued them, so a later user turn, or a later response
+in the same run, can reuse an ID without replacing earlier work or escaping the
+per-run delegation cap. A `task` call that needs approval keeps its ledger entry
+across the pause: the approved call records its result there, and a rejected or
+denied call is recorded as cancelled.
 
 The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions — when delegation has clear net benefit from real parallel latency, specialist capability, or context isolation. It keeps interdependent scopes and overlapping side effects out of parallel dispatch; a bounded sequential chain can still run in one sub-agent when specialist or context-isolation benefit clearly wins. The lead uses the fewest useful sub-agents and re-evaluates later batches instead of fanning out solely because a task is large or multi-step. Sub-agents report back structured results, and the lead agent verifies and synthesizes them into a coherent output. Deterministic tool receipts cover both direct tool messages and state-updating `Command` results such as delegated `task` responses; when the receipt ledger reaches its context budget, it retains the newest actions and their original receipt IDs. Operators can disable this provenance layer with `verification.receipts_enabled: false`. Their configured skills are resolved from the same user-scoped catalog as the lead agent, so user-owned custom skills remain available without exposing another user's version. Their internal AI and tool messages stay scoped to the delegated graph instead of entering the parent chat stream. Reloaded thread history enforces the same boundary: callback-captured sub-agent AI responses remain available in run-event diagnostics but are excluded from the parent transcript, while the parent `task` result remains attached to its subtask card. Long-running sub-agents compact older history when summarization is enabled and re-inject the summary as guarded, hidden durable context before continuing, so recent assistant/tool activity remains grounded in the task. Their system instructions, including the role and report contract, survive compaction; if only those instructions and the current request would be summarized, compaction is skipped. Provider/model request failures are reported as failed sub-agent tasks rather than successful results, so the lead agent and Web UI can react to them correctly. Concurrent parent runs also receive independent server-side sub-agent execution IDs, so a provider that reuses a tool-call ID cannot make one run poll, cancel, or clean up another run's background task. Collapsed sub-agent cards show the effective model and, when the provider returns usage metadata, a cumulative token total that updates after each completed sub-agent LLM call and persists after a reload. When token usage tracking is enabled, completed sub-agent usage is attributed back to the dispatching step from that run's terminal tool-message metadata rather than a process-global provider-ID cache.
 
@@ -258,6 +340,27 @@ The factory still does not load YAML or create SQL infrastructure: the caller su
 
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
 
+When Gateway workers share file storage, concurrent managed-subagent creates for the same name preserve the winning definition and return one HTTP 201 and one HTTP 409. File-backed managed-subagent creation requires a filesystem supporting hard links; see [Agent Storage](../../backend/docs/CONFIGURATION.md#agent-storage).
+
 Native workers support per-subagent `thinking_enabled` and `reasoning_effort` through YAML configuration and the managed-subagent API. Unconfigured workers keep the existing thinking-off request; the selected model's required-thinking policy, supported effort values and aliases still apply. These settings do not inherit the lead agent's thinking preferences.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
+
+## Tool restrictions
+
+Subagent `tools` allowlists and `disallowed_tools` denylists apply to middleware-declared tools as well as inherited tools, even when global authorization is disabled. Denylists take precedence; an empty allowlist excludes all middleware declarations.
+
+Framework-generated discovery helpers (`tool_search` and `describe_skill`) are
+an exception to these name-level allowlists and denylists. Adding either name to
+`disallowed_tools` does not remove the generated helper. Each helper's catalog
+remains limited to admitted tools or skills.
+
+Before creating the agent graph, a final check verifies the explicit tool list
+and middleware declarations against the subagent's name policy. A tool added
+after the earlier filtering passes stops the build if it violates that policy.
+The error identifies whether the tool is listed in `disallowed_tools` or missing
+from the `tools` allowlist, so the corresponding configuration can be corrected.
+Discovery exemptions apply only to the actual framework-generated helper
+instances; an ordinary tool with the same name still follows the name policy.
+
+Middleware tool declarations follow LangChain's `Sequence` contract, including lists and tuples. Restricted subagents reject non-sequence containers such as sets and generators before consuming them; the default `disallowed_tools=["task"]` also counts as a restriction. Global authorization retains its existing list/tuple declaration requirement. Extensions remain trusted operator code; tool configuration is not an isolation boundary for extension code.

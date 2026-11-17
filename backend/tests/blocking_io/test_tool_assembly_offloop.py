@@ -110,7 +110,7 @@ async def test_task_tool_assembles_off_loop(monkeypatch, tmp_path):
     monkeypatch.setattr(
         task_tool_module,
         "get_subagent_config",
-        lambda _name: SubagentConfig(
+        lambda _name, **_kwargs: SubagentConfig(
             name="general-purpose",
             description="General helper",
             system_prompt="Base system prompt",
@@ -158,6 +158,78 @@ async def test_task_tool_assembles_off_loop(monkeypatch, tmp_path):
     assert isinstance(messages[0], ToolMessage)
     assert observed_threads, "tool assembly must be invoked"
     assert all(thread is not threading.main_thread() for thread in observed_threads)
+
+
+async def test_task_tool_inherit_app_config_resolves_off_loop(monkeypatch, tmp_path):
+    """task_tool's inherit-path ``get_app_config`` fallback dispatches to a worker thread.
+
+    ``get_app_config()`` stats and hashes the config file and revalidates the
+    extensions config on **every** call, so the fallback the inherit branch
+    takes when neither the runtime nor the caller threads an app config must
+    not run it on the loop. The existing ``test_task_tool_assembles_off_loop``
+    cannot cover this: its runtime sets ``metadata.model_name``, so the
+    ``selected_model`` branch replaces ``config`` and the inherit fallback
+    never fires — which is why the gate missed this stall.
+    """
+    (tmp_path / "probe.txt").write_text("probe body", encoding="utf-8")
+    observed_threads: list = []
+    fallback_app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
+
+    def _blocking_probe_app_config():
+        # Real filesystem IO: trips the strict gate when it runs on the loop.
+        probe_file.read_text(encoding="utf-8")
+        observed_threads.append(threading.current_thread())
+        return fallback_app_config
+
+    probe_file = tmp_path / "probe.txt"
+    monkeypatch.setattr(task_tool_module, "get_app_config", _blocking_probe_app_config)
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", _FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", _DummyExecutor)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_subagent_config",
+        lambda _name, **_kwargs: SubagentConfig(
+            name="general-purpose",
+            description="General helper",
+            system_prompt="Base system prompt",
+            max_turns=50,
+            timeout_seconds=10,
+        ),
+    )
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    observed_tools_kwargs: list[dict] = []
+
+    def _record_tools(**kwargs):
+        observed_tools_kwargs.append(kwargs)
+        return []
+
+    monkeypatch.setattr("deerflow.tools.get_available_tools", _record_tools)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: _completed_result())
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+
+    tool = task_tool_module.task_tool
+    invoke = getattr(tool, "coroutine", None) or getattr(tool, "func", None)
+    assert invoke is not None
+    command = await invoke(
+        runtime=None,
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-inherit-offloop",
+    )
+
+    messages = command.update["messages"]
+    assert len(messages) == 1
+    assert isinstance(messages[0], ToolMessage)
+    assert observed_threads, "the inherit app-config fallback must be invoked"
+    assert all(thread is not threading.main_thread() for thread in observed_threads)
+    assert observed_tools_kwargs, "tool assembly must be invoked"
+    assert all(kwargs.get("app_config") is fallback_app_config for kwargs in observed_tools_kwargs)
 
 
 async def test_batch_item_assembles_off_loop(monkeypatch, tmp_path):

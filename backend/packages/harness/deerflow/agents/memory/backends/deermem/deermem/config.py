@@ -174,6 +174,14 @@ class DeerMemConfig(BaseModel):
     eviction_access_half_life_days: int = Field(default=30, ge=1, le=3650)
     eviction_correction_reserved_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
     eviction_correction_reserved_max: int = Field(default=10, ge=0, le=100)
+    eviction_reserved_categories: list[str] = Field(
+        default_factory=lambda: ["correction"],
+        description=("Fact categories eligible for reserved capacity slots in hybrid-v1 eviction. Defaults to ['correction'] for historical compatibility."),
+    )
+    eviction_decay_exempt_categories: list[str] = Field(
+        default_factory=list,
+        description=("Fact categories exempt from confirmation freshness time-decay in hybrid-v1 eviction (e.g. permanent preferences and user identity)."),
+    )
     eviction_audit_max_entries: int = Field(
         default=200,
         ge=0,

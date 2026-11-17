@@ -190,6 +190,8 @@ def _validate_model_exists(model: str | None) -> None:
     Best-effort: if the app config cannot be loaded (e.g. no ``config.yaml`` on
     disk in a bare/test deployment), skip the check rather than failing the
     write — the runtime still falls back to the default for an unknown model.
+    It reads the live config, so async routes call it through
+    ``asyncio.to_thread``.
     """
     if not model:
         return
@@ -402,7 +404,7 @@ async def import_agent_package(body: AgentPackage, request: Request, name: str |
     _require_agents_api_enabled()
     target_name = name or body.agent.name
     _validate_agent_name(target_name, for_creation=True)
-    _validate_model_exists(body.agent.model)
+    await asyncio.to_thread(_validate_model_exists, body.agent.model)
     normalized_name = _normalize_agent_name(target_name)
     user_id = get_effective_user_id()
 
@@ -532,7 +534,7 @@ async def create_agent_endpoint(body: AgentCreateRequest, request: Request) -> A
     """
     _require_agents_api_enabled()
     _validate_agent_name(body.name, for_creation=True)
-    _validate_model_exists(body.model)
+    await asyncio.to_thread(_validate_model_exists, body.model)
     normalized_name = _normalize_agent_name(body.name)
     user_id = get_effective_user_id()
 
@@ -604,7 +606,7 @@ async def update_agent(name: str, body: AgentUpdateRequest, request: Request) ->
         )
 
     if "model" in body.model_fields_set:
-        _validate_model_exists(body.model)
+        await asyncio.to_thread(_validate_model_exists, body.model)
 
     try:
         # Update config if any config fields changed

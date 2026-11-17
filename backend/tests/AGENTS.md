@@ -62,11 +62,26 @@ with a reason when the binary is missing.
 - **Circular imports are solved in `conftest.py`** with a `sys.modules` stub; see
   the existing entry for `deerflow.subagents.executor`.
 
+## Bundled extension behavior
+
+A module that validates a bundled example's own behavior carries
+`pytest.mark.bundled_extension` at module level, so the core shards skip it and
+the bundled extension CI runs it. Host mechanisms stay in the core shards even
+when an example package is the payload: loading and registration, the public
+extension API, authorization, routing and runtime. Host/extension compatibility
+checks live in `test_extension_host_contracts.py`, so a broken compatibility
+guarantee still fails core CI, and `test_bundled_extension_ci.py` keeps the
+workflow's test-file list in step with the marker. Run the bundled suites with
+`make test-bundled-extensions`.
+
 ## Blocking-I/O tests
 
 Every test under `blocking_io/` runs with a detector that fails on a blocking
 call made on the event loop through DeerFlow code. Add a case there when you add
 an async entry point that touches files, subprocesses or a synchronous SDK.
+The detector raises `BlockingError`, which is an `Exception`, so code that
+catches `Exception` hides a blocking call from it. On such a path, assert where
+the call ran, not only that the request succeeded.
 `@pytest.mark.allow_blocking_io` is for a test that needs the unguarded behaviour
 and states why.
 
