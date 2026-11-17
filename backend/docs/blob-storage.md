@@ -21,7 +21,7 @@ On a single gateway both are correct. Behind a load balancer, the instance handl
 
 Reads **verify the digest**. A content-addressed store that silently returns wrong bytes is indistinguishable from a corrupt checkpoint, so it fails loudly instead.
 
-`kind` is validated by `validate_blob_kind` against `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` (1-64 chars, no leading or trailing hyphen) at the contract level because it is also a path segment in the `local_fs` backend — traversal and separator surprises are ruled out once, not per backend, and the single validator is what a rejected producer sees.
+`validate_blob_kind` uses the Python regex `^(?=.{1,64}\Z)[a-z0-9]([a-z0-9-]*[a-z0-9])?\Z` and reports the same pattern in validation errors. A kind is 1–64 characters long and may contain lowercase ASCII letters, digits, and hyphens. It must start and end with a letter or digit. The `\Z` anchor requires the match to end at the last character, so trailing newlines are rejected. This grammar keeps `kind` safe as a path segment in the `local_fs` backend.
 
 ## Backend
 

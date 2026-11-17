@@ -33,10 +33,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # would also match just before a trailing newline, letting kinds like
 # ``"tool\n"`` or 64 chars + ``"\n"`` (65 bytes) through the 1-64 rule.
 _KIND_PATTERN = re.compile(r"^(?=.{1,64}\Z)[a-z0-9]([a-z0-9-]*[a-z0-9])?\Z")
-# The grammar as a caller sees it. One text, one place: this message is the only
-# thing a producer gets when a kind is rejected, and a second copy of the
-# pattern (the local_fs backend had one) drifts from the enforced one.
-_KIND_GRAMMAR = "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ (1-64 chars, no leading or trailing hyphen)"
+# Use the validation pattern in the error so the advertised grammar stays in sync.
+_KIND_GRAMMAR = f"{_KIND_PATTERN.pattern} (1-64 chars, no leading or trailing hyphen)"
 
 
 def is_valid_blob_kind(kind: str) -> bool:
