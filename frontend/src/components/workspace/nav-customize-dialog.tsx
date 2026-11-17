@@ -166,6 +166,7 @@ function SortableRow({
             aria-describedby={
               disabled ? `${item.key}-dialog-disabled-reason` : undefined
             }
+            data-nav-move={item.key}
             onClick={onMove}
           >
             {group === "primary" ? <ArrowRightIcon /> : <ArrowLeftIcon />}
@@ -277,6 +278,17 @@ function CustomizeDialogBody() {
     }
   });
 
+  // An arrow-button move unmounts the row from one group and mounts it in the
+  // other, so the browser drops focus and the dialog container takes it back.
+  // Restore focus to the moved row's button once it has rendered.
+  const pendingFocusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const key = pendingFocusRef.current;
+    if (!key) return;
+    pendingFocusRef.current = null;
+    document.querySelector<HTMLElement>(`[data-nav-move="${key}"]`)?.focus();
+  });
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, {
@@ -297,6 +309,7 @@ function CustomizeDialogBody() {
       key,
       target,
     );
+    pendingFocusRef.current = key;
     applyLists(next);
     save(next.primary, next.more);
   };

@@ -341,6 +341,28 @@ test.describe("sidebar customization", () => {
     expect(stored).toContain('"more":["usage"]');
   });
 
+  test("keeps keyboard focus on the moved row", async ({ page }) => {
+    mockLangGraphAPI(page, { threads: [] });
+    await page.goto("/workspace/chats/new");
+    await expect(navButtons(page).first()).toContainText("Chats");
+
+    const dialog = await openCustomizeDialog(page);
+    await dialog.getByRole("button", { name: "Move Chats to More" }).focus();
+    await page.keyboard.press("Enter");
+
+    const movedChats = dialog.getByRole("button", {
+      name: "Move Chats to the main menu",
+    });
+    await expect(movedChats).toBeFocused();
+    await expect(dialog.locator('[data-group="more"]')).toContainText("Chats");
+
+    // The next keyboard action continues from the moved row.
+    await page.keyboard.press("Shift+Tab");
+    await expect(
+      dialog.getByRole("button", { name: "Reorder Chats" }),
+    ).toBeFocused();
+  });
+
   test("keeps Cmd+K working after search is moved into More", async ({
     page,
   }) => {
