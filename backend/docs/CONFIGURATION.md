@@ -1676,6 +1676,14 @@ startup error.
 sandbox's limits and requests. Without `resource`, the SDK asks for 1 CPU and
 2Gi; without `resource_requests`, the server decides the requests.
 
+Only Kubernetes runtimes apply `resource_requests`; the Docker runtime ignores
+them. On Kubernetes, a request you omit defaults to its limit, and every request
+must fit within its limit. That includes the SDK default limits: setting only
+`resource_requests: {cpu: "2", memory: 4Gi}` sends limits of 1 CPU and 2Gi, and
+the sandbox creation fails. Set `resource` whenever requests exceed those
+defaults. Blank names or quantities and zero, negative or non-finite numbers
+cause a provider startup error.
+
 Install the optional SDK before selecting this provider:
 
 ```bash

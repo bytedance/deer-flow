@@ -9,8 +9,9 @@ cd backend && python -m pytest tests -q -k "opensandbox"
 Validate `use_server_proxy` and `secure_access` at provider startup. Accept
 booleans, default missing or null values to `false`, and reject strings and
 other types before creating an SDK connection. Validate `resource` and
-`resource_requests` the same way: a mapping of string names to string or
-numeric quantities, or missing/null/empty for the SDK default.
+`resource_requests` the same way: a mapping of non-blank string names to
+non-blank string or finite positive numeric quantities, or missing/null/empty
+for the SDK default.
 
 ## Command deadlines
 

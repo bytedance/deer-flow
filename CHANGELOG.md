@@ -11,6 +11,11 @@ This section accumulates work toward the **2.3.0** milestone
 ([2.3.0](https://github.com/bytedance/deer-flow/milestone/4)).
 
 ### Added
+- **sandbox:** The OpenSandbox provider accepts `sandbox.resource` (limits) and
+  `sandbox.resource_requests` (requests, Kubernetes runtimes only) and passes
+  them to sandbox creation. Unset keeps the SDK default of 1 CPU / 2Gi.
+  `config_version` 67. ([#8305](https://github.com/bytedance/deer-flow/pull/8305))
+
 - **summarization:** The built-in compaction prompt guides the summarizer to
   preserve active user requirements, literal approval phrases, action conditions,
   and explicit revisions. Explicit `summarization.summary_prompt` configurations

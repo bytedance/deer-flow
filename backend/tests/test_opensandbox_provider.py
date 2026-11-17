@@ -409,7 +409,7 @@ def test_create_keeps_sdk_default_resources_when_unset(monkeypatch: pytest.Monke
 
 
 def test_create_forwards_resource_limits_and_requests(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider, sdk = _install(monkeypatch, config={"resource": {"cpu": 2, "memory": "4Gi"}, "resource_requests": {"cpu": 0.5, "memory": "1Gi"}})
+    provider, sdk = _install(monkeypatch, config={"resource": {"cpu": 2, "memory": " 4Gi "}, "resource_requests": {" cpu ": 0.5, "memory": "1Gi"}})
 
     provider.acquire("thread-1", user_id="user-1")
 
@@ -419,9 +419,12 @@ def test_create_forwards_resource_limits_and_requests(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.parametrize("name", ["resource", "resource_requests"])
-@pytest.mark.parametrize("value", ["2", ["cpu"], {"cpu": True}, {"cpu": None}, {1: "2"}])
+@pytest.mark.parametrize(
+    "value",
+    ["2", ["cpu"], {"cpu": True}, {"cpu": None}, {1: "2"}, {"": "1"}, {" ": "1"}, {"cpu": ""}, {"cpu": "  "}, {"cpu": 0}, {"cpu": -1}, {"cpu": float("nan")}, {"cpu": float("inf")}],
+)
 def test_provider_rejects_invalid_resources(monkeypatch: pytest.MonkeyPatch, name: str, value: Any) -> None:
-    with pytest.raises(ValueError, match=f"sandbox.{name} must map resource names to quantities"):
+    with pytest.raises(ValueError, match=f"sandbox.{name} must map resource names to positive quantities"):
         _install(monkeypatch, config={name: value})
 
 

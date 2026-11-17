@@ -53,8 +53,14 @@ the create with HTTP 400.
 
 `resource` sets each sandbox's limits and `resource_requests` its requests,
 as maps of resource names to Kubernetes quantities. Without `resource`, the
-SDK default of 1 CPU and 2Gi applies to every sandbox; numbers are passed as
-strings, and other value types cause a provider startup error.
+SDK default of 1 CPU and 2Gi applies to every sandbox. Without
+`resource_requests`, the server decides the requests. Only Kubernetes runtimes
+apply `resource_requests`; Docker ignores them. Kubernetes uses the limit for
+any request you omit, and a request must not exceed its limit, including the
+SDK default limits when `resource` is unset (a request of 2 CPU without
+`resource` fails at sandbox creation). Positive numbers are passed as strings;
+blank names or quantities, zero, negative or non-finite numbers, and other
+value types cause a provider startup error.
 
 Values in `sandbox.environment` that start with `$` are resolved from the
 Gateway process environment once, when `config.yaml` loads; a missing variable

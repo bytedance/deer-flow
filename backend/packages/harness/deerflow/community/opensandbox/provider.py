@@ -126,13 +126,27 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
                 raise ValueError(f"sandbox.{name} must be true or false")
             return value
 
+        def resource_quantity(value: Any) -> str | None:
+            if isinstance(value, str):
+                return value.strip() or None
+            if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value) and value > 0:
+                return str(value)
+            return None
+
         def resource_option(name: str) -> dict[str, str] | None:
             value = option(name)
             if value is None:
                 return None
-            if not isinstance(value, Mapping) or not all(isinstance(k, str) and isinstance(v, str | int | float) and not isinstance(v, bool) for k, v in value.items()):
-                raise ValueError(f"sandbox.{name} must map resource names to quantities, e.g. {{cpu: '2', memory: 4Gi}}")
-            return {k: str(v) for k, v in value.items()} or None
+            invalid = ValueError(f"sandbox.{name} must map resource names to positive quantities, e.g. {{cpu: '2', memory: 4Gi}}")
+            if not isinstance(value, Mapping):
+                raise invalid
+            resources: dict[str, str] = {}
+            for key, raw in value.items():
+                quantity = resource_quantity(raw)
+                if not isinstance(key, str) or not key.strip() or quantity is None:
+                    raise invalid
+                resources[key.strip()] = quantity
+            return resources or None
 
         api_key = option("api_key")
         domain = option("domain")
