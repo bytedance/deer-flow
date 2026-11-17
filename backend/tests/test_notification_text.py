@@ -310,6 +310,34 @@ def test_redact_egress_text_scrubs_the_aws_signature_field():
     assert "[redacted]" in redacted
 
 
+def test_redact_egress_text_scrubs_the_whole_digest_credential():
+    # Digest writes every credential as its own `name=value` field after the
+    # scheme, so only redacting the first field leaves the nonce and response
+    # visible.
+    nonce = "8f14e45fceea167a5a36dedd4bea2543"
+    response = "c0ffee1234567890abcdef0123456789"
+    header = f'Authorization: Digest username="someone", realm="api", nonce="{nonce}", uri="/v1/export", qop=auth, response="{response}"'
+
+    redacted = redact_egress_text(f"sent {header} to the service")
+
+    assert nonce not in redacted
+    assert response not in redacted
+    assert "Authorization: Digest [redacted]" in redacted
+
+
+def test_redact_egress_text_scrubs_a_pem_block_behind_a_header_name():
+    # A header rule that runs first would consume the `BEGIN` line and leave the
+    # block rule without a start marker, so the body would survive.
+    pem_body = "ABCDEFSECRETKEYBODY"
+    pem = "-----BEGIN RSA PRIVATE KEY-----\n" + pem_body + "\n-----END RSA PRIVATE KEY-----"
+
+    redacted = redact_egress_text(f"Cookie: {pem}\nafter the key")
+
+    assert pem_body not in redacted
+    assert "PRIVATE KEY" not in redacted
+    assert "after the key" in redacted
+
+
 def test_result_summary_never_forwards_url_credentials():
     text = render_notification_text(notice("run_completed", run_status="success", result_summary="Connected to postgres://admin:hunter2@db.internal:5432/deerflow"))
 
