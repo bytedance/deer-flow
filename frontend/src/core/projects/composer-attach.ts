@@ -43,6 +43,30 @@ function safeSessionStorage(): Storage | null {
   }
 }
 
+function safeGetItem(storage: Storage, key: string): string | null {
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSetItem(storage: Storage, key: string, value: string): void {
+  try {
+    storage.setItem(key, value);
+  } catch {
+    // Storage can be unavailable or full. The caller keeps its in-memory state.
+  }
+}
+
+function safeRemoveItem(storage: Storage, key: string): void {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Storage can be unavailable. The caller keeps its in-memory state.
+  }
+}
+
 function isAttachment(value: unknown): value is AttachProjectDocumentResult {
   return (
     value !== null &&
@@ -70,7 +94,8 @@ export function stageProjectAttachment(
   const pending = readProjectAttachments(threadId).filter(
     (candidate) => candidate.virtual_path !== attachment.virtual_path,
   );
-  storage.setItem(
+  safeSetItem(
+    storage,
     storageKey(threadId),
     JSON.stringify([...pending, attachment]),
   );
@@ -88,7 +113,7 @@ export function readProjectAttachments(
   if (!storage) {
     return [];
   }
-  const raw = storage.getItem(storageKey(threadId));
+  const raw = safeGetItem(storage, storageKey(threadId));
   if (raw === null) {
     return [];
   }
@@ -103,7 +128,7 @@ export function readProjectAttachments(
   } catch {
     // Corrupt payload: drop it.
   }
-  storage.removeItem(storageKey(threadId));
+  safeRemoveItem(storage, storageKey(threadId));
   return [];
 }
 
@@ -126,9 +151,9 @@ export function retireProjectAttachments(
     (attachment) => !sentPaths.has(attachment.virtual_path),
   );
   if (remaining.length === 0) {
-    storage.removeItem(storageKey(threadId));
+    safeRemoveItem(storage, storageKey(threadId));
   } else {
-    storage.setItem(storageKey(threadId), JSON.stringify(remaining));
+    safeSetItem(storage, storageKey(threadId), JSON.stringify(remaining));
   }
 }
 
@@ -164,9 +189,9 @@ export function useStagedProjectAttachments(threadId: string) {
       const storage = safeSessionStorage();
       if (storage) {
         if (next.length === 0) {
-          storage.removeItem(storageKey(threadId));
+          safeRemoveItem(storage, storageKey(threadId));
         } else {
-          storage.setItem(storageKey(threadId), JSON.stringify(next));
+          safeSetItem(storage, storageKey(threadId), JSON.stringify(next));
         }
       }
       setAttachmentsState(next);
