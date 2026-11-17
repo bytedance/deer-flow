@@ -379,6 +379,8 @@ async def test_regenerated_old_head_pruned_opt_in(saver_env: _SaverEnv) -> None:
     assert fork_tuple is not None
     base = await _walk(saver_env, _config_thread(thread_id, fork_head_id), "fork-turn")
     assert base is not None
+    materialized = await graph.aget_state(_config(thread_id))
+    assert materialized.values["messages"][-1].content.startswith("regenerated turn:")
     remaining = await _listed_checkpoint_ids(saver_env, thread_id)
     assert old_head_id not in remaining
     assert {checkpoint_ids[0], checkpoint_ids[1], fork_head_id}.issubset(remaining)
