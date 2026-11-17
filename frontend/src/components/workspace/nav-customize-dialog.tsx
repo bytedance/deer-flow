@@ -46,7 +46,9 @@ import { useLocalSettings } from "@/core/settings/hooks";
 import {
   mergeNavLayout,
   moveNavItem,
+  reconcileCommittedOrder,
   resolveNavLayout,
+  type CommittedNavOrder,
   type NavGroup,
 } from "@/core/settings/nav-layout";
 import { cn } from "@/lib/utils";
@@ -248,15 +250,31 @@ function CustomizeDialogBody() {
   } | null>(null);
   const baseKey = `${basePrimary.join("\u0000")}\u0001${baseMore.join("\u0000")}`;
   const lastBaseKeyRef = useRef(baseKey);
+  const latestBaseRef = useRef<CommittedNavOrder>({
+    key: baseKey,
+    primary: basePrimary,
+    more: baseMore,
+  });
   const applyLists = (next: { primary: string[]; more: string[] }) => {
     listsRef.current = next;
     setLists(next);
   };
   useEffect(() => {
-    if (lastBaseKeyRef.current === baseKey) return;
-    lastBaseKeyRef.current = baseKey;
-    if (dragStartRef.current) return;
-    applyLists({ primary: basePrimary, more: baseMore });
+    const saved: CommittedNavOrder = {
+      key: baseKey,
+      primary: basePrimary,
+      more: baseMore,
+    };
+    latestBaseRef.current = saved;
+    const next = reconcileCommittedOrder({
+      committed: { key: lastBaseKeyRef.current, ...listsRef.current },
+      saved,
+      holding: dragStartRef.current !== null,
+    });
+    lastBaseKeyRef.current = next.state.key;
+    if (next.applied) {
+      applyLists({ primary: next.state.primary, more: next.state.more });
+    }
   });
 
   const sensors = useSensors(
@@ -357,6 +375,23 @@ function CustomizeDialogBody() {
     const current = listsRef.current;
     clearDrag();
     if (!start || !over) return;
+
+    const pending = reconcileCommittedOrder({
+      committed: { key: lastBaseKeyRef.current, ...current },
+      saved: latestBaseRef.current,
+      holding: false,
+    });
+    if (pending.applied) {
+      // The saved layout changed while the drag was active (another tab or a
+      // gate change). Apply it and drop this move instead of writing the
+      // pre-drag order over it.
+      lastBaseKeyRef.current = pending.state.key;
+      applyLists({
+        primary: pending.state.primary,
+        more: pending.state.more,
+      });
+      return;
+    }
 
     if (target) {
       // The indicator showed this slot, so this is exactly the order to save.

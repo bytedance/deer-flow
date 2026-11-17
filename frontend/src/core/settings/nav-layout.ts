@@ -212,6 +212,30 @@ export function mergeNavLayout(
   return { version: 1, primary: mergedPrimary, more: mergedMore };
 }
 
+export interface CommittedNavOrder {
+  key: string;
+  primary: string[];
+  more: string[];
+}
+
+/**
+ * The customization dialog renders a committed copy of the order so a drag can
+ * show before the settings write lands. A saved layout that changes during the
+ * drag must stay pending: marking it applied without showing it would let the
+ * drop write the pre-drag order over the newer one. `holding` is true while a
+ * drag is active; the caller runs this again once the drag ends.
+ */
+export function reconcileCommittedOrder(args: {
+  committed: CommittedNavOrder;
+  saved: CommittedNavOrder;
+  holding: boolean;
+}): { state: CommittedNavOrder; applied: boolean } {
+  if (args.committed.key === args.saved.key || args.holding) {
+    return { state: args.committed, applied: false };
+  }
+  return { state: args.saved, applied: true };
+}
+
 function orderByKeys<T extends NavItemShape>(items: T[], keys: string[]): T[] {
   const byKey = new Map(items.map((item) => [item.key, item]));
   const ordered: T[] = [];

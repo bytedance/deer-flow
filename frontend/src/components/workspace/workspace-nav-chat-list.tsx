@@ -186,7 +186,18 @@ function MoreNavItem({
     >
       <Link
         href={item.target.href}
-        onClick={onNavigate}
+        onClick={(event) => {
+          if (
+            event.button !== 0 ||
+            event.metaKey ||
+            event.ctrlKey ||
+            event.shiftKey ||
+            event.altKey
+          ) {
+            return;
+          }
+          onNavigate();
+        }}
         aria-current={active ? "page" : undefined}
       >
         <Icon />

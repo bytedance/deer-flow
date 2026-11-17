@@ -5,6 +5,7 @@ import {
   mergeNavLayout,
   moveNavItem,
   parseNavLayout,
+  reconcileCommittedOrder,
   resolveNavLayout,
   type NavGateContext,
   type NavItemShape,
@@ -392,4 +393,32 @@ test("moveNavItem never mutates the input layout", () => {
   moveNavItem(layout, "search", "more");
 
   expect(layout).toEqual({ version: 1, primary: ["search"], more: [] });
+});
+
+test("holds a saved-layout change while a drag is active", () => {
+  const committed = { key: "a", primary: ["chats", "search"], more: [] };
+  const saved = { key: "b", primary: ["chats", "agents"], more: ["search"] };
+
+  expect(reconcileCommittedOrder({ committed, saved, holding: true })).toEqual({
+    state: committed,
+    applied: false,
+  });
+});
+
+test("applies a saved-layout change once the drag is released", () => {
+  const committed = { key: "a", primary: ["chats", "search"], more: [] };
+  const saved = { key: "b", primary: ["chats", "agents"], more: ["search"] };
+
+  expect(reconcileCommittedOrder({ committed, saved, holding: false })).toEqual(
+    { state: saved, applied: true },
+  );
+});
+
+test("keeps the committed order when the saved layout has not changed", () => {
+  const committed = { key: "a", primary: ["chats", "search"], more: [] };
+  const saved = { key: "a", primary: ["chats", "agents"], more: ["search"] };
+
+  expect(reconcileCommittedOrder({ committed, saved, holding: false })).toEqual(
+    { state: committed, applied: false },
+  );
 });
