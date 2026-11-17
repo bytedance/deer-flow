@@ -114,6 +114,7 @@ Each guide is the full reference for its topic. Open the one you need.
 | Skills, built-in tools, script workflows, Claude Code integration | [Skills & Tools](docs/guide/skills-and-tools.md) |
 | MCP servers | [MCP Server](docs/guide/mcp.md) |
 | Sub-agents, task delegation and optional SQLite checkpoint history | [Sub-Agents](docs/guide/subagents.md), [Tool restrictions](docs/guide/subagents.md#tool-restrictions) |
+| Custom Agent definitions, shared storage and migration | [Agent Storage](backend/docs/CONFIGURATION.md#agent-storage) |
 | Long-term memory | [Long-Term Memory](docs/guide/memory.md) |
 | Session goals, context compaction, task notes, evidence-based decisions | [Context, Goals and Agent Decisions](docs/guide/context.md) |
 | Private knowledge retrieval (RAGFlow) | [Private Knowledge Retrieval](docs/guide/knowledge-retrieval.md) |

@@ -960,7 +960,14 @@ uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.p
 uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py            # copy on-disk agents into the db
 ```
 
-The importer is idempotent (already-present agents are skipped) and leaves the source files untouched, so reverting `agent_storage.backend` to `file` is a clean rollback. Agent *memory* (`memory.json`) is unaffected by this switch.
+The importer is idempotent (already-present agents are skipped) and leaves the
+source files untouched. It is a one-way import, not a synchronized file backup:
+DB-backed creates and updates do not refresh those files. Switching
+`agent_storage.backend` back to `file` reads the definitions currently on disk,
+which may be stale or missing; deleting a DB-backed Custom Agent can also remove
+its coexisting agent directory. Before switching back, reconcile and back up any
+definitions you need to preserve. Agent *memory* (`memory.json`) is unaffected
+by the backend switch itself.
 
 With `backend: db`, retained legacy files do not block HTTP or `update_agent`
 updates to the imported SQL definitions. With `backend: file`, shared legacy

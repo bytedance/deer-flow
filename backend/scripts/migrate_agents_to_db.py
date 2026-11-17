@@ -12,8 +12,9 @@ shared ``managed_subagents`` table.
 Design (mirrors ``scripts/migrate_user_isolation.py``):
 - Explicit, operator-run. Nothing auto-imports on boot.
 - Idempotent: a definition already present in the db is skipped, so re-running is safe.
-- Non-destructive: the on-disk files are left untouched, so unsetting
-  ``agent_storage.backend`` (back to ``file``) is a clean rollback.
+- Non-destructive import: the on-disk files are left untouched.
+- One-way only: later DB creates and updates do not refresh file-backed definitions.
+  Reconcile and back up needed definitions before switching back to ``file``.
 
 Usage (from the repository root)::
 
@@ -114,7 +115,9 @@ def main() -> int:
             logger.info("skip managed subagent %s: already present in db", definition.name)
 
     logger.info(
-        "Done: Custom Agents: %d imported, %d already present; managed subagents: %d imported, %d already present. Source files left in place (rollback: revert agent_storage.backend to 'file').",
+        "Done: Custom Agents: %d imported, %d already present; managed subagents: %d imported, %d already present. "
+        "Source files left in place. DB creates and updates do not refresh those files; "
+        "reconcile and back up needed definitions before switching agent_storage.backend to 'file'.",
         imported_agents,
         skipped_agents,
         imported_managed,

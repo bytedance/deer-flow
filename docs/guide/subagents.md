@@ -144,9 +144,10 @@ edits remain saveable without the catalog. Incompatible saved reasoning values
 are shown explicitly so they can be replaced with Inherit or a supported value.
 
 Custom Agents migrated to `agent_storage.backend: db` remain editable through
-Agent settings and `update_agent` while the importer retains their old files
-for rollback. See [Agent Storage](../../backend/docs/CONFIGURATION.md#agent-storage)
-for the migration procedure.
+Agent settings and `update_agent`. The importer retains their existing files,
+but DB creates and updates do not refresh them. Switching back to `file` reads
+only the definitions still on disk. See [Agent Storage](../../backend/docs/CONFIGURATION.md#agent-storage)
+for the migration procedure and the checks needed before switching back.
 
 Custom Agents can also be moved between DeerFlow users or deployments from the
 Agents gallery. **Export Agent** downloads a versioned

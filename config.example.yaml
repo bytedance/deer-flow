@@ -2895,7 +2895,9 @@ run_events:
 # environment and the same runtime/configuration selectors as the Gateway:
 #     uv run --no-sync --project backend python backend/scripts/migrate_agents_to_db.py --dry-run
 # Remove --dry-run after reviewing the preview to perform the import.
-# The source files are left in place, so reverting to 'file' is a clean rollback.
+# The importer leaves source files in place, but DB creates and updates do not
+# refresh them. Before switching back to 'file', reconcile and back up the
+# definitions you need; only files still present on disk will be read.
 #
 # agent_storage:
 #   backend: file

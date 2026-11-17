@@ -80,6 +80,9 @@ When you add or rename a field, update `config.example.yaml` and raise its
 
 ## Agent and model settings
 
+- **Changing `agent_storage.backend` does not migrate data.** The importer is
+  file-to-DB only; SQL writes do not refresh files, and deletion can remove them.
+  Reconcile and preserve required definitions before switching back to file.
 - **Stored agent config is parsed leniently, written strictly.** A reader ignores
   an invalid stored field and keeps the agent usable. Add a managed field to
   `MANAGED_AGENT_CONFIG_FIELDS`, or an unrelated update drops it.
