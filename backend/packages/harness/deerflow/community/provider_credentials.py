@@ -61,6 +61,7 @@ ENV_TEMPLATE_PLACEHOLDERS = frozenset(
         "your-openai-api-key",
         "your-openviking-user-api-key",
         "your-opper-api-key",
+        "your-perplexity-api-key",
         "your-provisioner-api-key",
         "your-serper-api-key",
         "your-serply-api-key",

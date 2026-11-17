@@ -756,6 +756,22 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SPECSTREAM_API_KEY" in (result.fix or "")
 
+    def test_perplexity_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.perplexity.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "perplexity" in result.detail
+
+    def test_perplexity_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PERPLEXITY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.perplexity.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "PERPLEXITY_API_KEY" in (result.fix or "")
+
     def test_serper_with_key_ok(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SERPER_API_KEY", "test-key")
         cfg = tmp_path / "config.yaml"

@@ -29,6 +29,7 @@ from importlib.metadata import PackageNotFoundError, version
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.provider_credentials import resolve_api_key
 from deerflow.community.search_max_results import coerce_max_results
 from deerflow.community.search_time_range import SearchTimeRange
 from deerflow.community.url_safety import safe_public_result_url
@@ -90,9 +91,7 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object, str, lis
     if config is not None:
         extra = config.model_extra or {}
         max_results = extra.get("max_results")
-        candidate = extra.get("api_key")
-        if isinstance(candidate, str) and candidate.strip():
-            api_key = candidate.strip()
+        api_key = resolve_api_key(extra.get("api_key"))
         configured_type = extra.get("search_type")
         if isinstance(configured_type, str) and configured_type.strip().lower() in _SEARCH_TYPES:
             search_type = configured_type.strip().lower()
@@ -106,9 +105,7 @@ def _resolve_tool_settings(tool_name: str) -> tuple[str | None, object, str, lis
                 domain_filter = domain_filter[:_MAX_DOMAIN_FILTERS]
         elif configured_domains is not None:
             logger.warning("Invalid Perplexity search_domain_filter=%r; expected a list of domains", configured_domains)
-    if api_key is None:
-        api_key = os.getenv("PERPLEXITY_API_KEY", "").strip() or None
-    return api_key, max_results, search_type, domain_filter
+    return api_key or resolve_api_key(os.getenv("PERPLEXITY_API_KEY")), max_results, search_type, domain_filter
 
 
 async def _resolve_user_agent() -> str:
@@ -150,10 +147,17 @@ async def _search(
         "User-Agent": await _resolve_user_agent(),
         "X-Pplx-Integration": _INTEGRATION_HEADER,
     }
-    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
+    async with await asyncio.to_thread(httpx.AsyncClient, timeout=_TIMEOUT_S) as client:
         response = await client.post(_PERPLEXITY_SEARCH_ENDPOINT, json=payload, headers=headers)
     response.raise_for_status()
     return response.json()
+
+
+def _format_error(query: str) -> str:
+    return json.dumps(
+        {"error": "Perplexity returned an unexpected response format; retry and report this error if it persists", "query": query},
+        ensure_ascii=False,
+    )
 
 
 @tool("web_search", parse_docstring=True)
@@ -202,19 +206,24 @@ async def web_search_tool(query: str, max_results: int | None = None, time_range
 
     if not isinstance(data, dict):
         logger.error("Perplexity returned an unexpected payload type: %s", type(data).__name__)
-        return json.dumps(
-            {"error": "Perplexity returned an unexpected response format; retry and report this error if it persists", "query": query},
-            ensure_ascii=False,
-        )
+        return _format_error(query)
 
     raw_results = data.get("results")
-    results = [r for r in raw_results if isinstance(r, dict)] if isinstance(raw_results, list) else []
+    if raw_results is None:
+        raw_results = []
+    if not isinstance(raw_results, list):
+        logger.error("Perplexity returned an unexpected 'results' payload type: %s", type(raw_results).__name__)
+        return _format_error(query)
+    results = [r for r in raw_results if isinstance(r, dict)]
+    if raw_results and not results:
+        logger.error("Perplexity returned 'results' with no usable result objects")
+        return _format_error(query)
     if not results:
         return json.dumps({"error": "No results found; try a broader query or relax the search filters", "query": query}, ensure_ascii=False)
 
     normalized_results = [
         {
-            "title": r.get("title", ""),
+            "title": r.get("title", "") if isinstance(r.get("title"), str) else "",
             "url": safe_public_result_url(r.get("url")),
             "snippet": r.get("snippet", "") if isinstance(r.get("snippet"), str) else "",
         }

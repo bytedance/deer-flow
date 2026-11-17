@@ -4,6 +4,7 @@ import json
 import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -39,12 +40,33 @@ def _make_response(payload: object) -> MagicMock:
     return mock_resp
 
 
+def _provider_httpx(async_client) -> SimpleNamespace:
+    """Stand-in for the provider's own ``httpx`` reference; the shared module stays untouched."""
+    return SimpleNamespace(AsyncClient=async_client, HTTPStatusError=httpx.HTTPStatusError, HTTPError=httpx.HTTPError)
+
+
 def _patch_post(mock_resp: MagicMock):
-    """Patch httpx.AsyncClient so the context-managed .post returns mock_resp."""
-    patcher = patch("deerflow.community.perplexity.tools.httpx.AsyncClient")
-    mock_client_cls = patcher.start()
+    """Patch the provider's httpx reference so the context-managed .post returns mock_resp."""
+    mock_client_cls = MagicMock()
     mock_client_cls.return_value.__aenter__.return_value.post = AsyncMock(return_value=mock_resp)
+    patcher = patch("deerflow.community.perplexity.tools.httpx", _provider_httpx(mock_client_cls))
+    patcher.start()
     return patcher, mock_client_cls
+
+
+def _offline_transport(monkeypatch, payload: object) -> list[httpx.Request]:
+    """Serve ``payload`` from an offline transport under the real httpx client."""
+    from deerflow.community.perplexity import tools as module
+
+    requests: list[httpx.Request] = []
+    client_class = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    monkeypatch.setattr(module, "httpx", _provider_httpx(lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs)))
+    return requests
 
 
 def _post_call(mock_client_cls):
@@ -174,6 +196,16 @@ class TestRequestShape:
         assert "PERPLEXITY_API_KEY" in parsed["error"]
         assert parsed["query"] == "test"
         assert not mock_client_cls.called
+
+    async def test_env_template_placeholder_reads_as_missing_key(self, mock_config_no_key, monkeypatch):
+        monkeypatch.setenv("PERPLEXITY_API_KEY", "your-perplexity-api-key")
+        requests = _offline_transport(monkeypatch, _payload())
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+
+        assert "PERPLEXITY_API_KEY" in parsed["error"]
+        assert requests == []
 
     async def test_time_range_maps_to_recency_filter(self, mock_config_with_key):
         patcher, mock_client_cls = _patch_post(_make_response(_payload()))
@@ -348,6 +380,55 @@ class TestWebSearchTool:
             patcher.stop()
 
         assert "unexpected response format" in parsed["error"]
+
+    @pytest.mark.parametrize(
+        "results",
+        [pytest.param({"a": 1}, id="object"), pytest.param("text", id="string"), pytest.param(["x", 3, None], id="no-objects")],
+    )
+    async def test_malformed_results_container_returns_format_error(self, results, mock_config_with_key, monkeypatch):
+        requests = _offline_transport(monkeypatch, {"id": "req-1", "results": results})
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+
+        assert len(requests) == 1
+        assert parsed["error"] == "Perplexity returned an unexpected response format; retry and report this error if it persists"
+
+    async def test_null_results_is_an_empty_search(self, mock_config_with_key, monkeypatch):
+        _offline_transport(monkeypatch, {"id": "req-1", "results": None})
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+
+        assert parsed["error"] == "No results found; try a broader query or relax the search filters"
+
+    async def test_non_object_entries_are_skipped_in_order(self, mock_config_with_key, monkeypatch):
+        _offline_transport(monkeypatch, {"id": "req-1", "results": [_result(title="first"), "junk", None, _result(title="second", url="https://ex.com/b")]})
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+
+        assert [r["title"] for r in parsed] == ["first", "second"]
+
+    async def test_offline_transport_leaves_the_shared_client_alone(self, mock_config_with_key, monkeypatch):
+        real_client = httpx.AsyncClient
+        requests = _offline_transport(monkeypatch, _payload())
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        await web_search_tool.ainvoke({"query": "test"})
+
+        assert len(requests) == 1
+        assert httpx.AsyncClient is real_client
+
+    @pytest.mark.parametrize("value", [None, 7, ["A"]])
+    async def test_non_string_title_and_snippet_become_empty(self, mock_config_with_key, monkeypatch, value):
+        _offline_transport(monkeypatch, _payload(_result(title=value, snippet=value)))
+        from deerflow.community.perplexity.tools import web_search_tool
+
+        parsed = json.loads(await web_search_tool.ainvoke({"query": "test"}))
+
+        assert parsed[0]["title"] == ""
+        assert parsed[0]["snippet"] == ""
 
     async def test_partial_fields_default_to_empty_string(self, mock_config_with_key):
         patcher, _ = _patch_post(_make_response(_payload({})))

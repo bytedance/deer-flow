@@ -10,12 +10,13 @@ import pytest
 
 from deerflow.community.groundroute import tools as groundroute
 from deerflow.community.infoquest.infoquest_client import InfoQuestClient
+from deerflow.community.perplexity import tools as perplexity
 from deerflow.community.webz import tools as webz
 from deerflow.community.youcom import tools as youcom
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider", ["youcom-keyed", "youcom-keyless", "groundroute-search", "groundroute-fetch", "webz"])
+@pytest.mark.parametrize("provider", ["youcom-keyed", "youcom-keyless", "groundroute-search", "groundroute-fetch", "webz", "perplexity"])
 async def test_search_tool_tls_setup_runs_off_loop(provider, monkeypatch):
     loop_thread = threading.get_ident()
     original_context = ssl.create_default_context
@@ -47,6 +48,11 @@ async def test_search_tool_tls_setup_runs_off_loop(provider, monkeypatch):
             body = json.loads(request.content)
             assert body["max_results"] == (1 if provider.endswith("fetch") else 5)
             payload = {"results": [{"url": "https://example.com", "title": "Synthetic", "snippet": "Synthetic text", "content": "Synthetic text"}]}
+        elif provider == "perplexity":
+            assert request.url.host == "api.perplexity.ai"
+            assert request.headers["Authorization"] == "Bearer synthetic-key"
+            assert json.loads(request.content)["max_results"] == 5
+            payload = {"results": [{"url": "https://example.com", "title": "Synthetic", "snippet": "Synthetic text"}]}
         else:
             assert request.url.host == "api.webz.io"
             assert request.headers["Authorization"] == "Bearer synthetic-key"
@@ -58,12 +64,12 @@ async def test_search_tool_tls_setup_runs_off_loop(provider, monkeypatch):
         key = "" if provider == "youcom-keyless" else "synthetic-key"
         return SimpleNamespace(get_tool_config=lambda _: SimpleNamespace(model_extra={"api_key": key, "max_results": 5}))
 
-    for module in (youcom, groundroute, webz):
+    for module in (youcom, groundroute, webz, perplexity):
         monkeypatch.setattr(module, "get_app_config", config)
     monkeypatch.delenv("YDC_API_KEY", raising=False)
     monkeypatch.setattr(ssl, "create_default_context", create_context)
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
-    module = youcom if provider.startswith("youcom") else groundroute if provider.startswith("groundroute") else webz
+    module = youcom if provider.startswith("youcom") else groundroute if provider.startswith("groundroute") else perplexity if provider == "perplexity" else webz
     tool = module.web_fetch_tool if provider.endswith("fetch") else module.web_search_tool
     result = await tool.ainvoke({"url": "https://example.com"} if provider.endswith("fetch") else {"query": "synthetic query"})
     assert "Synthetic text" in result
