@@ -5,7 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from _agent_e2e_helpers import build_single_tool_call_model
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.middlewares import title_middleware as title_middleware_module
@@ -13,6 +16,58 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.config.title_config import TitleConfig, get_title_config, set_title_config
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_step_text", ["", "Let me look that up."])
+async def test_configured_title_model_receives_the_final_reply_after_tools(monkeypatch, tool_step_text):
+    events = []
+
+    @tool
+    def lookup() -> str:
+        """Get the requested information."""
+        events.append("tool")
+        return "lookup result"
+
+    async def title_model(prompt, **kwargs):
+        events.append(prompt)
+        return AIMessage(content="Resolved conversation title")
+
+    monkeypatch.setattr(title_middleware_module, "create_chat_model", lambda **_: SimpleNamespace(ainvoke=title_model))
+    model = build_single_tool_call_model(tool_name="lookup", tool_args={}, final_text="The final answer is available.")
+    model.responses[0].content = tool_step_text
+    graph = create_agent(
+        model=model,
+        tools=[lookup],
+        middleware=[TitleMiddleware(title_config=TitleConfig(model_name="test-title-model"))],
+    )
+    output = await graph.ainvoke({"messages": [HumanMessage(content="Please look up the result")]})
+
+    assert output["title"] == "Resolved conversation title"
+    assert len(events) == 2
+    assert events[0] == "tool"
+    assert "The final answer is available." in events[1]
+
+
+@pytest.mark.asyncio
+async def test_return_direct_tool_end_keeps_local_title_without_calling_title_model(monkeypatch):
+    @tool(return_direct=True)
+    def lookup() -> str:
+        """Get the requested information."""
+        return "lookup result"
+
+    create_title_model = MagicMock()
+    monkeypatch.setattr(title_middleware_module, "create_chat_model", create_title_model)
+    graph = create_agent(
+        model=build_single_tool_call_model(tool_name="lookup", tool_args={}),
+        tools=[lookup],
+        middleware=[TitleMiddleware(title_config=TitleConfig(model_name="test-title-model"))],
+    )
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Please look up the result")]})
+
+    assert state["title"] == "Please look up the result"
+    assert state["messages"][-1].type == "tool"
+    create_title_model.assert_not_called()
 
 
 def _clone_title_config(config: TitleConfig) -> TitleConfig:
