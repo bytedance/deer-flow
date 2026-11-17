@@ -784,6 +784,10 @@ def test_triage_flags_config_parse_errors(tmp_path):
     assert triage["status"] == "needs_user_setup"
     assert triage["signals"]["config_error"] is True
     assert "config_error" in triage["active_signals"]
+    # A YAML that fails to parse is not a resolution error, so the syntax
+    # guidance must stay for both audiences.
+    assert any("`config.yaml` syntax" in step for step in triage["reporter_next_steps"])
+    assert any("`config.yaml` syntax" in step for step in triage["maintainer_next_steps"])
 
 
 def test_triage_flags_extensions_parse_errors(tmp_path):
@@ -1238,6 +1242,12 @@ def test_missing_env_config_path_is_reported(tmp_path, monkeypatch):
     assert "DEER_FLOW_CONFIG_PATH" in config_summary["error"]
     triage = json.loads(_zip_text(output_path, "triage.json"))
     assert triage["signals"]["config_error"] is True
+    # The resolution error names the missing target; sending the reporter to
+    # `config.yaml` syntax or `make setup` cannot fix a path that does not exist.
+    for step in (*triage["reporter_next_steps"], *triage["maintainer_next_steps"]):
+        assert "config.yaml` syntax" not in step
+    assert any("DEER_FLOW_CONFIG_PATH" in step for step in triage["reporter_next_steps"])
+    assert any("DEER_FLOW_CONFIG_PATH" in step for step in triage["maintainer_next_steps"])
 
 
 def test_config_path_follows_dotenv_override(tmp_path, monkeypatch):
@@ -1614,6 +1624,13 @@ def test_config_path_reports_an_empty_selector_as_the_gateways_startup_failure(t
     config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
     assert "DEER_FLOW_ENV_FILE" in config_summary["error"]
     assert "empty" in config_summary["error"]
+    triage = json.loads(_zip_text(output_path, "triage.json"))
+    # `make setup` and a YAML syntax fix both leave the rejected selector in
+    # place, so the steps have to point at the variable the Gateway refused.
+    for step in (*triage["reporter_next_steps"], *triage["maintainer_next_steps"]):
+        assert "config.yaml` syntax" not in step
+    assert any("DEER_FLOW_ENV_FILE" in step for step in triage["reporter_next_steps"])
+    assert any("DEER_FLOW_ENV_FILE" in step for step in triage["maintainer_next_steps"])
 
 
 def test_config_path_reports_a_disabled_dotenv_loader_as_the_gateways_startup_failure(tmp_path, monkeypatch):

@@ -160,9 +160,9 @@ def redact_data(value: Any) -> Any:
     return value
 
 
-def _read_yaml(path: Path, error: str | None = None) -> Any:
+def _read_yaml(path: Path, error: str | None = None, *, resolution_error: bool = False) -> Any:
     if error is not None:
-        return {"present": True, "error": error}
+        return {"present": True, "error": error, "resolution_error": resolution_error}
     if not path.exists():
         return {"present": False}
     if yaml is None:
@@ -390,13 +390,17 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
     return location
 
 
-def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
+def resolve_config_path(project_root: Path) -> tuple[Path, str | None, bool]:
     """Resolve the config.yaml the Gateway would load.
 
     Delegates to the harness resolver so a bundle inspects the same file the
     Gateway reads. An explicit ``DEER_FLOW_CONFIG_PATH`` naming a missing file
     is the Gateway's own startup error, so it is reported in the bundle instead
     of silently falling back to the checkout ``config.yaml``.
+
+    The third element says whether ``error`` came from resolving the location
+    (a missing target or a rejected dotenv selector) rather than from reading
+    the file, so the triage steps name the file that actually needs fixing.
     """
     # Importing the harness loads the checkout `.env` into `os.environ`, and the
     # lookup below stages the launcher's view. Snapshot before the import so a
@@ -407,7 +411,7 @@ def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
         try:
             from deerflow.config.app_config import AppConfig
         except Exception as exc:
-            return project_root / "config.yaml", f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})"
+            return project_root / "config.yaml", f"cannot import the DeerFlow harness to resolve it ({type(exc).__name__}: {exc})", True
 
         # The harness reads the process environment, so stage the launcher's view
         # for the duration of the lookup only: the checkout `.env` wins for these
@@ -416,22 +420,24 @@ def resolve_config_path(project_root: Path) -> tuple[Path, str | None]:
         if not os.environ.get("DEER_FLOW_PROJECT_ROOT"):
             os.environ["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
         try:
-            return AppConfig.resolve_config_path(), None
+            return AppConfig.resolve_config_path(), None, False
         except FileNotFoundError as exc:
             config_env = os.environ.get("DEER_FLOW_CONFIG_PATH")
             if not config_env:
                 # Nothing at the default locations: a plain missing config.
-                return project_root / "config.yaml", None
-            return Path(config_env), str(exc)
+                return project_root / "config.yaml", None, False
+            return Path(config_env), str(exc), True
         except ValueError as exc:
-            return project_root / "config.yaml", str(exc)
+            # `DEER_FLOW_PROJECT_ROOT` naming a non-existent or non-directory
+            # path is rejected here too; the fix is that variable, not YAML.
+            return project_root / "config.yaml", str(exc), True
     finally:
         os.environ.clear()
         os.environ.update(previous)
 
 
-def collect_config_summary(config_path: Path, error: str | None = None) -> Any:
-    return redact_data(_read_yaml(config_path, error=error))
+def collect_config_summary(config_path: Path, error: str | None = None, *, resolution_error: bool = False) -> Any:
+    return redact_data(_read_yaml(config_path, error=error, resolution_error=resolution_error))
 
 
 def collect_extensions_summary(extensions_config_path: Path) -> Any:
@@ -667,6 +673,9 @@ def _config_summary(config_summary: Any) -> dict[str, Any]:
         "present": True,
         "config_version": config_summary.get("config_version"),
         "error": config_summary.get("error"),
+        # A resolution error names a config file the Gateway could not locate or
+        # a dotenv selector it refused; `config.yaml` syntax is not the fix.
+        "resolution_error": bool(config_summary.get("resolution_error")),
         "models": len(models) if isinstance(models, list) else 0,
         "tools": sorted(str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")) if isinstance(tools, list) else [],
         "channels": _enabled_mapping_keys(channels),
@@ -709,7 +718,7 @@ def _active_signal_names(signals: dict[str, bool]) -> list[str]:
     return [name for name, enabled in signals.items() if enabled and name in ATTENTION_SIGNAL_NAMES]
 
 
-def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
+def _maintainer_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
         steps.append("Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`.")
@@ -718,7 +727,12 @@ def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     if signals["config_missing"] or signals["models_missing"]:
         steps.append("Do not triage model/runtime behavior until `config.yaml` exists and at least one model is configured.")
     if signals["config_error"]:
-        steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
+        if resolution_hint:
+            # The resolution error names the file and selector that actually
+            # stopped startup; `config.yaml` syntax would be the wrong fix.
+            steps.append(f"Ask the reporter to resolve the config location the Gateway failed on: {resolution_hint}")
+        else:
+            steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["extensions_config_error"]:
         steps.append("Ask the reporter to fix `extensions_config.json` syntax before triaging MCP/skill behavior.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
@@ -730,7 +744,7 @@ def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     return steps
 
 
-def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
+def _reporter_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
         steps.append("Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes.")
@@ -739,7 +753,10 @@ def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     if signals["config_missing"] or signals["models_missing"]:
         steps.append("Create or repair `config.yaml` with `make setup`; model/runtime issues cannot be triaged until at least one model is configured.")
     if signals["config_error"]:
-        steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
+        if resolution_hint:
+            steps.append(f"Fix the config location the Gateway failed on before filing: {resolution_hint}")
+        else:
+            steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
         steps.append("Paste the generated issue summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle.")
     if not steps:
@@ -799,6 +816,7 @@ def build_triage_report(
         "thread_summary_found": bool(thread_summary and thread_summary.get("found")),
     }
     status = _status_from_signals(signals)
+    resolution_hint = config.get("error") if config.get("resolution_error") else None
     return {
         "schema_version": 1,
         "generated_at": manifest["generated_at"],
@@ -826,8 +844,8 @@ def build_triage_report(
             "included": thread_summary is not None,
             "found": bool(thread_summary and thread_summary.get("found")),
         },
-        "reporter_next_steps": _reporter_next_steps(status, signals),
-        "maintainer_next_steps": _maintainer_next_steps(status, signals),
+        "reporter_next_steps": _reporter_next_steps(status, signals, resolution_hint),
+        "maintainer_next_steps": _maintainer_next_steps(status, signals, resolution_hint),
         "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
         "privacy": manifest["privacy"],
     }
@@ -1094,8 +1112,9 @@ def create_support_bundle(
     if config_path is not None:
         config_path = config_path.resolve()
         config_error = None
+        config_error_is_resolution = False
     else:
-        config_path, config_error = resolve_config_path(project_root)
+        config_path, config_error, config_error_is_resolution = resolve_config_path(project_root)
     extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
     # `--out` names the zip, so a directory there would only fail inside
@@ -1123,7 +1142,7 @@ def create_support_bundle(
     }
 
     environment = collect_environment(project_root)
-    config_summary = collect_config_summary(config_path, error=config_error)
+    config_summary = collect_config_summary(config_path, error=config_error, resolution_error=config_error_is_resolution)
     extensions_summary = collect_extensions_summary(extensions_config_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
