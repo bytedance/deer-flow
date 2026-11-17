@@ -1325,8 +1325,41 @@ def test_legacy_archive_keeps_fts_normalized_hits(scoped):
         db.commit()
 
     for query in ("cafe", "resume"):
-        hits = [row["id"] for row in _json.loads(history_search.func(scoped, query))["results"]]
+        rows = _json.loads(history_search.func(scoped, query))["results"]
+        hits = [row["id"] for row in rows]
         assert hits == [source_id], f"{query} must keep the FTS-normalized hit, got {hits}"
+        # The documented behaviour is unchanged: the excerpt still does not claim
+        # a literal hit, it only shows the source that FTS legitimately matched.
+        assert rows[0]["excerpt_match"] is False
+        assert (rows[0]["excerpt_start"], rows[0]["excerpt_end"]) == (0, len(message.content))
+        assert rows[0]["excerpt"] == message.content
+
+
+def test_legacy_archive_still_drops_a_stale_index_term(scoped):
+    """Normalized matching must not resurrect a row the decoded text lost.
+
+    A pre-tokenizer archive can hold index terms the stored text no longer
+    carries. The index MATCHes those, so the fallback still has to verify the
+    hit against the decoded text - with the same folding, not literally.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="the cat sat on the warm keyboard", id="cat")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    source_id = _json.loads(history_search.func(scoped, "keyboard"))["results"][0]["id"]
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        # An index term from an older writer that the message text never had.
+        db.execute("UPDATE sources SET words='bericht human'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    assert _json.loads(history_search.func(scoped, "human"))["results"] == []
+    # The source is still there and still reachable through its decoded text.
+    assert [row["id"] for row in _json.loads(history_search.func(scoped, "keyboard"))["results"]] == [source_id]
 
 
 def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):

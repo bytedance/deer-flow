@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import sqlite3
+import unicodedata
 from contextlib import closing
 from pathlib import Path
 
@@ -163,6 +164,18 @@ def _decoded_rows(cursor):
             yield row
 
 
+def _fold_for_match(value: str) -> str:
+    """Fold text the way the FTS tokenizer does: strip diacritics, then casefold.
+
+    FTS5's unicode61 tokenizer removes diacritics, so a stored "café" MATCHes the
+    query "cafe". Comparing the decoded text literally would reject that genuine
+    hit; comparing both sides folded keeps it, and still rejects an index term the
+    text no longer carries (#8300 review: a legacy archive answered neither "cafe"
+    nor "resume" until the next capture rebuilt the index).
+    """
+    return "".join(char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)).casefold()
+
+
 def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: str | None, keywords: list[str], role_filter: str):
     """Yield matches from an archive whose index predates the current tokenizer.
 
@@ -170,18 +183,23 @@ def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: st
     decoded text backs it up. Index hits still come first: they are genuine
     token matches, ordered by FTS rank, and running them before the substring
     scan stops a query like "cat" from being filled with eight rows that merely
-    contain "concatenate". Index hits are taken as they are - FTS matches are
-    normalized (unicode61 folds diacritics), so a hit need not contain the
-    literal query text ("cafe" matching a stored "café") and re-checking the
-    decoded text would drop valid rows. Both passes are lazy: rows are decoded
-    only until the caller has eight distinct sources, so a large archive is not
-    decoded in full to answer a query its own index can already rank.
+    contain "concatenate". Both passes compare the decoded text with the same
+    FTS-equivalent folding (_fold_for_match: diacritics stripped, casefolded),
+    so a normalized hit need not contain the literal query text ("cafe" matching
+    a stored "café") while an index term the text no longer carries is still
+    dropped. Both passes are lazy: rows are decoded only until the caller has
+    eight distinct sources, so a large archive is not decoded in full to answer
+    a query its own index can already rank.
     """
     emitted: set[str] = set()
+    folded_terms = [_fold_for_match(term) for term in keywords]
     parameters = [match, *batches, *([role] if role is not None else [])]
     for (payload,) in db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters):
         row = _source_row(payload)
         if row is None or row["id"] in emitted:
+            continue
+        if not any(term in _fold_for_match(str(row.get("text", ""))) for term in folded_terms):
+            # A stale index term: the stored text no longer carries it.
             continue
         emitted.add(row["id"])
         yield row
@@ -190,7 +208,7 @@ def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: st
         row = _source_row(payload)
         if row is None or row["id"] in emitted:
             continue
-        if any(term in str(row.get("text", "")).casefold() for term in keywords):
+        if any(term in _fold_for_match(str(row.get("text", ""))) for term in folded_terms):
             emitted.add(row["id"])
             yield row
 
