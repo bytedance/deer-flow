@@ -235,6 +235,13 @@ def test_incognito_sections_keep_lead_and_subagent_copy_distinct():
     assert "The interface already shows these notices" not in subagent
     assert "无痕模式" in lead
     assert "无痕模式" not in subagent
+    # The Chinese name is a term-selection rule, not an explanation to hand
+    # the user: it must not describe the interface language or enumerate
+    # wrong translations, which invites further glosses.
+    assert "exactly as written; do not substitute other Chinese terms" in lead
+    assert "Do not use these Chinese terms in a reply in another language" in lead
+    assert "Chinese interface" not in lead
+    assert "隐身" not in lead
     assert "Return your results to the lead agent" in subagent
     assert "Return your results to the lead agent" not in lead
 
