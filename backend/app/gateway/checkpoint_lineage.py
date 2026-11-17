@@ -87,12 +87,7 @@ def channel_versions_match(
     metadata-only copy when two channels exchange their versions.
     """
 
-    return (
-        isinstance(versions, dict)
-        and isinstance(parent_versions, dict)
-        and bool(versions)
-        and versions == parent_versions
-    )
+    return isinstance(versions, dict) and isinstance(parent_versions, dict) and bool(versions) and versions == parent_versions
 
 
 def is_duration_only_checkpoint(checkpoint_tuple: Any, *, parent: Any | None = None, stamp_fallback: bool = True, versions: dict[str, Any] | None = None, parent_versions: dict[str, Any] | None = None) -> bool:
