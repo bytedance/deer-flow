@@ -17,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from dotenv import main as dotenv_main
+except ImportError:  # A harness that dropped the dependency; callers fall back.
+    dotenv_main = None
+
+try:
     import yaml
 except Exception:  # pragma: no cover - exercised only in broken environments
     yaml = None
@@ -271,29 +276,25 @@ def _checkout_dotenv_assignments(project_root: Path, environment: dict[str, str]
 
 
 def _installed_dotenv_module() -> Any:
-    """Return ``dotenv`` as the Gateway imports it, or ``None``.
+    """Return ``dotenv.main`` as the Gateway imports it, or ``None``.
 
     Only called after `deerflow.config.app_config` has been imported, and that
-    module imports `dotenv` at module level, so the import below normally
-    succeeds; the guard covers a harness that dropped the dependency.
+    module imports `dotenv` at module level, so the import normally succeeds;
+    the guard covers a harness that dropped the dependency.
     """
-    try:
-        import dotenv  # noqa: F401
-
-        return dotenv
-    except ImportError:
-        return None
+    return dotenv_main
 
 
-def _read_selected_env_file(selected_file: Path, environment: dict[str, str], loader: Any) -> dict[str, str] | None:
+def _read_selected_env_file(selected_file: Path, environment: dict[str, str]) -> dict[str, str] | None:
     """Return the assignments the Gateway's dotenv load applies, or ``None``.
 
-    ``load_selected_env_file`` hands the file to python-dotenv after the launcher
-    exported the checkout `.env`, so expansion sees those exports and only
-    `${NAME}` is substituted. Parsing the file the launcher's way first and then
-    handing python-dotenv the rewritten result expands a bare `$NAME` that the
-    Gateway leaves literal, which points the bundle at a file the Gateway never
-    reads.
+    ``load_selected_env_file`` calls ``load_dotenv(stream=..., override=False)``
+    after the launcher exported the checkout `.env`. Mirroring that call matters
+    for `${NAME}` substitution: python-dotenv resolves ``override=False``
+    references against the process environment before the assignments earlier
+    in this file, so a launcher export wins over a selected-file assignment of
+    the same name. ``dotenv_values`` resolves the other way round and would
+    report a path the Gateway never reads.
     """
     try:
         text = selected_file.read_text(encoding="utf-8-sig")
@@ -303,7 +304,11 @@ def _read_selected_env_file(selected_file: Path, environment: dict[str, str], lo
     os.environ.clear()
     os.environ.update(environment)
     try:
-        values = loader.dotenv_values(stream=StringIO(text))
+        bindings = dotenv_main.parse_stream(StringIO(text))
+        values = dotenv_main.resolve_variables(
+            ((binding.key, binding.value) for binding in bindings),
+            override=False,
+        )
     finally:
         os.environ.clear()
         os.environ.update(previous_environment)
@@ -336,9 +341,23 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
     base["PWD"] = str(project_root)
     for name, value in assignments:
         base[name] = value
+    if not base.get("DEER_FLOW_PROJECT_ROOT"):
+        # `serve.sh` fills an empty runtime root with the checkout before it
+        # starts the Gateway, so this value reaches the selected file's
+        # `${DEER_FLOW_PROJECT_ROOT}` references ahead of any assignment there.
+        base["DEER_FLOW_PROJECT_ROOT"] = str(project_root)
     selected = dict(base)
     selector = base.get("DEER_FLOW_ENV_FILE")
-    if selector:
+    # `load_selected_env_file` checks the switch in the environment the
+    # launcher handed the Gateway, before it reads the file.
+    gateway_disabled = base.get("PYTHON_DOTENV_DISABLED", "").casefold() in {"1", "true", "t", "yes", "y"}
+    # Only an absent selector leaves `load_selected_env_file` to the default
+    # discovery; an inherited empty one names no file and stops the Gateway.
+    if selector is not None:
+        if not selector:
+            return {"DEER_FLOW_CONFIG_PATH": "DEER_FLOW_ENV_FILE is set but empty; the Gateway fails startup"}
+        if gateway_disabled:
+            return {"DEER_FLOW_CONFIG_PATH": ("DEER_FLOW_ENV_FILE cannot be used while PYTHON_DOTENV_DISABLED disables dotenv loading; the Gateway fails startup")}
         selected_file = Path(selector)
         # A relative selector uses the Gateway's working directory, `backend/`.
         if not selected_file.is_absolute():
@@ -357,7 +376,7 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
         else:
             # `load_selected_env_file` loads with `override=False`, so a variable
             # the launcher already exported keeps its value over the file's.
-            assignments = _read_selected_env_file(selected_file, gateway_environment, loader)
+            assignments = _read_selected_env_file(selected_file, gateway_environment)
             if assignments is None:
                 return {"DEER_FLOW_CONFIG_PATH": f"DEER_FLOW_ENV_FILE must name a readable file: {selected_file}"}
             for name, value in assignments.items():

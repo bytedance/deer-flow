@@ -1517,6 +1517,132 @@ def test_config_path_expands_the_selected_file_from_the_backend_directory(tmp_pa
     assert config_summary == {"models": [{"name": "backend"}]}
 
 
+def test_config_path_expands_the_selected_file_with_the_gateway_precedence(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "inherited.yaml").write_text("models:\n  - name: inherited\n", encoding="utf-8")
+    (backend / "selected.yaml").write_text("models:\n  - name: selected\n", encoding="utf-8")
+    # The launcher exports SUPPORT_CONFIG_NAME=inherited.yaml and the Gateway
+    # loads the selected file with `override=False`, so python-dotenv resolves
+    # `${SUPPORT_CONFIG_NAME}` against the launcher's export even though the
+    # file assigns it first. The later `setdefault` cannot undo an interpolation
+    # that already happened, so reporting `selected.yaml` names a YAML the
+    # Gateway never reads.
+    (backend / "stage.env").write_text(
+        "SUPPORT_CONFIG_NAME=selected.yaml\nDEER_FLOW_CONFIG_PATH=${SUPPORT_CONFIG_NAME}\n",
+        encoding="utf-8",
+    )
+    (project_root / ".env").write_text(
+        "DEER_FLOW_ENV_FILE=stage.env\nSUPPORT_CONFIG_NAME=inherited.yaml\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [{"name": "inherited"}]}
+
+
+def test_config_path_fills_the_launchers_runtime_root_before_the_selected_file(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    other = project_root / "other"
+    (other / "backend").mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "config.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    (other / "backend" / "config.yaml").write_text("models:\n  - name: other\n", encoding="utf-8")
+    # `serve.sh` exports the checkout as `DEER_FLOW_PROJECT_ROOT` when the shell
+    # and the checkout `.env` leave it empty, and the Gateway loads the selected
+    # file afterwards with `override=False`. That launcher default therefore
+    # beats the selected file's own assignment, so a selected file that points
+    # the runtime root at `other` has no effect and `${DEER_FLOW_PROJECT_ROOT}`
+    # resolves to the checkout. Filling the default only after the selected-file
+    # pass would follow the file to `other/backend/config.yaml`.
+    (backend / "stage.env").write_text(
+        "DEER_FLOW_PROJECT_ROOT=../other\nDEER_FLOW_CONFIG_PATH=${DEER_FLOW_PROJECT_ROOT}/backend/config.yaml\n",
+        encoding="utf-8",
+    )
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_PROJECT_ROOT", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert config_summary == {"models": [], "tools": []}
+
+
+def test_config_path_reports_an_empty_selector_as_the_gateways_startup_failure(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    # An inherited empty selector is not an absent one: `load_selected_env_file`
+    # sees `""` and rejects it, so the Gateway never loads anything. Skipping the
+    # selector the way a falsy check does would report the checkout YAML and call
+    # a deployment healthy that cannot start.
+    #
+    # The bundle runs in its own process, so the empty selector lives only in the
+    # checkout `.env` and reaches the Gateway through the launcher's export.
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("DEER_FLOW_ENV_FILE", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert "DEER_FLOW_ENV_FILE" in config_summary["error"]
+    assert "empty" in config_summary["error"]
+
+
+def test_config_path_reports_a_disabled_dotenv_loader_as_the_gateways_startup_failure(tmp_path, monkeypatch):
+    project_root = tmp_path / "project"
+    backend = project_root / "backend"
+    backend.mkdir(parents=True)
+    (project_root / "config.yaml").write_text("models:\n  - name: checkout\n", encoding="utf-8")
+    (backend / "selected.yaml").write_text("models: []\ntools: []\n", encoding="utf-8")
+    # A valid selector paired with `PYTHON_DOTENV_DISABLED` makes
+    # `load_selected_env_file` raise before it reads the file, so the Gateway
+    # fails startup. python-dotenv's own loaders disagree about the switch
+    # (`load_dotenv` honours it silently, `dotenv_values` ignores it), so the
+    # bundle has to reproduce the Gateway's check rather than one of those.
+    (backend / "stage.env").write_text("DEER_FLOW_CONFIG_PATH=selected.yaml\n", encoding="utf-8")
+    (project_root / ".env").write_text("DEER_FLOW_ENV_FILE=stage.env\nPYTHON_DOTENV_DISABLED=true\n", encoding="utf-8")
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(sys.modules, "deerflow.config.app_config", raising=False)
+
+    output_path = tmp_path / "support.zip"
+    support_bundle.create_support_bundle(
+        project_root=project_root,
+        out_path=output_path,
+        include_doctor=False,
+    )
+
+    config_summary = json.loads(_zip_text(output_path, "config-summary.json"))
+    assert "PYTHON_DOTENV_DISABLED" in config_summary["error"]
+
+
 def test_fresh_harness_import_restores_the_process_environment(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
     project_root.mkdir()
