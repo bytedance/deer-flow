@@ -37,10 +37,20 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
 from deerflow.agents.thread_state import ThreadState
+from deerflow.utils.messages import UNTRUSTED_INPUT_KEY
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
 _TODO_REMINDER_INTRO_EDITED = "Your todo list was revised after your last `write_todos` call; here is the current state:"
 _TODO_REMINDER_INTRO_TRUNCATED = "Your todo list from earlier is no longer visible in the current context window, but it is still active. Here is the current state:"
+_TODO_REMINDER_INTRO_CLEARED = "Your todo list was cleared after your last `write_todos` call; there is no active plan."
+# Every intro the middleware itself writes. The section parser only
+# recognizes a reminder whose framework block carries one of these and the
+# footer, so wrapper-only caller text never qualifies as a reminder.
+_TODO_REMINDER_INTROS = (
+    _TODO_REMINDER_INTRO_EDITED,
+    _TODO_REMINDER_INTRO_TRUNCATED,
+    _TODO_REMINDER_INTRO_CLEARED,
+)
 _TODO_REMINDER_FOOTER = "Continue tracking and updating this todo list as you work. Call `write_todos` whenever the status of any item changes."
 # The items are caller-influenced task data, so they render after the
 # framework block, never inside it: text inside <system_reminder> carries
@@ -164,6 +174,12 @@ def _find_legacy_todo_reminder(messages: list[Any]) -> HumanMessage | None:
             continue
         if not (msg.additional_kwargs or {}).get("hide_from_ui"):
             continue
+        # The Gateway marks a hidden caller message untrusted_input: such a
+        # message only looks like a reminder because its sender reused the
+        # name and the hidden flag, and reusing its id would replace the
+        # caller's own request with a hidden reminder.
+        if (msg.additional_kwargs or {}).get(UNTRUSTED_INPUT_KEY):
+            continue
         if isinstance(msg.content, str) and _looks_like_todo_reminder(msg.content):
             return msg
     return None
@@ -220,6 +236,26 @@ def _build_todo_reminder(formatted: str, *, edited_after_write: bool, message_id
     )
 
 
+def _build_todo_cleared_notice(*, message_id: str | None = None) -> HumanMessage:
+    """Build the stamped notice that the plan was cleared.
+
+    Same template, name, hidden flag and provenance stamp as
+    `_build_todo_reminder`, with the cleared intro and no items: the section
+    parser recognizes it as a reminder rendering the current (empty) list,
+    so it is kept while the plan stays cleared and removed or replaced when
+    a new plan is written.
+    """
+    kwargs: dict[str, Any] = {}
+    if message_id is not None:
+        kwargs["id"] = message_id
+    return HumanMessage(
+        name=TODO_REMINDER_MESSAGE_NAME,
+        additional_kwargs={"hide_from_ui": True, **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "todo_reminder")},
+        content=(f"<system_reminder>\n{_TODO_REMINDER_INTRO_CLEARED}\n\n{_TODO_REMINDER_ITEMS_NOTICE}\n\n{_TODO_REMINDER_FOOTER}\n</system_reminder>\n\n"),
+        **kwargs,
+    )
+
+
 def _rendered_todo_section(content: str) -> str:
     """Return the todo list rendered by a todo reminder.
 
@@ -230,21 +266,35 @@ def _rendered_todo_section(content: str) -> str:
     Callers compare the returned section with the current rendering as a
     whole: a substring check is not enough, because a stale reminder that
     renders tasks A and B contains the rendering of A alone.
+
+    Either layout only counts when the framework block is complete — a
+    known intro and the footer. Content that merely wraps arbitrary text
+    in ``<system_reminder>`` tags is returned unchanged, so it never reads
+    as a reminder rendering.
     """
     closing = "\n</system_reminder>\n\n"
     if content.startswith("<system_reminder>\n") and closing in content:
-        return content.split(closing, 1)[1]
+        block, _, suffix = content.partition(closing)
+        inner = block[len("<system_reminder>\n") :]
+        if any(inner.startswith(intro + "\n\n") for intro in _TODO_REMINDER_INTROS) and inner.endswith(_TODO_REMINDER_FOOTER):
+            return suffix
+        return content
     text = content
-    if text.startswith("<system_reminder>\n"):
-        text = text[len("<system_reminder>\n") :]
-    if text.endswith("\n</system_reminder>"):
-        text = text[: -len("\n</system_reminder>")]
-    for intro in (_TODO_REMINDER_INTRO_EDITED, _TODO_REMINDER_INTRO_TRUNCATED):
+    if not text.startswith("<system_reminder>\n"):
+        return content
+    text = text[len("<system_reminder>\n") :]
+    if not text.endswith("\n</system_reminder>"):
+        return content
+    text = text[: -len("\n</system_reminder>")]
+    for intro in _TODO_REMINDER_INTROS:
         if text.startswith(intro + "\n\n"):
             text = text[len(intro) + 2 :]
             break
-    if text.endswith("\n\n" + _TODO_REMINDER_FOOTER):
-        text = text[: -len(_TODO_REMINDER_FOOTER) - 2]
+    else:
+        return content
+    if not text.endswith("\n\n" + _TODO_REMINDER_FOOTER):
+        return content
+    text = text[: -len(_TODO_REMINDER_FOOTER) - 2]
     return text
 
 
@@ -361,8 +411,10 @@ class TodoMiddleware(TodoListMiddleware):
         a persisted reminder that still renders a superseded list is removed
         instead of being left in history. A reminder persisted before
         provenance stamps existed is migrated or superseded the same way, and
-        an explicitly cleared list removes any persisted reminder: the
-        visible plan must reflect the saved state.
+        an explicitly cleared list removes any persisted reminder that still
+        renders a plan — while the last write is still visible, a stamped
+        clear-state notice takes its place, so the visible plan reflects the
+        saved state.
         """
         if not self._todo_capability_enabled:
             # write_todos was denied for this build; context-loss detection only
@@ -371,12 +423,32 @@ class TodoMiddleware(TodoListMiddleware):
         messages = state.get("messages") or []
         todos = _usable_todos(state)
         if not todos:
-            # An explicitly cleared list is a plan replacement too: a
+            # An explicitly cleared list is a plan replacement too. A
             # persisted reminder still rendering the old list would keep
-            # steering the model toward tasks the state no longer holds.
-            existing = _find_todo_reminder(messages) or _find_legacy_todo_reminder(messages)
-            if existing is not None and existing.id is not None:
-                return {"messages": [RemoveMessage(id=existing.id)]}
+            # steering the model toward tasks the state no longer holds,
+            # so it is removed — but when the last write_todos call is
+            # still visible, removing the reminder alone leaves the model
+            # staring at the old plan with nothing contradicting it, so a
+            # stamped clear-state notice takes its place instead. A notice
+            # already rendering the current (empty) list is kept; a legacy
+            # one rendering the same empty list is migrated to a stamped
+            # notice, so it stops reading as user text.
+            existing = _find_todo_reminder(messages)
+            if existing is not None:
+                if existing.id is not None and isinstance(existing.content, str) and _rendered_todo_section(existing.content) == _format_todos(todos):
+                    return None
+                if existing.id is not None:
+                    return {"messages": [RemoveMessage(id=existing.id)]}
+                return None
+            legacy = _find_legacy_todo_reminder(messages)
+            if legacy is not None:
+                if legacy.id is not None and isinstance(legacy.content, str) and _rendered_todo_section(legacy.content) == _format_todos(todos):
+                    return {"messages": [_build_todo_cleared_notice(message_id=legacy.id)]}
+                if legacy.id is not None:
+                    return {"messages": [RemoveMessage(id=legacy.id)]}
+                return None
+            if _todos_in_messages(messages):
+                return {"messages": [_build_todo_cleared_notice()]}
             return None
 
         edited_after_write = False
