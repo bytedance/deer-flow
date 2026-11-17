@@ -298,28 +298,23 @@ async def test_postgres_round_trip_shape_pruned_by_default(saver_env: _SaverEnv)
         # aput needs the full configurable (namespace included) for the parent link.
         return {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": parent_id}}
 
-    # Control: exchange two distinct channel versions. The value set is
-    # unchanged, but channel ownership changed, so this is resumable state.
-    control = copy.deepcopy(dict(head.checkpoint))
+    # Seed two distinct channel counters so the regression is deterministic
+    # even when the real graph writes only one state channel.
+    baseline = copy.deepcopy(dict(head.checkpoint))
+    baseline.update(_new_checkpoint_marker())
+    baseline["channel_versions"] = {"messages": "v1", "goal": "v2"}
+    baseline_id = baseline["id"]
+    baseline_meta = {"source": "loop", "step": 1}
+    await saver_env.saver.aput(_leaf_config(head_id), baseline, baseline_meta, {})
+
+    # Control: exchange the channel versions without changing their value set.
+    # The channel ownership changed, so this checkpoint must remain resumable.
+    control = copy.deepcopy(baseline)
     control.update(_new_checkpoint_marker())
-    control["channel_versions"] = dict(control["channel_versions"])
-    version_items = list(control["channel_versions"].items())
-    swapped_pair = next(
-        (
-            (left, right)
-            for index, left in enumerate(version_items)
-            for right in version_items[index + 1 :]
-            if left[1] != right[1]
-        ),
-        None,
-    )
-    assert swapped_pair is not None, "fixture needs two channels with distinct versions"
-    left, right = swapped_pair
-    control["channel_versions"][left[0]] = right[1]
-    control["channel_versions"][right[0]] = left[1]
+    control["channel_versions"] = {"messages": "v2", "goal": "v1"}
     control_id = control["id"]
-    control_meta = _pg_round_trip_meta(head.metadata)
-    await saver_env.saver.aput(_leaf_config(head_id), control, control_meta, {})
+    control_meta = _pg_round_trip_meta(baseline_meta)
+    await saver_env.saver.aput(_leaf_config(baseline_id), control, control_meta, {})
 
     # The Postgres round-trip shape on top: verbatim clone of the control
     # (identical ``channel_versions``), marker popped from the metadata.
