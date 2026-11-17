@@ -101,6 +101,28 @@ def test_model_as_a_common_noun_stays_task_text(text):
     assert result["task_offset"] == 0
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Use the v2 API to fetch the data",
+        "Use v2 of the API to fetch the data",
+        "Use v2 endpoints to paginate the results",
+        "Use v2 API for this turn: fetch the data",
+        "这次用 v2 接口帮我测试",
+    ],
+)
+def test_versioned_tool_reference_in_a_task_stays_task_text(text):
+    result = resolve_model_control(text, [DS, OPUS])
+    assert result["status"] == "none"
+    assert result["task_offset"] == 0
+
+
+def test_scoped_versioned_name_still_asks_instead_of_using_the_default():
+    result = resolve_model_control("Use v9.2 for this turn: summarize the document", [model("chat-default", "Chat Default")])
+    assert result["status"] == "unavailable"
+    assert result["model_name"] is None
+
+
 def test_name_without_scope_requires_a_scope_choice():
     result = resolve_model_control("用 ds flash 帮我算一下", [DS, OPUS])
     assert result["status"] == "ambiguous"

@@ -11,6 +11,10 @@ from typing import Any, Literal
 
 ModelScope = Literal["task", "turn", "conversation"]
 
+# A version followed by one of these heads names an API, SDK or service, not a
+# chat model: "v2 of the API", "v3 SDK for this turn", "这次用 v2 接口".
+_NON_MODEL_VERSION = re.compile(r"\bv\d(?:\.\d+)?(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?|接口|服务)", re.IGNORECASE)
+
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
     ("conversation", r"^(?:please\s+)?from now on\s+use\s+(.+?)(?:[,:]|$)"),
@@ -71,12 +75,12 @@ def resolve_model_control(text: str, models: list[Any], *, model_name: str | Non
             candidates = [model for model in models if _matches(model_name, model)]
     else:
         candidates = [model for model in models if _matches(query, model)]
-    # "Use Python to ..." is an ordinary task. A versioned query ("v4.1") still
-    # names a model the user expects, so it must not fall through to a run on
-    # the default. The noun alone is task wording: "a regression model" and
-    # "the attached model" describe the work, and treating them as a missing
-    # model name would block the request.
-    if not candidates and model_name is None and not re.search(r"\bv\d", query, re.IGNORECASE):
+    # A versioned name ("opus v4") is a model choice the user expects, so it
+    # must not run on the default. The noun by itself is task wording ("use a
+    # regression model to analyze"), and a version on an API or SDK is a tool
+    # reference; blocking either would drop the user's task wording.
+    versioned = re.search(r"\bv\d", query, re.IGNORECASE) is not None and _NON_MODEL_VERSION.search(query) is None
+    if not candidates and model_name is None and not versioned:
         return result
     offset = len(text) - len(text.lstrip()) + match.end()
     if match.groupdict().get("action") in {"处理", "计算", "回答", "分析", "生成", "写", "做"}:
