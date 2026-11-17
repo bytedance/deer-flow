@@ -270,27 +270,19 @@ def _checkout_dotenv_assignments(project_root: Path, environment: dict[str, str]
     return _read_dotenv_assignments(env_file, scope, parse_dotenv)
 
 
-def _installed_dotenv_module(project_root: Path) -> Any:
+def _installed_dotenv_module() -> Any:
     """Return ``dotenv`` as the Gateway imports it, or ``None``.
 
-    The backend dependencies are not importable from the script's own checkout
-    root: `make support-bundle` runs it from `backend/`, where `uv` put them.
+    Only called after `deerflow.config.app_config` has been imported, and that
+    module imports `dotenv` at module level, so the import below normally
+    succeeds; the guard covers a harness that dropped the dependency.
     """
     try:
         import dotenv  # noqa: F401
 
         return dotenv
     except ImportError:
-        pass
-    for candidate in sorted((project_root / "backend").glob(".venv/lib/python*/site-packages")):
-        sys.path.insert(0, str(candidate))
-        try:
-            import dotenv  # noqa: F401
-
-            return dotenv
-        except ImportError:
-            sys.path.pop(0)
-    return None
+        return None
 
 
 def _read_selected_env_file(selected_file: Path, environment: dict[str, str], loader: Any) -> dict[str, str] | None:
@@ -354,7 +346,7 @@ def _dotenv_config_location(project_root: Path, environment: dict[str, str]) -> 
         # The Gateway imports the selected file from `backend/`, so its `$PWD`
         # is that directory rather than the checkout the launcher used.
         gateway_environment = {**base, "PWD": str(project_root / "backend")}
-        loader = _installed_dotenv_module(project_root)
+        loader = _installed_dotenv_module()
         if loader is None:
             try:
                 text = selected_file.read_text(encoding="utf-8-sig")
