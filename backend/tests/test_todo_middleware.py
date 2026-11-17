@@ -488,6 +488,47 @@ class TestBeforeModelLegacyAndCleared:
         assert isinstance(result["messages"][0], RemoveMessage)
         assert result["messages"][0].id == "clear-1"
 
+    def test_replaces_stale_reminder_with_clear_notice_when_write_still_visible(self):
+        # Codex P2 on #8171 (follow-up on 4e43713): clearing the plan while
+        # a stale reminder is persisted and the last write_todos call is
+        # still visible — removing the reminder alone leaves the model with
+        # the old plan and nothing contradicting it, so the reminder is
+        # replaced in place by a stamped clear notice.
+        mw = TodoMiddleware()
+        current = _build_todo_reminder(_format_todos(_sample_todos()), edited_after_write=False, message_id="reminder-1")
+        state = {
+            "messages": [_ai_with_write_todos_args([dict(t) for t in _sample_todos()]), current],
+            "todos": [],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        assert msgs[0].id == "reminder-1"
+        assert isinstance(msgs[0], HumanMessage)
+        assert _reminder_in_messages(msgs) is True
+        assert "cleared" in msgs[0].content.lower()
+        assert _rendered_todo_section(msgs[0].content) == ""
+        assert "Set up project" not in msgs[0].content
+
+    def test_replaces_stale_legacy_reminder_with_clear_notice_when_write_still_visible(self):
+        mw = TodoMiddleware()
+        legacy = _legacy_reminder_msg("- [pending] Old task")
+        state = {
+            "messages": [_ai_with_write_todos_args([dict(t) for t in _sample_todos()]), legacy],
+            "todos": [],
+        }
+        result = mw.before_model(state, _make_runtime())
+        assert result is not None
+        msgs = result["messages"]
+        assert len(msgs) == 1
+        assert msgs[0].id == "legacy-1"
+        assert isinstance(msgs[0], HumanMessage)
+        assert _reminder_in_messages(msgs) is True
+        assert "cleared" in msgs[0].content.lower()
+        assert _rendered_todo_section(msgs[0].content) == ""
+        assert "Old task" not in msgs[0].content
+
 
 def _ai_with_write_todos_args(todos: list[dict[str, str]]):
     return AIMessage(

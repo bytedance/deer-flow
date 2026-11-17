@@ -438,6 +438,13 @@ class TodoMiddleware(TodoListMiddleware):
                 if existing.id is not None and isinstance(existing.content, str) and _rendered_todo_section(existing.content) == _format_todos(todos):
                     return None
                 if existing.id is not None:
+                    if _todos_in_messages(messages):
+                        # The stale reminder is removed, but the old plan is
+                        # still visible in the last write_todos call: removing
+                        # it alone leaves the model with that plan and nothing
+                        # contradicting it, so it is replaced in place by a
+                        # stamped clear notice instead.
+                        return {"messages": [_build_todo_cleared_notice(message_id=existing.id)]}
                     return {"messages": [RemoveMessage(id=existing.id)]}
                 return None
             legacy = _find_legacy_todo_reminder(messages)
@@ -445,6 +452,8 @@ class TodoMiddleware(TodoListMiddleware):
                 if legacy.id is not None and isinstance(legacy.content, str) and _rendered_todo_section(legacy.content) == _format_todos(todos):
                     return {"messages": [_build_todo_cleared_notice(message_id=legacy.id)]}
                 if legacy.id is not None:
+                    if _todos_in_messages(messages):
+                        return {"messages": [_build_todo_cleared_notice(message_id=legacy.id)]}
                     return {"messages": [RemoveMessage(id=legacy.id)]}
                 return None
             if _todos_in_messages(messages):
