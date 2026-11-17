@@ -78,6 +78,7 @@ from deerflow.persistence.thread_meta import (
     THREAD_PROJECT_METADATA_KEY,
     ThreadCreateConflictError,
     ThreadOwnershipConflictError,
+    incognito_deadline,
     is_incognito_expired,
 )
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
@@ -1181,6 +1182,7 @@ async def end_incognito_thread(thread_id: ThreadId, request: Request) -> Respons
     ended = await thread_store.end_incognito(
         thread_id,
         grace=timedelta(seconds=app_config.incognito.end_grace_seconds),
+        max_lifetime=timedelta(seconds=app_config.incognito.max_lifetime_seconds),
     )
     if not ended:
         raise HTTPException(status_code=410, detail="This incognito thread has expired")
@@ -1223,7 +1225,16 @@ async def _create_thread_locked(body: ThreadCreateRequest, request: Request, thr
         _require_incognito_creation_allowed(request, enabled=app_config.incognito.enabled)
         if body.project_id is not None:
             raise HTTPException(status_code=400, detail="An incognito thread cannot belong to a project")
-        expires_at = datetime.now(UTC) + timedelta(seconds=app_config.incognito.idle_ttl_seconds)
+        # Creation is the first deadline write, so it goes through the same
+        # ceiling as renewal and end; the store stamps created_at a moment
+        # later, which only makes the cap looser by that margin.
+        created_at = datetime.now(UTC)
+        expires_at = incognito_deadline(
+            now=created_at,
+            created_at=created_at,
+            window=timedelta(seconds=app_config.incognito.idle_ttl_seconds),
+            max_lifetime=timedelta(seconds=app_config.incognito.max_lifetime_seconds),
+        )
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
     # ``body.metadata`` is already stripped of server-reserved keys by

@@ -51,10 +51,10 @@ describe("IncognitoShell", () => {
 
 describe("IncognitoNotices", () => {
   test("states the storage notice with the live idle lifetime", () => {
-    render(<IncognitoNotices idleTtlSeconds={24 * 60 * 60} />);
+    render(<IncognitoNotices idleTtlSeconds={7 * 24 * 60 * 60} />);
 
     const text = screen.getByTestId("incognito-notices").textContent ?? "";
-    expect(text).toContain(enUS.incognito.notices("1 day"));
+    expect(text).toContain(enUS.incognito.notices("7 days"));
   });
 
   test("does not invent a lifetime it could not read", () => {
@@ -70,6 +70,22 @@ describe("IncognitoNotices", () => {
 
     expect(screen.getByTestId("incognito-notices").textContent).toContain(
       enUS.incognito.notices("1 hour"),
+    );
+  });
+
+  test("spells a window past 72 hours as days and hours", () => {
+    render(<IncognitoNotices idleTtlSeconds={73 * 60 * 60} />);
+
+    expect(screen.getByTestId("incognito-notices").textContent).toContain(
+      enUS.incognito.notices("3 days and 1 hour"),
+    );
+  });
+
+  test("marks a window the display cannot spell exactly", () => {
+    render(<IncognitoNotices idleTtlSeconds={73 * 60 * 60 + 30 * 60} />);
+
+    expect(screen.getByTestId("incognito-notices").textContent).toContain(
+      enUS.incognito.notices("about 3 days and 2 hours"),
     );
   });
 

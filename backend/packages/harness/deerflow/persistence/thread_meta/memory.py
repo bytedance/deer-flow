@@ -25,6 +25,7 @@ from deerflow.persistence.thread_meta.base import (
     ThreadOwnershipConflictError,
     _as_utc,
     _ProjectFilterUnset,
+    incognito_deadline,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -314,11 +315,18 @@ class MemoryThreadMetaStore(ThreadMetaStore):
                 # the sweep reaches an already-gone thread must not extend it.
                 return False
             created = _as_utc(record.get("created_at")) or moment
-            record["expires_at"] = coerce_iso(min(moment + idle_ttl, created + max_lifetime))
+            record["expires_at"] = coerce_iso(
+                incognito_deadline(
+                    now=moment,
+                    created_at=created,
+                    window=idle_ttl,
+                    max_lifetime=max_lifetime,
+                )
+            )
             await self._store.aput(THREADS_NS, thread_id, record)
             return True
 
-    async def end_incognito(self, thread_id: str, *, grace: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+    async def end_incognito(self, thread_id: str, *, grace: timedelta, max_lifetime: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
         moment = now or datetime.now(UTC)
         async with self._thread_locks.hold(thread_id):
             record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.end_incognito")
@@ -332,7 +340,14 @@ class MemoryThreadMetaStore(ThreadMetaStore):
                 return True
             metadata[THREAD_INCOGNITO_ENDED_METADATA_KEY] = True
             record["metadata"] = metadata
-            record["expires_at"] = coerce_iso(moment + grace)
+            record["expires_at"] = coerce_iso(
+                incognito_deadline(
+                    now=moment,
+                    created_at=_as_utc(record.get("created_at")) or moment,
+                    window=grace,
+                    max_lifetime=max_lifetime,
+                )
+            )
             await self._store.aput(THREADS_NS, thread_id, record)
             return True
 

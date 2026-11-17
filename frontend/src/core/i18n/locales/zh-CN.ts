@@ -804,6 +804,8 @@ export const zhCN: Translations = {
     durationMinutes: (count) => `${count} 分钟`,
     durationHours: (count) => `${count} 小时`,
     durationDays: (count) => `${count} 天`,
+    durationDaysHours: (days, hours) => `${days} 天 ${hours} 小时`,
+    approximately: (duration) => `约 ${duration}`,
     end: "退出无痕模式",
     endFailed: "无法结束对话，但它仍会在到期后自动删除。",
     createFailed: "无法开始无痕对话，消息未发送，请重试。",

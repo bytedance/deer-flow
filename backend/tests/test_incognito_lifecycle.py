@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from deerflow.persistence.thread_meta.base import (
     THREAD_INCOGNITO_ENDED_METADATA_KEY,
     THREAD_INCOGNITO_EXPIRED_STATUS,
+    incognito_deadline,
     is_incognito_expired,
 )
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -65,13 +66,48 @@ async def test_renewal_moves_the_idle_deadline_but_never_past_the_creation_ceili
     assert datetime.fromisoformat(capped["expires_at"]) - datetime.now(UTC) <= timedelta(minutes=31)
 
 
+def test_deadline_helper_caps_every_window_at_the_creation_ceiling():
+    created = datetime(2026, 1, 1, tzinfo=UTC)
+
+    # A window shorter than the ceiling wins unchanged.
+    assert incognito_deadline(
+        now=created + timedelta(minutes=10),
+        created_at=created,
+        window=timedelta(minutes=5),
+        max_lifetime=timedelta(days=1),
+    ) == created + timedelta(minutes=15)
+    # Idle and grace windows both stop at the ceiling.
+    for window in (timedelta(days=2), timedelta(days=30)):
+        assert incognito_deadline(
+            now=created + timedelta(hours=23),
+            created_at=created,
+            window=window,
+            max_lifetime=timedelta(days=1),
+        ) == created + timedelta(days=1)
+
+
+@pytest.mark.anyio
+async def test_end_schedules_grace_only_up_to_the_creation_ceiling(store):
+    await _incognito(store)
+
+    assert await store.end_incognito(
+        "secret",
+        grace=timedelta(days=30),
+        max_lifetime=timedelta(minutes=30),
+        user_id="alice",
+    )
+    ended = await store.get("secret", user_id="alice")
+    created = datetime.fromisoformat(ended["created_at"])
+    assert datetime.fromisoformat(ended["expires_at"]) == created + timedelta(minutes=30)
+
+
 @pytest.mark.anyio
 async def test_renewal_skips_ordinary_ended_and_tombstoned_threads(store):
     await store.create("plain", user_id="alice")
     assert not await store.renew_incognito("plain", idle_ttl=timedelta(hours=1), max_lifetime=timedelta(days=7), user_id="alice")
 
     await _incognito(store)
-    assert await store.end_incognito("secret", grace=timedelta(minutes=5), user_id="alice")
+    assert await store.end_incognito("secret", grace=timedelta(minutes=5), max_lifetime=timedelta(days=7), user_id="alice")
     ended = await store.get("secret", user_id="alice")
     assert ended["metadata"][THREAD_INCOGNITO_ENDED_METADATA_KEY] is True
     # An end must not be undone by activity finishing inside the grace window.
@@ -88,8 +124,8 @@ async def test_renewal_skips_ordinary_ended_and_tombstoned_threads(store):
 async def test_owner_end_requires_the_incognito_owner(store):
     await _incognito(store)
 
-    assert not await store.end_incognito("secret", grace=timedelta(minutes=5), user_id="bob")
-    assert not await store.end_incognito("missing", grace=timedelta(minutes=5), user_id="alice")
+    assert not await store.end_incognito("secret", grace=timedelta(minutes=5), max_lifetime=timedelta(days=7), user_id="bob")
+    assert not await store.end_incognito("missing", grace=timedelta(minutes=5), max_lifetime=timedelta(days=7), user_id="alice")
 
 
 @pytest.mark.anyio
@@ -190,11 +226,11 @@ async def test_end_incognito_is_idempotent_and_keeps_the_first_deadline(store):
     await _incognito(store)
     moment = datetime.now(UTC)
 
-    assert await store.end_incognito("secret", grace=timedelta(minutes=5), now=moment, user_id="alice")
+    assert await store.end_incognito("secret", grace=timedelta(minutes=5), max_lifetime=timedelta(days=7), now=moment, user_id="alice")
     first = await store.get("secret", user_id="alice")
     # A repeated end (the caller retried or closed the tab twice) must not push
     # the purge deadline out again.
-    assert await store.end_incognito("secret", grace=timedelta(minutes=5), now=moment + timedelta(minutes=3), user_id="alice")
+    assert await store.end_incognito("secret", grace=timedelta(minutes=5), max_lifetime=timedelta(days=7), now=moment + timedelta(minutes=3), user_id="alice")
     second = await store.get("secret", user_id="alice")
     assert second["expires_at"] == first["expires_at"]
 

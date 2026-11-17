@@ -3928,10 +3928,42 @@ authorization:
 # whichever comes first; an explicit end shortens the idle window to the
 # grace period.
 #
+# Every window is in seconds, and an out-of-range value fails validation when
+# the Gateway starts instead of being clamped. idle_ttl_seconds must be between
+# one hour (3600) and max_lifetime_seconds; max_lifetime_seconds must be
+# between one hour and one year (31536000), a cap that keeps the deadline
+# arithmetic inside datetime's range. end_grace_seconds may be 0,
+# sweep_interval_seconds must be between 5 and 3600, and sweep_batch_size
+# between 1 and 1000. Setting idle_ttl_seconds equal to max_lifetime_seconds is
+# allowed: the absolute lifetime alone then decides when the chat goes.
+#
 # incognito:
 #   enabled: true
-#   idle_ttl_seconds: 86400        # 24 hours after the last activity
-#   end_grace_seconds: 3600        # 1 hour after an explicit end
-#   max_lifetime_seconds: 604800   # 7 days from creation, regardless of activity
-#   sweep_interval_seconds: 60     # how often the Gateway scans for expired threads
+#
+#   # Idle timeout, minimum one hour. A run starting or finishing renews the
+#   # deadline; leaving the window open, typing or scrolling is not activity
+#   # and renews nothing. Example: a user sends a message and never ends the
+#   # chat, so it expires 24 hours after that message and the next sweep
+#   # removes it.
+#   idle_ttl_seconds: 86400
+#
+#   # Grace period after the user ends the chat from the incognito header.
+#   # Ending does not delete immediately; it shortens the deadline to this
+#   # window, never past max_lifetime_seconds. Example: a chat ended at 10:00
+#   # is removed by the first sweep after 11:00.
+#   end_grace_seconds: 3600
+#
+#   # Absolute ceiling measured from creation, at most one year. Activity
+#   # renews the idle deadline and an explicit end schedules its grace period,
+#   # but neither can pass this one. Example: a user who keeps chatting every
+#   # few minutes still loses the chat 7 days after creating it.
+#   max_lifetime_seconds: 604800
+#
+#   # How often the background sweep scans for expired chats. It delays the
+#   # purge but never extends a deadline. Example: a 24-hour idle window is
+#   # removed within about one interval after it expires.
+#   sweep_interval_seconds: 60
+#
+#   # Expired chats removed per sweep pass; a backlog drains over several
+#   # passes instead of one.
 #   sweep_batch_size: 100

@@ -119,10 +119,12 @@ edges are worth knowing:
 ## Lifetime and deletion
 
 The deadline shown in `expires_at` moves forward on run admission and run
-completion, but never past the absolute maximum measured from creation. A
-deadline that has already passed is final: a run finishing after it cannot
-push it out again, and a run that races the sweep is stopped before its agent
-starts rather than allowed to write into a purged thread. The defaults are:
+completion, but never past the absolute maximum measured from creation. An
+explicit end replaces it with the grace period under the same ceiling, so no
+path schedules a purge beyond the maximum. A deadline that has already passed
+is final: a run finishing after it cannot push it out again, and a run that
+races the sweep is stopped before its agent starts rather than allowed to write
+into a purged thread. The defaults are:
 
 | Setting                            | Default | Meaning                             |
 | ---------------------------------- | ------- | ----------------------------------- |
@@ -131,6 +133,21 @@ starts rather than allowed to write into a purged thread. The defaults are:
 | `incognito.max_lifetime_seconds`   | 604800  | absolute lifetime from creation     |
 | `incognito.sweep_interval_seconds` | 60      | Gateway scan cadence                |
 | `incognito.sweep_batch_size`       | 100     | maximum threads purged per pass     |
+
+Every window is in seconds. `idle_ttl_seconds` must be between one hour and
+`max_lifetime_seconds`; `max_lifetime_seconds` must be between one hour and one
+year, a cap that keeps the deadline arithmetic inside `datetime`'s range. The
+one-hour idle floor exists because renewal happens on runs only: typing,
+reading or leaving the window open does not count, so a shorter window can
+expire the chat while it is still in use or right after a long run finishes.
+`end_grace_seconds` may be 0, and the sweep settings are bounded as well
+(`sweep_interval_seconds` 5 to 3600, `sweep_batch_size` 1 to 1000). An idle
+window equal to the absolute lifetime is allowed: the lifetime alone then
+decides when the chat goes. An out-of-range or contradictory value fails
+configuration validation, so the Gateway does not start rather than running
+with a silently adjusted lifetime. The chat notice spells the live idle window
+in hours up to 72 hours, and days (plus hours) above that, marking a window the
+units cannot express exactly with "about".
 
 The Gateway's background sweep writes a tombstone first
 (`status="expired"`, with the row's title, metadata and project membership

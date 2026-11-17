@@ -23,6 +23,7 @@ from deerflow.persistence.thread_meta.base import (
     ThreadMetaStore,
     _as_utc,
     _ProjectFilterUnset,
+    incognito_deadline,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
@@ -547,11 +548,16 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return False
             created = _as_utc(row.created_at) or moment
             # The absolute ceiling wins even when it shortens the deadline.
-            row.expires_at = min(moment + idle_ttl, created + max_lifetime)
+            row.expires_at = incognito_deadline(
+                now=moment,
+                created_at=created,
+                window=idle_ttl,
+                max_lifetime=max_lifetime,
+            )
             await session.commit()
             return True
 
-    async def end_incognito(self, thread_id: str, *, grace: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+    async def end_incognito(self, thread_id: str, *, grace: timedelta, max_lifetime: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.end_incognito")
         moment = now or datetime.now(UTC)
         async with self._sf() as session:
@@ -571,7 +577,12 @@ class ThreadMetaRepository(ThreadMetaStore):
                 return True
             metadata[THREAD_INCOGNITO_ENDED_METADATA_KEY] = True
             row.metadata_json = metadata
-            row.expires_at = moment + grace
+            row.expires_at = incognito_deadline(
+                now=moment,
+                created_at=_as_utc(row.created_at) or moment,
+                window=grace,
+                max_lifetime=max_lifetime,
+            )
             await session.commit()
             return True
 

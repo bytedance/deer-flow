@@ -696,6 +696,8 @@ export interface Translations {
     durationMinutes: (count: number) => string;
     durationHours: (count: number) => string;
     durationDays: (count: number) => string;
+    durationDaysHours: (days: number, hours: number) => string;
+    approximately: (duration: string) => string;
     end: string;
     endFailed: string;
     createFailed: string;

@@ -70,6 +70,23 @@ def is_incognito_expired(record: Mapping[str, Any], *, now: datetime | None = No
     return deadline is not None and deadline <= (now or datetime.now(UTC))
 
 
+def incognito_deadline(
+    *,
+    now: datetime,
+    created_at: datetime,
+    window: timedelta,
+    max_lifetime: timedelta,
+) -> datetime:
+    """Return the earlier of a renewal window and the absolute lifetime.
+
+    ``window`` is the idle window on an activity renewal and the end grace
+    period when the owner ends the chat. Every write that moves
+    ``expires_at`` goes through this function, so ``max_lifetime`` is a true
+    ceiling rather than a rule only renewals respect.
+    """
+    return min(now + window, created_at + max_lifetime)
+
+
 # Cross-component metadata key. Keep in sync with
 # ``frontend/src/core/threads/utils.ts`` and
 # ``frontend/tests/e2e/utils/mock-api.ts``.
@@ -300,8 +317,8 @@ class ThreadMetaStore(abc.ABC):
         """
         return False
 
-    async def end_incognito(self, thread_id: str, *, grace: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
-        """Schedule an owner-requested end: deadline ``now + grace``.
+    async def end_incognito(self, thread_id: str, *, grace: timedelta, max_lifetime: timedelta, now: datetime | None = None, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        """Schedule an owner-requested end: deadline ``min(now + grace, created_at + max_lifetime)``.
 
         Records the end in metadata so activity renewal stops. Returns
         ``False`` for missing/non-incognito/tombstoned rows or a foreign owner.

@@ -855,6 +855,11 @@ export const enUS: Translations = {
       `${count} ${count === 1 ? "minute" : "minutes"}`,
     durationHours: (count) => `${count} ${count === 1 ? "hour" : "hours"}`,
     durationDays: (count) => `${count} ${count === 1 ? "day" : "days"}`,
+    durationDaysHours: (days, hours) =>
+      `${days} ${days === 1 ? "day" : "days"} and ${hours} ${
+        hours === 1 ? "hour" : "hours"
+      }`,
+    approximately: (duration) => `about ${duration}`,
     end: "Exit incognito mode",
     endFailed:
       "Couldn't end the chat. It will still be deleted when it expires.",

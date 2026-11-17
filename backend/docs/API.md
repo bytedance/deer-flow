@@ -1594,7 +1594,8 @@ POST /api/threads/{thread_id}/incognito/end
 ```
 
 Answers `204`. The Gateway schedules deletion after
-`incognito.end_grace_seconds` in the background, and the deadline no longer
+`incognito.end_grace_seconds` in the background, capped by
+`created_at + incognito.max_lifetime_seconds`, and the deadline no longer
 moves. Repeating the request is idempotent and answers `204` again without
 pushing the deadline out. `409` when the thread is not incognito. Once the
 thread has expired it is no longer visible to its owner, so the route answers

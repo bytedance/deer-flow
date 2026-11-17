@@ -15,6 +15,7 @@ from deerflow.persistence.thread_meta.base import (
     ThreadCreateConflictError,
     ThreadMetaStore,
     ThreadOwnershipConflictError,
+    incognito_deadline,
     is_incognito_expired,
 )
 from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
@@ -40,6 +41,7 @@ __all__ = [
     "ThreadMetaStore",
     "ThreadCreateConflictError",
     "ThreadOwnershipConflictError",
+    "incognito_deadline",
     "is_incognito_expired",
     "make_thread_store",
 ]

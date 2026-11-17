@@ -5,7 +5,10 @@ import type { ReactNode } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import { incognitoLifetimeParts } from "@/core/threads/incognito";
+import {
+  incognitoLifetimeLabel,
+  incognitoLifetimeParts,
+} from "@/core/threads/incognito";
 
 import { Tooltip } from "../tooltip";
 
@@ -77,16 +80,10 @@ export function IncognitoTitle() {
  */
 export function IncognitoNotices({ idleTtlSeconds }: IncognitoNoticesProps) {
   const { t } = useI18n();
-  const parts =
-    idleTtlSeconds === null ? null : incognitoLifetimeParts(idleTtlSeconds);
   const duration =
-    parts === null
+    idleTtlSeconds === null
       ? null
-      : parts.unit === "days"
-        ? t.incognito.durationDays(parts.count)
-        : parts.unit === "hours"
-          ? t.incognito.durationHours(parts.count)
-          : t.incognito.durationMinutes(parts.count);
+      : incognitoLifetimeLabel(incognitoLifetimeParts(idleTtlSeconds), t.incognito);
   return (
     <div
       className="text-muted-foreground mx-auto mt-4 max-w-xl space-y-1 text-center text-[13px] leading-relaxed"
