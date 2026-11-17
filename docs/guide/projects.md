@@ -80,6 +80,11 @@ from the project page's Documents section:
   a Save to project action.
 - **Attach to thread**: copy a shelf file into a thread's uploads through the
   normal ingestion pipeline, so the conversation can work with it directly.
+  Pending composer chips normally survive navigation and reloads through
+  browser session storage. If storage is blocked or full, successful ingestion
+  still closes the picker and opens the chat, and a mounted composer's chips
+  can still change. Cross-route and reload persistence is not guaranteed in
+  that case; a chip may be missing or a previously stored chip may reappear.
 
 New shelf names, including explicit upload `name` and promotion `shelf_name`,
 follow ordinary upload filename validation. Names containing NUL, Windows

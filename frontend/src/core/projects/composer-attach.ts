@@ -24,8 +24,9 @@ import type { AttachProjectDocumentResult } from "./types";
  *   send is dispatched (after any upload), so a failed upload keeps the chip
  *   and a document staged during the upload is kept for the next message.
  *
- * sessionStorage (not module memory) so the pending list also survives a
- * full page load of the target thread.
+ * sessionStorage (not module memory) normally keeps the pending list across
+ * full page loads. Storage is best-effort: when access fails, mounted composer
+ * state still updates, but cross-route/reload persistence is not guaranteed.
  */
 const STORAGE_KEY_PREFIX = "deerflow.project-attachment.";
 
@@ -37,9 +38,28 @@ function safeSessionStorage(): Storage | null {
   try {
     return typeof window === "undefined" ? null : window.sessionStorage;
   } catch {
-    // Storage can be unavailable (privacy mode, sandboxed frame). The
-    // handoff is best-effort — degrading to memory-only state.
+    // Storage can be unavailable (privacy mode, sandboxed frame). There is
+    // no cross-route fallback; only a mounted composer's local state remains.
     return null;
+  }
+}
+
+function writeProjectAttachments(
+  threadId: string,
+  attachments: readonly AttachProjectDocumentResult[],
+): void {
+  const storage = safeSessionStorage();
+  if (!storage) {
+    return;
+  }
+  try {
+    if (attachments.length === 0) {
+      storage.removeItem(storageKey(threadId));
+    } else {
+      storage.setItem(storageKey(threadId), JSON.stringify(attachments));
+    }
+  } catch {
+    // Failed persistence must not interrupt attachment callbacks or local state.
   }
 }
 
@@ -63,17 +83,10 @@ export function stageProjectAttachment(
   threadId: string,
   attachment: AttachProjectDocumentResult,
 ): void {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return;
-  }
   const pending = readProjectAttachments(threadId).filter(
     (candidate) => candidate.virtual_path !== attachment.virtual_path,
   );
-  storage.setItem(
-    storageKey(threadId),
-    JSON.stringify([...pending, attachment]),
-  );
+  writeProjectAttachments(threadId, [...pending, attachment]);
 }
 
 /**
@@ -88,7 +101,12 @@ export function readProjectAttachments(
   if (!storage) {
     return [];
   }
-  const raw = storage.getItem(storageKey(threadId));
+  let raw: string | null;
+  try {
+    raw = storage.getItem(storageKey(threadId));
+  } catch {
+    return [];
+  }
   if (raw === null) {
     return [];
   }
@@ -103,7 +121,7 @@ export function readProjectAttachments(
   } catch {
     // Corrupt payload: drop it.
   }
-  storage.removeItem(storageKey(threadId));
+  writeProjectAttachments(threadId, []);
   return [];
 }
 
@@ -117,27 +135,19 @@ export function retireProjectAttachments(
   threadId: string,
   sent: readonly AttachProjectDocumentResult[],
 ): void {
-  const storage = safeSessionStorage();
-  if (!storage) {
-    return;
-  }
   const sentPaths = new Set(sent.map((attachment) => attachment.virtual_path));
   const remaining = readProjectAttachments(threadId).filter(
     (attachment) => !sentPaths.has(attachment.virtual_path),
   );
-  if (remaining.length === 0) {
-    storage.removeItem(storageKey(threadId));
-  } else {
-    storage.setItem(storageKey(threadId), JSON.stringify(remaining));
-  }
+  writeProjectAttachments(threadId, remaining);
 }
 
 /**
  * The current thread's pending attachments, held by the mounted composer.
  *
  * The list is loaded from storage on mount and on every thread change, and
- * every mutation is written back immediately, so unmounting (navigating to
- * the project page, reloading) never loses a pending chip. A Strict-Mode
+ * every mutation is written back immediately when storage permits, so
+ * pending chips normally survive navigation and reloads. A Strict-Mode
  * effect replay re-reads the same list and re-applies the same state — there
  * is no consume step left to replay wrongly.
  *
@@ -161,14 +171,7 @@ export function useStagedProjectAttachments(threadId: string) {
       const next =
         typeof value === "function" ? value(pendingRef.current) : value;
       pendingRef.current = next;
-      const storage = safeSessionStorage();
-      if (storage) {
-        if (next.length === 0) {
-          storage.removeItem(storageKey(threadId));
-        } else {
-          storage.setItem(storageKey(threadId), JSON.stringify(next));
-        }
-      }
+      writeProjectAttachments(threadId, next);
       setAttachmentsState(next);
     },
     [threadId],
