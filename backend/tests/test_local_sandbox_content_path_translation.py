@@ -15,6 +15,7 @@ import errno
 import os
 import shutil
 import threading
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -329,3 +330,41 @@ def test_download_file_enforces_limit_on_restored_bytes(tmp_path):
     with pytest.raises(OSError) as excinfo:
         sandbox.download_file(virtual, max_bytes=stored_size)
     assert excinfo.value.errno == errno.EFBIG
+
+
+def test_download_file_bounds_restored_bytes_while_substituting(tmp_path):
+    """The size ceiling must bound the substitution itself, not only the
+    result: with a virtual root far longer than the host root, repeated
+    translated paths expand the payload far beyond the limit, and building
+    the whole expanded string before checking would materialize the very
+    bytes the ceiling exists to refuse (Codex P2 on #8260).
+    """
+    outputs = tmp_path / "o"
+    outputs.mkdir()
+    # A virtual prefix far longer than any host temp path, so restoring it
+    # expands the payload an order of magnitude over what is stored.
+    prefix = "/mnt/user-data/" + "/".join(["segment"] * 128) + "/outputs"
+    sandbox = LocalSandbox(
+        id="test",
+        path_mappings=[PathMapping(container_path=prefix, local_path=str(outputs))],
+    )
+    virtual = f"{prefix}/run.sh"
+    line = f"cat {prefix}/data.csv\n"
+    content = "#!/bin/sh\n" + line * 50
+    sandbox.write_file(virtual, content)
+
+    stored_size = (outputs / "run.sh").stat().st_size
+    restored = content.encode()
+    assert stored_size < len(restored)  # the fixture must really expand on restore
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(OSError) as excinfo:
+            sandbox.download_file(virtual, max_bytes=stored_size)
+    finally:
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+    assert excinfo.value.errno == errno.EFBIG
+    # The refused payload is never materialized: peak memory stays well
+    # below the size of the expanded string the old code built first.
+    assert peak < len(restored) // 2

@@ -710,12 +710,16 @@ class LocalSandbox(Sandbox):
                 return f"{mapping.container_path}/{relative}" if relative else mapping.container_path
         return None
 
-    def _reverse_resolve_paths_in_output(self, output: str) -> str:
+    def _reverse_resolve_paths_in_output(self, output: str, *, max_bytes: int | None = None) -> str:
         """
         Reverse resolve local paths back to container paths in output string.
 
         Args:
             output: Output string that may contain local paths
+            max_bytes: Bound on the substituted output in bytes. When set,
+                the budget is enforced while substituting (see
+                ``replace_output_path_matches``), so a caller that refuses
+                an oversized result never materializes the expanded string.
 
         Returns:
             Output with local paths resolved to container paths
@@ -731,11 +735,15 @@ class LocalSandbox(Sandbox):
         # maps back to.
         result = output
         for mapping in self._mappings_by_local_specificity:
+            # Only pass the budget when one is set, so the unbudgeted call
+            # sites keep the exact call shape they had before.
+            budget = {"max_bytes": max_bytes} if max_bytes is not None else {}
             result = replace_output_path_matches(
                 result,
                 self._resolved_local_paths[mapping],
                 self._reverse_resolve_path,
                 separator_agnostic=True,
+                **budget,
             )
 
         return result
@@ -1357,7 +1365,11 @@ class LocalSandbox(Sandbox):
             digest = self._stored_content_digests.get(resolved_path)
             if resolved_path in self._stored_content_translated and digest is not None and hashlib.sha256(data).hexdigest() == digest.hexdigest():
                 text = data.decode("utf-8")
-                restored = self._reverse_resolve_paths_in_output(text).encode("utf-8")
+                # The budget is enforced while substituting, not after: a
+                # much longer virtual root expands the payload, and building
+                # the whole expanded string first would materialize the very
+                # bytes the ceiling exists to refuse (#8260, Codex P2).
+                restored = self._reverse_resolve_paths_in_output(text, max_bytes=max_download_size).encode("utf-8")
                 # Reverse resolution can expand the payload — a short host
                 # path can stand in for a longer virtual one — so the size
                 # ceiling applies to the bytes actually returned, not only

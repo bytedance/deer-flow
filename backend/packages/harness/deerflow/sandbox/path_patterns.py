@@ -25,6 +25,7 @@ reverse direction has to accept both spellings of the same host path — see
 
 from __future__ import annotations
 
+import errno
 import re
 from collections.abc import Callable
 
@@ -118,6 +119,7 @@ def replace_output_path_matches(
     replacement: str | Callable[[str], str],
     *,
     separator_agnostic: bool = False,
+    max_bytes: int | None = None,
 ) -> str:
     """Replace ``base`` path matches without compiling a path-specific regex.
 
@@ -125,6 +127,12 @@ def replace_output_path_matches(
     leaves those roots in Python's global ``re`` caches after DeerFlow evicts
     the owning sandbox. This scanner preserves the same boundary and path-tail
     contract while keeping no process-level reference to ``base``.
+
+    ``max_bytes`` bounds the substituted output in bytes: the budget is
+    enforced while the pieces are appended, so a caller that refuses an
+    oversized result never materializes the expanded string first. A
+    replacement that would push the running total past the budget raises
+    ``OSError`` (``EFBIG``) at that match instead of completing the scan.
     """
     if not output or not base:
         return output
@@ -134,6 +142,15 @@ def replace_output_path_matches(
     chunks: list[str] = []
     copied_until = 0
     search_from = 0
+    budgeted_size = 0
+
+    def _append(piece: str) -> None:
+        nonlocal budgeted_size
+        chunks.append(piece)
+        if max_bytes is not None:
+            budgeted_size += len(piece.encode("utf-8"))
+            if budgeted_size > max_bytes:
+                raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
 
     while True:
         match_start = searchable_output.find(searchable_base, search_from)
@@ -165,12 +182,14 @@ def replace_output_path_matches(
             relative = normalize_mask_tail(matched_path[len(base) :])
             replaced_path = f"{replacement}/{relative}" if relative else replacement
 
-        chunks.append(output[copied_until:match_start])
-        chunks.append(replaced_path)
+        _append(output[copied_until:match_start])
+        _append(replaced_path)
         copied_until = match_end
         search_from = match_end
 
     if not chunks:
+        if max_bytes is not None and len(output.encode("utf-8")) > max_bytes:
+            raise OSError(errno.EFBIG, f"Substituted output exceeds maximum size of {max_bytes} bytes")
         return output
-    chunks.append(output[copied_until:])
+    _append(output[copied_until:])
     return "".join(chunks)

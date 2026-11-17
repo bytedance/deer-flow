@@ -18,6 +18,7 @@ re-freezing the literals, so any other drift still goes red.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 from pathlib import Path
@@ -159,6 +160,31 @@ def test_direct_replacer_normalizes_nested_tail_to_virtual_posix_style() -> None
         )
         == "see /mnt/skills/pkg/a.md"
     )
+
+
+def test_direct_replacer_enforces_max_bytes_while_substituting() -> None:
+    # A byte budget aborts the substitution mid-scan: with a virtual root
+    # far longer than the host base, repeated matches expand the output
+    # far beyond the budget, and the scanner must refuse before
+    # materializing the expanded string (Codex P2 on #8260).
+    calls: list[str] = []
+
+    def replacement(matched: str) -> str:
+        calls.append(matched)
+        return "v" * 100
+
+    text = " ".join(["/h/f.txt"] * 100)
+    with pytest.raises(OSError) as excinfo:
+        path_patterns_module.replace_output_path_matches(
+            text,
+            "/h",
+            replacement,
+            separator_agnostic=True,
+            max_bytes=200,
+        )
+    assert excinfo.value.errno == errno.EFBIG
+    # Only a prefix of the matches was substituted before the budget ran out.
+    assert len(calls) < 100
 
 
 def _regex_mask(output: str, base: str, virtual: str) -> str:
