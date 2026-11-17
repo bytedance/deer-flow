@@ -173,27 +173,76 @@ def _fold_for_match(value: str) -> str:
     text no longer carries (#8300 review: a legacy archive answered neither "cafe"
     nor "resume" until the next capture rebuilt the index).
     """
-    return "".join(char for char in unicodedata.normalize("NFKD", value) if not unicodedata.combining(char)).casefold()
+    return "".join(char for char in unicodedata.normalize("NFKD", value.casefold()) if not unicodedata.combining(char))
+
+
+def _term_coverage(text: str, folded_terms: list[str]) -> int:
+    """How many query terms occur as whole tokens in the source text.
+
+    Whole tokens, not substrings: a query for "cat" must not score a row that
+    only says "concatenate". The compound token emitted across a script boundary
+    ("a股") counts as one, so a contiguous match outranks documents that only
+    carry its fragments.
+    """
+    folded = _fold_for_match(text)
+    tokens = {folded[left:right] for _, left, right in _token_spans(folded)}
+    return sum(1 for term in folded_terms if term in tokens)
+
+
+def _rank_rows(rows, folded_terms: list[str]):
+    """Yield rows ordered by how many query terms they contain, then by input order."""
+    ranked = []
+    for order, row in enumerate(rows):
+        ranked.append((-_term_coverage(str(row.get("text", "")), folded_terms), order, row))
+    for _, _, row in sorted(ranked, key=lambda item: (item[0], item[1])):
+        yield row
 
 
 def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: str | None, keywords: list[str], role_filter: str):
     """Yield matches from an archive whose index predates the current tokenizer.
 
     The stored index terms cannot answer the new query on their own, so the
-    decoded text backs it up. Index hits still come first: they are genuine
-    token matches, ordered by FTS rank, and running them before the substring
-    scan stops a query like "cat" from being filled with eight rows that merely
-    contain "concatenate". Both passes compare the decoded text with the same
-    FTS-equivalent folding (_fold_for_match: diacritics stripped, casefolded),
-    so a normalized hit need not contain the literal query text ("cafe" matching
-    a stored "café") while an index term the text no longer carries is still
-    dropped. Both passes are lazy: rows are decoded only until the caller has
-    eight distinct sources, so a large archive is not decoded in full to answer
-    a query its own index can already rank.
+    decoded text backs it up. A single-term query keeps the lazy two-pass order:
+    index hits are genuine token matches, ordered by FTS rank, and running them
+    before the substring scan stops a query like "cat" from being filled with
+    eight rows that merely contain "concatenate". A multi-term query may mix a
+    term the old index can answer with one it cannot, so both passes are merged
+    and ranked by how many query terms each source carries as whole tokens before
+    the caller applies its eight-source cap; otherwise the index pass can fill the
+    cap with rows matching only the term it knows. Both passes compare the decoded
+    text with the same FTS-equivalent folding (_fold_for_match: casefolded, then
+    diacritics stripped), so a normalized hit need not contain the literal query
+    text ("cafe" matching a stored "café") while an index term the text no longer
+    carries is still dropped. Single-term queries stay lazy: rows are decoded only
+    until the caller has eight distinct sources.
     """
     emitted: set[str] = set()
     folded_terms = [_fold_for_match(term) for term in keywords]
     parameters = [match, *batches, *([role] if role is not None else [])]
+    if len(folded_terms) > 1:
+        candidates = []
+        for order, (payload,) in enumerate(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters)):
+            row = _source_row(payload)
+            if row is None or row["id"] in emitted:
+                continue
+            text = str(row.get("text", ""))
+            if not any(term in _fold_for_match(text) for term in folded_terms):
+                # A stale index term: the stored text no longer carries it.
+                continue
+            emitted.add(row["id"])
+            candidates.append((-_term_coverage(text, folded_terms), 0, order, row))
+        parameters = [*batches, *([role] if role is not None else [])]
+        for order, (payload,) in enumerate(db.execute(f"SELECT payload FROM sources WHERE batch IN ({placeholders}){role_filter} ORDER BY rowid", parameters)):
+            row = _source_row(payload)
+            if row is None or row["id"] in emitted:
+                continue
+            coverage = _term_coverage(str(row.get("text", "")), folded_terms)
+            if coverage:
+                emitted.add(row["id"])
+                candidates.append((-coverage, 1, order, row))
+        for _, _, _, row in sorted(candidates, key=lambda item: (item[0], item[1], item[2])):
+            yield row
+        return
     for (payload,) in db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters):
         row = _source_row(payload)
         if row is None or row["id"] in emitted:
@@ -350,7 +399,14 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     else:
                         parameters = [match, *batches, *([role] if role is not None else [])]
                         # Rank all matches in the bounded archive. A SQL row limit can hide distinct sources behind duplicates.
-                        rows = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters))
+                        decoded = _decoded_rows(db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters))
+                        if len(keywords) > 1:
+                            # OR term scores can let short fragment-only documents outrank the
+                            # contiguous compound (or the source carrying every term), so rank
+                            # by whole-token coverage before the eight-source cap.
+                            rows = _rank_rows(decoded, [_fold_for_match(term) for term in keywords])
+                        else:
+                            rows = decoded
                 for row in rows:
                     # Repeated archives share one result slot; keep match order
                     # and stop reading once eight distinct sources are selected.

@@ -1398,3 +1398,65 @@ def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):
     assert seen_remaining == [0], "the expired batch must be gone before the rebuild runs"
     with _sqlite3.connect(db_path) as db:
         assert db.execute("SELECT count(*) FROM batches").fetchone()[0] == 1
+
+
+def test_mixed_script_compound_outranks_fragment_documents(scoped):
+    """A contiguous compound must survive background documents that match its fragments."""
+    import json as _json
+
+    messages = [HumanMessage(content="a 股", id=f"noise{index}") for index in range(9)]
+    messages += [HumanMessage(content=f"unrelated memo {index}", id=f"filler{index}") for index in range(20)]
+    messages += [HumanMessage(content=" ".join(f"topic{index}" for index in range(20)) + " A股", id="exact")]
+    scoped.state = {"messages": messages}
+    history = archive.capture(scoped.state, scoped, messages, TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+
+    payload = _json.loads(history_search.func(scoped, "A股"))
+    assert "results" in payload, payload
+    rows = payload["results"]
+
+    assert rows and rows[0]["message_id"] == "exact", f"the contiguous compound must rank first, got {[row['message_id'] for row in rows]}"
+
+
+def test_legacy_archive_ranks_recovered_terms_before_cap(scoped):
+    """A mixed query must rank a payload-recovered term above index-only rows."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    notes = [HumanMessage(content=f"budget note {index}", id=f"note{index}") for index in range(12)]
+    purchase = HumanMessage(content="采购ThinkPad电脑，budget 6000元", id="purchase")
+    scoped.state = {"messages": [purchase, *notes]}
+    history = archive.capture(scoped.state, scoped, [purchase, *notes], TaskContinuityConfig(enabled=True))
+    scoped.state = {"messages": [], "task_history": history}
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        # What the base writer indexed for "ThinkPad" inside a CJK run: two-character terms.
+        db.execute(
+            "UPDATE sources SET words=? WHERE json_extract(payload, '$.message_id')='purchase'",
+            ("采购 购t th hi in nk kp pa ad 电脑 budget 6000 元",),
+        )
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    rows = _json.loads(history_search.func(scoped, "ThinkPad budget"))["results"]
+
+    assert rows and rows[0]["message_id"] == "purchase", f"the source matching both terms must rank first, got {[row['message_id'] for row in rows]}"
+
+
+def test_legacy_archive_folds_before_stripping_marks(scoped):
+    """Casefold before mark stripping, matching the tokenizer's expansion."""
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="ᾠδή", id="greek")
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture({}, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("UPDATE sources SET words='obsolete'")
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    rows = _json.loads(history_search.func(scoped, "ᾠδή"))["results"]
+
+    assert [row["message_id"] for row in rows] == ["greek"], "casefolding must happen before combining marks are stripped"
