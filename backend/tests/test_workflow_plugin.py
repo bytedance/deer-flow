@@ -1169,8 +1169,28 @@ agent({stepId:args.second,agentRef:'lead_agent',task:'read',artifacts:[f.artifac
     assert len({s["step_id"] for s in result["steps"]}) == len(result["steps"])
 
 
+class ValidatingRuns:
+    """Wraps every delegated operation in the host's per-operation validator gate."""
+
+    def __init__(self, runs, validator):
+        self._runs = runs
+        self._validator = validator
+
+    def __getattr__(self, name):
+        attribute = getattr(self._runs, name)
+        if not callable(attribute):
+            return attribute
+
+        async def operation(*args, **kwargs):
+            await self._validator()
+            return await attribute(*args, **kwargs)
+
+        return operation
+
+
 class Restorer:
-    """Host-side delegated restore stub; records the grant it was handed."""
+    """Host-side delegated restore stub; the real host revalidates the grant on
+    every operation of the returned handle, including before publication."""
 
     def __init__(self, runs):
         self.runs = runs
@@ -1178,7 +1198,7 @@ class Restorer:
 
     async def __call__(self, *, user_id, grant, validator=None, plugin_namespace=None):
         self.calls.append((user_id, grant, plugin_namespace))
-        return self.runs
+        return self.runs if validator is None else ValidatingRuns(self.runs, validator)
 
 
 async def crash_like_record(service, run_id, owner="alice"):
@@ -1232,11 +1252,7 @@ async def test_unattended_recovery_resumes_crashed_workflow_to_child_results(plu
     from deerflow_extension_workflows.service import Workflows
 
     _, actions, service, runs = plugin
-    script = (
-        "const a = await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});"
-        "const b = await agent({stepId:'b',agentRef:'lead_agent',task:'second'});"
-        "return b.output;"
-    )
+    script = "const a = await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});const b = await agent({stepId:'b',agentRef:'lead_agent',task:'second'});return b.output;"
     launched = await actions["launch"]({"request_id": "crash", "script": script, "unattended_recovery": True}, replace(context(runs), interaction="session"))
     run_id = launched["run_id"]
     # Freeze the crash window: the step row is saved queued, admission never starts.
@@ -1280,6 +1296,63 @@ async def test_unattended_recovery_resumes_crashed_workflow_to_child_results(plu
         assert final["steps"][0]["thread_id"] == record["steps"][0]["thread_id"]
         assert final["result"] == {"echo": "second"}
         assert restorer.calls == [("alice", {"token_version": 0, "source": "session", "permissions": ["runs:create", "threads:write"]}, NAMESPACE)]
+    finally:
+        gate.set()
+        runs.release.set()
+        await replacement.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_recovered_workflow_keeps_child_cleanup_authorized(plugin):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from deerflow_extension_workflows.service import Workflows
+
+    _, actions, service, runs = plugin
+    launched = await actions["launch"](
+        {"request_id": "recancel", "script": "return await agent({stepId:'a',agentRef:'lead_agent',task:'blocked'});", "unattended_recovery": True},
+        replace(context(runs), interaction="session"),
+    )
+    run_id = launched["run_id"]
+    # Freeze the crash window: the step row is saved queued, admission never starts.
+    gate = asyncio.Event()
+    original_create = runs.create_thread
+
+    async def gated_create(**kwargs):
+        await gate.wait()
+        return await original_create(**kwargs)
+
+    runs.create_thread = gated_create
+    for _ in range(500):
+        record = await asyncio.to_thread(service.store.get, "alice", run_id)
+        if record["steps"]:
+            break
+        await asyncio.sleep(0.01)
+    gate.set()
+    await service.stop()
+    runs.create_thread = original_create
+    record = await crash_like_record(service, run_id)
+    stale_thread = record["steps"][0]["thread_id"]
+    runs.runs = {key: value for key, value in runs.runs.items() if value.thread_id != stale_thread}
+
+    replacement = Workflows(service.config)
+    await replacement.start(SimpleNamespace(agent_runs_restore=Restorer(runs)))
+    try:
+        for _ in range(500):
+            if runs.entered.is_set() and replacement.entries.get(run_id) is not None:
+                break
+            await asyncio.sleep(0.01)
+        assert runs.entered.is_set(), "recovered workflow never re-admitted its child"
+        # The delegated handle is the only authorized path to the running child;
+        # revoking before cleanup would strand it in needs_reconciliation.
+        assert (await actions["cancel"]({"run_id": run_id}, context(runs)))["status"] == "cancelling"
+        await asyncio.wait_for(replacement.wait_idle(run_id), 10)
+        final = await replacement.get({"run_id": run_id}, context(runs))
+        assert final["status"] == "cancelled", (final.get("error"), [(s["step_id"], s["status"], s.get("error")) for s in final["steps"]])
+        assert final["steps"][0]["status"] == "cancelled", final["steps"][0]
+        persisted = await asyncio.to_thread(replacement.store.get, "alice", run_id)
+        assert persisted["grant"]["revoked"] is True
     finally:
         gate.set()
         runs.release.set()

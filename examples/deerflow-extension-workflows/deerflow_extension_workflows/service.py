@@ -225,8 +225,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
 
     @staticmethod
     def _revoke_grant(record):
-        # Cancellation withdraws the owner's standing recovery authority; the
-        # next delegated operation fails closed even mid-recovered-execution.
+        # Withdraw the owner's standing recovery authority with the record, so
+        # the next delegated operation fails closed. A live supervisor defers
+        # this until its cleanup of already-admitted children finishes, since
+        # that cleanup is itself an authorized use of the handle.
         grant = record.get("grant")
         if isinstance(grant, dict):
             grant["revoked"] = True
@@ -445,7 +447,11 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
                 entry["suspending"] = False
                 if entry["record"]["status"] not in TERMINAL:
                     entry["record"]["status"] = "cancelling"
-                self._revoke_grant(entry["record"])
+                # Defer revocation to the supervisor's cleanup: the delegated
+                # handle is the authorized path that cancels children this
+                # workflow already admitted, and revoking now would 403 that
+                # cleanup into needs_reconciliation.
+                entry["revoke_grant_on_finish"] = True
                 await self.save(owner, entry["record"])
                 return {"run_id": run_id, "status": "cancelling"}
             if record["status"] == "recoverable":
@@ -875,6 +881,10 @@ class Workflows(Cluster, Recovery, Lifecycle, Artifacts):
             cleanup = [self.cancel_child(runs, row, **({"record": record} if self.clustered else {})) for row in record["steps"] if row.get("run_id") and row["status"] not in ("completed", "waiting_input", "cancelled")]
             if cleanup:
                 await asyncio.gather(*cleanup)
+            if entry.pop("revoke_grant_on_finish", False):
+                # Cleanup above was the last authorized user of the delegated
+                # handle; withdraw the persisted grant before the final save.
+                self._revoke_grant(record)
             if self.clustered:
                 for row in record["steps"]:
                     if self.slot_releasable(row):

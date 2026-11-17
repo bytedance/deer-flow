@@ -164,7 +164,7 @@ class _BoundAgentRuns:
             user = get_auth_disabled_user() if is_auth_disabled() else None
         else:
             user = await self._host.load_user(self._user_id) if self._host.load_user is not None else None
-        if user is None or str(user.id) != self._user_id or user.token_version != self._token_version or user.needs_setup:
+        if user is None or str(user.id) != self._user_id or user.token_version != self._token_version or user.needs_setup or getattr(user, "disabled", False):
             raise AgentRunError(403, "Agent run authorization revoked")
         if self._delegation_validator is not None:
             try:

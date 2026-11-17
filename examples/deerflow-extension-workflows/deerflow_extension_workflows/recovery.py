@@ -82,10 +82,17 @@ class Recovery:
             isinstance(grant, dict) and grant.get("version") == 1 and grant.get("revoked") is not True and isinstance(grant.get("expires_at"), (int, float)) and grant["expires_at"] > time.time() and isinstance(grant.get("authority"), dict)
         )
 
-    def grant_validator(self, run_id):
+    def grant_validator(self, owner, run_id):
         async def validate():
             entry = self.entries.get(run_id)
-            grant = entry["record"].get("grant") if entry is not None else None
+            if entry is not None:
+                grant = entry["record"].get("grant")
+            else:
+                # Locked admission publishes the entry only after restore, while
+                # the delegated handle already operates; validate the current
+                # persisted grant until publication switches to the live entry.
+                record = await asyncio.to_thread(self.store.get, owner, run_id)
+                grant = record.get("grant") if isinstance(record, dict) else None
             if not isinstance(grant, dict) or grant.get("revoked") is True or grant.get("expires_at", 0) <= time.time():
                 raise AgentRunError(403, "Workflow recovery grant expired or revoked")
 
@@ -110,7 +117,7 @@ class Recovery:
             if run_id in self.entries or not self.grant_usable(record):
                 continue
             try:
-                runs = await self.agent_runs_restore(user_id=owner, grant=record["grant"]["authority"], validator=self.grant_validator(run_id), plugin_namespace=NAMESPACE)
+                runs = await self.agent_runs_restore(user_id=owner, grant=record["grant"]["authority"], validator=self.grant_validator(owner, run_id), plugin_namespace=NAMESPACE)
                 await self.restore_body(owner, run_id, runs)
             except Exception:
                 logger.exception("Workflow %s unattended recovery failed; manual recovery remains available", run_id)

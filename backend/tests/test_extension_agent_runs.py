@@ -72,6 +72,21 @@ async def test_handle_rechecks_user_and_shutdown_before_dispatch(host, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_handle_rechecks_current_account_disablement(host, monkeypatch):
+    control, request, load_user = host
+    runs = control.bind(request)
+    handler = AsyncMock(return_value=SimpleNamespace(thread_id="thread-a"))
+    monkeypatch.setattr("app.gateway.routers.threads.create_thread", handler)
+    assert await runs.create_thread() == "thread-a"
+    # Disabling the account leaves token_version unchanged, so the per-operation
+    # guard must observe the current disabled state, not only the mint-time one.
+    load_user.return_value = request.state.user.model_copy(update={"disabled": True})
+    with pytest.raises(AgentRunError, match="revoked"):
+        await runs.create_thread()
+    assert handler.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_permissions_are_intersected_with_original_grant_and_current_policy(host, monkeypatch):
     control, request, _ = host
     request.state.auth.permissions = ["runs:read"]
