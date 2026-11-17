@@ -2076,6 +2076,10 @@ bounded by `stream_bridge.queue_maxsize` (default `256`) and, for Redis, by the
 rolling `stream_ttl_seconds`. A retained cursor resumes after that event with no
 additional control frame.
 
+For Redis, a cursor that identifies the retained END marker completes the
+subscription immediately. Numerically equivalent Redis IDs, such as `12` and
+`12-0`, identify the same position.
+
 The Memory bridge also remembers its exact last evicted event ID. Reconnecting
 from that known predecessor replays every retained successor without a `gap`,
 because none of the events after the cursor has been lost. This uses one ID per

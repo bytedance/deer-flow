@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from collections import defaultdict
+from contextlib import aclosing
 from unittest.mock import AsyncMock, Mock
 
 import anyio
@@ -35,7 +36,8 @@ _INVALID_NUMERIC_REDIS_CURSORS = [
 
 def _stream_id_gt(left: str, right: str) -> bool:
     left_ms, left_seq = left.split("-", 1)
-    right_ms, right_seq = right.split("-", 1)
+    right_ms, _, right_seq = right.partition("-")
+    right_seq = right_seq or "0"
     return (int(left_ms), int(left_seq)) > (int(right_ms), int(right_seq))
 
 
@@ -1028,6 +1030,25 @@ async def test_redis_recovery_cursor_at_end_yields_end_immediately(
     ]
 
     assert received == [END_SENTINEL]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("spelling", ["milliseconds-only", "zero-padded"])
+async def test_redis_equivalent_end_cursor_finishes(redis_bridge: RedisStreamBridge, spelling):
+    run_id = "equivalent-end"
+    await redis_bridge.publish(run_id, "event", {})
+    await redis_bridge.publish_end(run_id)
+    end_id = redis_bridge._redis.streams[redis_bridge._stream_key(run_id)][-1][0]
+    milliseconds, sequence = end_id.split("-")
+    assert sequence == "0"
+    cursor = milliseconds if spelling == "milliseconds-only" else f"00{milliseconds}-00{sequence}"
+    subscriber = redis_bridge.subscribe(run_id, last_event_id=cursor, heartbeat_interval=0.01)
+    try:
+        assert await anext(subscriber) is END_SENTINEL
+        with pytest.raises(StopAsyncIteration):
+            await anext(subscriber)
+    finally:
+        await subscriber.aclose()
 
 
 @pytest.mark.anyio
@@ -2376,6 +2397,21 @@ async def real_redis_bridge():
         async for key in client.scan_iter(f"{key_prefix}:*"):
             await client.delete(key)
         await client.aclose()
+
+
+@pytest.mark.integration
+@requires_redis
+@pytest.mark.anyio
+@pytest.mark.parametrize(("end_id", "cursor"), [("12-0", "12"), ("12-0", "0012-00"), ("12-1", "0012-01")])
+async def test_redis_integration_equivalent_end_cursor_finishes(real_redis_bridge, end_id, cursor):
+    run_id = "equivalent-end"
+    key = real_redis_bridge._stream_key(run_id)
+    # Seed fixed IDs so the Redis clock cannot change the sequence component.
+    await real_redis_bridge._redis.xadd(key, {"kind": "end", "event": "", "data": ""}, id=end_id)
+    async with aclosing(real_redis_bridge.subscribe(run_id, last_event_id=cursor, heartbeat_interval=0.01)) as subscriber:
+        assert await anext(subscriber) is END_SENTINEL
+        with pytest.raises(StopAsyncIteration):
+            await anext(subscriber)
 
 
 @pytest.mark.integration

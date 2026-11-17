@@ -953,9 +953,13 @@ class RedisStreamBridge(StreamBridge):
                 responses_to_process.append(response)
 
             if not responses_to_process:
-                if latest_entries and self._decode(latest_entries[0][0]) == stream_id and self._is_end_entry(latest_entries[0][1]):
-                    yield END_SENTINEL
-                    return
+                if latest_entries and self._is_end_entry(latest_entries[0][1]):
+                    # XREAD compares numeric IDs. A cursor such as "12" or
+                    # "0012-00" is already at the END stored as "12-0".
+                    end_position = self._parse_stream_id(self._decode(latest_entries[0][0]))
+                    if end_position is not None and end_position == self._parse_stream_id(stream_id):
+                        yield END_SENTINEL
+                        return
 
                 try:
                     wake_response = await self._redis.xread(
