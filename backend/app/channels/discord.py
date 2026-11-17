@@ -821,6 +821,7 @@ class DiscordChannel(Channel):
             )
             inbound.topic_id = thread_id
             inbound.dedupe_claimed = claim.dedupe_claimed
+            inbound._inbound_dedupe_claim = claim._inbound_dedupe_claim
 
             handoff = self._publish_reserved(inbound, reservation, guild_id=str(guild.id) if guild else None)
             if handoff is None:

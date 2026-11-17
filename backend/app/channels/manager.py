@@ -16,7 +16,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -2575,8 +2575,14 @@ class ChannelManager:
                     # event N times does not log N accepts. Provider ack side
                     # effects may still happen before this manager-level dedupe,
                     # unless the adapter claimed the key ahead of them.
-                    if not msg.dedupe_claimed and await self._is_duplicate_inbound(msg):
-                        continue
+                    if msg.dedupe_claimed:
+                        msg = replace(msg)
+                    else:
+                        # Each dispatch owns its receipt, even if a producer reuses
+                        # the same envelope for another queue delivery.
+                        msg = replace(msg, _inbound_dedupe_claim=None)
+                        if await self._is_duplicate_inbound(msg):
+                            continue
                     dedupe_recorded = self._inbound_dedupe_key(msg) is not None
                     logger.info(
                         "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
@@ -2684,8 +2690,10 @@ class ChannelManager:
         Installed as the bus's inbound claim. ``False`` means another delivery
         (a peer instance's session, an earlier redelivery) owns the message.
         Once recorded, ``msg.dedupe_claimed`` tells the worker not to record
-        it again; the adapter copies the flag onto the message it publishes.
+        it again; the adapter copies the flag and ``_inbound_dedupe_claim``
+        onto the message it publishes.
         """
+        msg._inbound_dedupe_claim = None
         if self._inbound_dedupe_key(msg) is None:
             return True
         if await self._is_duplicate_inbound(msg):
@@ -2704,32 +2712,34 @@ class ChannelManager:
             return False
 
         # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
-        # and capacity bounds; try_record returns True when the key was already
-        # present (i.e. this is a duplicate delivery to drop).
-        is_duplicate = await self._inbound_dedupe_store.try_record(key)
-        if is_duplicate:
+        # and capacity bounds; each admission returns its own cleanup receipt.
+        claim = await self._inbound_dedupe_store.try_record(key)
+        if claim is None:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-        return is_duplicate
+            return True
+        msg._inbound_dedupe_claim = claim
+        return False
 
     async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
-        """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
+        """Release this admission so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
         recorded on receipt so retries arriving *while* the message is being
         handled are still deduped, but if handling fails we must not turn a
         recoverable error into a TTL-long black hole for the same message_id.
+        Repeated or late cleanup must leave a replacement admission unchanged.
         Generic failure paths ask ``_keep_dedupe_key_after`` first; sites that
         know the Gateway rejected the run (busy thread, stale pin) release
         unconditionally.
         """
-        key = self._inbound_dedupe_key(msg)
-        if key is not None:
-            await self._inbound_dedupe_store.release(key)
+        claim = msg._inbound_dedupe_claim
+        if claim is not None:
+            await self._inbound_dedupe_store.release(claim)
 
     @staticmethod
     def _keep_dedupe_key_after(msg: InboundMessage, exc: BaseException | None) -> bool:
@@ -3424,7 +3434,10 @@ class ChannelManager:
             service = get_channel_service()
             channel = service.get_channel(msg.channel_name) if service else None
             logger.info("[Manager] preparing receive file context for %d attachments", len(msg.files))
-            msg = await channel.receive_file(msg, thread_id, user_id=storage_user_id) if channel else msg
+            if channel:
+                received = await channel.receive_file(msg, thread_id, user_id=storage_user_id)
+                received._inbound_dedupe_claim = msg._inbound_dedupe_claim
+                msg = received
         if extra_context:
             run_context.update(extra_context)
 

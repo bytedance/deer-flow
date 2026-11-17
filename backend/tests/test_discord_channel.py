@@ -949,7 +949,7 @@ class TestDiscordDedupeClaimBeforeThreadCreation:
     @pytest.mark.asyncio
     async def test_message_claimed_by_a_peer_creates_no_thread(self, tmp_path) -> None:
         bus, channel, dedupe = self._wire(tmp_path)
-        assert await dedupe.try_record(self._key()) is False  # the peer instance won
+        assert await dedupe.try_record(self._key()) is not None  # the peer instance won
 
         await channel._on_message(_make_discord_message("hello"))
 
@@ -967,6 +967,7 @@ class TestDiscordDedupeClaimBeforeThreadCreation:
 
         channel._create_thread.assert_awaited_once()
         assert (inbound.chat_id, inbound.topic_id, inbound.dedupe_claimed) == ("456", "777", True)
+        assert inbound._inbound_dedupe_claim is not None
         assert self._key() in dedupe._store
 
         # The same MESSAGE_CREATE on a second session sharing the dedupe store.

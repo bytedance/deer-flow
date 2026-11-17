@@ -45,7 +45,7 @@ async def test_migration_0009_creates_composite_pk_table_and_is_idempotent(tmp_p
             cols = {row["name"] for row in await conn.run_sync(lambda c: sa.inspect(c).get_columns("webhook_deliveries"))}
         # Composite PK columns only; the old single-column ``dedupe_key`` must
         # NOT exist (it is illegal in Postgres TEXT and caused schema drift).
-        assert cols == {"channel", "workspace_id", "chat_id", "message_id", "first_seen"}
+        assert cols == {"channel", "workspace_id", "chat_id", "message_id", "first_seen", "claim_token"}
 
         # Idempotent: re-running bootstrap at head must not raise (table exists).
         await bootstrap_schema(engine, backend="sqlite")
