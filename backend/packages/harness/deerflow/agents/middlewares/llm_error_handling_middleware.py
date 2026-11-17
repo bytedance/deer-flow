@@ -1013,12 +1013,16 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable and reason != "empty_response":
                     remaining_attempts = max(0, self.retry_max_attempts - attempt)
-                    response, last_error = self._try_model_fallback_sync(
-                        request,
-                        handler,
-                        exc,
-                        self.fallback_model_names[:remaining_attempts],
-                    )
+                    try:
+                        response, last_error = self._try_model_fallback_sync(
+                            request,
+                            handler,
+                            exc,
+                            self.fallback_model_names[:remaining_attempts],
+                        )
+                    except GraphBubbleUp:
+                        self._release_half_open_probe(admission=admission)
+                        raise
                     if response is not None:
                         self._record_success(admission=admission)
                         return response
@@ -1098,12 +1102,16 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     )
                     if retriable and reason != "empty_response":
                         remaining_attempts = max(0, self.retry_max_attempts - attempt)
-                        response, last_error = await self._try_model_fallback(
-                            request,
-                            handler,
-                            exc,
-                            self.fallback_model_names[:remaining_attempts],
-                        )
+                        try:
+                            response, last_error = await self._try_model_fallback(
+                                request,
+                                handler,
+                                exc,
+                                self.fallback_model_names[:remaining_attempts],
+                            )
+                        except GraphBubbleUp:
+                            self._release_half_open_probe(admission=admission)
+                            raise
                         if response is not None:
                             self._record_success(admission=admission)
                             return response

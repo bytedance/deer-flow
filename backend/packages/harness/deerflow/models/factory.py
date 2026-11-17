@@ -604,13 +604,6 @@ def create_chat_model(
     # value exactly as it would a profile-native one.
     if model_overrides:
         model_settings_from_config.update({key: value for key, value in model_overrides.items() if value is not None})
-    if disable_provider_retries:
-        kwargs.pop("max_retries", None)
-        kwargs.pop("retry_max_attempts", None)
-        if "max_retries" in model_class.model_fields:
-            model_settings_from_config["max_retries"] = 0
-        if "retry_max_attempts" in model_class.model_fields:
-            model_settings_from_config["retry_max_attempts"] = 1
     # The per-request reasoning effort layers the same way. The regular lead-agent
     # build forwards the key even when None (neither the request nor the custom
     # agent chose one), so it must leave kwargs: a profile that also yields
@@ -737,6 +730,14 @@ def create_chat_model(
     # 先合并再展开，避免同名字段通过两个 **dict 传入时触发 TypeError。
     effective_model_settings = dict(model_settings_from_config)
     effective_model_settings.update({key: value for key, value in kwargs.items() if value is not None})
+    if disable_provider_retries:
+        # Retry caps must win over thinking templates and caller-provided options.
+        effective_model_settings.pop("max_retries", None)
+        effective_model_settings.pop("retry_max_attempts", None)
+        if "max_retries" in model_class.model_fields:
+            effective_model_settings["max_retries"] = 0
+        if "retry_max_attempts" in model_class.model_fields:
+            effective_model_settings["retry_max_attempts"] = 1
     if (
         issubclass(model_class, BaseChatOpenAI)
         and effective_model_settings.get("model") in OPENAI_GPT6_MODELS

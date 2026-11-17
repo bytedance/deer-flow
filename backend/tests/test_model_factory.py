@@ -151,6 +151,34 @@ def test_fallback_model_build_disables_provider_retries_and_strips_profile_metad
     assert "fallback_models" not in FakeChatModel.captured_kwargs
 
 
+def test_fallback_model_retry_cap_overrides_thinking_template_and_caller_options(monkeypatch):
+    cfg = _make_app_config(
+        [
+            _make_model(
+                "primary",
+                supports_thinking=True,
+                when_thinking_enabled={"max_retries": 4, "retry_max_attempts": 4},
+                fallback_models=["backup"],
+            ),
+            _make_model("backup"),
+        ]
+    )
+    _patch_factory(monkeypatch, cfg, model_class=RetryAwareFakeChatModel)
+
+    factory_module.create_chat_model(
+        name="primary",
+        thinking_enabled=True,
+        app_config=cfg,
+        attach_tracing=False,
+        disable_provider_retries=True,
+        max_retries=7,
+        retry_max_attempts=7,
+    )
+
+    assert FakeChatModel.captured_kwargs["max_retries"] == 0
+    assert FakeChatModel.captured_kwargs["retry_max_attempts"] == 1
+
+
 def test_legacy_chatopenai_config_uses_empty_choice_guard():
     config = _make_app_config([_make_model("alpha")])
 

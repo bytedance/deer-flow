@@ -549,7 +549,7 @@ def build_middlewares(
     resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
     runtime_middleware_kwargs = {"app_config": resolved_app_config, "lazy_init": True}
     runtime_model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    if runtime_model_config is not None and runtime_model_config.fallback_models:
+    if runtime_model_config is not None and getattr(runtime_model_config, "fallback_models", ()):
         runtime_middleware_kwargs.update(
             model_name=model_name,
             thinking_enabled=thinking_enabled,
@@ -1216,7 +1216,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             container_base_path=container_base_path,
             skill_authorization=skill_authorization,
         )
-        model_factory_options = {"disable_provider_retries": True} if model_config.fallback_models else {}
+        model_factory_options = {"disable_provider_retries": True} if getattr(model_config, "fallback_models", ()) else {}
         chat_model = create_chat_model(
             name=model_name,
             thinking_enabled=thinking_enabled,
@@ -1376,7 +1376,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
     extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
     # Resolve the model once so tool guidance uses the same effective settings.
-    model_factory_options = {"disable_provider_retries": True} if model_config.fallback_models else {}
+    model_factory_options = {"disable_provider_retries": True} if getattr(model_config, "fallback_models", ()) else {}
     chat_model = create_chat_model(
         name=model_name,
         thinking_enabled=thinking_enabled,
@@ -1449,7 +1449,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
                 "reasoning_effort": reasoning_effort,
                 "model_overrides": agent_model_overrides,
             }
-            if model_config.fallback_models
+            if getattr(model_config, "fallback_models", ())
             else {}
         ),
     )

@@ -150,6 +150,47 @@ def test_async_call_fails_over_to_configured_model_after_transient_http_error(mo
     assert result.content == "fallback response"
 
 
+def test_sync_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        middleware.wrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+    result = middleware.wrap_model_call(_FailoverRequest("primary"), lambda _request: AIMessage(content="healthy"))
+    assert result.content == "healthy"
+
+
+@pytest.mark.anyio
+async def test_async_fallback_graph_bubble_up_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
+    middleware._circuit_state = "half_open"
+    monkeypatch.setattr(middleware, "_create_fallback_model", lambda _name: "backup-model")
+
+    async def handler(request):
+        if request.model == "primary":
+            raise FakeError("provider unavailable", status_code=503)
+        raise GraphBubbleUp()
+
+    with pytest.raises(GraphBubbleUp):
+        await middleware.awrap_model_call(_FailoverRequest("primary"), handler)
+
+    assert middleware._circuit_probe_in_flight is False
+
+    async def healthy_handler(_request):
+        return AIMessage(content="healthy")
+
+    result = await middleware.awrap_model_call(_FailoverRequest("primary"), healthy_handler)
+    assert result.content == "healthy"
+
+
 def test_async_call_does_not_fail_over_after_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     middleware = LLMErrorHandlingMiddleware(app_config=_make_fallback_app_config(), model_name="primary")
     fallback_builds = []
