@@ -1,8 +1,10 @@
 """Unit tests for the Firecrawl community tools."""
 
+import asyncio
 import ipaddress
 import json
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -328,6 +330,38 @@ class TestPerCallClientTeardown:
         result = await web_search_tool.ainvoke({"query": "test query"})
 
         assert result == "[]"
+
+
+class TestClientConstruction:
+    @pytest.mark.anyio
+    async def test_cancelled_construction_closes_the_late_client(self, monkeypatch):
+        from deerflow.community.firecrawl import tools
+
+        started = threading.Event()
+        release = threading.Event()
+        close = AsyncMock()
+        client = SimpleNamespace(_v2_client=SimpleNamespace(async_http_client=SimpleNamespace(close=close)))
+
+        monkeypatch.setattr(tools, "_get_tool_config_extra", lambda _tool_name: {})
+
+        def build_client(*_args, **_kwargs):
+            started.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("test did not release Firecrawl client construction")
+            return client
+
+        monkeypatch.setattr(tools, "_get_firecrawl_client", build_client)
+        task = asyncio.create_task(tools.web_search_tool.ainvoke({"query": "q"}))
+
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        close.assert_awaited_once()
 
 
 class TestFirecrawlBackendIsolation:
