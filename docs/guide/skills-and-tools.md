@@ -168,7 +168,9 @@ validated or converted, and provider-specific format restrictions still apply.
 
 The [image-generation skill](../../skills/public/image-generation/SKILL.md#output-handling)
 decodes Gemini base64 image data before opening the output file,
-preserving an existing image when decoding fails.
+preserving an existing image when decoding fails. With the legacy MiniMax
+`/v1/image_generation` endpoint, a decode failure can still erase an existing
+output image. Use a fresh `--output-file` path to keep the previous image.
 
 The [music-generation skill](../../skills/public/music-generation/SKILL.md#output-handling) preserves existing output when the provider returns malformed, empty or unrecognized audio.
 
