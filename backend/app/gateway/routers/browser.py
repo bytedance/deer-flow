@@ -85,7 +85,7 @@ async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, re
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
         raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
-    if not _browser_tools_enabled():
+    if not await asyncio.to_thread(_browser_tools_enabled):
         raise HTTPException(status_code=404, detail="Browser automation is not enabled")
 
     try:
@@ -260,7 +260,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
         await websocket.close(code=4404)
         return
 
-    if not _browser_tools_enabled():
+    if not await asyncio.to_thread(_browser_tools_enabled):
         await websocket.close(code=4404)
         return
 
@@ -310,7 +310,7 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     # the user's real Chrome when configured.
     from deerflow.config import get_app_config
 
-    tool_cfg = get_app_config().get_tool_config("browser_navigate")
+    tool_cfg = (await asyncio.to_thread(get_app_config)).get_tool_config("browser_navigate")
     extra = (tool_cfg.model_extra or {}) if tool_cfg is not None else {}
 
     def _cfg_int(key: str, default: int) -> int:

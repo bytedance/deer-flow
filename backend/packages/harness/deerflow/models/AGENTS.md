@@ -59,6 +59,11 @@ transport, so they check the payload that DeerFlow sends.
 - **A completed response with null or empty usage keeps its text.**
 - **A terminal stream error returns no partial output.** The caller must not take
   a truncated answer for a finished one.
+- **Cancelling a Codex async call closes its HTTP stream.** Async generation owns
+  an HTTPX async stream, not an executor-backed sync request. Load TLS trust
+  off-loop, keep retry sleeps cancellable, and drain the client close across
+  repeated cancellation. `test_codex_cancellation.py` observes real loopback EOF
+  before fixture release.
 - **MindIE requests `stream=False` and simulates streaming**, and its XML tool
   calls and numeric arguments are parsed in the adapter.
 - **Claude prompt caching copies before it marks.** The request payload shares
@@ -68,6 +73,12 @@ transport, so they check the payload that DeerFlow sends.
 - **`thinking` and `redacted_thinking` blocks take no cache marker.** Anthropic
   rejects one there. Keep their content, signature and order, so a later
   breakpoint still covers them.
+- **Claude OAuth betas lead any request `betas` and any `anthropic-beta` in
+  `extra_headers`.** They sit in the client's default header, but request
+  `betas` replace that header and `extra_headers` replace both, and Anthropic
+  rejects the Bearer token without `oauth-2025-04-20`. Build a new list and a
+  new header dict, because the payload can hold the model's own `betas` and
+  `model_kwargs`.
 
 ## Credentials
 

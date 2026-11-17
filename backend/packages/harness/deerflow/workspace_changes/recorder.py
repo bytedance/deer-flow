@@ -10,7 +10,7 @@ from typing import Any
 
 from deerflow.config import get_paths
 
-from .diff import compare_snapshots, get_changed_paths
+from .diff import OUTPUTS_VIRTUAL_PREFIX, compare_snapshots, get_changed_paths
 from .scanner import scan_workspace_roots
 from .types import (
     WORKSPACE_CHANGES_EVENT_CATEGORY,
@@ -35,7 +35,7 @@ def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) 
         WorkspaceRoot(
             name="outputs",
             host_path=paths.sandbox_outputs_dir(thread_id, user_id=user_id),
-            virtual_prefix="/mnt/user-data/outputs",
+            virtual_prefix=OUTPUTS_VIRTUAL_PREFIX,
         ),
     ]
 

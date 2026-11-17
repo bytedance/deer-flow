@@ -447,7 +447,11 @@ class WeComChannel(Channel):
             return False
 
         media_type = "image" if attachment.is_image else "file"
-        size_limit = 2 * 1024 * 1024 if attachment.is_image else 20 * 1024 * 1024
+        # aibot media upload limits: image 10 MB, voice 2 MB, video 10 MB,
+        # file 20 MB (https://developer.work.weixin.qq.com/document/path/101917).
+        # The image cap used to be 2 MB — the voice limit — which dropped every
+        # 2-10 MB image before it was uploaded.
+        size_limit = 10 * 1024 * 1024 if attachment.is_image else 20 * 1024 * 1024
         if attachment.size > size_limit:
             logger.warning(
                 "[WeCom] %s too large (%d bytes), skipping: %s",

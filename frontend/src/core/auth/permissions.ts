@@ -5,6 +5,7 @@ import type { User } from "./types";
  * Kept in lockstep with `Permissions` in `backend/app/gateway/authz.py`.
  */
 export const PERMISSIONS = {
+  THREADS_WRITE: "threads:write",
   THREADS_DELETE: "threads:delete",
   RUNS_CANCEL: "runs:cancel",
   RUNS_CREATE: "runs:create",

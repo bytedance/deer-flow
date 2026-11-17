@@ -106,38 +106,38 @@ async def test_postgres_checks_database_time_after_row_lock(store, monkeypatch, 
         pytest.skip("requires PostgreSQL row locks and clock_timestamp")
     import asyncio
 
-    from sqlalchemy import func, select
+    from sqlalchemy import func, select, update
 
-    expiry = datetime.now(UTC) + timedelta(milliseconds=300)
+    expiry = datetime.now(UTC) + timedelta(hours=1)
     await store.put("locked", thread_id="locked-thread", status="running", owner_worker_id="owner", lease_expires_at=expiry.isoformat())
-    entered = asyncio.Event()
+    entered = asyncio.get_running_loop().create_future()
     lock = store._lock_owned_row
 
     async def observe_transaction_start(session, run_id):
-        assert await session.scalar(select(func.clock_timestamp())) < expiry
-        entered.set()
+        pid, transaction_started_at = (await session.execute(select(func.pg_backend_pid(), func.transaction_timestamp()))).one()
+        entered.set_result((pid, transaction_started_at))
         await lock(session, run_id)
 
     monkeypatch.setattr(store, "_lock_owned_row", observe_transaction_start)
-    operation = None
-    async with store._sf() as blocker:
-        await blocker.execute(select(RunRow).where(RunRow.run_id == "locked").with_for_update())
-        try:
+    async with asyncio.timeout(10), asyncio.TaskGroup() as tasks:
+        async with store._sf() as blocker:
+            await blocker.execute(select(RunRow.run_id).where(RunRow.run_id == "locked").with_for_update())
+            blocker_pid = await blocker.scalar(select(func.pg_backend_pid()))
             if method in ("renew_lease", "update_lease"):
-                operation = asyncio.create_task(getattr(store, method)("locked", owner_worker_id="owner", lease_expires_at=(expiry + timedelta(seconds=30)).isoformat()))
+                operation = tasks.create_task(getattr(store, method)("locked", owner_worker_id="owner", lease_expires_at=(expiry + timedelta(seconds=30)).isoformat()))
             elif method == "update_status":
-                operation = asyncio.create_task(store.update_status("locked", "error", owner_worker_id="owner"))
+                operation = tasks.create_task(store.update_status("locked", "error", owner_worker_id="owner"))
             else:
-                operation = asyncio.create_task(store.finalize_if_not_cancelled("locked", status="success", owner_worker_id="owner"))
-            await asyncio.wait_for(entered.wait(), 1)
-            async with asyncio.timeout(2):
-                while await blocker.scalar(select(func.clock_timestamp())) <= expiry:
-                    await asyncio.sleep(0.01)
-            assert not operation.done()
-        finally:
-            await blocker.rollback()
-    assert operation is not None
-    result = await asyncio.wait_for(operation, 1)
+                operation = tasks.create_task(store.finalize_if_not_cancelled("locked", status="success", owner_worker_id="owner"))
+            pid, transaction_started_at = await entered
+            while blocker_pid not in await blocker.scalar(select(func.pg_blocking_pids(pid))):
+                await asyncio.sleep(0.01)
+            # Expire the lease while the writer is blocked. Its transaction clock
+            # still sees a live lease, but the database clock has reached expiry.
+            expired_at = await blocker.scalar(update(RunRow).where(RunRow.run_id == "locked").values(lease_expires_at=func.clock_timestamp()).returning(RunRow.lease_expires_at))
+            assert transaction_started_at < expired_at < expiry
+            await blocker.commit()
+        result = await operation
     if method == "renew_lease":
         assert not result.renewed
     elif method == "finalize_if_not_cancelled":
@@ -146,7 +146,7 @@ async def test_postgres_checks_database_time_after_row_lock(store, monkeypatch, 
         assert result is False
     row = await store.get("locked")
     assert row["status"] == "running"
-    assert datetime.fromisoformat(row["lease_expires_at"]) == expiry
+    assert datetime.fromisoformat(row["lease_expires_at"]) == expired_at
 
 
 @pytest.mark.anyio

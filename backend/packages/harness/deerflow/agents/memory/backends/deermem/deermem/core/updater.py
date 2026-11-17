@@ -946,6 +946,8 @@ class MemoryUpdater:
             "access_half_life_days": self._config.eviction_access_half_life_days,
             "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
             "correction_reserved_max": self._config.eviction_correction_reserved_max,
+            "reserved_categories": self._config.eviction_reserved_categories,
+            "decay_exempt_categories": self._config.eviction_decay_exempt_categories,
         }
         decision = select_facts_for_capacity(
             facts,
@@ -1004,14 +1006,15 @@ class MemoryUpdater:
             if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
                 raise ValueError("fact.revision must be an integer >= 1")
         memory_data = normalize_memory_data(memory_data)
-        if agent_name is not None:
-            # Validate before capacity selection can discard a conflicting entry.
-            seen_ids: set[str] = set()
-            for fact in memory_data["facts"]:
-                fact_id = fact["id"]
-                if fact_id in seen_ids:
-                    raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
-                seen_ids.add(fact_id)
+        # Duplicate detection must cover BOTH storage paths (the apply_changes
+        # override and the base save() path) and run before capacity selection,
+        # which can drop one of two same-id entries and hide the duplicate.
+        seen_import_ids: set[str] = set()
+        for fact in memory_data.get("facts", []):
+            fact_id = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+            if fact_id in seen_import_ids:
+                raise DuplicateFactIdError(f"Duplicate fact id {fact_id!r} in memory import")
+            seen_import_ids.add(fact_id)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -2203,7 +2206,7 @@ class MemoryUpdater:
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:
@@ -2218,7 +2221,7 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not isinstance(section_data.get("summary"), str) or not section_data["summary"]:
                 continue
             rejection_reason = _summary_scope_gate_reason(section_data)
             if rejection_reason is not None:

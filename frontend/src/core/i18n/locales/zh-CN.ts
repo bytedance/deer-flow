@@ -14,6 +14,49 @@ import { bundledCopy } from "@/core/extensions/documentation";
 import type { Translations } from "./types";
 
 export const zhCN: Translations = {
+  sharing: {
+    title: "分享会话",
+    description: "任何持有链接的人都可以免登录查看此快照。",
+    scope:
+      "包含可见对话、工具执行结果和已展示的产物文件。后续修改不会同步到快照。撤销可停止后续访问，已下载或复制的内容仍由接收方保留。",
+    expiry: "链接有效期",
+    hour: "1 小时",
+    day: "1 天",
+    week: "7 天",
+    month: "30 天",
+    create: "创建快照链接",
+    working: "正在处理…",
+    link: "分享链接",
+    copy: "复制链接",
+    copied: "已复制",
+    links: "已创建的链接",
+    noLinks: "尚未创建分享链接。",
+    revoke: "撤销",
+    revoked: "已撤销",
+    expired: "已过期",
+    expires: "到期时间",
+    loading: "加载中…",
+    failed: "操作未完成，请重试。",
+    unavailable: "此服务器暂不支持分享。",
+    conflict:
+      "请在当前任务结束后分享。如果任务已经结束，请刷新页面或撤销旧链接后重试。",
+    tooLarge: "此会话或其产物超过分享大小限制。",
+    readOnly: "只读快照",
+    fork: "复制到我的工作区继续",
+    forking: "正在复制…",
+    missing: "此分享链接已过期、被撤销或无法访问。",
+    retry: "重试",
+    artifacts: "产物",
+    download: "下载",
+    preview: "预览",
+    close: "关闭预览",
+    you: "用户",
+    assistant: "助手",
+    tool: "工具执行结果",
+    noPreview: "请下载后打开此文件。",
+    previewNote: "静态预览。交互内容可能需要下载文件后查看。",
+    previewLimited: "预览仅显示前 512 KiB，下载可查看完整文件。",
+  },
   usage: {
     title: "Token 用量",
     description: "查看输入、输出及缓存命中 Token 用量。",
@@ -116,6 +159,11 @@ export const zhCN: Translations = {
       refreshHint: "管理员更新扩展后，刷新页面以获取最新状态。",
     },
     catalog: {
+      officePreview: bundledCopy("deerflow-extension-office-preview", "zh-CN"),
+      workspaceSearch: {
+        title: "会话全文搜索",
+        description: "检索历史消息正文，并跳转到命中的对话轮次。",
+      },
       agentTeams: bundledCopy("deerflow-extension-agent-teams", "zh-CN"),
       bookmarks: bundledCopy("deerflow-extension-bookmarks", "zh-CN"),
       context: bundledCopy("deerflow-extension-jev-context", "zh-CN"),
@@ -138,6 +186,10 @@ export const zhCN: Translations = {
       ),
       knowledgeCenter: bundledCopy(
         "deerflow-extension-knowledge-center",
+        "zh-CN",
+      ),
+      skillEvolution: bundledCopy(
+        "deerflow-extension-skill-evolution",
         "zh-CN",
       ),
       lightrag: bundledCopy("deerflow-extension-lightrag", "zh-CN"),
@@ -253,6 +305,7 @@ export const zhCN: Translations = {
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
+    scrollToBottom: "滚动到底部",
     showingOf: (loaded, total) => `已显示 ${loaded} / 共 ${total}`,
     download: "下载",
     thinking: "思考",
@@ -351,6 +404,19 @@ export const zhCN: Translations = {
     linkCopied: "链接已复制到剪贴板",
   },
 
+  artifactSelection: {
+    rewrite: "改写选区",
+    instructions: "描述如何修改后，选择「改写选区」。普通追问请使用发送按钮。",
+    exactRequired: "切换到源码，选择准确范围后即可改写。",
+    review: "预览替换内容",
+    original: "选中段落",
+    replacement: "替换内容",
+    apply: "应用到草稿",
+    applied: "选区已替换到草稿，请检查后保存文件。",
+    changed: "文件或草稿已变化，请重新选择段落。",
+    limit: "请选择不超过 12,000 个字符。",
+  },
+
   artifactEditing: {
     unsaved: "未保存",
     saving: "正在保存...",
@@ -365,6 +431,12 @@ export const zhCN: Translations = {
   },
 
   artifactPreview: {
+    preparingDownload: "正在准备下载…",
+    retryDownload: "重试下载",
+    downloadFailed: "下载失败，请重试。",
+    downloadRequested: "已交给浏览器下载",
+    retry: "重新预览",
+    unavailable: "当前格式暂无可用预览，可下载原始文件查看。",
     loadingPreview: "正在准备预览...",
     resourcesUnavailable:
       "部分预览资源无法加载。可查看源代码或下载文件以获取完整内容。",
@@ -1856,6 +1928,19 @@ export const zhCN: Translations = {
   },
 
   uploads: {
+    status: {
+      pending: "待发送",
+      uploading: "上传中…",
+      uploaded: "上传成功",
+      failed: "上传失败",
+      cancelled: "已取消",
+    },
+    cancelUpload: "取消上传",
+    retryUpload: "重试上传",
+    notReady: "附件尚未就绪。请重试失败项或将其移除，然后重新发送。",
+    attachment: "附件",
+    image: "图片",
+    removeAttachment: (filename) => `移除附件：${filename}`,
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
@@ -1919,6 +2004,37 @@ export const zhCN: Translations = {
   },
 
   // Shortcuts
+  workspaceSearch: {
+    title: "搜索对话",
+    description: "查找历史对话和消息，或执行快捷操作。",
+    placeholder: "搜索标题和消息内容…",
+    open: "搜索",
+    all: "全部",
+    threads: "对话",
+    messages: "消息",
+    includeArchived: "包含已归档",
+    archived: "已归档",
+    recent: "最近对话",
+    searching: "正在搜索…",
+    indexing: "正在准备历史消息搜索，结果将自动显示。",
+    unavailable: "当前部署尚未启用消息搜索，可以搜索对话标题。",
+    unsupported: "当前视图暂不支持搜索。",
+    error: "搜索未能完成，请重试。",
+    empty: "没有找到匹配内容，试试其他关键词或包含已归档对话。",
+    more: "显示更多结果",
+    retry: "重试",
+    hint: "↑ ↓ 选择 · Enter 打开 · 输入 > 查找操作",
+    user: "你",
+    assistant: "助手",
+    context: "消息上下文",
+    returnToLatest: "返回最新消息",
+    loadingContext: "正在加载消息上下文…",
+    messageUnavailable: "这条消息已不可用，可返回对话查看当前历史。",
+    matchedMessage: "已定位消息",
+    earlier: "更早的消息",
+    later: "后续消息",
+    untitled: "未命名对话",
+  },
   shortcuts: {
     searchActions: "搜索操作...",
     noResults: "未找到结果。",

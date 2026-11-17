@@ -50,3 +50,6 @@ make test-blocking-io                            # after adding any file, config
   skill name, file name) is validated when it is created, including Windows
   reserved device names. Read and delete routes stay permissive so that data
   stored by an older release can still be exported and removed.
+- **Search results use the latest owner-visible message.** A historical jump
+  resolves only the requested thread. Use the shared history seed path for
+  legacy checkpoints so it keeps its existing write reservation.

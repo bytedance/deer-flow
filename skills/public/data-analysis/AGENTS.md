@@ -4,9 +4,12 @@
 python -m pytest tests/skills -q -k "data_analysis"
 ```
 
-Tests use real DuckDB. Default tests never download the spatial extension. Excel
-and CLI integration tests run only with an installed copy named by
-`DEERFLOW_TEST_SPATIAL_DIRECTORY`.
+Tests use real DuckDB. Default tests never download the spatial extension. XLSX
+integration tests run only with an installed copy named by
+`DEERFLOW_TEST_SPATIAL_DIRECTORY`. Legacy XLS and CSV analysis do not need it;
+the XLS CLI regression uses an empty local extension repository in a fresh process.
+Legacy XLS keeps compatible columns typed and stores incompatible mixes as text,
+preserving nulls. Change the XLS cache key when this materialization changes.
 
 ## Table names and SQL
 
