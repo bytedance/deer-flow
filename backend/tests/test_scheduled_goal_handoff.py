@@ -625,3 +625,62 @@ async def test_cancel_accepted_at_terminal_cas_wins_after_worker_abort_check(inf
     snapshot = await CheckpointStateAccessor.bind(compiled, checkpointer, mode=mode).aget({"configurable": {"thread_id": "result"}})
     answers = [message.content for message in snapshot.values.get("messages", []) if isinstance(message, AIMessage)]
     assert ("Report verified" in answers) is (action == "interrupt")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["full", "delta"])
+async def test_scheduled_goal_cleanup_failure_reaches_the_stream_as_an_error(infrastructure, monkeypatch, mode):
+    """A terminal error the finalizer commits must not end the stream as a success.
+
+    The finalizer flips the record to ``error`` when it cannot remove the
+    occurrence's goal. Without a matching ``error`` event, the web UI raises no
+    run-failure toast and streaming IM channels mark the turn successful while
+    the stored run (and ``/wait``) report the failure.
+    """
+    store, checkpointer = infrastructure
+    manager = RunManager(store=store, worker_id="scheduler")
+    metadata = {"scheduled_task_id": "task", "scheduled_task_run_id": "occurrence", "scheduled_goal_objective": "Scheduled report"}
+    record = await manager.create_or_reject("result", user_id="alice", metadata=metadata)
+    events = []
+
+    class RecordingBridge:
+        async def publish(self, _run_id, event, payload=None, **kwargs):
+            events.append((event, payload))
+
+        async def publish_end(self, _run_id, **kwargs):
+            events.append(("end", None))
+
+        async def cleanup(self, _run_id, **kwargs):
+            return None
+
+    async def failing_cleanup(**kwargs):
+        raise RuntimeError("goal store unavailable")
+
+    monkeypatch.setattr(worker, "_clear_scheduled_goal", failing_cleanup)
+
+    async def node(state):
+        return {"messages": [AIMessage(content="Report ready")], "title": "Report"}
+
+    compiled = _graph(node, checkpointer, mode)
+    await worker.run_agent(
+        RecordingBridge(),
+        manager,
+        record,
+        ctx=worker.RunContext(
+            checkpointer=checkpointer,
+            scheduled_task_runtime={
+                "task_id": "task",
+                "occurrence_id": "occurrence",
+                "user_id": "alice",
+                "goal_objective": metadata["scheduled_goal_objective"],
+            },
+        ),
+        agent_factory=lambda config: compiled,
+        graph_input={"messages": [HumanMessage(content="Report")]},
+        config={"configurable": {"thread_id": "result"}, "context": {"non_interactive": True}},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.error == "Scheduled goal cleanup failed"
+    assert [payload for event, payload in events if event == "error"] == [{"message": "Scheduled goal cleanup failed", "name": "RunError"}]
+    assert events[-1][0] == "end"
