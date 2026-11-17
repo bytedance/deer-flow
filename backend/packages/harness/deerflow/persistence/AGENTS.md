@@ -1,9 +1,8 @@
 # Persistence (`deerflow/persistence/`)
 
-The SQL engine, repositories and models for runs, threads, scheduled tasks,
-durable MCP tasks, batches and extension leases, on SQLite and PostgreSQL. Tables,
-columns and status vocabularies are in the model modules. Schema changes follow
-the [migrations guide](migrations/AGENTS.md). Background:
+SQL storage for runs, threads, schedules, MCP tasks, batches and extension
+leases on SQLite/PostgreSQL. Models define schema and statuses.
+Follow [migrations](migrations/AGENTS.md) for schema changes. See
 [thread lifecycle](../../../../docs/THREAD_LIFECYCLE.md),
 [MCP control leases](../../../../docs/mcp-control-leases.md),
 [multi-instance settings](../../../../docs/CONFIGURATION.md).
@@ -16,8 +15,8 @@ python -m pytest tests -q -k "persistence or repository or scheduled_task or lea
 make test-blocking-io
 ```
 
-Set `TEST_POSTGRES_URI` to run the dialect-sensitive cases on PostgreSQL. A
-change to a query, a lock or a JSON predicate is verified on both dialects.
+Set `TEST_POSTGRES_URI` for PostgreSQL tests. Verify query, lock and JSON predicate
+changes on both dialects.
 
 ## Both dialects
 
@@ -81,9 +80,8 @@ with best-effort cleanup, preserving the original publication outcome.
 - **An `ExecutionFence` is data, not authority.** The Gateway binds it to the
   current plugin and user. When the extension generation is stale, a fenced
   cancel never falls back to a local cancel.
-- **Conservative batch claims record dispatch intent before launch.** Guard the
-  intent write with the live claim. Expiry recovery must match the dispatch
-  marker it read so a concurrent dispatch cannot be requeued for replay.
+- **Conservative batches persist dispatch intent before launch, fenced by the
+  live claim.** Expiry recovery must compare the observed marker before requeue.
 - **Lease renewal changes the expiry only.** It must not touch `updated_at` or
   overwrite a cancellation that arrived in between.
 
