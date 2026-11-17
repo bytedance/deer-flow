@@ -473,6 +473,23 @@ def _extract_thread_id(runtime: Runtime | None) -> str:
         return "default"
 
 
+def _describe_non_text_result(blocks: list[dict[str, Any]]) -> str:
+    """Name the non-text blocks of an error result without their payloads.
+
+    The tool error reported to the model is built from the result's text
+    blocks. An error result that carries only images or files has none, and
+    stringifying the blocks instead would put their base64 payload into the
+    model-visible message (and into the checkpointed ToolMessage). Report the
+    block kinds and MIME types, which is all the model can act on anyway.
+    """
+    parts: list[str] = []
+    for block in blocks:
+        kind = block.get("type", "unknown")
+        mime_type = block.get("mime_type")
+        parts.append(f"{kind} ({mime_type})" if mime_type else str(kind))
+    return ", ".join(parts)
+
+
 def _convert_call_tool_result(
     call_tool_result: Any,
     *,
@@ -622,7 +639,16 @@ def _convert_call_tool_result(
 
     if call_tool_result.isError:
         error_parts = [item["text"] for item in lc_content if isinstance(item, dict) and item.get("type") == "text"]
-        raise ToolException("\n".join(error_parts) if error_parts else str(lc_content))
+        if error_parts:
+            raise ToolException("\n".join(error_parts))
+        # No text block to report: describe the payload shapes instead of
+        # stringifying the blocks, which would put image/file base64 into the
+        # model-visible error message.
+        described = _describe_non_text_result(lc_content)
+        message = "MCP tool returned an error result without text content"
+        if described:
+            message += f" ({described}); the payload is not shown"
+        raise ToolException(message + ".")
 
     artifact = None
     if call_tool_result.structuredContent is not None:
