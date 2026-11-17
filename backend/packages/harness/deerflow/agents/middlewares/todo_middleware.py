@@ -34,6 +34,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.model_length_finish_reason_middleware import MODEL_LENGTH_CAPPED_STOP_REASON, MODEL_LENGTH_TERMINATION_MARKER
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SAFETY_CAPPED_STOP_REASON, SAFETY_TERMINATION_MARKER
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.thread_state import ThreadState
 
 TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
@@ -135,6 +136,51 @@ def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
 
     response_metadata = getattr(message, "response_metadata", {}) or {}
     return response_metadata.get("finish_reason") in _TOOL_CALL_FINISH_REASONS
+
+
+_SYNTHETIC_WRITE_TODOS_ID_PREFIX = "deerflow_write_todos_synthetic_"
+
+
+def _normalize_write_todos_ids(message: AIMessage) -> AIMessage | None:
+    """Return *message* with addressable ``write_todos`` call ids, or None.
+
+    The base ``TodoListMiddleware.after_model`` builds a ``ToolMessage`` per
+    parallel ``write_todos`` call from ``tool_calls[*]["id"]``, and the tool
+    node does the same for a single call. A missing or non-string id raises a
+    pydantic validation error there and aborts the run; an empty id is
+    accepted but cannot be matched to its result, and a repeated id makes the
+    results ambiguous. ``backend/AGENTS.md`` requires addressable call ids, so
+    give those calls synthetic ids and replace the message in place (same
+    message id, so the reducer substitutes it). Only the structured
+    ``tool_calls`` are relabelled: raw provider payload blocks in
+    ``additional_kwargs`` or the message content keep their original ids.
+    """
+    calls = list(message.tool_calls or [])
+    todo_positions = [position for position, call in enumerate(calls) if call.get("name") == "write_todos"]
+    if not todo_positions:
+        return None
+
+    used = {call["id"] for call in calls if isinstance(call.get("id"), str) and call["id"].strip()}
+    seen: set[str] = set()
+    changed = False
+    for position in todo_positions:
+        call = calls[position]
+        call_id = call.get("id")
+        if isinstance(call_id, str) and call_id.strip() and call_id not in seen:
+            seen.add(call_id)
+            continue
+
+        synthetic = f"{_SYNTHETIC_WRITE_TODOS_ID_PREFIX}{position}"
+        while synthetic in used:
+            synthetic += "_"
+        used.add(synthetic)
+        seen.add(synthetic)
+        calls[position] = {**call, "id": synthetic}
+        changed = True
+
+    if not changed:
+        return None
+    return clone_ai_message_with_tool_calls(message, calls)
 
 
 class TodoMiddleware(TodoListMiddleware):
@@ -381,10 +427,21 @@ class TodoMiddleware(TodoListMiddleware):
         if any(termination_metadata.get(marker) for marker in _COMPLETION_REMINDER_RESPONSE_STOP_MARKERS.values()):
             return None
 
-        # 1. Preserve base class logic (parallel write_todos detection).
-        base_result = super().after_model(state, runtime)
+        # 1. Preserve base class logic (parallel write_todos detection). Give
+        # malformed call ids synthetic ones first: the base builds ToolMessages
+        # from them, and the tool node does the same for a single call, so a
+        # missing or duplicated id would abort the run with a validation error.
+        normalized_ai = _normalize_write_todos_ids(last_ai) if last_ai is not None else None
+        base_state = state
+        if normalized_ai is not None:
+            base_state = {**state, "messages": [normalized_ai if item is last_ai else item for item in messages]}
+        base_result = super().after_model(base_state, runtime)
         if base_result is not None:
-            return base_result
+            if normalized_ai is None:
+                return base_result
+            return {**base_result, "messages": [normalized_ai, *(base_result.get("messages") or [])]}
+        if normalized_ai is not None:
+            return {"messages": [normalized_ai]}
 
         # 2. Only intervene when the agent wants to exit cleanly. Tool-call
         # intent or tool-call parse errors should be handled by the tool path
