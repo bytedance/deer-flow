@@ -25,7 +25,13 @@ import {
   GripVerticalIcon,
   LockIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import {
+  type ComponentProps,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -222,7 +228,11 @@ function GroupList({
   );
 }
 
-function CustomizeDialogBody() {
+function CustomizeDialogBody({
+  onCloseAutoFocus,
+}: {
+  onCloseAutoFocus?: ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
+}) {
   const { t } = useI18n();
   const gate = useNavGateContext();
   const [settings, setSettings] = useLocalSettings();
@@ -459,7 +469,10 @@ function CustomizeDialogBody() {
   };
 
   return (
-    <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-md">
+    <DialogContent
+      className="max-h-[80vh] overflow-y-auto sm:max-w-md"
+      onCloseAutoFocus={onCloseAutoFocus}
+    >
       <DialogHeader>
         <DialogTitle>{t.sidebar.customize}</DialogTitle>
         <DialogDescription>{t.sidebar.customizeDescription}</DialogDescription>
@@ -532,13 +545,27 @@ function CustomizeDialogBody() {
 export function NavCustomizeDialog({
   open,
   onOpenChange,
+  returnFocusRef,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  returnFocusRef?: RefObject<HTMLButtonElement | null>;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {open && <CustomizeDialogBody />}
+      {open && (
+        <CustomizeDialogBody
+          // The dialog has no DialogTrigger: it opens from a dropdown item
+          // that unmounts, so Radix's default close focus lands on the body.
+          // Hand focus back to the button that opened the menu.
+          onCloseAutoFocus={(event) => {
+            const button = returnFocusRef?.current;
+            if (!button) return;
+            event.preventDefault();
+            button.focus();
+          }}
+        />
+      )}
     </Dialog>
   );
 }

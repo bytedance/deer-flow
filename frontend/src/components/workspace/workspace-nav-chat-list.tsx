@@ -4,7 +4,7 @@ import { MoreHorizontalIcon, Settings2Icon } from "lucide-react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   DropdownMenu,
@@ -214,6 +214,7 @@ export function WorkspaceNavChatList() {
   const { setOpenMobile } = useSidebar();
   const [settings] = useLocalSettings();
   const [customizeOpen, setCustomizeOpen] = useState(false);
+  const moreButtonRef = useRef<HTMLButtonElement>(null);
 
   const { primary, more } = resolveNavLayout(
     NAV_ITEMS,
@@ -249,6 +250,7 @@ export function WorkspaceNavChatList() {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <SidebarMenuButton
+                  ref={moreButtonRef}
                   className="text-muted-foreground"
                   isActive={currentInMore}
                 >
@@ -286,7 +288,11 @@ export function WorkspaceNavChatList() {
         </SidebarMenu>
       </SidebarGroup>
       {customizeOpen && (
-        <NavCustomizeDialog open onOpenChange={setCustomizeOpen} />
+        <NavCustomizeDialog
+          open
+          onOpenChange={setCustomizeOpen}
+          returnFocusRef={moreButtonRef}
+        />
       )}
     </>
   );
