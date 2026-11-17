@@ -166,6 +166,10 @@ def _score_fact(
     )
 
 
+def _fact_category(fact: dict[str, Any]) -> str:
+    return str(fact.get("category") or "").strip().lower()
+
+
 def select_facts_for_capacity(
     facts: list[dict[str, Any]],
     *,
@@ -186,9 +190,11 @@ def select_facts_for_capacity(
     """Select facts under the configured cap without mutating the snapshot.
 
     ``confidence`` exactly preserves the historical ranking. ``hybrid-v1``
-    combines three bounded signals and reserves only the minimum number of
-    capacity slots for configured reserved categories (defaulting to correction);
-    corrections take priority when included. Unused slots return to ordinary competition.
+    combines three bounded signals and uses up to the configured reserve slots
+    to rescue at-risk facts in ``reserved_categories`` (defaulting to
+    ``correction``) that fell below the ``max_facts`` cutoff, prioritizing
+    corrections and higher scores while never displacing higher-priority or
+    higher-scored same-tier facts.
     """
     if isinstance(reserved_categories, str):
         raise TypeError("reserved_categories must be an iterable of strings, not a bare str")
@@ -233,24 +239,36 @@ def select_facts_for_capacity(
         key=lambda item: (-scored[item[0]].value, item[0]),
     )
     reserved_correction_count = 0
-    selected_indexes: set[int] = set()
+    ordinary = ranked[: max(0, max_facts)]
+    selected_indexes: set[int] = {index for index, _fact in ordinary}
     if policy == EVICTION_POLICY_HYBRID_V1 and max_facts > 0:
         target_categories = {c.strip().lower() for c in reserved_categories if isinstance(c, str) and c.strip()} if reserved_categories is not None else {"correction"}
         reserved_slots = min(
             correction_reserved_max,
             math.ceil(max_facts * correction_reserved_fraction),
         )
-        reserved_candidates = [item for item in ranked if str(item[1].get("category") or "").strip().lower() in target_categories]
-        reserved_candidates.sort(key=lambda item: str(item[1].get("category") or "").strip().lower() != "correction")
-        reserved_count = min(reserved_slots, len(reserved_candidates), max_facts)
-        reserved_candidates = reserved_candidates[:reserved_count]
-        selected_indexes.update(index for index, _fact in reserved_candidates)
-        reserved_correction_count = sum(str(fact.get("category") or "").strip().lower() == "correction" for _index, fact in reserved_candidates)
+        if target_categories and reserved_slots > 0:
 
-    for index, _fact in ranked:
-        if len(selected_indexes) >= max(0, max_facts):
-            break
-        selected_indexes.add(index)
+            def _priority(fact: dict[str, Any]) -> int:
+                category = _fact_category(fact)
+                if category not in target_categories:
+                    return 2
+                return 0 if category == "correction" else 1
+
+            # Rescue at-risk reserved facts below the cap (corrections first, then
+            # descending score), displacing the lowest-ranked lower-tier winners first.
+            rescue_pool = sorted(
+                (item for item in ranked[max_facts:] if _fact_category(item[1]) in target_categories),
+                key=lambda item: _priority(item[1]),
+            )[:reserved_slots]
+            victims = sorted(reversed(ordinary), key=lambda item: -_priority(item[1]))
+            for victim_cursor, (rescue_index, rescue_fact) in enumerate(rescue_pool):
+                if victim_cursor >= len(victims) or _priority(victims[victim_cursor][1]) <= _priority(rescue_fact):
+                    break
+                selected_indexes.remove(victims[victim_cursor][0])
+                selected_indexes.add(rescue_index)
+                if _fact_category(rescue_fact) == "correction":
+                    reserved_correction_count += 1
 
     kept = [fact for index, fact in ranked if index in selected_indexes]
     evicted: list[EvictedFact] = []
