@@ -69,9 +69,11 @@ Stop-reason surfacing (#3875 Phase 2):
   :meth:`consume_stop_reason`. The executor collects that reason alongside
   the token-budget guard's so a loop-capped run surfaces as
   ``completed + loop_capped`` and the lead/ledger can tell it was capped
-  without parsing result text. A per-tool cap writes ``runtime.context`` only
-  when the run ends, because other middlewares read that key mid-run as
-  "the run is ending" (see ``_mark_capped``).
+  without parsing result text. A per-tool cap reports only when the run ends,
+  and not at all when another guard stopped the run, because other
+  middlewares read ``runtime.context["stop_reason"]`` mid-run as "the run is
+  ending" (see ``_report_cap``). A response whose admitted calls another
+  middleware discards before they run is undone (see ``_Admission``).
 """
 
 from __future__ import annotations
@@ -415,6 +417,32 @@ def _read_loop_cap(value: object) -> _LoopCap | None:
 
 
 @dataclass(frozen=True)
+class _Admission:
+    """Loop state from before a response whose calls were passed on.
+
+    Another middleware can still discard every one of those calls before they
+    run: input admission supersedes the response when the user steers, and
+    approval strips calls it cannot address. Calls that never ran must not
+    count toward a limit or leave a cap behind, so the state is kept until the
+    next model call shows whether any of the calls stood. That check runs in
+    ``wrap_model_call`` rather than a ``before_model`` hook, because a hook is
+    a graph node: it would cost every turn a super-step of the run's
+    recursion limit.
+    """
+
+    message_id: str
+    call_ids: frozenset[str]
+    # The cap record as it would stand had the response made no decision.
+    record: dict | None
+    history: list[str] | None
+    warned: frozenset[str] | None
+    names: tuple[str, ...] | None
+    counter: dict[str, int] | None
+    freq_warned: frozenset[str] | None
+    pending_warnings: tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
 class _LoopDecision:
     """A loop-detection transition that may be persisted for audit."""
 
@@ -551,6 +579,16 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         # both maps are written, evicted, and popped together under ``_lock``.
         self._stop_reason: BoundedDict[str | None, str] = BoundedDict(1000)
         self._stop_reason_thread_id: BoundedDict[str | None, str] = BoundedDict(1000)
+        # The newest response per run scope whose calls were passed on, with the
+        # state from before it (see ``_Admission``). Settled by the next
+        # ``before_model``; bounded because a run that pauses for approval
+        # resumes under another scope and never settles its entry.
+        self._admissions: OrderedDict[_RunScopeKey, _Admission] = OrderedDict()
+        # The cap record to use instead of the checkpointed one, set when an
+        # admission is undone in ``wrap_model_call`` and written to state by
+        # the ``after_model`` of that same model call.
+        self._record_overrides: OrderedDict[_RunScopeKey, dict | None] = OrderedDict()
+        self._max_admissions = max(1, self.max_tracked_threads * 2)
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {
@@ -678,6 +716,8 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
             self._tool_name_history.pop(evicted_key, None)
             self._tool_name_counter.pop(evicted_key, None)
             self._tool_freq_warned.pop(evicted_key, None)
+            self._admissions.pop(evicted_key, None)
+            self._record_overrides.pop(evicted_key, None)
             self._drop_pending_warning_key_locked(evicted_key)
             logger.debug(
                 "Evicted loop tracking for thread/run scope (LRU)",
@@ -1064,34 +1104,121 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         run_id = self._get_run_id(runtime)
         return None if run_id is None else str(run_id)
 
-    def _mark_capped(self, runtime: Runtime, *, terminal: bool = False) -> None:
+    def _report_cap(self, runtime: Runtime, *, terminal: bool) -> None:
         """Surface ``stop_reason=loop_capped`` for the current run (#3875 Phase 2).
 
         A cap does not raise: the run finishes with an answer, so without this
-        the caller would see a clean completion. The subagent executor reads
-        the reason through ``consume_stop_reason`` after the run returns, so
-        that channel is written at once. Written under the lock to match
+        the caller would see a clean completion. There are two channels. The
+        subagent executor reads ``consume_stop_reason`` after the run returns;
+        the lead worker (#4176) and Goal continuation read
+        ``runtime.context["stop_reason"]`` when the run is over. Run-input
+        admission, the todo middleware and the end-of-graph input handling also
+        read that key while the run goes on, as "the run is ending: skip your
+        checks".
+
+        ``terminal`` is a response with no call left, which ends the run: both
+        channels are written now, replacing another guard's reason as every
+        hard stop does. Otherwise the run goes on and its admitted calls must
+        pass those checks, so ``_finish`` reports when the run ends, and only
+        when no other guard has already given the reason it stopped. Both
+        channels then name the same guard. Written under the lock to match
         ``TokenBudgetMiddleware``: the lead agent's middleware instance is
         shared across concurrent Gateway threads.
-
-        ``runtime.context`` is two signals at once. The worker (#4176) and Goal
-        continuation read it when the run is over, but run-input admission, the
-        todo middleware and the end-of-graph input handling read it while the
-        run goes on, as "the run is ending: skip your checks". That holds only
-        when the response has no call left. ``terminal`` marks that case and
-        writes the context now, replacing another guard's reason as every hard
-        stop does. A run that dropped only some calls still executes the
-        others, which must pass those checks, so its context reason is written
-        by ``after_agent`` instead (see ``_finish``).
         """
         thread_id, run_id = self._run_scope_key(runtime)
+        ctx = getattr(runtime, "context", None)
+        ctx = ctx if isinstance(ctx, dict) else None
+        if not terminal and ctx is not None and ctx.get("stop_reason") not in (None, "loop_capped"):
+            return
         with self._lock:
             self._stop_reason[run_id] = "loop_capped"
             self._stop_reason_thread_id[run_id] = thread_id
-        if terminal:
-            ctx = getattr(runtime, "context", None)
-            if isinstance(ctx, dict):
-                ctx["stop_reason"] = "loop_capped"
+        if ctx is not None:
+            ctx["stop_reason"] = "loop_capped"
+
+    def _snapshot_locked(self, scope_key: _RunScopeKey) -> dict:
+        """Copy the loop state of one run scope. Must be called while holding self._lock."""
+        names = self._tool_name_history.get(scope_key)
+        counter = self._tool_name_counter.get(scope_key)
+        warned = self._warned.get(scope_key)
+        freq_warned = self._tool_freq_warned.get(scope_key)
+        pending = self._pending_warnings.get(scope_key)
+        history = self._history.get(scope_key)
+        return {
+            "history": list(history) if history is not None else None,
+            "warned": frozenset(warned) if warned is not None else None,
+            "names": tuple(names) if names is not None else None,
+            "counter": dict(counter) if counter is not None else None,
+            "freq_warned": frozenset(freq_warned) if freq_warned is not None else None,
+            "pending_warnings": tuple(pending) if pending is not None else None,
+        }
+
+    def _restore_locked(self, scope_key: _RunScopeKey, admission: _Admission) -> None:
+        """Put back the loop state from before ``admission``. Must be called while holding self._lock."""
+        if admission.history is None:
+            self._history.pop(scope_key, None)
+        else:
+            self._history[scope_key] = list(admission.history)
+        for mapping, value in (
+            (self._warned, admission.warned),
+            (self._tool_freq_warned, admission.freq_warned),
+        ):
+            if value is None:
+                mapping.pop(scope_key, None)
+            else:
+                mapping[scope_key] = set(value)
+        if admission.names is None:
+            self._tool_name_history.pop(scope_key, None)
+            self._tool_name_counter.pop(scope_key, None)
+        else:
+            self._tool_name_history[scope_key] = deque(admission.names)
+            self._tool_name_counter[scope_key] = Counter(admission.counter or {})
+        if admission.pending_warnings is None:
+            self._drop_pending_warning_key_locked(scope_key)
+        else:
+            self._pending_warnings[scope_key] = list(admission.pending_warnings)
+            self._touch_pending_warning_key_locked(scope_key)
+
+    def _settle_admission(self, state: object, runtime: Runtime) -> None:
+        """Undo the accounting of a response whose admitted calls were all discarded.
+
+        Runs as the next model call starts. If none of the calls this
+        middleware passed on is still in that response, another middleware
+        discarded them before they ran, so the response counts as if it had not
+        been made: the frequency window, the warning state and the cap record go
+        back to what they were before it. Caps from earlier responses stay. A
+        response that is no longer in the history (compaction) keeps its
+        accounting.
+        """
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            admission = self._admissions.pop(scope_key, None)
+        if admission is None or not isinstance(state, Mapping):
+            return
+        source = next((m for m in reversed(state.get("messages") or []) if getattr(m, "id", None) == admission.message_id), None)
+        if source is None:
+            return
+        standing = {tc.get("id") for tc in (getattr(source, "tool_calls", None) or [])}
+        if standing & admission.call_ids:
+            return
+        with self._lock:
+            self._restore_locked(scope_key, admission)
+            self._record_overrides[scope_key] = admission.record
+            self._record_overrides.move_to_end(scope_key)
+            while len(self._record_overrides) > self._max_admissions:
+                self._record_overrides.popitem(last=False)
+        thread_id, run_id = scope_key
+        logger.info(
+            "Loop detection undid the accounting of a response whose calls were discarded before they ran",
+            extra={"thread_id": thread_id, "run_id": run_id, "calls": len(admission.call_ids)},
+        )
+
+    def _current_record(self, scope_key: _RunScopeKey, state: object, *, consume: bool) -> object:
+        """The cap record in force: an undone admission's record, else the checkpointed one."""
+        with self._lock:
+            if scope_key in self._record_overrides:
+                return self._record_overrides.pop(scope_key) if consume else self._record_overrides[scope_key]
+        return state.get(LOOP_CAP_STATE_KEY) if isinstance(state, Mapping) else None
 
     @staticmethod
     def _admitted_calls(last_msg, decision: _LoopDecision) -> list[dict]:
@@ -1105,7 +1232,15 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
         stored = state.get(LOOP_CAP_STATE_KEY)
-        cap = _read_loop_cap(stored)
+        scope_key = self._run_scope_key(runtime)
+        cap = _read_loop_cap(self._current_record(scope_key, state, consume=True))
+        messages = state.get("messages", [])
+        last_msg = messages[-1] if messages else None
+        calls = list(getattr(last_msg, "tool_calls", None) or []) if getattr(last_msg, "type", None) == "ai" else []
+        snapshot = None
+        if calls:
+            with self._lock:
+                snapshot = self._snapshot_locked(scope_key)
         decision = self._track_and_check(state, runtime, cap)
 
         next_cap = cap
@@ -1114,6 +1249,8 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
             # before an approval pause. The model has now answered the request
             # that explained the cap, so the notice is delivered.
             next_cap = replace(cap, run_id=self._record_run_id(runtime), notice=None)
+        baseline = next_cap.dump() if next_cap is not None else None
+        admitted = calls
 
         update: dict = {}
         if decision is not None:
@@ -1138,10 +1275,11 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 # warning is delivered via ``wrap_model_call`` below.
                 self._queue_pending_warning(runtime, decision.message)
             else:
-                last_msg = state.get("messages", [])[-1]
                 kept = self._admitted_calls(last_msg, decision) if decision.action == "reject_excess" else []
+                admitted = kept
                 capped_tools = _recordable_caps(cap.tools if cap is not None else {}, decision.limits)
-                self._mark_capped(runtime, terminal=not kept)
+                if not kept:
+                    self._report_cap(runtime, terminal=True)
                 if kept:
                     # Run the calls within the limit and drop the rest. Like a
                     # warning, the explanation reaches the model on its next
@@ -1167,6 +1305,15 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                         next_cap = _LoopCap(run_id=self._record_run_id(runtime), tools=capped_tools)
                     content = self._append_text(last_msg.content, text)
                     update["messages"] = [clone_ai_message_with_tool_calls(last_msg, [], content=content)]
+
+        call_ids = frozenset(call_id for tc in admitted if isinstance(call_id := tc.get("id"), str) and call_id)
+        message_id = getattr(last_msg, "id", None)
+        if snapshot is not None and call_ids and isinstance(message_id, str) and message_id:
+            with self._lock:
+                self._admissions[scope_key] = _Admission(message_id=message_id, call_ids=call_ids, record=baseline, **snapshot)
+                self._admissions.move_to_end(scope_key)
+                while len(self._admissions) > self._max_admissions:
+                    self._admissions.popitem(last=False)
 
         value = next_cap.dump() if next_cap is not None else None
         if value != stored:
@@ -1197,16 +1344,18 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
             # The run is over, so the report no longer suspends any check.
             # ``after_agent`` hooks run in reverse middleware order, so the
             # end-of-graph input handling appended after this middleware has
-            # already run. Another guard's reason, set earlier, is kept. This
-            # also covers a resumed run that ends without another model call,
-            # and it hands the cap to this run for any later entry of it.
-            self._mark_capped(runtime)
-            ctx = getattr(runtime, "context", None)
-            if isinstance(ctx, dict) and ctx.get("stop_reason") is None:
-                ctx["stop_reason"] = "loop_capped"
+            # already run. This also covers a resumed run that ends without
+            # another model call, and it hands the cap to this run for any
+            # later entry of it.
+            self._report_cap(runtime, terminal=False)
             run_id = self._record_run_id(runtime)
             if cap.run_id != run_id:
                 update = {LOOP_CAP_STATE_KEY: replace(cap, run_id=run_id).dump()}
+        # Resolved before taking the lock: a fallback run id takes it too.
+        scope_key = self._run_scope_key(runtime)
+        with self._lock:
+            self._admissions.pop(scope_key, None)
+            self._record_overrides.pop(scope_key, None)
         self._clear_current_run_pending_warnings(runtime)
         self._release_fallback_run_id(runtime)
         return update
@@ -1303,7 +1452,7 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         ``after_model`` clears it once the model has answered.
         """
         state = getattr(request, "state", None)
-        cap = _read_loop_cap(state.get(LOOP_CAP_STATE_KEY)) if isinstance(state, Mapping) else None
+        cap = _read_loop_cap(self._current_record(self._run_scope_key(request.runtime), state, consume=False))
         if cap is None:
             return []
         text = cap.notice_text()
@@ -1315,6 +1464,7 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
+        self._settle_admission(getattr(request, "state", None), request.runtime)
         notice = self._cap_notice(request)
         warnings = self._drain_pending_warnings(request.runtime)
         try:
@@ -1329,6 +1479,7 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
+        self._settle_admission(getattr(request, "state", None), request.runtime)
         notice = self._cap_notice(request)
         warnings = self._drain_pending_warnings(request.runtime)
         try:
@@ -1347,6 +1498,8 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                     self._tool_name_history,
                     self._tool_name_counter,
                     self._tool_freq_warned,
+                    self._admissions,
+                    self._record_overrides,
                 ):
                     for key in list(mapping):
                         if key[0] == thread_id:
@@ -1370,3 +1523,5 @@ class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
                 self._stop_reason.clear()
                 self._stop_reason_thread_id.clear()
                 self._fallback_run_ids.clear()
+                self._admissions.clear()
+                self._record_overrides.clear()

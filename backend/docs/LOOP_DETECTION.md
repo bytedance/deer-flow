@@ -54,16 +54,28 @@ cap, and a notice for the model.
   calls only capped tools stops the run.
 - **A run that dropped a call is `loop_capped`** in the run record and in a
   subagent result, although it goes on to wrap up. Goal continuation stands
-  down on that reason. The calls that survive still run, so the reason enters
-  the run context only when the run ends: other middlewares read
-  `stop_reason` there as "the run is ending" and skip their checks. Until
-  then, input that arrives mid-run still cancels the response's planned calls,
-  parallel `write_todos` calls are still rejected, input that arrives as the
-  run finishes is still applied, and the todo completion reminder works as in
-  any run. If another guard already set a reason, that reason is reported. A
-  response with no call left is a terminal stop and is reported at once, as
-  before. A run that pauses for approval reports no reason; the run that
-  resumes it reports `loop_capped` when it ends.
+  down on that reason. The calls that survive still run, so the reason is
+  reported only when the run ends: other middlewares read `stop_reason` in the
+  run context as "the run is ending" and skip their checks. Until then, input
+  that arrives mid-run still cancels the response's planned calls, parallel
+  `write_todos` calls are still rejected, input that arrives as the run
+  finishes is still applied, and the todo completion reminder works as in any
+  run. If another guard has already given the reason the run stopped, loop
+  detection reports nothing, so the run record and a subagent result name the
+  same guard. A response with no call left is a terminal stop and is reported
+  at once, as before. A run that pauses for approval reports no reason; the
+  run that resumes it reports `loop_capped` when it ends.
+- **A response whose admitted calls are all discarded leaves no trace.**
+  Another middleware can drop every call that loop detection passed on before
+  any of them runs: input admission does so when the user steers, and approval
+  does so for calls it cannot address. Calls that never ran do not count, so
+  as the next model call starts, the frequency window, the warnings and the cap
+  record go back to their state before that response. Caps from earlier
+  responses stay, and the notice for the discarded response is not sent. This
+  runs in `wrap_model_call` rather than a `before_model` hook, because a hook
+  is a graph node and would spend a super-step of every turn. A response that
+  keeps some of its calls keeps its accounting, as before, and so does one that
+  compaction has removed from the history.
 - **The model is told on its next call** how many calls of its last response
   were skipped and how many were passed on, followed by the wrap-up
   instructions. The text reports admission, not execution: an admitted call can

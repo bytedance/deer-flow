@@ -31,10 +31,12 @@ from deerflow.agents.middlewares.loop_detection_middleware import (
 )
 from deerflow.agents.middlewares.run_input_middleware import RunInputAdmissionMiddleware, RunInputMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.approvals.middleware import ToolApprovalMiddleware
 from deerflow.config.app_config import AppConfig
 from deerflow.config.hitl_approval_config import HitlApprovalConfig
+from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.runtime.runs.input_control import RunInputControl
 from deerflow.runtime.runs.inputs import INPUT_CONTEXT_KEY, RunInputs
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -2152,6 +2154,9 @@ class TestToolCallBatchDecisions:
         assert [tc["id"] for tc in kept.tool_calls] == [f"call_{i}" for i in range(1, expected_kept + 1)]
         assert "FORCED STOP" not in str(kept.content)
         assert result[LOOP_CAP_STATE_KEY]["notice"] == {"total": batch_size, "skipped": batch_size - expected_kept, "tools": ["write_file"]}
+        # Both report channels are written when the run ends.
+        assert mw.consume_stop_reason("test-run") is None
+        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: result[LOOP_CAP_STATE_KEY]}, runtime)
         assert mw.consume_stop_reason("test-run") == "loop_capped"
 
     @pytest.mark.parametrize("seed", range(40))
@@ -2876,7 +2881,9 @@ class TestPartialCapKeepsRunGuards:
 
         # The two calls the cap admitted are obsolete after the steer and must not run.
         assert executed == ["new"]
-        assert context["stop_reason"] == "loop_capped"
+        # None of the trimmed response's calls ran, so it leaves no cap behind.
+        assert "stop_reason" not in context
+        assert graph.get_state({"configurable": {"thread_id": "thread"}}).values.get(LOOP_CAP_STATE_KEY) is None
 
     @pytest.mark.asyncio
     async def test_input_that_arrives_as_the_run_finishes_is_applied(self, monkeypatch):
@@ -2940,6 +2947,235 @@ class TestPartialCapKeepsRunGuards:
         assert not result.get("todos")
         assert sorted(executed) == ["old-0", "old-1"]
         assert context["stop_reason"] == "loop_capped"
+
+
+class _ScriptedSteerModel(BaseChatModel):
+    """Answers with ``script`` in order; pauses on call ``gate_at``; once a run input arrives, writes ``corrected`` with the same tool."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    script: list
+    gate_at: int = 0
+    entered: Any = None
+    release: Any = None
+    calls: int = 0
+
+    @property
+    def _llm_type(self):
+        return "scripted-steer"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        if any(m.additional_kwargs.get("run_input_id") for m in messages):
+            done = any(isinstance(m, ToolMessage) and m.tool_call_id == "corrected" for m in messages)
+            message = AIMessage(content="Correction written") if done else AIMessage(content="", tool_calls=[{"name": "write_out", "args": {"value": "corrected"}, "id": "corrected"}])
+        else:
+            message = AIMessage(content="", tool_calls=self.script[self.calls]) if self.calls < len(self.script) else AIMessage(content="Wrapped up")
+            self.calls += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        if self.entered is not None and self.calls == self.gate_at and not self.entered.is_set():
+            self.entered.set()
+            await self.release.wait()
+        return self._generate(messages)
+
+
+class TestDiscardedResponseLeavesNoAccounting:
+    """Calls that another middleware discards before they run must not count toward a limit or leave a cap behind."""
+
+    @staticmethod
+    def _call(name, value):
+        return {"name": name, "id": f"call_{name}_{value}", "args": {"value": value}}
+
+    @staticmethod
+    def _state(calls, message_id="response-1", loop_cap=None):
+        state = {"messages": [AIMessage(content="", tool_calls=calls, id=message_id)]}
+        if loop_cap is not None:
+            state[LOOP_CAP_STATE_KEY] = loop_cap
+        return state
+
+    @staticmethod
+    def _next_model_call(mw, runtime, state):
+        request = _make_request(state["messages"], runtime)
+        request.state = state
+        captured, handler = _capture_handler()
+        mw.wrap_model_call(request, handler)
+        return captured[0]
+
+    async def _steered_run(self, script, gate_at):
+        store = MemoryRunStore()
+        await store.put("run", thread_id="thread", user_id="owner", status="running", owner_worker_id="worker")
+        inputs = RunInputs(store, "run", "owner", "worker")
+        control = RunInputControl(inputs, agent_runs=None, thread_id="thread", checkpointer=InMemorySaver())
+        executed, entered, release = [], asyncio.Event(), asyncio.Event()
+
+        @as_tool
+        async def write_out(value: str) -> str:
+            """Write a value."""
+            executed.append(("write_out", value))
+            return "ok"
+
+        @as_tool
+        async def note(value: str) -> str:
+            """Keep a note."""
+            executed.append(("note", value))
+            return "ok"
+
+        model = _ScriptedSteerModel(script=script, gate_at=gate_at, entered=entered, release=release)
+        middleware = [RunInputAdmissionMiddleware(), LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3), RunInputMiddleware()]
+        context = {INPUT_CONTEXT_KEY: control, "thread_id": "thread", "run_id": "run"}
+        graph = create_agent(model, tools=[write_out, note], middleware=middleware, state_schema=ThreadState, context_schema=dict, checkpointer=control.checkpointer)
+        config = {"configurable": {"thread_id": "thread"}}
+        run = asyncio.create_task(graph.ainvoke({"messages": [HumanMessage(content="Original task")]}, config, context=context))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            await inputs.submit("update", "Write only the corrected value", "steer")
+            release.set()
+            await asyncio.wait_for(run, 5)
+            items = (await inputs.read())["items"]
+        finally:
+            release.set()
+            await asyncio.gather(run, return_exceptions=True)
+            await control.close()
+        return executed, [item["status"] for item in items], graph.get_state(config).values.get(LOOP_CAP_STATE_KEY), context.get("stop_reason")
+
+    @pytest.mark.asyncio
+    async def test_steer_replacement_can_use_the_tool_the_discarded_response_capped(self):
+        batch = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
+
+        executed, steer, cap, stop_reason = await self._steered_run([batch], gate_at=0)
+
+        assert executed == [("write_out", "corrected")]
+        assert steer == ["applied"]
+        assert cap is None
+        assert stop_reason is None
+
+    @pytest.mark.asyncio
+    async def test_undo_keeps_a_cap_from_an_earlier_response(self):
+        notes = [{"name": "note", "args": {"value": f"n{i}"}, "id": f"note_{i}"} for i in range(4)]
+        writes = [{"name": "write_out", "args": {"value": f"old-{i}"}, "id": f"old_{i}"} for i in range(4)]
+
+        executed, steer, cap, stop_reason = await self._steered_run([notes, writes], gate_at=1)
+
+        assert sorted(executed) == [("note", "n0"), ("note", "n1"), ("write_out", "corrected")]
+        assert steer == ["applied"]
+        assert cap == {"run_id": "run", "tools": {"note": 3}}
+        assert stop_reason == "loop_capped"
+
+    def test_discarded_response_below_the_limit_is_not_counted(self):
+        """The same holds without a cap: calls that never ran must not push a later call over the limit."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        first = [self._call("a", 0), self._call("a", 1)]
+        assert mw.after_model(self._state(first), runtime) is None
+        assert mw._tool_name_counter[_scope_key()]["a"] == 2
+
+        # Another middleware replaced the response (same id) with one that has no calls.
+        self._next_model_call(mw, runtime, self._state([]))
+
+        assert mw._tool_name_counter[_scope_key()].get("a", 0) == 0
+        assert mw.after_model(self._state([self._call("a", 2), self._call("a", 3)], message_id="response-2"), runtime) is None
+
+    def test_response_whose_calls_stand_keeps_its_accounting(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        first = [self._call("a", 0), self._call("a", 1)]
+        mw.after_model(self._state(first), runtime)
+
+        self._next_model_call(mw, runtime, self._state(first))
+        result = mw.after_model(self._state([self._call("a", 2), self._call("a", 3)], message_id="response-2"), runtime)
+
+        assert result["messages"][0].tool_calls == []
+        assert "[FORCED STOP] Tool a called 3 times" in result["messages"][0].content
+
+    def test_response_no_longer_in_the_history_keeps_its_accounting(self):
+        """Compaction can remove the response; without it there is no evidence its calls were discarded."""
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        mw.after_model(self._state([self._call("a", 0), self._call("a", 1)]), runtime)
+
+        self._next_model_call(mw, runtime, {"messages": [HumanMessage(content="summary", name="summary")]})
+
+        assert mw._tool_name_counter[_scope_key()]["a"] == 2
+
+    def test_undone_cap_is_not_explained_to_the_model(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        trimmed = mw.after_model(self._state([self._call("a", i) for i in range(4)]), runtime)
+        assert trimmed[LOOP_CAP_STATE_KEY]["notice"]["skipped"] == 2
+
+        sent = self._next_model_call(mw, runtime, self._state([], loop_cap=trimmed[LOOP_CAP_STATE_KEY]))
+
+        assert [m.name for m in sent.messages] == [None]
+        assert mw.after_model(self._state([], message_id="response-2", loop_cap=trimmed[LOOP_CAP_STATE_KEY]) | {"messages": [AIMessage(content="ok", id="response-2")]}, runtime) == {LOOP_CAP_STATE_KEY: None}
+
+
+class TestCapReportNamesTheGuardThatStopped:
+    """Both report channels name the same guard, so a subagent result agrees with the run context."""
+
+    class _TokenHeavyModel(BaseChatModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        calls: int = 0
+
+        @property
+        def _llm_type(self):
+            return "token-heavy"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                calls = [{"name": "write_out", "args": {"value": f"v{i}"}, "id": f"w{i}"} for i in range(4)]
+                usage = {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}
+            else:
+                calls = [{"name": "note", "args": {"text": "more"}, "id": f"note_{self.calls}"}]
+                usage = {"input_tokens": 5000, "output_tokens": 10, "total_tokens": 5010}
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=calls, usage_metadata=usage))])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("use_async", [False, True])
+    async def test_later_token_budget_stop_is_what_the_subagent_reports(self, use_async):
+        @as_tool
+        def write_out(value: str) -> str:
+            """Write a value."""
+            return "ok"
+
+        @as_tool
+        def note(text: str) -> str:
+            """Keep a note."""
+            return "noted"
+
+        # Subagent chain order: loop detection before the token budget. The executor
+        # (``SubagentExecutor._consume_guard_stop_reason``) asks them in that order
+        # and reports the first reason it gets.
+        loop = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        budget = TokenBudgetMiddleware.from_config(TokenBudgetConfig(enabled=True, max_tokens=1000))
+        middlewares = [loop, budget]
+        context = {"thread_id": "sub-thread", "run_id": "sub-run"}
+        graph = create_agent(self._TokenHeavyModel(), tools=[write_out, note], middleware=middlewares, state_schema=ThreadState, context_schema=dict)
+        payload, config = {"messages": [HumanMessage(content="Do it")]}, {"recursion_limit": 20}
+
+        await graph.ainvoke(payload, config, context=context) if use_async else graph.invoke(payload, config, context=context)
+
+        assert context["stop_reason"] == "token_capped"
+        # Loop detection only trimmed a batch; the token budget stopped the run.
+        assert loop.consume_stop_reason("sub-run") is None
+        assert budget.consume_stop_reason("sub-run") == "token_capped"
+
+    def test_partial_cap_with_another_guards_reason_reports_nothing_of_its_own(self):
+        mw = LoopDetectionMiddleware(tool_freq_warn=2, tool_freq_hard_limit=3)
+        runtime = _make_runtime()
+        written = mw.after_model(_make_state(tool_calls=[{"name": "a", "id": f"c{i}", "args": {"v": i}} for i in range(4)]), runtime)[LOOP_CAP_STATE_KEY]
+        runtime.context["stop_reason"] = "model_length_capped"
+
+        mw.after_agent({"messages": [AIMessage(content="done")], LOOP_CAP_STATE_KEY: written}, runtime)
+
+        assert runtime.context["stop_reason"] == "model_length_capped"
+        assert mw.consume_stop_reason("test-run") is None
 
 
 class TestCapSurvivesApprovalPauseAndRestart:
