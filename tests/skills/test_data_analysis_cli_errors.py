@@ -15,6 +15,7 @@ SCRIPT = (
     Path(__file__).resolve().parents[2]
     / "skills/public/data-analysis/scripts/analyze.py"
 )
+TRANSACTION_QUERY = "BEGIN TRANSACTION; SELECT CAST('not-an-int' AS INTEGER)"
 FAILURES = [
     pytest.param(
         ["--action", "query", "--sql", "SELEC id FROM input"],
@@ -33,6 +34,12 @@ FAILURES = [
         ".csv",
         "missing_table",
         id="sql-table",
+    ),
+    pytest.param(
+        ["--action", "query", "--sql", TRANSACTION_QUERY],
+        ".csv",
+        "Conversion Error: Could not convert string 'not-an-int'",
+        id="sql-aborted-transaction",
     ),
     pytest.param(
         ["--action", "summary", "--table", "missing_table"],
@@ -114,6 +121,19 @@ def test_cli_failure_reports_stderr_without_overwriting(
         assert output.read_bytes() == original
     else:
         assert not output.exists()
+
+
+def test_query_preserves_conversion_error_in_aborted_transaction(
+    analysis, cached_source
+):
+    source, _ = cached_source
+    with analysis["open_analysis_cache"]([str(source)]) as (con, table_map):
+        with pytest.raises(ValueError, match="Conversion Error") as error:
+            analysis["action_query"](con, TRANSACTION_QUERY, table_map)
+        assert isinstance(error.value.__cause__, duckdb.ConversionException)
+        assert "'not-an-int'" in str(error.value.__cause__)
+        with pytest.raises(duckdb.TransactionException, match="aborted"):
+            con.execute("SELECT 1")
 
 
 @pytest.mark.parametrize("filename", ["result.txt", "result"])

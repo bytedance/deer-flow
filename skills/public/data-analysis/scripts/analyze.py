@@ -468,9 +468,14 @@ def action_query(
     except Exception as e:
         error_msg = f"SQL Error: {e}\n\nAvailable tables:\n"
         for orig, tbl in table_map.items():
-            cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
-            col_names = [c[0] for c in cols]
-            error_msg += f'  "{tbl}" ({orig}): {", ".join(col_names)}\n'
+            label = f'  "{tbl}" ({orig})'
+            try:
+                cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
+            except duckdb.Error:
+                # An aborted transaction may make column metadata unavailable.
+                error_msg += f"{label}\n"
+            else:
+                error_msg += f"{label}: {', '.join(c[0] for c in cols)}\n"
         raise ValueError(error_msg) from e
 
     # Format output
