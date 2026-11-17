@@ -689,14 +689,16 @@ async def test_scheduled_goal_cleanup_failure_reaches_the_stream_as_an_error(inf
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["full", "delta"])
-async def test_cancellation_during_failing_cleanup_ends_as_interruption(infrastructure, monkeypatch, mode):
-    """A staged error frame must not describe a run whose final outcome is cancelled.
+@pytest.mark.parametrize("action", ["interrupt", "rollback"])
+async def test_cancellation_during_failing_cleanup_ends_as_the_cancellation(infrastructure, monkeypatch, mode, action):
+    """A staged error frame must not describe a run a cancellation replaced.
 
-    An interrupt is accepted while the occurrence's goal cleanup runs (the run
-    slot stays active until cleanup finishes). Cleanup then fails, so the error
-    is staged; the cancellation branch persists ``interrupted``. The stale frame
-    belongs to an outcome that lost: the stream must report the interruption the
-    record and ``/wait`` carry, not a failure toast.
+    A cancellation is accepted while the occurrence's goal cleanup runs (the run
+    slot stays active until cleanup finishes). Cleanup then fails, so the error is
+    staged; the cancellation branch then commits the cancellation's outcome —
+    ``interrupted`` for an interrupt, ``error`` with ``Rolled back by user`` for a
+    rollback. The stale frame belongs to an outcome that lost: the stream has to
+    agree with the record and ``/wait``.
     """
     store, checkpointer = infrastructure
     manager = RunManager(store=store, worker_id="scheduler")
@@ -716,7 +718,7 @@ async def test_cancellation_during_failing_cleanup_ends_as_interruption(infrastr
             return None
 
     async def cancel_then_fail(**kwargs):
-        cancels.append(await manager.cancel(record.run_id, action="interrupt"))
+        cancels.append(await manager.cancel(record.run_id, action=action))
         raise RuntimeError("goal store unavailable")
 
     monkeypatch.setattr(worker, "_clear_scheduled_goal", cancel_then_fail)
@@ -745,6 +747,10 @@ async def test_cancellation_during_failing_cleanup_ends_as_interruption(infrastr
     )
 
     assert cancels == [CancelOutcome.cancelled]
-    assert record.status == RunStatus.interrupted
+    if action == "interrupt":
+        assert record.status == RunStatus.interrupted
+    else:
+        assert record.status == RunStatus.error
+        assert record.error.startswith("Rolled back by user")
     assert [payload for event, payload in events if event == "error"] == []
     assert events[-1][0] == "end"
