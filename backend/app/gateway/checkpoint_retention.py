@@ -53,6 +53,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.gateway.checkpoint_lineage import (
+    channel_versions_match,
     checkpoint_configurable,
     is_duration_only_checkpoint,
 )
@@ -105,7 +106,7 @@ class _Node:
     duration_only: bool
     metadata_source: str | None = None
     carries_run_durations: bool = False
-    versions: frozenset = frozenset()
+    versions: dict[str, Any] = field(default_factory=dict)
 
 
 def _thread_config(thread_id: str) -> dict[str, Any]:
@@ -156,7 +157,7 @@ def _mark_duration_leaves_without_the_marker(nodes: dict[tuple[str, str], _Node]
         parent = nodes.get((node.parent_ns, node.parent_id))
         if parent is None or node.metadata_source != "update" or not node.carries_run_durations:
             continue
-        if node.versions and node.versions == parent.versions:
+        if channel_versions_match(node.versions, parent.versions):
             node.duration_only = True
 
 
@@ -452,7 +453,7 @@ async def enforce_thread_retention(
                 duration_only=is_duration_only_checkpoint(tuple_, stamp_fallback=False),
                 metadata_source=metadata.get("source"),
                 carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-                versions=frozenset(channel_versions.values()) if isinstance(channel_versions, dict) else frozenset(),
+                versions=dict(channel_versions) if isinstance(channel_versions, dict) else {},
             )
         if not nodes:
             # Nothing to classify: an empty (or unknown) thread is a no-op, but
