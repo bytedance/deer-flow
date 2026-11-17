@@ -45,6 +45,10 @@ def run_check(tmp_path: Path, example: str, chart: str) -> subprocess.CompletedP
     [
         ("66", "66oops"),
         ("66oops", "66"),
+        ("66 trailing words", "66"),
+        ("66", "66 trailing words"),
+        ("010", "9"),
+        ("9", "010"),
         ("66", "9999999999999999999"),
     ],
 )
@@ -52,7 +56,7 @@ def test_invalid_version_fails_with_both_operands(tmp_path: Path, example: str, 
     result = run_check(tmp_path, example, chart)
 
     assert result.returncode != 0, result.stdout + result.stderr
-    assert "config_version must be a decimal integer of at most 18 digits" in result.stderr
+    assert "config_version must be a canonical decimal integer of at most 18 digits" in result.stderr
     assert f"config.example.yaml: {example}" in result.stderr
     assert f"values.yaml: {chart}" in result.stderr
     assert "OK -" not in result.stdout
@@ -65,6 +69,7 @@ def test_invalid_version_fails_with_both_operands(tmp_path: Path, example: str, 
         ("66", "67", 0),
         ("66", "65", 1),
         ("1", "999999999999999999", 0),
+        ("66 # example", "67 # chart", 0),
     ],
 )
 def test_version_comparison(tmp_path: Path, example: str, chart: str, expected: int) -> None:
