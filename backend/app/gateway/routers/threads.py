@@ -60,7 +60,7 @@ from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import PROJECT_FILTER_UNSET, THREAD_ARCHIVED_METADATA_KEY, THREAD_PINNED_METADATA_KEY, THREAD_PROJECT_METADATA_KEY, ThreadOwnershipConflictError
 from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
-from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
+from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels, validate_state_mutation_node
 from deerflow.runtime.context_compaction import (
     ContextCompactionDisabled,
     ContextCompactionFailed,
@@ -597,6 +597,16 @@ class ThreadStateUpdateRequest(BaseModel):
     checkpoint_id: str | None = Field(default=None, description="Checkpoint to branch from")
     checkpoint: dict[str, Any] | None = Field(default=None, description="Full checkpoint object")
     as_node: str | None = Field(default=None, description="Node identity for the update")
+
+    @field_validator("as_node")
+    @classmethod
+    def _as_node_is_a_graph_node_name(cls, value: str | None) -> str | None:
+        # The name becomes the mutation graph's node; reject what LangGraph
+        # cannot compile as a 422 instead of an unhandled 500. An empty value
+        # keeps falling back to the default node in the route.
+        if value:
+            validate_state_mutation_node(value)
+        return value
 
 
 class ThreadGoalRequest(BaseModel):

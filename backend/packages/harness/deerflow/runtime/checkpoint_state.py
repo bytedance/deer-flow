@@ -34,6 +34,28 @@ def _finish_state_mutation(_state: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def validate_state_mutation_node(as_node: str) -> str:
+    """Return *as_node*, or raise ``ValueError`` when LangGraph refuses it as a node name.
+
+    :func:`build_state_mutation_graph` registers ``as_node`` as the graph's
+    only node, and LangGraph refuses ``__start__``, ``__end__``, its other
+    reserved names and any name containing a namespace separator (``|``) or
+    task separator (``:``). Callers that take the name from a client check it
+    here first, so a bad name is an input error and not a failed compile.
+    The reserved set is private to LangGraph; recheck this import when
+    upgrading LangGraph (verified against 1.2.9 and 1.2.14).
+    """
+    from langgraph._internal._constants import NS_END, NS_SEP, RESERVED
+    from langgraph.constants import END, START
+
+    if as_node in (START, END) or as_node in RESERVED:
+        raise ValueError(f"Node name {as_node!r} is reserved by LangGraph")
+    for character in (NS_SEP, NS_END):
+        if character in as_node:
+            raise ValueError(f"Node name must not contain {character!r}")
+    return as_node
+
+
 def build_state_mutation_graph(
     as_node: str,
     mode: CheckpointChannelMode,

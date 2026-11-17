@@ -233,8 +233,9 @@ wait 响应仍为 HTTP `200`。Python SDK 默认使用 `raise_error=True`，识�
 | `create_deerflow_agent(..., checkpoint_channel_mode="full", checkpoint_snapshot_frequency=None, ...)` | `deerflow.agents.factory` | 对外 agent 工厂；delta 加 checkpointer 会被拒绝 | `factory:66-77`、`factory:135-141` |
 | `CheckpointStateAccessor`、`build_state_mutation_graph` | `deerflow.runtime`（包级再导出） | 访问器收口点与变更图 | `deerflow/runtime/__init__.py:8,21-22` |
 | `ThreadState`、`DeltaThreadState`、`SandboxState` | `deerflow.agents`（包级再导出） | 惰性导出的状态 schema | `agents/__init__.py:14-16,40-47` |
-| `CheckpointStateAccessor.bind(graph, checkpointer, *, store=None, mode="full")` | `deerflow.runtime.checkpoint_state` | 绑定 graph、saver 与模式 | `cstate:112-134` |
-| `build_state_mutation_graph(as_node, mode, state_schema=None, *, snapshot_frequency=None)` | `deerflow.runtime.checkpoint_state` | 面向 `Overwrite` 式写入的纯状态写入图 | `cstate:39-65` |
+| `CheckpointStateAccessor.bind(graph, checkpointer, *, store=None, mode="full")` | `deerflow.runtime.checkpoint_state` | 绑定 graph、saver 与模式 | `cstate:134-154` |
+| `build_state_mutation_graph(as_node, mode, state_schema=None, *, snapshot_frequency=None)` | `deerflow.runtime.checkpoint_state` | 面向 `Overwrite` 式写入的纯状态写入图 | `cstate:59-89` |
+| `validate_state_mutation_node(as_node)` | `deerflow.runtime.checkpoint_state` | 拒绝 LangGraph 无法编译的节点名；`POST /api/threads/{thread_id}/state` 的请求模型用它校验 `as_node` | `cstate:37-56`、`threads:601-609` |
 
 <Callout type="warning">
   delta 模式下裸读 saver 看到的是哨兵而不是消息。消费者必须通过
