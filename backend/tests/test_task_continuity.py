@@ -1302,6 +1302,33 @@ def test_legacy_archive_decodes_only_until_the_result_cap(scoped, monkeypatch):
     assert len(decoded) <= 20, f"decoded {len(decoded)} rows to return eight results"
 
 
+def test_legacy_archive_keeps_fts_normalized_hits(scoped):
+    """A pre-tokenizer-bump archive must still answer diacritic-folded queries.
+
+    FTS5's unicode61 tokenizer folds accents, so `cafe` matches a stored `café`
+    even though the decoded text never contains the literal query (the documented
+    `cafe` → `café` behavior). Re-checking the decoded text dropped those valid
+    hits in the read-only fallback while a fresh archive still answered them.
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    message = HumanMessage(content="Travel notes: café and résumé", id="accents")
+    scoped.state = {"messages": [message]}
+    source_id = _json.loads(history_search.func(scoped, "café"))["results"][0]["id"]
+    scoped.state = {
+        "messages": [],
+        "task_history": archive.capture(scoped.state, scoped, [message], TaskContinuityConfig(enabled=True)),
+    }
+    with _sqlite3.connect(_archive_db(scoped)) as db:
+        db.execute("DELETE FROM meta")
+        db.commit()
+
+    for query in ("cafe", "resume"):
+        hits = [row["id"] for row in _json.loads(history_search.func(scoped, query))["results"]]
+        assert hits == [source_id], f"{query} must keep the FTS-normalized hit, got {hits}"
+
+
 def test_capture_evicts_before_reindexing_a_legacy_archive(scoped, monkeypatch):
     """Reindexing must not run against batches that are about to be dropped.
 

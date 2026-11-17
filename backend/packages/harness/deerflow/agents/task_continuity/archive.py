@@ -167,11 +167,14 @@ def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: st
     """Yield matches from an archive whose index predates the current tokenizer.
 
     The stored index terms cannot answer the new query on their own, so the
-    decoded text is the source of truth. Index hits still come first: they are
-    genuine token matches, ordered by FTS rank, and running them before the
-    substring scan stops a query like "cat" from being filled with eight rows
-    that merely contain "concatenate". Both passes are lazy - rows are decoded
-    only until the caller has eight distinct sources - so a large archive is not
+    decoded text backs it up. Index hits still come first: they are genuine
+    token matches, ordered by FTS rank, and running them before the substring
+    scan stops a query like "cat" from being filled with eight rows that merely
+    contain "concatenate". Index hits are taken as they are - FTS matches are
+    normalized (unicode61 folds diacritics), so a hit need not contain the
+    literal query text ("cafe" matching a stored "café") and re-checking the
+    decoded text would drop valid rows. Both passes are lazy: rows are decoded
+    only until the caller has eight distinct sources, so a large archive is not
     decoded in full to answer a query its own index can already rank.
     """
     emitted: set[str] = set()
@@ -179,10 +182,6 @@ def _legacy_rows(db, match: str, placeholders: str, batches: list[str], role: st
     for (payload,) in db.execute(f"SELECT payload FROM sources WHERE sources MATCH ? AND batch IN ({placeholders}){role_filter} ORDER BY rank", parameters):
         row = _source_row(payload)
         if row is None or row["id"] in emitted:
-            continue
-        text = str(row.get("text", "")).casefold()
-        if not any(term in text for term in keywords):
-            # A stale index term: the stored text no longer carries it.
             continue
         emitted.add(row["id"])
         yield row
@@ -321,12 +320,14 @@ def lookup(state: dict, runtime, *, query: str | None = None, source_id: str | N
                     match = " OR ".join('"' + term.replace('"', '""') + '"' for term in keywords)
                     if (stored_tokenizer_version(db) or 0) < TOKENIZER_VERSION:
                         # The archive still holds index terms from the older tokenizer and this
-                        # path is read-only, so match the decoded text for now; the next capture
-                        # rebuilds the index in place. Index hits are used first and the text is
-                        # the source of truth for both passes: not SQL `LIKE`, because SQLite's
-                        # `lower()` folds ASCII only, so "STRASSE" would miss a stored "Straße",
-                        # and not the raw JSON payload, which would let a query like "human" hit
-                        # the "role" field instead of the message text.
+                        # path is read-only, so fall back to the decoded text for the terms the
+                        # index cannot express; the next capture rebuilds the index in place.
+                        # Index hits are yielded first and as they are (FTS normalization folds
+                        # diacritics, so "cafe" legitimately hits a stored "café"); the text pass
+                        # is what replaces SQL `LIKE`: SQLite's `lower()` folds ASCII only, so
+                        # "STRASSE" would miss a stored "Straße", and matching the raw JSON
+                        # payload would let a query like "human" hit the "role" field instead of
+                        # the message text.
                         rows = _legacy_rows(db, match, placeholders, batches, role, keywords, role_filter)
                     else:
                         parameters = [match, *batches, *([role] if role is not None else [])]
