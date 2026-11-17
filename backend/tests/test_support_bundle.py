@@ -1246,6 +1246,9 @@ def test_missing_env_config_path_is_reported(tmp_path, monkeypatch):
     # `config.yaml` syntax or `make setup` cannot fix a path that does not exist.
     for step in (*triage["reporter_next_steps"], *triage["maintainer_next_steps"]):
         assert "config.yaml` syntax" not in step
+        # Setup guidance probes the checkout default, so it cannot fix a
+        # selector that pointed somewhere else.
+        assert "make setup" not in step
     assert any("DEER_FLOW_CONFIG_PATH" in step for step in triage["reporter_next_steps"])
     assert any("DEER_FLOW_CONFIG_PATH" in step for step in triage["maintainer_next_steps"])
 
@@ -1629,6 +1632,7 @@ def test_config_path_reports_an_empty_selector_as_the_gateways_startup_failure(t
     # place, so the steps have to point at the variable the Gateway refused.
     for step in (*triage["reporter_next_steps"], *triage["maintainer_next_steps"]):
         assert "config.yaml` syntax" not in step
+        assert "make setup" not in step
     assert any("DEER_FLOW_ENV_FILE" in step for step in triage["reporter_next_steps"])
     assert any("DEER_FLOW_ENV_FILE" in step for step in triage["maintainer_next_steps"])
 

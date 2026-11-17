@@ -720,11 +720,13 @@ def _active_signal_names(signals: dict[str, bool]) -> list[str]:
 
 def _maintainer_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
-    if status == "needs_user_setup":
+    # A resolution error names a file the Gateway never read, so setup guidance
+    # would send the reporter to the wrong file; the hint below replaces it.
+    if status == "needs_user_setup" and resolution_hint is None:
         steps.append("Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`.")
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Ask the reporter to install Node.js 22+ before treating this as an application bug.")
-    if signals["config_missing"] or signals["models_missing"]:
+    if (signals["config_missing"] or signals["models_missing"]) and resolution_hint is None:
         steps.append("Do not triage model/runtime behavior until `config.yaml` exists and at least one model is configured.")
     if signals["config_error"]:
         if resolution_hint:
@@ -746,11 +748,13 @@ def _maintainer_next_steps(status: str, signals: dict[str, bool], resolution_hin
 
 def _reporter_next_steps(status: str, signals: dict[str, bool], resolution_hint: str | None = None) -> list[str]:
     steps: list[str] = []
-    if status == "needs_user_setup":
+    # A resolution error names a file the Gateway never read, so setup guidance
+    # would send the reporter to the wrong file; the hint below replaces it.
+    if status == "needs_user_setup" and resolution_hint is None:
         steps.append("Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes.")
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Install Node.js 22+ and rerun `make doctor`.")
-    if signals["config_missing"] or signals["models_missing"]:
+    if (signals["config_missing"] or signals["models_missing"]) and resolution_hint is None:
         steps.append("Create or repair `config.yaml` with `make setup`; model/runtime issues cannot be triaged until at least one model is configured.")
     if signals["config_error"]:
         if resolution_hint:
