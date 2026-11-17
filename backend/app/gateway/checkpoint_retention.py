@@ -539,7 +539,7 @@ async def enforce_thread_retention(
         survivor_versions: set[Any] = set()
         for key, node in nodes.items():
             if key not in deleted_keys:
-                survivor_versions.update(node.versions)
+                survivor_versions.update(node.versions.values())
 
         # Invalidate before touching source-of-truth rows. If cache deletion
         # fails, fail closed with every checkpoint intact; doing this after the
@@ -604,7 +604,7 @@ async def enforce_trailing_duration_retention(
 
         latest_versions = latest.checkpoint.get("channel_versions")
         parent_versions = parent.checkpoint.get("channel_versions")
-        if not isinstance(latest_versions, dict) or latest_versions != parent_versions:
+        if not channel_versions_match(latest_versions, parent_versions):
             return report
         metadata = latest.metadata or {}
         run_durations = metadata.get("run_durations")
@@ -616,9 +616,9 @@ async def enforce_trailing_duration_retention(
             duration_only=is_duration_only_checkpoint(latest),
             metadata_source=metadata.get("source"),
             carries_run_durations=isinstance(run_durations, dict) and bool(run_durations),
-            versions=frozenset(latest_versions.values()),
+            versions=dict(latest_versions),
         )
-        parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=latest_node.versions)
+        parent_node = _Node(ns="", cp_id=parent_id, parent_ns=None, parent_id=None, duration_only=False, versions=dict(parent_versions))
         _mark_duration_leaves_without_the_marker({("", latest_id): latest_node, ("", parent_id): parent_node})
         if not latest_node.duration_only or await _checkpoint_has_writes(storage, ("", latest_id), thread_id):
             return report
