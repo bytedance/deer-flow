@@ -3408,8 +3408,9 @@ def test_collect_pre_existing_message_ids_handles_missing_pieces():
     assert _collect_pre_existing_message_ids({"messages": None}) == set()
 
 
+@pytest.mark.parametrize("capture_fails", [False, True], ids=["capture-ok", "capture-failed"])
 @pytest.mark.anyio
-async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run():
+async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run(capture_fails):
     """A stale fallback marker checkpointed by an earlier run on the same thread
     must NOT cause a successful current run to be reported as ``error``.
 
@@ -3451,6 +3452,8 @@ async def test_run_agent_ignores_stale_llm_error_fallback_from_prior_run():
 
     class DummyAgent:
         async def aget_state(self, _config):
+            if capture_fails:
+                raise RuntimeError("snapshot capture failed")
             return SimpleNamespace(
                 values={"messages": [stale_fallback]},
                 config={
