@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 66
+config_version: 67
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -2013,6 +2013,8 @@ sandbox:
 #   # ready_timeout: 30               # finite positive create/readiness timeout seconds
 #   # use_server_proxy: false         # proxy execd/file traffic through server
 #   # secure_access: false            # per-sandbox endpoint token; needs Kubernetes + ingress gateway mode
+#   # resource: {cpu: "2", memory: 4Gi}          # sandbox limits; omitted = SDK default 1 CPU / 2Gi
+#   # resource_requests: {cpu: "1", memory: 2Gi} # sandbox requests; omitted = server default
 #   # sandbox_timeout: 14400          # finite non-negative remote lifetime seconds; 0 = explicit cleanup
 #   # bash_command_timeout: 600       # default remote command timeout seconds
 #   # replicas: 3                     # active + warm cap per gateway process
