@@ -2050,20 +2050,41 @@ def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState 
     return result
 
 
-def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None) -> str:
-    """Prepend 'cd <workspace> &&' so relative paths are anchored to the thread workspace.
+def _quote_powershell_literal(value: str) -> str:
+    """Render *value* as a PowerShell single-quoted literal, doubling inner quotes."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _apply_cwd_prefix(command: str, thread_data: ThreadDataState | None, *, shell: str | None = None) -> str:
+    """Anchor relative paths to the thread workspace with a shell-appropriate prefix.
+
+    The syntax has to follow the shell that will actually run the command, not
+    the POSIX one this used to assume unconditionally. ``LocalSandbox._get_shell``
+    falls back to ``powershell.exe`` and then ``cmd.exe`` on Windows, and a
+    ``cd '<path>' && ...`` prefix is unparseable in both: Windows PowerShell
+    before 7 rejects ``&&`` ("not a valid statement separator in this version",
+    surfaced as ``InvalidEndOfLine``), and cmd.exe does not strip single quotes,
+    so it looks for a directory literally named ``'<path>'``. Either way every
+    ``bash`` call fails before the command runs.
 
     Args:
         command: The bash command to execute.
         thread_data: The thread data containing the workspace path.
+        shell: The shell executable that will run the command. Defaults to the
+            one ``LocalSandbox`` resolves.
 
     Returns:
-        The command prefixed with 'cd <workspace> &&' if workspace_path is available,
+        The command prefixed with a cwd change if workspace_path is available,
         otherwise the original command unchanged.
     """
-    if thread_data and (workspace := thread_data.get("workspace_path")):
-        return f"cd {shlex.quote(workspace)} && {command}"
-    return command
+    if not (thread_data and (workspace := thread_data.get("workspace_path"))):
+        return command
+    resolved_shell = shell or LocalSandbox._get_shell()
+    if LocalSandbox._is_powershell(resolved_shell):
+        return f"Set-Location -LiteralPath {_quote_powershell_literal(workspace)}; {command}"
+    if LocalSandbox._is_cmd_shell(resolved_shell):
+        return f'cd /d "{workspace}" && {command}'
+    return f"cd {shlex.quote(workspace)} && {command}"
 
 
 def get_thread_data(runtime: Runtime | None) -> ThreadDataState | None:

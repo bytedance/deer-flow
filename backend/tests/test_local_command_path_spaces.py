@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
-from deerflow.sandbox.tools import bash_tool, replace_virtual_paths_in_command
+from deerflow.sandbox.tools import _apply_cwd_prefix, bash_tool, replace_virtual_paths_in_command
 
 
 @pytest.fixture
@@ -207,3 +207,36 @@ def test_public_bash_tool_preserves_thread_path_argument(powershell, tmp_path, m
     assert "needle" in result
     assert "Exit Code:" not in result
     assert not result.startswith("Error:"), result
+
+
+@pytest.mark.parametrize(
+    ("shell", "expected_prefix"),
+    [
+        ("/bin/bash", "cd '/tmp/thread data/workspace' && "),
+        ("/bin/sh", "cd '/tmp/thread data/workspace' && "),
+        # Git Bash/MSYS on Windows reports as sh.exe and speaks POSIX.
+        ("C:/Program Files/Git/bin/bash.exe", "cd '/tmp/thread data/workspace' && "),
+        # PowerShell 7 and Windows PowerShell 5.1: the 5.1 parser has no `&&`.
+        ("/usr/local/bin/pwsh", "Set-Location -LiteralPath '/tmp/thread data/workspace'; "),
+        ("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "Set-Location -LiteralPath '/tmp/thread data/workspace'; "),
+        # cmd.exe keeps single quotes as literal characters, so `cd '<path>'` looks
+        # for a directory whose name includes them.
+        ("C:\\Windows\\System32\\cmd.exe", 'cd /d "/tmp/thread data/workspace" && '),
+    ],
+)
+def test_cwd_prefix_uses_syntax_the_selected_shell_can_parse(shell, expected_prefix):
+    workspace = "/tmp/thread data/workspace"
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell=shell) == f"{expected_prefix}echo hi"
+
+
+def test_cwd_prefix_quotes_a_workspace_with_an_apostrophe():
+    workspace = "/tmp/O'Brien's thread/workspace"
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="/bin/bash") == "cd '/tmp/O'\"'\"'Brien'\"'\"'s thread/workspace' && echo hi"
+    # PowerShell escapes a literal quote by doubling it inside a single-quoted string.
+    assert _apply_cwd_prefix("echo hi", {"workspace_path": workspace}, shell="pwsh") == "Set-Location -LiteralPath '/tmp/O''Brien''s thread/workspace'; echo hi"
+
+
+@pytest.mark.parametrize("shell", ["/bin/bash", "pwsh", "C:\\Windows\\System32\\cmd.exe"])
+def test_cwd_prefix_leaves_the_command_alone_without_a_workspace(shell):
+    assert _apply_cwd_prefix("echo hi", None, shell=shell) == "echo hi"
+    assert _apply_cwd_prefix("echo hi", {}, shell=shell) == "echo hi"
