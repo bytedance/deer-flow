@@ -545,6 +545,9 @@ def test_open_intents_are_primary_committed_only_and_cached(server):
     engine.recover_primary(stream)
     with pytest.raises(ValueError):
         engine.run(bad, lambda: [NewEvent(id=uuid.uuid4(), type="boundary", data=b"{}")], [])
+    # ...and the intent is recorded as abandoned at once (the boundary was never appended).
+    assert _index(server)[-1] == ("DeletionAbandoned", {"intent_id": bad.intent_id})
+    assert engine.recover_primary(stream) == []
     with pytest.raises(ValueError):
         Intent.new("drop_everything", {}, stream, 0)
 
@@ -581,6 +584,40 @@ def test_later_deletion_waits_for_earlier_open_intent(server):
     assert DeletionEngine(server.sync_client(), timeout=TIMEOUT, derive=lambda intent: [DerivedStep("deerflow.test-side", side_step)]).recover_primary() == []
     assert [(kind, data["intent_id"]) for kind, data in _index(server)][2:] == [("DeletionDone", first.intent_id), ("DeletionDone", second.intent_id)]
     assert _tb(server, stream) == 2
+
+
+def test_index_reads_are_safe_across_threads(server):
+    """One engine serves every scope from DeerMem's timer threads: a refresh never mutates the index mid-iteration."""
+    import threading
+
+    from deerflow_extension_kurrentdb.deletions import DeletionEngine, Intent, intended_event
+
+    client = server.sync_client()
+    engine = DeletionEngine(client, timeout=TIMEOUT, derive=lambda intent: [])
+    for position in range(3):
+        client.append_to_stream(INDEX, events=[intended_event(Intent.new("delete_run", {"op": "delete_run"}, "deerflow.test-primary", position))], current_version=StreamState.ANY, timeout=TIMEOUT)
+    assert len(engine.open_intents_for("deerflow.nothing")) == 0
+    errors: list[BaseException] = []
+
+    class _Racing(dict):
+        def items(self):
+            for index, item in enumerate(dict.items(self)):
+                if index == 0 and not racing:
+                    # Mid-iteration, another thread refreshes the index after a new intent landed.
+                    client.append_to_stream(INDEX, events=[intended_event(Intent.new("delete_run", {"op": "delete_run"}, "deerflow.test-primary", 9))], current_version=StreamState.ANY, timeout=TIMEOUT)
+                    other = threading.Thread(target=lambda: errors.append(None) if engine.open_intents_for("deerflow.nothing") == [] else None)
+                    racing.append(other)
+                    other.start()
+                    other.join(timeout=0.3)
+                yield item
+
+    racing: list[threading.Thread] = []
+    engine._index.intents = _Racing(engine._index.intents)
+    assert len(engine._open("deerflow.test-primary")) == 3
+    for thread in racing:
+        thread.join()
+    assert errors == [None]
+    assert len(engine._open("deerflow.test-primary")) == 4
 
 
 def test_orphan_usage_after_done_is_hidden(server):

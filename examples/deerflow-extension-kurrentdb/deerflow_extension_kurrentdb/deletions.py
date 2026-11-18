@@ -286,6 +286,15 @@ class DeletionEngine:
                 self._index.apply(event)
             return self._index
 
+    def _open(self, stream: str | None = None) -> list[Intent]:
+        """The open intents after a head-checked refresh; computed under the lock (threads share the index)."""
+        with self._lock:
+            return self._refresh_index().open(stream)
+
+    def _open_before(self, intent: Intent) -> list[Intent]:
+        with self._lock:
+            return self._refresh_index().open_before(intent)
+
     def _append_index(self, event: NewEvent) -> None:
         self._client.append_to_stream(DELETIONS_STREAM, events=[event], current_version=StreamState.ANY, timeout=self._timeout)
 
@@ -316,7 +325,7 @@ class DeletionEngine:
 
     def open_intents_for(self, stream: str) -> list[Intent]:
         """The open intents of ``stream`` whose primary boundary is committed, in index order."""
-        return [intent for intent in self._refresh_index().open(stream) if self._status(intent) == "present"]
+        return [intent for intent in self._open(stream) if self._status(intent) == "present"]
 
     # --- $tb -----------------------------------------------------------------------
 
@@ -343,7 +352,7 @@ class DeletionEngine:
         """
         try:
             boundaries = [(step.stream, step.run(intent)) for step in steps]
-            if self._refresh_index().open_before(intent):
+            if self._open_before(intent):
                 logger.info("Deletion %s of %r waits for earlier deletions of the stream", intent.intent_id, intent.primary_stream)
                 return False
             for stream, position in boundaries:
@@ -379,7 +388,7 @@ class DeletionEngine:
     def recover_primary(self, stream: str | None = None) -> list[Intent]:
         """Finish or abandon the open intents of ``stream`` (every stream for ``None``); returns those still open."""
         remaining: list[Intent] = []
-        for intent in self._refresh_index().open(stream):
+        for intent in self._open(stream):
             steps = self._derive(intent)
             if steps is None:
                 if stream is not None:
@@ -400,7 +409,12 @@ class DeletionEngine:
         except Exception as exc:
             raise DeletionIndexError(f"recording deletion {intent.intent_id} failed: {exc}") from exc
         boundary = list(build_boundary())
-        check_boundary(boundary, intent)
+        try:
+            check_boundary(boundary, intent)
+        except ValueError:
+            # Nothing reached the primary stream: the intent can never commit.
+            self._abandon(intent)
+            raise
         try:
             self._client.append_to_stream(intent.primary_stream, events=boundary, current_version=intent.expected_position, timeout=self._timeout)
         except WrongCurrentVersionError as exc:
@@ -552,7 +566,11 @@ class AsyncDeletionEngine:
         except Exception as exc:
             raise DeletionIndexError(f"recording deletion {intent.intent_id} failed: {exc}") from exc
         boundary = list(build_boundary())
-        check_boundary(boundary, intent)
+        try:
+            check_boundary(boundary, intent)
+        except ValueError:
+            await self._abandon(intent)
+            raise
         try:
             await self._client.append_to_stream(intent.primary_stream, events=boundary, current_version=intent.expected_position, timeout=self._timeout)
         except WrongCurrentVersionError as exc:
