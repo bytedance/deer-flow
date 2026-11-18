@@ -39,12 +39,23 @@ def _container_running(container_name: str) -> bool:
 
 
 def _stop_container(container_name: str) -> None:
-    subprocess.run(["docker", "stop", container_name], capture_output=True, timeout=15)
+    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True, timeout=15)
 
 
-# Use a lightweight image for testing to avoid pulling the heavy sandbox image
+def _wait_container_stopped(container_name: str, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _container_running(container_name):
+            return
+        time.sleep(0.05)
+
+
+# Use a lightweight image for testing to avoid pulling the heavy sandbox image.
+# Trap SIGTERM in PID 1 so `docker stop` inside `backend.destroy()` exits cleanly
+# instead of blocking for Docker's 10-second SIGTERM grace timeout per container.
 E2E_TEST_IMAGE = "busybox:latest"
 E2E_PREFIX = "deer-flow-sandbox-e2e-test"
+_SLEEP_CMD = ["sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait"]
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +92,7 @@ class TestOrphanReconciliationE2E:
 
         # Step 1: Start a container (simulating previous process lifecycle)
         result = subprocess.run(
-            ["docker", "run", "--rm", "-d", "--name", container_name, E2E_TEST_IMAGE, "sleep", "3600"],
+            ["docker", "run", "--rm", "-d", "--name", container_name, E2E_TEST_IMAGE, *_SLEEP_CMD],
             capture_output=True,
             text=True,
             timeout=30,
@@ -115,8 +126,7 @@ class TestOrphanReconciliationE2E:
             # Destroy it (simulating what _reconcile_orphans does for old containers)
             backend.destroy(orphan_info)
 
-            # Give Docker a moment to stop the container
-            time.sleep(1)
+            _wait_container_stopped(container_name)
 
             # Verify container is gone
             assert not _container_running(container_name), "Orphan container should be stopped after destroy"
@@ -133,7 +143,7 @@ class TestOrphanReconciliationE2E:
             for i in range(3):
                 name = f"{E2E_PREFIX}-multi{i:02d}"
                 result = subprocess.run(
-                    ["docker", "run", "--rm", "-d", "--name", name, E2E_TEST_IMAGE, "sleep", "3600"],
+                    ["docker", "run", "--rm", "-d", "--name", name, E2E_TEST_IMAGE, *_SLEEP_CMD],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -162,7 +172,8 @@ class TestOrphanReconciliationE2E:
             for info in running:
                 backend.destroy(info)
 
-            time.sleep(1)
+            for name in containers:
+                _wait_container_stopped(name)
 
             # Verify all gone
             for name in containers:
@@ -180,13 +191,13 @@ class TestOrphanReconciliationE2E:
         try:
             # Start an unrelated container
             subprocess.run(
-                ["docker", "run", "--rm", "-d", "--name", unrelated_name, E2E_TEST_IMAGE, "sleep", "3600"],
+                ["docker", "run", "--rm", "-d", "--name", unrelated_name, E2E_TEST_IMAGE, *_SLEEP_CMD],
                 capture_output=True,
                 timeout=30,
             )
             # Start our container
             subprocess.run(
-                ["docker", "run", "--rm", "-d", "--name", our_name, E2E_TEST_IMAGE, "sleep", "3600"],
+                ["docker", "run", "--rm", "-d", "--name", our_name, E2E_TEST_IMAGE, *_SLEEP_CMD],
                 capture_output=True,
                 timeout=30,
             )

@@ -258,12 +258,18 @@ async def test_artifact_transfer_can_exceed_the_poll_deadline(plugin, monkeypatc
         runs.finish(target["id"])
         method = "read_artifact"
     transfer = getattr(runs, method)
+    real_timeout = asyncio.timeout
+    monkeypatch.setattr(
+        asyncio,
+        "timeout",
+        lambda delay: real_timeout(0.15 if delay == 10 else delay),
+    )
     calls = 0
 
     async def slow_transfer(**kwargs):
         nonlocal calls
         calls += 1
-        await asyncio.sleep(10.1)
+        await asyncio.sleep(0.3)
         return await transfer(**kwargs)
 
     monkeypatch.setattr(runs, method, slow_transfer)
