@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, ExtensionData, TaskInfo, TaskOutcome
+from deerflow_extension_api import EXTENSION_TASK_STORE_KEY, ExtensionData, TaskInfo, TaskOutcome, TaskStopDetail
 from langchain_core.messages import AIMessage
 
 from deerflow.extensions import reset_loaded_extensions, set_loaded_extensions
@@ -163,7 +164,8 @@ async def test_subagent_success_emits_shaped_start_and_completed_stop(monkeypatc
         parent_task_id="run-1",
         agent_name="researcher",
     )
-    assert recorder.stops == [(info, TaskOutcome.COMPLETED)]
+    assert info.stop is None
+    assert recorder.stops == [(replace(info, stop=TaskStopDetail(status="completed")), TaskOutcome.COMPLETED)]
     assert recorder.stores[0] is recorder.stores[1]
     assert seen["context"][EXTENSION_TASK_STORE_KEY] is recorder.stores[0]
 
@@ -181,6 +183,7 @@ async def test_subagent_failure_and_cancellation_map_to_distinct_outcomes(monkey
     failed = await executor._aexecute("fail")
     assert failed.status is env.SubagentStatus.FAILED
     assert recorder.stops[-1][1] is TaskOutcome.FAILED
+    assert recorder.stops[-1][0].stop == TaskStopDetail(status="failed", error="build failed")
 
     monkeypatch.setattr(env.SubagentExecutor, "_build_initial_state", _noop_initial_state)
     monkeypatch.setattr(env.SubagentExecutor, "_create_agent", _create_agent_stub())
@@ -194,6 +197,7 @@ async def test_subagent_failure_and_cancellation_map_to_distinct_outcomes(monkey
     assert cancelled.status is env.SubagentStatus.CANCELLED
     assert recorder.stops[-1][1] is TaskOutcome.ABORTED
     assert recorder.stops[-1][0].task_id == "cancel-me"
+    assert recorder.stops[-1][0].stop.status == "cancelled"
 
 
 @pytest.mark.asyncio

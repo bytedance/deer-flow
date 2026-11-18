@@ -1381,6 +1381,8 @@ def _relative_file(path: Path, root: Path) -> str:
 
 def _is_hidden_sensitive_path(rel_path: str) -> bool:
     parts = PurePosixPath(rel_path).parts
+    if not parts:
+        return False
     if ".aws" in parts and parts[-1] == "credentials":
         return True
     if ".git" in parts and parts[-1] == "config":

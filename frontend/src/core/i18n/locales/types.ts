@@ -153,6 +153,7 @@ export interface Translations {
       | "knowledgeManagement"
       | "knowledgePlatform"
       | "knowledgeCenter"
+      | "skillEvolution"
       | "weknora"
       | "lightrag"
       | "example",
@@ -357,6 +358,19 @@ export interface Translations {
     copiedToClipboard: string;
     failedToCopyToClipboard: string;
     linkCopied: string;
+  };
+
+  artifactSelection: {
+    rewrite: string;
+    instructions: string;
+    exactRequired: string;
+    review: string;
+    original: string;
+    replacement: string;
+    apply: string;
+    applied: string;
+    changed: string;
+    limit: string;
   };
 
   artifactEditing: {
