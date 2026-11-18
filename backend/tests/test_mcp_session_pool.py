@@ -3193,3 +3193,63 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_session_pool_disconnect_cleanup_timeout_preserves_error_and_tracks_owner():
+    """A stuck owner exit cannot hold a disconnected tool call indefinitely."""
+    pool = MCPSessionPool()
+    pool.SESSION_CLOSE_TIMEOUT = 0.01
+    exit_started = asyncio.Event()
+    release_exit = asyncio.Event()
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    session.call_tool = AsyncMock(side_effect=anyio.EndOfStream())
+
+    class Cm:
+        owner: asyncio.Task | None = None
+
+        async def __aenter__(self):
+            self.owner = asyncio.current_task()
+            return session
+
+        async def __aexit__(self, *_args):
+            assert asyncio.current_task() is self.owner
+            exit_started.set()
+            await release_exit.wait()
+            return False
+
+    cm = Cm()
+    connection = {"transport": "stdio", "command": "x", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", return_value=cm):
+        pooled = await pool.get_session("srv", "scope", connection)
+        try:
+            with pytest.raises(anyio.EndOfStream):
+                await asyncio.wait_for(
+                    call_pooled_session_tool(
+                        pooled,
+                        pool,
+                        server_name="srv",
+                        scope_key="scope",
+                        tool_name="act",
+                        arguments={},
+                        call_kwargs={},
+                    ),
+                    timeout=1.0,
+                )
+
+            await asyncio.wait_for(exit_started.wait(), timeout=0.5)
+            assert cm.owner is not None and not cm.owner.done()
+            assert pool._teardown_tasks
+        finally:
+            release_exit.set()
+            for _ in range(100):
+                tasks = list(pool._teardown_tasks)
+                if not tasks:
+                    break
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=0.5,
+                )
+    assert not pool._teardown_tasks
+
