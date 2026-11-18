@@ -108,7 +108,9 @@ def test_model_as_a_common_noun_stays_task_text(text):
         "Use v2 of the API to fetch the data",
         "Use v2 endpoints to paginate the results",
         "Use v2 API for this turn: fetch the data",
-        "这次用 v2 接口帮我测试",
+        "Use the v12 API to fetch the data",
+        "Use v2.1.3 SDK to fetch the data",
+        "这次用 v10 接口帮我测试",
     ],
 )
 def test_versioned_tool_reference_in_a_task_stays_task_text(text):

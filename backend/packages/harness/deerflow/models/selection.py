@@ -13,7 +13,7 @@ ModelScope = Literal["task", "turn", "conversation"]
 
 # A version followed by one of these heads names an API, SDK or service, not a
 # chat model: "v2 of the API", "v3 SDK for this turn", "这次用 v2 接口".
-_NON_MODEL_VERSION = re.compile(r"\bv\d(?:\.\d+)?(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?|接口|服务)", re.IGNORECASE)
+_NON_MODEL_VERSION = re.compile(r"\bv\d+(?:\.\d+)*(?:\s+of)?\s+(?:the\s+)?(?:apis?|sdks?|endpoints?|servers?|services?|interfaces?|clients?|versions?|接口|服务)", re.IGNORECASE)
 
 _PATTERNS = (
     ("conversation", r"^(?:请)?(?:以后|今后|接下来)(?:这个对话|这段对话|这里)?(?:都|一直|默认)?(?:用|使用|改用|换成)\s*(.+?)(?:模型)?(?:[，。：:]|$)"),
