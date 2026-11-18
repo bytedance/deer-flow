@@ -3,7 +3,7 @@ from pathlib import Path
 from deerflow.sandbox.search import should_ignore_name
 
 
-def list_dir(path: str, max_depth: int = 2) -> list[str]:
+def list_dir(path: str, max_depth: int = 2, *, apply_default_ignores: bool = True) -> list[str]:
     """
     List files and directories up to max_depth levels deep.
 
@@ -11,6 +11,10 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
         path: The root directory path to list.
         max_depth: Maximum depth to traverse (default: 2).
                    1 = only direct children, 2 = children + grandchildren, etc.
+        apply_default_ignores: Apply ``IGNORE_PATTERNS`` to every entry. Set
+                   this to ``False`` for a directory the user owns, such as
+                   their uploads, where a name such as ``app.log`` must not
+                   hide the file from the agent.
 
     Returns:
         A list of absolute paths for files and directories,
@@ -41,7 +45,7 @@ def list_dir(path: str, max_depth: int = 2) -> list[str]:
             return
 
         for item in current_path.iterdir():
-            if should_ignore_name(item.name):
+            if apply_default_ignores and should_ignore_name(item.name):
                 continue
 
             if item.is_symlink():

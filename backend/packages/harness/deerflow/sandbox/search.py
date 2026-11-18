@@ -159,7 +159,7 @@ def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
         return b"\0" in handle.read(sample_size)
 
 
-def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200, relative_prefix: str = "") -> tuple[list[str], bool]:
+def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200, relative_prefix: str = "", apply_default_ignores: bool = True) -> tuple[list[str], bool]:
     matches: list[str] = []
     truncated = False
     root = root.resolve()
@@ -177,7 +177,7 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
             raise error
 
     for current_root, dirs, files in os.walk(root, onerror=handle_walk_error):
-        dirs[:] = [name for name in dirs if not should_ignore_name(name)]
+        dirs[:] = [name for name in dirs if not (apply_default_ignores and should_ignore_name(name))]
         # root is already resolved; os.walk builds current_root by joining under root,
         # so relative_to() works without an extra stat()/resolve() per directory.
         rel_dir = Path(current_root).relative_to(root)
@@ -194,7 +194,7 @@ def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, m
                         return matches, truncated
 
         for name in files:
-            if should_ignore_name(name):
+            if apply_default_ignores and should_ignore_name(name):
                 continue
             rel_path = (rel_dir / name).as_posix()
             if relative_prefix:
@@ -253,6 +253,7 @@ def find_grep_matches(
     max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES,
     line_summary_length: int = DEFAULT_LINE_SUMMARY_LENGTH,
     relative_prefix: str = "",
+    apply_default_ignores: bool = True,
 ) -> tuple[list[GrepMatch], bool]:
     matches: list[GrepMatch] = []
     truncated = False
@@ -285,10 +286,10 @@ def find_grep_matches(
             return
 
         for current_root, dirs, files in os.walk(root, onerror=handle_search_error):
-            dirs[:] = [name for name in dirs if not should_ignore_name(name)]
+            dirs[:] = [name for name in dirs if not (apply_default_ignores and should_ignore_name(name))]
             rel_dir = Path(current_root).relative_to(root)
             for name in files:
-                if should_ignore_name(name):
+                if apply_default_ignores and should_ignore_name(name):
                     continue
                 yield Path(current_root) / name, (rel_dir / name).as_posix()
 
@@ -307,7 +308,7 @@ def find_grep_matches(
             file_stat = file_path.stat()
             if not stat.S_ISREG(file_stat.st_mode):
                 continue
-            if file_stat.st_size > max_file_size or is_binary_file(file_path):
+            if is_binary_file(file_path) or (not root_is_file and file_stat.st_size > max_file_size):
                 continue
             # newline="\n" ends lines where LocalSandbox.read_file does, so a
             # hit's line_number is the start_line that reads it back; a bare

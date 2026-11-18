@@ -1187,3 +1187,53 @@ def test_ls_tool_does_not_surface_disabled_custom_skill(tmp_path, monkeypatch) -
 
     assert "secret-custom" not in result
     assert "open-custom" in result
+
+
+def _user_data_tree(root: Path) -> Path:
+    root.mkdir()
+    (root / "app.log").write_text("FATAL out of memory\n", encoding="utf-8")
+    (root / "notes.txt").write_text("FATAL in notes\n", encoding="utf-8")
+    (root / "logs").mkdir()
+    (root / "logs" / "worker.txt").write_text("FATAL timeout\n", encoding="utf-8")
+    return root
+
+
+def test_list_dir_shows_user_files_the_ignore_list_would_hide(tmp_path: Path) -> None:
+    """A name such as app.log must not hide a file the user uploaded."""
+    host = _user_data_tree(tmp_path / "host")
+    sandbox = LocalSandbox("test", path_mappings=[PathMapping("/mnt/user-data/uploads", str(host))])
+
+    entries = sandbox.list_dir("/mnt/user-data/uploads")
+
+    assert sorted(Path(entry.rstrip("/")).name for entry in entries) == ["app.log", "logs", "notes.txt"]
+
+
+def test_search_reads_user_files_but_still_filters_repository_mounts(tmp_path: Path) -> None:
+    """The mount decides: user data is searched unfiltered, repositories keep the ignore list."""
+    user_host = _user_data_tree(tmp_path / "user")
+    repo_host = _user_data_tree(tmp_path / "repo")
+    user_sandbox = LocalSandbox("user", path_mappings=[PathMapping("/mnt/user-data/uploads", str(user_host))])
+    repo_sandbox = LocalSandbox("repo", path_mappings=[PathMapping("/workspace", str(repo_host))])
+
+    assert user_sandbox.glob("/mnt/user-data/uploads", "*.log")[0] == ["/mnt/user-data/uploads/app.log"]
+    assert repo_sandbox.glob("/workspace", "*.log")[0] == []
+
+    user_hits, _ = user_sandbox.grep("/mnt/user-data/uploads", "FATAL")
+    repo_hits, _ = repo_sandbox.grep("/workspace", "FATAL")
+
+    assert sorted(Path(hit.path).name for hit in user_hits) == ["app.log", "notes.txt", "worker.txt"]
+    assert [Path(hit.path).name for hit in repo_hits] == ["notes.txt"]
+
+
+def test_grep_searches_an_explicit_file_over_the_size_limit(tmp_path: Path) -> None:
+    """A file named as the search path is searched even when it exceeds max_file_size."""
+    host = _user_data_tree(tmp_path / "host")
+    with (host / "server.txt").open("w", encoding="utf-8") as handle:
+        handle.write("ok\n" * 400_000)
+        handle.write("FATAL at the end\n")
+    sandbox = LocalSandbox("test", path_mappings=[PathMapping("/mnt/user-data/uploads", str(host))])
+
+    matches, truncated = sandbox.grep("/mnt/user-data/uploads/server.txt", "FATAL")
+
+    assert [(Path(match.path).name, match.line_number) for match in matches] == [("server.txt", 400_001)]
+    assert truncated is False

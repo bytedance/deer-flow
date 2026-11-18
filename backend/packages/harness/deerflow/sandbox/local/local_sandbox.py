@@ -36,6 +36,19 @@ logger = logging.getLogger(__name__)
 # indefinitely. Overridable per call via ``execute_command(timeout=...)`` and,
 # for the bash tool, via ``sandbox.bash_command_timeout`` in config.yaml.
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
+
+
+def _is_user_data_path(path: str) -> bool:
+    """True for the user's own mount and its children.
+
+    Files there belong to the user, so a name such as ``app.log`` or a path
+    below ``logs/`` must not hide them from ``ls``, ``glob`` and ``grep``. The
+    default ignore list exists to keep source-repository walks cheap.
+    """
+    normalized = path.replace("\\", "/").rstrip("/") or "/"
+    return normalized == VIRTUAL_PATH_PREFIX or normalized.startswith(f"{VIRTUAL_PATH_PREFIX}/")
+
+
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 
@@ -1232,7 +1245,7 @@ class LocalSandbox(Sandbox):
                 pass
 
         try:
-            entries = list_dir(resolved_path, max_depth)
+            entries = list_dir(resolved_path, max_depth, apply_default_ignores=not _is_user_data_path(path))
         except FileNotFoundError:
             # The requested path may exist only in the container, as the
             # parent of mounted sub-directories (e.g. /mnt/skills with only
@@ -1418,13 +1431,13 @@ class LocalSandbox(Sandbox):
                     if len(results) <= max_results:
                         # One lookahead match proves whether the combined view
                         # exceeds the cap, without collecting a cap per mount.
-                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child)
+                        matches, _ = find_glob_matches(root, pattern, include_dirs=include_dirs, max_results=max_results - len(results) + 1, relative_prefix=child, apply_default_ignores=not _is_user_data_path(path))
                         results.extend(f"{virtual_dir}/{Path(match).relative_to(root).as_posix()}" for match in matches)
                     if len(results) > max_results:
                         return results[:max_results], True
                 return results, False
             resolved_path = Path(self._resolve_path(path))
-            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results)
+            matches, truncated = find_glob_matches(resolved_path, pattern, include_dirs=include_dirs, max_results=max_results, apply_default_ignores=not _is_user_data_path(path))
         except OSError as e:
             if e.filename is None:
                 raise
@@ -1457,6 +1470,7 @@ class LocalSandbox(Sandbox):
                         case_sensitive=case_sensitive,
                         max_results=max_results - len(results) + 1,
                         relative_prefix=child,
+                        apply_default_ignores=not _is_user_data_path(path),
                     )
                     results.extend(GrepMatch(path=f"{path.rstrip('/')}/{child}/{Path(match.path).relative_to(root).as_posix()}", line_number=match.line_number, line=match.line) for match in matches)
                     if len(results) > max_results:
@@ -1470,6 +1484,7 @@ class LocalSandbox(Sandbox):
                 literal=literal,
                 case_sensitive=case_sensitive,
                 max_results=max_results,
+                apply_default_ignores=not _is_user_data_path(path),
             )
         except OSError as e:
             if e.filename is None:
