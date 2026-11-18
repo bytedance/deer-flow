@@ -435,6 +435,14 @@ async def test_unpresented_outputs_publish_an_error_frame_before_end(monkeypatch
         "deerflow.runtime.runs.worker._produced_output_paths",
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
+
+    async def prepare_continuation(**kwargs):
+        # Delivery enforcement is required only for a goal run; mark this fixture
+        # as one so the test keeps exercising the durable error path.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
     bridge = _RecordingBridge()
 
     class ProseOnlyAgent:
@@ -475,6 +483,13 @@ async def test_unpersisted_delivery_receipt_publishes_an_error_frame_before_end(
         "deerflow.runtime.runs.worker._persist_delivery_receipt",
         AsyncMock(return_value=False),
     )
+
+    async def prepare_continuation(**kwargs):
+        # Only a goal run's delivery is required; this fixture must stay on it.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
     bridge = _RecordingBridge()
 
     class PresentingAgent:
@@ -561,6 +576,13 @@ async def test_unconfirmed_delivery_terminal_status_defers_the_error_frame_until
         "deerflow.runtime.runs.worker._produced_output_paths",
         AsyncMock(return_value=["/mnt/user-data/outputs/report.md"]),
     )
+
+    async def prepare_continuation(**kwargs):
+        # Keep the delivery required so the deferred error-frame ordering is tested.
+        kwargs["participation_callback"]({"status": "active"})
+        return None
+
+    monkeypatch.setattr("deerflow.runtime.runs.worker._prepare_goal_continuation_input", prepare_continuation)
 
     class ProseOnlyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
